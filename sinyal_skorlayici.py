@@ -1,28 +1,39 @@
-import pandas as pd
-from sklearn.linear_model import LogisticRegression
-import os
+def evaluate_signal(result):
+    signal = result.get("signal")
+    rsi = result.get("rsi")
+    macd = result.get("macd")
+    pattern = result.get("pattern", None)
 
-# Путь к CSV с историей сигналов
-CSV_FILE = "sinyal_fiyat_analizi.csv"
+    score = 0.0
 
-def evaluate_signal(signal_data):
-    if not os.path.exists(CSV_FILE):
-        return 0.5  # Нет данных? Возвращаем нейтральную оценку
+    # --- RSI scoring ---
+    if signal == "BUY" and rsi < 30:
+        score += 0.3
+    elif signal == "SELL" and rsi > 70:
+        score += 0.3
+    elif 45 <= rsi <= 55:
+        score += 0.1  # зона неопределённости
 
-    df = pd.read_csv(CSV_FILE)
-    if len(df) < 10:
-        return 0.5  # Мало данных — доверие низкое
+    # --- MACD scoring ---
+    if signal == "BUY" and macd > 0:
+        score += 0.3
+    elif signal == "SELL" and macd < 0:
+        score += 0.3
 
-    X = df[['rsi', 'macd', 'price']]  # Признаки
-    y = df['success']                 # Целевая переменная
+    # --- Candle pattern scoring (если есть) ---
+    if pattern:
+        strong_bullish = ["hammer", "engulfing_bullish"]
+        strong_bearish = ["shooting_star", "engulfing_bearish"]
 
-    model = LogisticRegression()
-    model.fit(X, y)
+        if signal == "BUY" and pattern in strong_bullish:
+            score += 0.3
+        elif signal == "SELL" and pattern in strong_bearish:
+            score += 0.3
 
-    # Текущий сигнал:
-    rsi = signal_data.get('rsi', 50)
-    macd = signal_data.get('macd', 0)
-    price = signal_data.get('price', 10000)
+    # --- Уверенность ---
+    if score >= 0.8:
+        print(f"🔍 Сильный сигнал {signal} с оценкой {score:.2f}")
+    else:
+        print(f"ℹ️ Слабый/нейтральный сигнал {signal} с оценкой {score:.2f}")
 
-    prob = model.predict_proba([[rsi, macd, price]])[0][1]
-    return round(prob, 2)
+    return score
