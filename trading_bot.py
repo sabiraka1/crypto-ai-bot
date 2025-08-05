@@ -6,20 +6,23 @@ from sinyal_skorlayici import evaluate_signal
 from data_logger import log_trade
 from technical_analysis import generate_signal
 
+# Загружаем переменные из .env
 load_dotenv()
 
 api_key = os.getenv("GATE_API_KEY")
 api_secret = os.getenv("GATE_API_SECRET")
 chat_id = os.getenv("CHAT_ID")
 
+# Настройка подключения к Gate.io
 exchange = ccxt.gateio({
     'apiKey': api_key,
     'secret': api_secret,
     'enableRateLimit': True,
 })
 
+# Пара и сумма сделки
 symbol = 'BTC/USDT'
-amount_usdt = 10  # фиксированная сумма сделки
+amount_usdt = 10  # сумма сделки в долларах
 
 def get_price():
     ticker = exchange.fetch_ticker(symbol)
@@ -48,7 +51,7 @@ def check_and_trade():
         order = execute_order(side, amount_usdt)
         if order:
             log_trade(signal, score, price, success=True)
-            send_telegram_message(chat_id, f"✅ Сделка {side.upper()} открыта на {amount_usdt}$")
+            send_telegram_message(chat_id, f"✅ Открыта сделка {side.upper()} на {amount_usdt}$")
         else:
             log_trade(signal, score, price, success=False)
     else:
