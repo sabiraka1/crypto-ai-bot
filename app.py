@@ -4,28 +4,28 @@ from trading_bot import check_and_trade
 from telegram_bot import handle_telegram_command
 import logging
 
+# === Flask App ===
 app = Flask(__name__)
+scheduler = BackgroundScheduler()
+
+# === Включаем логирование ===
 logging.basicConfig(level=logging.INFO)
 
-# Запускаем трейдинг каждые 15 минут
-scheduler = BackgroundScheduler()
+# === Планировщик торговли (каждые 15 минут) ===
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
 scheduler.start()
 
-@app.route('/')
-def index():
-    return '🤖 Crypto AI Bot работает!'
-
-@app.route('/alive')
-def alive():
-    return '✅ OK'
-
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    logging.info(f"📨 Получено сообщение: {data}")
-    handle_telegram_command(data)
-    return 'OK'
+    if data:
+        handle_telegram_command(data)
+    return "OK", 200
 
-if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000)
+@app.route("/alive", methods=["GET"])
+def alive():
+    return "🤖 Бот работает!", 200
+
+if __name__ == "__main__":
+    print("🚀 Запуск бота...")
+    app.run(host="0.0.0.0", port=5000)
