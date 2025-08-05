@@ -7,4 +7,5 @@ ta
 ccxt
 matplotlib
 numpy
+scikit-learn
 gunicorn
