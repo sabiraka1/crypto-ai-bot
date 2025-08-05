@@ -2,7 +2,8 @@ import requests
 import os
 from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
-from technical_analysis import generate_signal, draw_rsi_macd_chart
+from technical_analysis import generate_signal
+from grafik_olusturucu import draw_rsi_macd_chart
 from data_logger import log_test_trade
 
 load_dotenv()
