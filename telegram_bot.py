@@ -11,6 +11,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
@@ -18,6 +19,7 @@ def send_telegram_message(chat_id, text):
         requests.post(url, json=payload)
     except Exception as e:
         print(f"Ошибка при отправке сообщения: {e}")
+
 
 def send_telegram_photo(chat_id, image_path, caption=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -30,6 +32,7 @@ def send_telegram_photo(chat_id, image_path, caption=None):
             requests.post(url, data=data, files=files)
     except Exception as e:
         print(f"Ошибка при отправке фото: {e}")
+
 
 def handle_telegram_command(data):
     print("📨 Получено сообщение:", data)
