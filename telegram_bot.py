@@ -50,7 +50,7 @@ def handle_telegram_command(data):
         rsi = result["rsi"]
         macd = result["macd"]
         price = result["price"]
-        patterns = result.get("patterns", [])
+        pattern = result.get("pattern", None)
 
         score = evaluate_signal(result)
         log_test_trade(signal, score, price)
@@ -59,7 +59,7 @@ def handle_telegram_command(data):
             f"🧪 Тест сигнала\n"
             f"📊 Сигнал: {signal}\n"
             f"📉 RSI: {rsi}, 📈 MACD: {macd}\n"
-            f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
+            f"📌 Паттерн: {pattern if pattern else 'нет'}\n"
             f"🤖 Оценка AI: {score:.2f}\n"
             f"💰 Цена: {price}"
         )
