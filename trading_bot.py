@@ -1,9 +1,12 @@
 import os
 import ccxt
+from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from data_logger import log_trade
 from telegram_bot import send_telegram_message
+
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -26,10 +29,9 @@ def open_position(signal, amount_usdt):
         order = exchange.create_order(symbol, 'market', side, amount)
         return order, price
     except Exception as e:
-        print(f"Ошибка при создании ордера: {e}")
+        print(f"❌ Ошибка при создании ордера: {e}")
         return None, price
 
-# ✅ Вот эта функция обязательно должна быть здесь:
 def check_and_trade():
     result = generate_signal()
     signal = result["signal"]
@@ -54,7 +56,7 @@ def check_and_trade():
             )
             send_telegram_message(CHAT_ID, message)
         else:
-            send_telegram_message(CHAT_ID, "❌ Ошибка при открытии ордера.")
+            send_telegram_message(CHAT_ID, "❌ Ошибка при попытке открыть ордер.")
     else:
         send_telegram_message(
             CHAT_ID,
