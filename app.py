@@ -5,11 +5,9 @@ from telegram_bot import handle_telegram_command
 import logging
 
 app = Flask(__name__)
-
-# Логирование
 logging.basicConfig(level=logging.INFO)
 
-# Планировщик задач (запуск трейдинга каждые 15 минут)
+# Планировщик запускает трейдинг каждые 15 минут
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
 scheduler.start()
