@@ -37,6 +37,9 @@ def send_telegram_photo(chat_id, image_path, caption=None):
         requests.post(url, data=data, files=files)
 
 def handle_telegram_command(data):
+    print("=== Входящее сообщение от Telegram ===")
+    print(data)
+
     message = data.get("message", {})
     chat = message.get("chat", {})
     chat_id = chat.get("id")
@@ -48,13 +51,13 @@ def handle_telegram_command(data):
     if text.lower() in ["/start", "start"]:
         send_telegram_message(chat_id, "🤖 Бот активен! Готов к работе.")
 
-    elif text.lower() == "/test":
+    elif "/test" in text.lower():
         result = generate_signal()
         signal = result["signal"]
         rsi = result["rsi"]
         macd = result["macd"]
         price = result["price"]
-        score = evaluate_signal(result)
+        score = evaluate_signal(signal)  # ← исправлено: передаём только строку
 
         log_test_trade(signal, score, price)
 
