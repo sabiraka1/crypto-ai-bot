@@ -22,4 +22,12 @@ def alive():
     return 'OK'
 
 if __name__ == '__main__':
+    from flask import request
+from telegram_bot import handle_telegram_command
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    handle_telegram_command(data)
+    return 'OK'
     app.run(debug=False, host='0.0.0.0', port=5000)
