@@ -5,26 +5,20 @@ from trading_bot import check_and_trade
 from telegram_bot import handle_telegram_command
 import logging
 
-# === Flask App ===
 app = Flask(__name__)
-
-# === Logging ===
 logging.basicConfig(level=logging.INFO)
 
-# === Healthcheck ===
 @app.route('/', methods=['GET'])
 def home():
     return "✅ Bot is alive!"
 
-# === Telegram Webhook ===
-@app.route('/webhook', methods=['POST'])
+@app.route('/webhook', methods=['POST'])  # <-- ВОТ ЭТО ОЧЕНЬ ВАЖНО!!!
 def webhook():
     data = request.get_json()
     if data:
         handle_telegram_command(data)
     return '', 200
 
-# === Scheduler ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
 scheduler.start()
