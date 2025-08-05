@@ -3,20 +3,28 @@ from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from trading_bot import check_and_trade
 from telegram_bot import handle_telegram_command
+import logging
 
+# === Flask App ===
 app = Flask(__name__)
 
+# === Logging ===
+logging.basicConfig(level=logging.INFO)
+
+# === Healthcheck ===
 @app.route('/', methods=['GET'])
 def home():
     return "✅ Bot is alive!"
 
-@app.route('/', methods=['POST'])
+# === Telegram Webhook ===
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
     if data:
         handle_telegram_command(data)
     return '', 200
 
+# === Scheduler ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
 scheduler.start()
