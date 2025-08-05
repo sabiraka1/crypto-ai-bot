@@ -1,9 +1,8 @@
 flask
-ccxt
 python-dotenv
 requests
-pandas
-scikit-learn
-matplotlib
-ta
 apscheduler
+pandas
+ta
+ccxt
+matplotlib
