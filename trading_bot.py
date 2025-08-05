@@ -41,9 +41,9 @@ def check_and_trade():
     patterns = result.get("patterns", [])
 
     score = evaluate_signal(result)
-    log_trade(signal, score, price, success=(score >= 0.8))
+    log_trade(signal, score, price, success=(score >= 0.7))
 
-    if signal in ["BUY", "SELL"] and score >= 0.8:
+    if signal in ["BUY", "SELL"] and score >= 0.7:
         order, exec_price = open_position(signal, TRADE_AMOUNT)
         if order:
             message = (
