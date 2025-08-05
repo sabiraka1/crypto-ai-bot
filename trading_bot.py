@@ -1,9 +1,9 @@
-import requests
 import os
 import ccxt
 from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
-from technical_analysis import generate_signal, draw_rsi_macd_chart
+from technical_analysis import generate_signal
+from telegram_utils import send_telegram_message  # вынеси сюда send_telegram_message
 from data_logger import log_test_trade
 
 load_dotenv()
@@ -11,65 +11,31 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# Gate.io
 exchange = ccxt.gateio({
     'apiKey': os.getenv("GATE_API_KEY"),
     'secret': os.getenv("GATE_API_SECRET"),
     'enableRateLimit': True
 })
 
-def get_price():
-    ticker = exchange.fetch_ticker('BTC/USDT')
-    return ticker['last']
+def check_and_trade():
+    result = generate_signal()
+    signal = result["signal"]
+    price = result["price"]
 
-def send_telegram_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
+    score = evaluate_signal(result)
+    log_test_trade(signal, score, price)
 
-def send_telegram_photo(chat_id, image_path, caption=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    with open(image_path, 'rb') as photo:
-        files = {'photo': photo}
-        data = {'chat_id': chat_id}
-        if caption:
-            data['caption'] = caption
-        requests.post(url, data=data, files=files)
+    message = (
+        f"📊 Авто-трейдинг\n"
+        f"Сигнал: {signal}\n"
+        f"AI оценка: {score:.2f}\n"
+        f"Цена: {price}"
+    )
 
-def handle_telegram_command(data):
-    if not data:
-        return
+    if score >= 0.8 and signal in ["BUY", "SELL"]:
+        action = "ПОКУПКА ✅" if signal == "BUY" else "ПРОДАЖА ❌"
+        message += f"\n🚀 Открытие сделки: {action}"
+        # Здесь можешь вызвать функцию для покупки через ccxt, если хочешь
 
-    message = data.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "")
-
-    if not chat_id or not text:
-        return
-
-    if text.lower() == "/start":
-        send_telegram_message(chat_id, "🤖 Бот активен! Готов к работе.")
-
-    elif text.lower() == "/test":
-        result = generate_signal()
-        signal = result['signal']
-        rsi = result['rsi']
-        macd = result['macd']
-        price = result['price']
-
-        score = evaluate_signal(result)
-        log_test_trade(signal, score, price)
-
-        caption = f"🧪 Тест сигнала\n📊 Сигнал: {signal}\n📉 RSI: {rsi}\n📈 MACD: {macd}\n🤖 Оценка AI: {score:.2f}\n💰 Цена: {price}"
-
-        if score >= 0.7 and signal in ["BUY", "SELL"]:
-            action = "📈 AL" if signal == "BUY" else "📉 SAT"
-            caption += f"\n✅ Рекомендация: {action}"
-            image_path = draw_rsi_macd_chart(result)
-            if image_path:
-                send_telegram_photo(chat_id, image_path, caption)
-                return
-
-        send_telegram_message(chat_id, caption)
-
-    else:
-        send_telegram_message(chat_id, f"📨 Вы написали: {text}")
+    send_telegram_message(CHAT_ID, message)
