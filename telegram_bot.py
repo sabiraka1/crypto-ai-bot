@@ -49,19 +49,33 @@ def handle_telegram_command(data):
         send_telegram_message(chat_id, "🤖 Бот активен! Готов к работе.")
 
     elif text.lower() == "/test":
-        signal = generate_signal()
-        score = evaluate_signal(signal)
-        price = get_price()
+        result = generate_signal()
+        signal = result["signal"]
+        rsi = result["rsi"]
+        macd = result["macd"]
+        price = result["price"]
+        score = evaluate_signal(result)
+
         log_test_trade(signal, score, price)
 
-        caption = f"🧪 Тест сигнала\n📊 Сигнал: {signal}\n🤖 Оценка AI: {score:.2f}\n💰 Цена: {price}"
+        caption = (
+            f"🧪 Тест сигнала\n"
+            f"📊 Сигнал: {signal}\n"
+            f"📉 RSI: {rsi}, 📈 MACD: {macd}\n"
+            f"🤖 Оценка AI: {score:.2f}\n"
+            f"💰 Цена: {price}"
+        )
 
         if score >= 0.7:
             action = "📈 AL" if signal == "BUY" else "📉 SAT"
             caption += f"\n✅ Рекомендация: {action}"
 
-            # Сохраняем график и отправляем
-            image_path = draw_rsi_macd_chart(signal)
+            image_path = draw_rsi_macd_chart({
+                'signal': signal,
+                'rsi': rsi,
+                'macd': macd
+            })
+
             if image_path:
                 send_telegram_photo(chat_id, image_path, caption)
                 return
