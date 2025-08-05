@@ -29,6 +29,16 @@ def webhook():
         logger.error(f"❌ Ошибка при обработке webhook: {e}")
     return '', 200
 
+# === ✅ Новый маршрут: обучение AI-модели ===
+@app.route('/train-model', methods=['GET'])
+def train_model_route():
+    try:
+        import train_model
+        return "✅ AI-модель успешно обучена и сохранена!"
+    except Exception as e:
+        logger.error(f"❌ Ошибка обучения модели: {e}")
+        return f"❌ Ошибка при обучении модели: {e}", 500
+
 # === Планировщик трейдинга (каждые 15 минут) ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
@@ -39,7 +49,7 @@ logger.info("✅ Планировщик запущен (каждые 15 мину
 def set_webhook():
     bot_token = os.getenv("BOT_TOKEN")
     webhook_url = os.getenv("WEBHOOK_URL")
-    
+
     if not bot_token or not webhook_url:
         logger.error("❌ BOT_TOKEN или WEBHOOK_URL не заданы.")
         return
