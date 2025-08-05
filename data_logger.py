@@ -24,3 +24,6 @@ def log_trade(signal, score, price, success):
             score,
             int(success)
         ])
+
+def log_test_trade(signal, score, price):
+    log_trade(signal, score, price, success=False)
