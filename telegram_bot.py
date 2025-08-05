@@ -16,7 +16,7 @@ def send_telegram_message(chat_id, text):
     try:
         requests.post(url, json=payload)
     except Exception as e:
-        print(f"\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f: {e}")
+        print(f"Ошибка при отправке сообщения: {e}")
 
 def send_telegram_photo(chat_id, image_path, caption=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -28,10 +28,10 @@ def send_telegram_photo(chat_id, image_path, caption=None):
                 data['caption'] = caption
             requests.post(url, data=data, files=files)
     except Exception as e:
-        print(f"\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0435 \u0444\u043e\u0442\u043e: {e}")
+        print(f"Ошибка при отправке фото: {e}")
 
 def handle_telegram_command(data):
-    print("\ud83d\udce8 \u041f\u043e\u043b\u0443\u0447\u0435\u043d\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435:", data)
+    print("📨 Получено сообщение:", data)
 
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
@@ -41,7 +41,7 @@ def handle_telegram_command(data):
         return
 
     if text.lower() in ["/start", "start"]:
-        send_telegram_message(chat_id, "🤖 \u0411\u043e\u0442 \u0430\u043a\u0442\u0438\u0432\u0435\u043d \u0438 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 24/7!")
+        send_telegram_message(chat_id, "🤖 Бот активен и работает 24/7!")
 
     elif "/test" in text.lower():
         result = generate_signal()
@@ -55,17 +55,17 @@ def handle_telegram_command(data):
         log_test_trade(signal, score, price)
 
         caption = (
-            f"🧪 \u0422\u0435\u0441\u0442 \u0441\u0438\u0433\u043d\u0430\u043b\u0430\n"
-            f"📊 \u0421\u0438\u0433\u043d\u0430\u043b: {signal}\n"
+            f"🧪 Тест сигнала\n"
+            f"📊 Сигнал: {signal}\n"
             f"📉 RSI: {rsi}, 📈 MACD: {macd}\n"
-            f"📌 \u041f\u0430\u0442\u0442\u0435\u0440\u043d\u044b: {', '.join(patterns) if patterns else 'нет'}\n"
-            f"�\udd16 \u041e\u0446\u0435\u043d\u043a\u0430 AI: {score:.2f}\n"
-            f"�\udcb0 \u0426\u0435\u043d\u0430: {price}"
+            f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
+            f"🤖 Оценка AI: {score:.2f}\n"
+            f"💰 Цена: {price}"
         )
 
         if score >= 0.7:
             action = "📈 AL" if signal == "BUY" else "📉 SAT"
-            caption += f"\n\u2705 \u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u044f: {action}"
+            caption += f"\n✅ Рекомендация: {action}"
 
             image_path = draw_rsi_macd_chart(result)
             if image_path:
@@ -75,4 +75,4 @@ def handle_telegram_command(data):
         send_telegram_message(chat_id, caption)
 
     else:
-        send_telegram_message(chat_id, f"📨 \u0412\u044b \u043d\u0430\u043f\u0438\u0441\u0430\u043b\u0438: {text}")
+        send_telegram_message(chat_id, f"📨 Вы написали: {text}")
