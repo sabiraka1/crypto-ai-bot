@@ -23,11 +23,10 @@ def open_position(signal, amount_usdt):
     price = exchange.fetch_ticker(symbol)['last']
     amount = round(amount_usdt / price, 6)
 
-    order_type = 'market'
     side = 'buy' if signal == "BUY" else 'sell'
 
     try:
-        order = exchange.create_order(symbol, order_type, side, amount)
+        order = exchange.create_order(symbol, 'market', side, amount)
         return order, price
     except Exception as e:
         print(f"Ошибка при создании ордера: {e}")
@@ -36,9 +35,12 @@ def open_position(signal, amount_usdt):
 def check_and_trade():
     result = generate_signal()
     signal = result["signal"]
-    score = evaluate_signal(result)
+    rsi = result["rsi"]
+    macd = result["macd"]
     price = result["price"]
+    patterns = result.get("patterns", [])
 
+    score = evaluate_signal(result)
     log_trade(signal, score, price, success=(score >= 0.8))
 
     if signal in ["BUY", "SELL"] and score >= 0.8:
@@ -47,9 +49,10 @@ def check_and_trade():
             message = (
                 f"🚀 Открыта сделка!\n"
                 f"Сигнал: {signal}\n"
-                f"AI Оценка: {score:.2f}\n"
-                f"Цена исполнения: {exec_price:.2f}\n"
-                f"Объём: {TRADE_AMOUNT} USDT"
+                f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
+                f"🤖 Оценка AI: {score:.2f}\n"
+                f"💰 Цена исполнения: {exec_price:.2f}\n"
+                f"💵 Объём: {TRADE_AMOUNT} USDT"
             )
             send_telegram_message(CHAT_ID, message)
         else:
@@ -57,5 +60,5 @@ def check_and_trade():
     else:
         send_telegram_message(
             CHAT_ID,
-            f"📊 Получен сигнал: {signal}, но оценка слишком низкая ({score:.2f}). Сделка не открыта."
+            f"📊 Сигнал: {signal} (оценка {score:.2f}) — сделка не открыта."
         )
