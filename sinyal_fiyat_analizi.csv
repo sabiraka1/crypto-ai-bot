@@ -1,0 +1,6 @@
+signal,rsi,macd,success
+BUY,28.5,0.6,1
+SELL,72.3,-0.8,1
+BUY,55.0,-0.1,0
+SELL,66.2,-0.5,1
+NONE,45.1,0.1,0
