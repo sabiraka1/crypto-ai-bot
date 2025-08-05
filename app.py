@@ -6,11 +6,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from trading_bot import check_and_trade
 from telegram_bot import handle_telegram_command
 
-# === Настройка логгера ===
+# === Настройка логирования ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === Flask приложение ===
+# === Flask-приложение ===
 app = Flask(__name__)
 
 @app.route('/', methods=['GET'])
@@ -29,26 +29,31 @@ def webhook():
         logger.error(f"❌ Ошибка при обработке webhook: {e}")
     return '', 200
 
-# === Планировщик для торговли ===
+# === Планировщик трейдинга ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
 scheduler.start()
 
-# === Установка webhook ===
+# === Автоматическая установка Webhook ===
 def set_webhook():
     bot_token = os.getenv("BOT_TOKEN")
     webhook_url = os.getenv("WEBHOOK_URL")
+    
+    if not bot_token or not webhook_url:
+        logger.error("❌ BOT_TOKEN или WEBHOOK_URL не заданы.")
+        return
 
-    if bot_token and webhook_url:
-        url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    try:
         response = requests.post(url, data={"url": webhook_url})
         logger.info(f"📡 Установка webhook: {response.status_code} - {response.text}")
-    else:
-        logger.error("❌ BOT_TOKEN или WEBHOOK_URL не найдены. Webhook не установлен.")
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки webhook: {e}")
 
-# === Запуск приложения ===
+# === Запуск при старте ===
+set_webhook()
+
 if __name__ == '__main__':
-    set_webhook()
     port = int(os.environ.get('PORT', 5000))
     logger.info("🚀 Запуск бота...")
     app.run(host='0.0.0.0', port=port)
