@@ -1,46 +1,62 @@
 import os
-import requests
-import logging
+import ccxt
+from sinyal_skorlayici import evaluate_signal
+from technical_analysis import generate_signal
+from data_logger import log_trade
+from telegram_bot import send_telegram_message
 
-# === Настройка логирования ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 10))
 
-# === Отправка сообщения в Telegram ===
-def send_telegram_message(chat_id, text):
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        logger.error("❌ BOT_TOKEN не найден в переменных окружения.")
-        return
+exchange = ccxt.gateio({
+    'apiKey': os.getenv("GATE_API_KEY"),
+    'secret': os.getenv("GATE_API_SECRET"),
+    'enableRateLimit': True
+})
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = {"chat_id": chat_id, "text": text}
+def open_position(signal, amount_usdt):
+    symbol = "BTC/USDT"
+    price = exchange.fetch_ticker(symbol)['last']
+    amount = round(amount_usdt / price, 6)
+
+    side = 'buy' if signal == "BUY" else 'sell'
 
     try:
-        response = requests.post(url, data=data)
-        logger.info(f"📤 Ответ Telegram: {response.status_code} - {response.text}")
+        order = exchange.create_order(symbol, 'market', side, amount)
+        return order, price
     except Exception as e:
-        logger.error(f"❌ Ошибка при отправке сообщения в Telegram: {e}")
+        print(f"Ошибка при создании ордера: {e}")
+        return None, price
 
-# === Обработка команд Telegram ===
-def handle_telegram_command(data):
-    logger.info(f"➡️ Обработка команды Telegram: {data}")
+# ✅ Вот эта функция обязательно должна быть здесь:
+def check_and_trade():
+    result = generate_signal()
+    signal = result["signal"]
+    rsi = result["rsi"]
+    macd = result["macd"]
+    price = result["price"]
+    patterns = result.get("patterns", [])
 
-    try:
-        message = data.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        text = message.get("text", "")
+    score = evaluate_signal(result)
+    log_trade(signal, score, price, success=(score >= 0.8))
 
-        if not chat_id:
-            logger.warning("⚠️ chat_id не найден в сообщении.")
-            return
-
-        if text == "/start":
-            send_telegram_message(chat_id, "👋 Привет! Бот успешно запущен и работает.")
-        elif text == "/test":
-            send_telegram_message(chat_id, "✅ Тест пройден! Бот жив и отвечает.")
+    if signal in ["BUY", "SELL"] and score >= 0.8:
+        order, exec_price = open_position(signal, TRADE_AMOUNT)
+        if order:
+            message = (
+                f"🚀 Открыта сделка!\n"
+                f"Сигнал: {signal}\n"
+                f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
+                f"🤖 Оценка AI: {score:.2f}\n"
+                f"💰 Цена исполнения: {exec_price:.2f}\n"
+                f"💵 Объём: {TRADE_AMOUNT} USDT"
+            )
+            send_telegram_message(CHAT_ID, message)
         else:
-            send_telegram_message(chat_id, f"🤖 Неизвестная команда: {text}")
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка в обработке команды Telegram: {e}")
+            send_telegram_message(CHAT_ID, "❌ Ошибка при открытии ордера.")
+    else:
+        send_telegram_message(
+            CHAT_ID,
+            f"📊 Сигнал: {signal} (оценка {score:.2f}) — сделка не открыта."
+        )
