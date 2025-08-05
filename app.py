@@ -29,10 +29,11 @@ def webhook():
         logger.error(f"❌ Ошибка при обработке webhook: {e}")
     return '', 200
 
-# === Планировщик трейдинга ===
+# === Планировщик трейдинга (каждые 15 минут) ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
 scheduler.start()
+logger.info("✅ Планировщик запущен (каждые 15 минут)")
 
 # === Автоматическая установка Webhook ===
 def set_webhook():
@@ -54,6 +55,6 @@ def set_webhook():
 set_webhook()
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     logger.info("🚀 Запуск бота...")
     app.run(host='0.0.0.0', port=port)
