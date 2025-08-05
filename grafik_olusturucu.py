@@ -1,57 +1,54 @@
-import ccxt
-import pandas as pd
 import matplotlib.pyplot as plt
-import ta
 import os
-from dotenv import load_dotenv
+from datetime import datetime
 
-load_dotenv()
+def draw_rsi_macd_chart(result):
+    """
+    Создаёт график на основе данных RSI, MACD, сигнала и свечной модели.
+    Сохраняет график в папке charts/ с уникальным именем.
+    Возвращает путь к изображению.
+    """
+    signal = result.get("signal", "NONE")
+    rsi = result.get("rsi", 50)
+    macd = result.get("macd", 0)
+    pattern = result.get("pattern", None)
+    price = result.get("price", "unknown")
 
-api_key = os.getenv("GATE_API_KEY")
-api_secret = os.getenv("GATE_API_SECRET")
+    # Создание директории charts, если она не существует
+    charts_dir = "charts"
+    os.makedirs(charts_dir, exist_ok=True)
 
-exchange = ccxt.gateio({
-    'apiKey': api_key,
-    'secret': api_secret,
-    'enableRateLimit': True,
-})
+    # Название файла
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{charts_dir}/signal_{signal}_{timestamp}.png"
 
-symbol = 'BTC/USDT'
+    # Создание графика
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-def fetch_ohlcv():
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+    # Основной заголовок
+    title = f"📈 Сигнал: {signal} | 💰 Цена: {price}\nRSI: {rsi} | MACD: {macd}"
+    if pattern:
+        title += f" | 🕯 Паттерн: {pattern}"
+    ax.set_title(title, fontsize=12)
 
-def plot_indicators():
-    df = fetch_ohlcv()
-    df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
-    df['macd'] = ta.trend.MACD(df['close']).macd()
-    df['macd_signal'] = ta.trend.MACD(df['close']).macd_signal()
+    # Нарисуем полосы
+    ax.axhline(y=70, color='red', linestyle='--', label='RSI 70')
+    ax.axhline(y=30, color='green', linestyle='--', label='RSI 30')
+    ax.bar(["RSI", "MACD"], [rsi, macd], color=["blue", "orange"])
+    
+    # Отметка сигнала
+    ax.text(0.5, max(rsi, macd) + 5, f"Сигнал: {signal}", ha='center', fontsize=11, color='purple')
 
-    plt.figure(figsize=(12, 8))
+    # Свечной паттерн
+    if pattern:
+        ax.text(0.5, min(rsi, macd) - 5, f"Паттерн: {pattern}", ha='center', fontsize=10, color='brown')
 
-    # Цена
-    plt.subplot(3, 1, 1)
-    plt.plot(df['timestamp'], df['close'], label='Price')
-    plt.title("Price")
-
-    # RSI
-    plt.subplot(3, 1, 2)
-    plt.plot(df['timestamp'], df['rsi'], label='RSI', color='orange')
-    plt.axhline(70, color='red', linestyle='--')
-    plt.axhline(30, color='green', linestyle='--')
-    plt.title("RSI")
-
-    # MACD
-    plt.subplot(3, 1, 3)
-    plt.plot(df['timestamp'], df['macd'], label='MACD', color='blue')
-    plt.plot(df['timestamp'], df['macd_signal'], label='Signal', color='red')
-    plt.title("MACD")
+    ax.set_ylim(0, max(100, rsi + 20))
+    ax.legend()
     plt.tight_layout()
-
-    file_path = "chart.png"
-    plt.savefig(file_path)
+    
+    # Сохраняем
+    plt.savefig(filename)
     plt.close()
-    return file_path
+
+    return filename
