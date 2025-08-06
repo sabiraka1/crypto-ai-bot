@@ -5,6 +5,7 @@ from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from grafik_olusturucu import draw_rsi_macd_chart
 from profit_analysis import generate_profit_chart  # 📊 График доходности
+from signal_analyzer import analyze_bad_signals  # ❌ Анализ ошибок
 from data_logger import log_test_trade
 
 load_dotenv()
@@ -40,17 +41,17 @@ def handle_telegram_command(data):
 
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "").strip()
+    text = message.get("text", "").strip().lower()
 
     if not chat_id or not text:
         return
 
     # ✅ Команда старт
-    if text.lower() in ["/start", "start"]:
-        send_telegram_message(chat_id, "🤖 Бот активен и работает 24/7!")
+    if text in ["/start", "start", "привет", "работаешь?", "ты тут?"]:
+        send_telegram_message(chat_id, "🤖 Бот активен и работает 24/7! Напиши /test, /profit или /errors.")
 
     # ✅ Команда тестового сигнала
-    elif text.lower() == "/test":
+    elif text == "/test":
         result = generate_signal()
         signal = result.get("signal")
         rsi = result.get("rsi")
@@ -84,7 +85,7 @@ def handle_telegram_command(data):
         send_telegram_message(chat_id, caption)
 
     # ✅ Команда доходности /profit
-    elif text.lower() == "/profit":
+    elif text == "/profit":
         path, total_return = generate_profit_chart()
 
         if path:
@@ -96,6 +97,29 @@ def handle_telegram_command(data):
         else:
             send_telegram_message(chat_id, "ℹ️ Недостаточно данных для построения графика прибыли.")
 
-    # ❓ Любая другая команда
+    # ✅ Команда ошибок /errors
+    elif text == "/errors":
+        summary, explanations = analyze_bad_signals()
+
+        if not summary:
+            send_telegram_message(chat_id, "ℹ️ Нет данных об ошибочных сигналах.")
+            return
+
+        message = "📉 Анализ ошибочных сигналов:\n"
+        for key, value in summary.items():
+            message += f"• {key}: {value}\n"
+
+        if explanations:
+            message += "\n❗ Примеры ошибок:\n" + "\n".join(explanations)
+
+        send_telegram_message(chat_id, message)
+
+    # 🧠 Умный ответ на некоторые вопросы
+    elif "прибыль" in text:
+        send_telegram_message(chat_id, "💡 Используй команду /profit для анализа доходности.")
+    elif "ошибк" in text:
+        send_telegram_message(chat_id, "📉 Введи /errors — покажу, какие сигналы были неудачными.")
+    elif "сигнал" in text:
+        send_telegram_message(chat_id, "⚡ Попробуй /test — я сгенерирую новый сигнал с графиком и оценкой.")
     else:
-        send_telegram_message(chat_id, f"📨 Вы написали: {text}")
+        send_telegram_message(chat_id, f"🤖 Неизвестная команда: {text}\nДоступно: /start, /test, /profit, /errors")
