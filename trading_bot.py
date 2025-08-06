@@ -7,8 +7,7 @@ from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from data_logger import log_trade, log_closed_trade
-from telegram_bot import send_telegram_message, send_telegram_photo
-from profit_analysis import generate_profit_chart  # 📈 график доходности
+from telegram_bot import send_telegram_message
 
 load_dotenv()
 
@@ -31,7 +30,10 @@ exchange = ccxt.gateio({
 def get_open_position():
     if os.path.exists(POSITION_FILE):
         with open(POSITION_FILE, 'r') as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except Exception as e:
+                logger.error(f"Ошибка чтения open_position.json: {e}")
     return None
 
 def save_position(data):
@@ -79,12 +81,6 @@ def close_position(position, reason="manual", signal=None, score=None):
         train_model()
         send_telegram_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
 
-        # 📈 Генерация и отправка графика прибыли
-        chart_path, total_return = generate_profit_chart()
-        if chart_path:
-            caption = f"📈 Доходность обновлена!\nТекущий итог: {total_return*100:.2f}%"
-            send_telegram_photo(CHAT_ID, chart_path, caption)
-
         clear_position()
 
     except Exception as e:
@@ -118,6 +114,7 @@ def open_position(signal, amount_usdt):
     side = 'buy' if signal == "BUY" else 'sell'
 
     try:
+        send_telegram_message(CHAT_ID, f"📥 Попытка открыть ордер: {side.upper()} на {amount} {symbol}")
         order = exchange.create_order(symbol, 'market', side, amount)
         save_position({
             "symbol": symbol,
@@ -130,6 +127,7 @@ def open_position(signal, amount_usdt):
         return order, price
     except Exception as e:
         logger.error(f"❌ Ошибка при создании ордера: {e}")
+        send_telegram_message(CHAT_ID, f"❌ Ошибка при создании ордера: {e}")
         return None, price
 
 def check_and_trade():
@@ -144,9 +142,12 @@ def check_and_trade():
     patterns = result.get("patterns", [])
 
     logger.info(f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
+    send_telegram_message(CHAT_ID, f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
 
     score = evaluate_signal(result)
     log_trade(signal, score, price, rsi, macd, success=(score >= 0.7))
+
+    send_telegram_message(CHAT_ID, f"🧠 Оценка AI: {score:.2f}")
 
     check_close_conditions(rsi)
 
