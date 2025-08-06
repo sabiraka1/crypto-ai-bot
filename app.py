@@ -3,21 +3,24 @@ import requests
 import logging
 from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
+
 from trading_bot import check_and_trade
 from telegram_bot import handle_telegram_command
-from log_cleaner import clean_logs  # 🧹
+from log_cleaner import clean_logs
 
-# === Настройка логирования ===
+# === 🪵 Настройка логирования ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === Flask-приложение ===
+# === 🌐 Инициализация Flask ===
 app = Flask(__name__)
 
+# === 🔗 Главная страница (alive check) ===
 @app.route('/', methods=['GET'])
 def home():
     return "✅ Bot is alive!"
 
+# === 🤖 Webhook: обработка Telegram-команд ===
 @app.route('/webhook', methods=['POST'])
 def webhook():
     logger.info("📨 Получен POST запрос на /webhook")
@@ -30,24 +33,25 @@ def webhook():
         logger.error(f"❌ Ошибка при обработке webhook: {e}")
     return '', 200
 
-# === ✅ Новый маршрут: обучение AI-модели ===
+# === 🤖 Обучение AI-модели по GET-запросу ===
 @app.route('/train-model', methods=['GET'])
 def train_model_route():
     try:
         import train_model
-        return "✅ AI-модель успешно обучена и сохранена!"
+        msg = train_model.train_model()
+        return msg
     except Exception as e:
         logger.error(f"❌ Ошибка обучения модели: {e}")
         return f"❌ Ошибка при обучении модели: {e}", 500
 
-# === Планировщик трейдинга (каждые 15 минут) + очистка (ежедневно) ===
+# === 🕒 Планировщик задач: трейдинг + автоочистка ===
 scheduler = BackgroundScheduler()
-scheduler.add_job(check_and_trade, 'interval', minutes=15)
-scheduler.add_job(clean_logs, 'interval', days=1)  # 🧹 Очистка логов
+scheduler.add_job(check_and_trade, 'interval', minutes=15)  # 🔁 Трейдинг
+scheduler.add_job(clean_logs, 'interval', days=1)           # 🧹 Очистка логов
 scheduler.start()
 logger.info("✅ Планировщик запущен (трейдинг + очистка)")
 
-# === Автоматическая установка Webhook ===
+# === 🔐 Установка Telegram Webhook ===
 def set_webhook():
     bot_token = os.getenv("BOT_TOKEN")
     webhook_url = os.getenv("WEBHOOK_URL")
@@ -63,7 +67,7 @@ def set_webhook():
     except Exception as e:
         logger.error(f"❌ Ошибка установки webhook: {e}")
 
-# === Запуск при старте ===
+# === 🚀 Запуск бота ===
 set_webhook()
 
 if __name__ == '__main__':
