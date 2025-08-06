@@ -45,8 +45,10 @@ def clear_position():
         os.remove(POSITION_FILE)
 
 
-# === Закрытие сделки ===
+# === Закрытие сделки с переобучением AI ===
 def close_position(position, reason="manual", signal=None, score=None):
+    from train_model import train_model  # ✅ импортируем здесь, чтобы избежать циклических зависимостей
+
     symbol = position['symbol']
     side = 'sell' if position['type'] == 'buy' else 'buy'
     amount = position['amount']
@@ -65,8 +67,8 @@ def close_position(position, reason="manual", signal=None, score=None):
             close_price=price_now,
             pnl_percent=profit,
             reason=reason,
-            signal=signal or "UNKNOWN",
-            score=score if score is not None else 0
+            signal=signal or position['type'].upper(),
+            score=score if score is not None else position.get("score", 0.0)
         )
 
         # ✅ Telegram уведомление
@@ -75,10 +77,17 @@ def close_position(position, reason="manual", signal=None, score=None):
             f"📉 Тип: {side.upper()}\n"
             f"💵 Вход: {entry_price:.2f}, Выход: {price_now:.2f}\n"
             f"📊 Доходность: {profit*100:.2f}%\n"
-            f"📌 Причина: {reason.upper()}"
+            f"📌 Причина: {reason.upper()}\n"
+            f"🤖 Переобучение AI модели..."
         )
         send_telegram_message(CHAT_ID, message)
+
+        # ✅ AI переобучение
+        train_model()
+        send_telegram_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
+
         clear_position()
+
     except Exception as e:
         print(f"❌ Ошибка при закрытии позиции: {e}")
         send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
@@ -121,7 +130,8 @@ def open_position(signal, amount_usdt):
             "type": side,
             "entry_price": price,
             "amount": amount,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "score": 0.0  # будет обновлён после
         })
         return order, price
     except Exception as e:
@@ -161,6 +171,16 @@ def check_and_trade():
                 f"💵 Объём: {TRADE_AMOUNT} USDT"
             )
             send_telegram_message(CHAT_ID, message)
+
+            # 🧠 Обновим score в json
+            save_position({
+                "symbol": "BTC/USDT",
+                "type": 'buy' if signal == "BUY" else 'sell',
+                "entry_price": exec_price,
+                "amount": round(TRADE_AMOUNT / exec_price, 6),
+                "timestamp": datetime.utcnow().isoformat(),
+                "score": score
+            })
         else:
             send_telegram_message(CHAT_ID, "❌ Ошибка при открытии ордера.")
     else:
