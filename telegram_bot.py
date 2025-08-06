@@ -1,85 +1,86 @@
-import telebot
-from profit_chart import generate_profit_chart
-from signal_analyzer import analyze_bad_signals
-from position_tracker import get_position_status
-from train_model import train_model
-from grafik_olusturucu import draw_chart
-from technical_analysis import generate_signal
-from sinyal_skorlayici import evaluate_signal
-from data_logger import log_test_trade
-from config import BOT_TOKEN, CHAT_ID
+# telegram_bot.py
 
+import os
+import telebot
+from sinyal_skorlayici import evaluate_signal
+from technical_analysis import generate_signal
+from data_logger import log_test_trade
+from signal_analyzer import analyze_bad_signals
+from profit_chart import generate_profit_chart
+from position_status import get_position_status
+from train_model import train_model
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# === 🟢 /start и /help
-@bot.message_handler(commands=["start", "help"])
-def handle_start_help(message):
-    bot.send_message(
-        CHAT_ID,
-        "🤖 Бот активен и работает 24/7!\n\n"
-        "📌 Доступные команды:\n"
-        "/test — ручной тест сигнала\n"
-        "/train — переобучение модели\n"
-        "/status — текущая позиция\n"
-        "/profit — график прибыли\n"
-        "/errors — ошибки сигналов"
-    )
 
-# === 🧪 /test — ручная проверка сигнала
-@bot.message_handler(commands=["test"])
-def handle_test(message):
-    result = generate_signal()
-    score = evaluate_signal(result)
-    draw_chart(result)
-    log_test_trade(result["signal"], score, result["price"], result["rsi"], result["macd"])
+def handle_telegram_command(data):
+    try:
+        message = data['message']
+        text = message.get("text", "")
+        chat_id = message["chat"]["id"]
 
-    bot.send_message(CHAT_ID, f"🧪 Сигнал: {result['signal']}\n"
-                              f"📈 RSI: {result['rsi']:.2f}, MACD: {result['macd']:.2f}\n"
-                              f"🤖 AI Оценка: {score:.2f}")
-    with open("charts/latest.png", "rb") as photo:
-        bot.send_photo(CHAT_ID, photo)
+        if text.startswith("/start") or text.startswith("/help"):
+            bot.send_message(chat_id,
+                "🤖 Бот активен и работает 24/7!\n\n"
+                "📌 Доступные команды:\n"
+                "/test — ручной тест сигнала\n"
+                "/train — переобучение модели\n"
+                "/status — текущая позиция\n"
+                "/profit — график прибыли\n"
+                "/errors — ошибки сигналов"
+            )
 
-# === 🔁 /train — ручное переобучение модели
-@bot.message_handler(commands=["train"])
-def handle_train(message):
-    train_model()
-    bot.send_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
+        elif text.startswith("/test"):
+            result = generate_signal()
+            signal = result["signal"]
+            rsi = result["rsi"]
+            macd = result["macd"]
+            price = result["price"]
+            score = evaluate_signal(result)
 
-# === 📈 /profit — график прибыли
-@bot.message_handler(commands=["profit"])
-def handle_profit(message):
-    path = generate_profit_chart()
-    if path:
-        with open(path, "rb") as photo:
-            bot.send_photo(CHAT_ID, photo)
-    else:
-        bot.send_message(CHAT_ID, "⚠️ Недостаточно данных для построения графика.")
+            log_test_trade(signal, score, price, rsi, macd)
 
-# === ℹ️ /status — статус открытой позиции
-@bot.message_handler(commands=["status"])
-def handle_status(message):
-    msg = get_position_status()
-    bot.send_message(CHAT_ID, msg)
+            msg = (
+                f"🧪 Ручной тест сигнала:\n"
+                f"Сигнал: {signal}\n"
+                f"RSI: {rsi:.2f}\n"
+                f"MACD: {macd:.2f}\n"
+                f"Цена: {price:.2f}\n"
+                f"🤖 Оценка AI: {score:.2f}"
+            )
+            bot.send_message(chat_id, msg)
 
-# === 📉 /errors — анализ ошибок
-@bot.message_handler(commands=["errors"])
-def handle_errors(message):
-    summary, explanations = analyze_bad_signals(limit=5)
-    
-    if summary is None:
-        bot.send_message(CHAT_ID, "⚠️ Недостаточно данных для анализа.")
-        return
+        elif text.startswith("/train"):
+            message = train_model()
+            bot.send_message(chat_id, message)
 
-    stats = "\n".join([f"{k}: {v}" for k, v in summary.items()])
-    bot.send_message(CHAT_ID, f"📉 Ошибки сигналов:\n\n{stats}")
+        elif text.startswith("/status"):
+            status = get_position_status()
+            bot.send_message(chat_id, status)
 
-    if explanations:
-        text = "\n\n".join(explanations)
-        bot.send_message(CHAT_ID, f"🧠 Причины последних ошибок:\n\n{text}")
-    else:
-        bot.send_message(CHAT_ID, "✅ Нет доступных объяснений.")
+        elif text.startswith("/profit"):
+            image_path = generate_profit_chart()
+            if image_path:
+                with open(image_path, "rb") as photo:
+                    bot.send_photo(chat_id, photo)
+            else:
+                bot.send_message(chat_id, "⚠️ Недостаточно данных для построения графика.")
 
-# === Запуск
-def start_telegram_bot():
-    print("🚀 Telegram бот запущен...")
-    bot.polling(none_stop=True)
+        elif text.startswith("/errors"):
+            summary, explanations = analyze_bad_signals()
+            if summary:
+                text_lines = [f"{k}: {v}" for k, v in summary.items()]
+                summary_text = "📊 Ошибки сигналов:\n" + "\n".join(text_lines)
+                bot.send_message(chat_id, summary_text)
+
+                if explanations:
+                    expl = "\n\n".join(explanations)
+                    bot.send_message(chat_id, f"🧠 Последние ошибки:\n{expl}")
+            else:
+                bot.send_message(chat_id, "✅ Ошибок сигналов не найдено или недостаточно данных.")
+        else:
+            bot.send_message(chat_id, "❓ Неизвестная команда. Напиши /help для списка.")
+    except Exception as e:
+        print(f"❌ Ошибка обработки команды: {e}")
