@@ -2,7 +2,6 @@ import joblib
 import os
 import numpy as np
 
-# === Загрузка модели ===
 MODEL_PATH = "models/ai_model.pkl"
 model = None
 
@@ -12,38 +11,34 @@ if os.path.exists(MODEL_PATH):
 else:
     print("⚠️ AI-модель не найдена. Сигналы будут оцениваться вручную.")
 
-# === Преобразование текста сигнала в число ===
 def encode_signal(signal):
     return {'BUY': 1, 'SELL': -1, 'NONE': 0}.get(signal, 0)
 
-# === Основная функция ===
 def evaluate_signal(result):
     signal = result.get("signal")
     rsi = result.get("rsi")
     macd = result.get("macd")
-    
+
     if model and signal is not None and rsi is not None and macd is not None:
         signal_encoded = encode_signal(signal)
         input_data = np.array([[rsi, macd, signal_encoded]])
-        
+
         try:
-            prediction = model.predict_proba(input_data)[0][1]  # вероятность успеха
+            prediction = model.predict_proba(input_data)[0][1]
             score = round(float(prediction), 2)
 
             if score >= 0.8:
                 print(f"🤖 AI: Сильный сигнал {signal} с оценкой {score}")
             else:
                 print(f"🤖 AI: Слабый/нейтральный сигнал {signal} с оценкой {score}")
-            
+
             return score
         except Exception as e:
             print(f"❌ Ошибка в AI-модели: {e}")
 
-    # Фоллбэк — ручной расчёт
     print("⚠️ Используется fallback логика для оценки сигнала.")
     return fallback_score(result)
 
-# === Ручная логика, как была раньше ===
 def fallback_score(result):
     signal = result.get("signal")
     rsi = result.get("rsi")
