@@ -1,0 +1,4 @@
+close_datetime,entry_price,close_price,pnl_percent,reason,signal,ai_score
+2025-08-01 15:30:00,29200.0,29784.0,2.0,profit_target,BUY,0.82
+2025-08-02 12:00:00,29800.0,29104.0,-2.33,rsi_overbought,SELL,0.78
+2025-08-03 09:15:00,29100.0,29682.0,2.0,holding_timeout,BUY,0.84
