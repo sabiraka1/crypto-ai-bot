@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from grafik_olusturucu import draw_rsi_macd_chart
-from profit_chart import generate_profit_chart  # 📊 График доходности
+from profit_analysis import generate_profit_chart  # 📊 График доходности
 from data_logger import log_test_trade
 
 load_dotenv()
@@ -85,11 +85,16 @@ def handle_telegram_command(data):
 
     # ✅ Команда доходности /profit
     elif text.lower() == "/profit":
-        image_path = generate_profit_chart()
-        if image_path:
-            send_telegram_photo(chat_id, image_path, "📈 Кумулятивная доходность")
+        path, total_return = generate_profit_chart()
+
+        if path:
+            caption = (
+                f"💼 Общая доходность: {total_return*100:.2f}%\n"
+                f"📈 График: кумулятивная прибыль"
+            )
+            send_telegram_photo(chat_id, path, caption)
         else:
-            send_telegram_message(chat_id, "❌ График доходности не удалось сгенерировать.")
+            send_telegram_message(chat_id, "ℹ️ Недостаточно данных для построения графика прибыли.")
 
     # ❓ Любая другая команда
     else:
