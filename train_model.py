@@ -6,23 +6,23 @@ import joblib
 import os
 
 CSV_FILE = "sinyal_fiyat_analizi.csv"
-MODEL_PATH = "models/ai_model.pkl"
+MODEL_DIR = "models"
+MODEL_PATH = os.path.join(MODEL_DIR, "ai_model.pkl")
 
 def encode_signal(signal):
     return {'BUY': 1, 'SELL': -1, 'NONE': 0}.get(signal, 0)
 
 def train_model():
     if not os.path.exists(CSV_FILE):
-        print("⚠️ CSV-файл не найден. Обучение невозможно.")
-        return
+        print("⚠️ CSV-файл не найден:", CSV_FILE)
+        return "⚠️ CSV-файл не найден."
 
     df = pd.read_csv(CSV_FILE)
 
     if len(df) < 10:
-        print("⚠️ Недостаточно данных для обучения модели.")
-        return
+        print("⚠️ Недостаточно данных для обучения (нужно ≥10, сейчас:", len(df), ")")
+        return "⚠️ Недостаточно данных для обучения."
 
-    # Преобразование признаков
     df["signal_encoded"] = df["signal"].apply(encode_signal)
     df["target"] = df["success"].astype(int)
 
@@ -36,9 +36,11 @@ def train_model():
 
     y_pred = model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
-    print(f"✅ Модель обучена. Accuracy: {acc:.2f}")
+    print(f"✅ AI-модель обучена. Accuracy: {acc:.2f}")
 
     # Сохраняем
-    os.makedirs("models", exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
     joblib.dump(model, MODEL_PATH)
-    print("💾 Модель сохранена:", MODEL_PATH)
+    print("💾 AI-модель сохранена в:", MODEL_PATH)
+
+    return f"✅ Модель обучена с точностью {acc:.2f} и сохранена в {MODEL_PATH}"
