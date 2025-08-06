@@ -9,3 +9,5 @@ matplotlib
 numpy
 scikit-learn
 gunicorn
+openpyxl
+xgboost
