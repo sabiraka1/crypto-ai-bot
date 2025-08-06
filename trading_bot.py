@@ -1,7 +1,7 @@
 import os
 import json
 import ccxt
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
@@ -25,7 +25,6 @@ exchange = ccxt.gateio({
 })
 
 
-# === Чтение открытой позиции ===
 def get_open_position():
     if os.path.exists(POSITION_FILE):
         with open(POSITION_FILE, 'r') as f:
@@ -33,13 +32,11 @@ def get_open_position():
     return None
 
 
-# === Сохранение новой позиции ===
 def save_position(data):
     with open(POSITION_FILE, 'w') as f:
         json.dump(data, f)
 
 
-# === Удаление позиции ===
 def clear_position():
     if os.path.exists(POSITION_FILE):
         os.remove(POSITION_FILE)
@@ -47,7 +44,7 @@ def clear_position():
 
 # === Закрытие сделки с переобучением AI ===
 def close_position(position, reason="manual", signal=None, score=None):
-    from train_model import train_model  # ✅ импортируем здесь, чтобы избежать циклических зависимостей
+    from train_model import train_model  # ✅ импорт внутри функции
 
     symbol = position['symbol']
     side = 'sell' if position['type'] == 'buy' else 'buy'
@@ -61,7 +58,6 @@ def close_position(position, reason="manual", signal=None, score=None):
         if position['type'] == 'sell':
             profit = -profit
 
-        # ✅ Лог закрытой сделки
         log_closed_trade(
             entry_price=entry_price,
             close_price=price_now,
@@ -71,7 +67,6 @@ def close_position(position, reason="manual", signal=None, score=None):
             score=score if score is not None else position.get("score", 0.0)
         )
 
-        # ✅ Telegram уведомление
         message = (
             f"❎ Сделка закрыта!\n"
             f"📉 Тип: {side.upper()}\n"
@@ -82,7 +77,6 @@ def close_position(position, reason="manual", signal=None, score=None):
         )
         send_telegram_message(CHAT_ID, message)
 
-        # ✅ AI переобучение
         train_model()
         send_telegram_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
 
@@ -93,7 +87,6 @@ def close_position(position, reason="manual", signal=None, score=None):
         send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
 
 
-# === Проверка условий закрытия ===
 def check_close_conditions(rsi):
     position = get_open_position()
     if not position:
@@ -107,7 +100,6 @@ def check_close_conditions(rsi):
     if position['type'] == 'sell':
         profit = -profit
 
-    # Условия закрытия
     if profit >= PROFIT_TARGET:
         close_position(position, reason="profit")
     elif rsi > 85:
@@ -116,7 +108,6 @@ def check_close_conditions(rsi):
         close_position(position, reason="timeout")
 
 
-# === Открытие новой сделки ===
 def open_position(signal, amount_usdt):
     symbol = "BTC/USDT"
     price = exchange.fetch_ticker(symbol)['last']
@@ -131,7 +122,7 @@ def open_position(signal, amount_usdt):
             "entry_price": price,
             "amount": amount,
             "timestamp": datetime.utcnow().isoformat(),
-            "score": 0.0  # будет обновлён после
+            "score": 0.0
         })
         return order, price
     except Exception as e:
@@ -139,7 +130,6 @@ def open_position(signal, amount_usdt):
         return None, price
 
 
-# === Главная логика ===
 def check_and_trade():
     result = generate_signal()
     signal = result["signal"]
@@ -151,10 +141,8 @@ def check_and_trade():
     score = evaluate_signal(result)
     log_trade(signal, score, price, rsi, macd, success=(score >= 0.7))
 
-    # 🧠 Проверка: надо ли закрыть существующую сделку?
     check_close_conditions(rsi)
 
-    # ✅ Новая сделка
     if signal in ["BUY", "SELL"] and score >= 0.7:
         if get_open_position():
             send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Ожидание закрытия.")
@@ -172,7 +160,6 @@ def check_and_trade():
             )
             send_telegram_message(CHAT_ID, message)
 
-            # 🧠 Обновим score в json
             save_position({
                 "symbol": "BTC/USDT",
                 "type": 'buy' if signal == "BUY" else 'sell',
