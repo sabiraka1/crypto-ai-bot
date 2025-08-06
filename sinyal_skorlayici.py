@@ -1,15 +1,23 @@
 import joblib
 import os
 import numpy as np
+import logging
+
+# === Логирование ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 MODEL_PATH = "models/ai_model.pkl"
 model = None
 
-if os.path.exists(MODEL_PATH):
-    model = joblib.load(MODEL_PATH)
-    print("✅ AI-модель успешно загружена.")
-else:
-    print("⚠️ AI-модель не найдена. Сигналы будут оцениваться вручную.")
+try:
+    if os.path.exists(MODEL_PATH):
+        model = joblib.load(MODEL_PATH)
+        logger.info("✅ AI-модель успешно загружена.")
+    else:
+        logger.warning("⚠️ AI-модель не найдена. Сигналы будут оцениваться вручную.")
+except Exception as e:
+    logger.error(f"❌ Ошибка загрузки модели: {e}")
 
 def encode_signal(signal):
     return {'BUY': 1, 'SELL': -1, 'NONE': 0}.get(signal, 0)
@@ -18,25 +26,29 @@ def evaluate_signal(result):
     signal = result.get("signal")
     rsi = result.get("rsi")
     macd = result.get("macd")
+    patterns = result.get("patterns", [])
+
+    logger.info(f"🧪 Оценка сигнала: {signal}, RSI: {rsi}, MACD: {macd}, Patterns: {patterns}")
 
     if model and signal is not None and rsi is not None and macd is not None:
-        signal_encoded = encode_signal(signal)
-        input_data = np.array([[rsi, macd, signal_encoded]])
-
         try:
+            signal_encoded = encode_signal(signal)
+            input_data = np.array([[rsi, macd, signal_encoded]])
+            logger.info(f"📊 Входные данные модели: {input_data}")
+
             prediction = model.predict_proba(input_data)[0][1]
             score = round(float(prediction), 2)
 
             if score >= 0.8:
-                print(f"🤖 AI: Сильный сигнал {signal} с оценкой {score}")
+                logger.info(f"🤖 AI: Сильный сигнал {signal} с оценкой {score}")
             else:
-                print(f"🤖 AI: Слабый/нейтральный сигнал {signal} с оценкой {score}")
+                logger.info(f"🤖 AI: Слабый/нейтральный сигнал {signal} с оценкой {score}")
 
             return score
         except Exception as e:
-            print(f"❌ Ошибка в AI-модели: {e}")
+            logger.error(f"❌ Ошибка в AI-модели: {e}")
 
-    print("⚠️ Используется fallback логика для оценки сигнала.")
+    logger.warning("⚠️ Используется fallback логика для оценки сигнала.")
     return fallback_score(result)
 
 def fallback_score(result):
@@ -69,7 +81,7 @@ def fallback_score(result):
     score = round(score, 2)
 
     if score >= 0.8:
-        print(f"🔍 Ручной: Сильный сигнал {signal} с оценкой {score}")
+        logger.info(f"🔍 Ручной: Сильный сигнал {signal} с оценкой {score}")
     else:
-        print(f"ℹ️ Ручной: Слабый сигнал {signal} с оценкой {score}")
+        logger.info(f"ℹ️ Ручной: Слабый сигнал {signal} с оценкой {score}")
     return score
