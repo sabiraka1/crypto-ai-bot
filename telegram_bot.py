@@ -1,28 +1,29 @@
-# telegram_bot.py
+# telegram_bot.py (обновлённый для webhook)
 
 import os
+import logging
 import telebot
+from signal_analyzer import analyze_bad_signals
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from data_logger import log_test_trade
-from signal_analyzer import analyze_bad_signals
-from profit_chart import generate_profit_chart
-from position_status import get_position_status
 from train_model import train_model
+from profit_chart import generate_profit_chart
+from position_status import get_open_position_status
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 bot = telebot.TeleBot(BOT_TOKEN)
-
+logger = logging.getLogger(__name__)
 
 def handle_telegram_command(data):
     try:
-        message = data['message']
-        text = message.get("text", "")
-        chat_id = message["chat"]["id"]
+        message = data.get("message", {})
+        text = message.get("text", "").strip()
+        chat_id = message.get("chat", {}).get("id")
 
-        if text.startswith("/start") or text.startswith("/help"):
-            bot.send_message(chat_id,
+        if text == "/start" or text == "/help":
+            bot.send_message(chat_id, (
                 "🤖 Бот активен и работает 24/7!\n\n"
                 "📌 Доступные команды:\n"
                 "/test — ручной тест сигнала\n"
@@ -30,57 +31,49 @@ def handle_telegram_command(data):
                 "/status — текущая позиция\n"
                 "/profit — график прибыли\n"
                 "/errors — ошибки сигналов"
-            )
+            ))
 
-        elif text.startswith("/test"):
+        elif text == "/test":
             result = generate_signal()
-            signal = result["signal"]
-            rsi = result["rsi"]
-            macd = result["macd"]
-            price = result["price"]
             score = evaluate_signal(result)
-
-            log_test_trade(signal, score, price, rsi, macd)
-
+            log_test_trade(
+                signal=result['signal'],
+                score=score,
+                price=result['price'],
+                rsi=result['rsi'],
+                macd=result['macd']
+            )
             msg = (
-                f"🧪 Ручной тест сигнала:\n"
-                f"Сигнал: {signal}\n"
-                f"RSI: {rsi:.2f}\n"
-                f"MACD: {macd:.2f}\n"
-                f"Цена: {price:.2f}\n"
-                f"🤖 Оценка AI: {score:.2f}"
+                f"🧪 Оценка сигнала: {result['signal']}, RSI: {result['rsi']:.2f}, MACD: {result['macd']:.2f}\n"
+                f"🤖 AI Score: {score:.2f}"
             )
             bot.send_message(chat_id, msg)
 
-        elif text.startswith("/train"):
-            message = train_model()
-            bot.send_message(chat_id, message)
+        elif text == "/train":
+            msg = train_model()
+            bot.send_message(chat_id, msg)
 
-        elif text.startswith("/status"):
-            status = get_position_status()
+        elif text == "/status":
+            status = get_open_position_status()
             bot.send_message(chat_id, status)
 
-        elif text.startswith("/profit"):
-            image_path = generate_profit_chart()
-            if image_path:
-                with open(image_path, "rb") as photo:
-                    bot.send_photo(chat_id, photo)
-            else:
-                bot.send_message(chat_id, "⚠️ Недостаточно данных для построения графика.")
+        elif text == "/profit":
+            chart_path = generate_profit_chart()
+            with open(chart_path, 'rb') as img:
+                bot.send_photo(chat_id, img)
 
-        elif text.startswith("/errors"):
-            summary, explanations = analyze_bad_signals()
-            if summary:
-                text_lines = [f"{k}: {v}" for k, v in summary.items()]
-                summary_text = "📊 Ошибки сигналов:\n" + "\n".join(text_lines)
-                bot.send_message(chat_id, summary_text)
-
-                if explanations:
-                    expl = "\n\n".join(explanations)
-                    bot.send_message(chat_id, f"🧠 Последние ошибки:\n{expl}")
+        elif text == "/errors":
+            summary, explanations = analyze_bad_signals(limit=5)
+            if not summary:
+                bot.send_message(chat_id, "✅ Ошибок не обнаружено")
             else:
-                bot.send_message(chat_id, "✅ Ошибок сигналов не найдено или недостаточно данных.")
+                text_summary = "\n".join([f"{k}: {v}" for k, v in summary.items()])
+                bot.send_message(chat_id, f"📉 Анализ ошибок:\n{text_summary}")
+                for explanation in explanations:
+                    bot.send_message(chat_id, explanation)
+
         else:
-            bot.send_message(chat_id, "❓ Неизвестная команда. Напиши /help для списка.")
+            bot.send_message(chat_id, "❌ Неизвестная команда")
+
     except Exception as e:
-        print(f"❌ Ошибка обработки команды: {e}")
+        logger.error(f"Ошибка обработки Telegram-команды: {e}")
