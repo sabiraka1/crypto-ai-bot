@@ -1,7 +1,7 @@
-import pandas as pd
-import numpy as np
 import os
 import joblib
+import pandas as pd
+import numpy as np
 import logging
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -10,63 +10,57 @@ from sklearn.metrics import accuracy_score
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DATA_FILE = "sinyal_fiyat_analizi.csv"
-MODEL_DIR = "models"
-MODEL_PATH = os.path.join(MODEL_DIR, "ai_model.pkl")
-BACKUP_PATH = os.path.join(MODEL_DIR, "ai_model_backup.pkl")
+MODEL_PATH = "models/ai_model.pkl"
+BACKUP_MODEL_PATH = "models/ai_model_old.pkl"
+CSV_PATH = "sinyal_fiyat_analizi.xlsx"
 
 def train_model():
-    if not os.path.exists(DATA_FILE):
-        logger.error("❌ Файл данных не найден!")
+    if not os.path.exists(CSV_PATH):
+        logger.error(f"❌ Файл {CSV_PATH} не найден.")
         return
 
-    df = pd.read_csv(DATA_FILE)
-
-    if df.shape[0] < 50:
-        logger.warning("⚠️ Недостаточно данных для обучения.")
-        return
-
+    # === Чтение данных ===
+    df = pd.read_excel(CSV_PATH)
     df = df.dropna()
-    df = df[df['signal'].isin(["BUY", "SELL"])]
-    df["signal_code"] = df["signal"].map({"BUY": 1, "SELL": -1})
 
-    X = df[["rsi", "macd", "signal_code"]]
-    y = df["success"].astype(int)
+    features = ["rsi", "macd", "score", "stochrsi", "adx"]
+    X = df[features]
+    y = (df["result"] == "correct").astype(int)
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # === Загрузка старой модели (если есть) ===
-    old_accuracy = None
+    # === Обучение новой модели ===
+    new_model = RandomForestClassifier(n_estimators=100, random_state=42)
+    new_model.fit(X_train, y_train)
+    new_acc = accuracy_score(y_test, new_model.predict(X_test))
+
+    logger.info(f"📈 Новая модель обучена. Accuracy: {new_acc:.2f}")
+
+    # === Проверка старой модели (если есть) ===
     if os.path.exists(MODEL_PATH):
         try:
             old_model = joblib.load(MODEL_PATH)
-            y_pred_old = old_model.predict(X_test)
-            old_accuracy = accuracy_score(y_test, y_pred_old)
-            logger.info(f"📊 Точность старой модели: {old_accuracy:.4f}")
+            old_acc = accuracy_score(y_test, old_model.predict(X_test))
+            logger.info(f"📉 Старая модель. Accuracy: {old_acc:.2f}")
+
+            if new_acc >= old_acc:
+                # Backup старой
+                joblib.dump(old_model, BACKUP_MODEL_PATH)
+                joblib.dump(new_model, MODEL_PATH)
+                logger.info("✅ Новая модель заменяет старую. Backup сохранён.")
+            else:
+                logger.warning("⚠️ Новая модель хуже. Откат на старую модель.")
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка при загрузке старой модели: {e}")
-
-    # === Обучение новой модели ===
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    y_pred_new = model.predict(X_test)
-    new_accuracy = accuracy_score(y_test, y_pred_new)
-    logger.info(f"📈 Точность новой модели: {new_accuracy:.4f}")
-
-    # === Сравнение ===
-    if old_accuracy is not None and new_accuracy < old_accuracy:
-        logger.warning("⛔ Новая модель хуже. Откат на старую.")
-        return  # Не сохраняем новую модель
+            logger.error(f"❌ Ошибка загрузки старой модели: {e}")
+            joblib.dump(new_model, MODEL_PATH)
+            logger.info("✅ Сохранена только новая модель.")
     else:
-        if os.path.exists(MODEL_PATH):
-            os.rename(MODEL_PATH, BACKUP_PATH)
-            logger.info("📦 Старая модель перемещена в backup.")
+        # Сохраняем впервые
+        joblib.dump(new_model, MODEL_PATH)
+        logger.info("✅ Модель сохранена впервые.")
 
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        joblib.dump(model, MODEL_PATH)
-        logger.info("✅ Новая AI-модель сохранена.")
-
-        # === Вывод важности признаков ===
-        importances = model.feature_importances_
-        for feature, imp in zip(X.columns, importances):
-            logger.info(f"📌 Важность {feature}: {imp:.4f}")
+    # === Важность признаков ===
+    importances = new_model.feature_importances_
+    logger.info("📊 Важность признаков:")
+    for feat, imp in zip(features, importances):
+        logger.info(f"  - {feat}: {imp:.4f}")
