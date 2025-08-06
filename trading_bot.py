@@ -8,6 +8,7 @@ from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from data_logger import log_trade, log_closed_trade
 from telegram_bot import send_telegram_message
+from train_model import train_model
 
 load_dotenv()
 
@@ -28,7 +29,6 @@ exchange = ccxt.gateio({
     'enableRateLimit': True
 })
 
-
 def get_open_position():
     if os.path.exists(POSITION_FILE):
         with open(POSITION_FILE, 'r') as f:
@@ -38,16 +38,13 @@ def get_open_position():
                 logger.error(f"Ошибка чтения open_position.json: {e}")
     return None
 
-
 def save_position(data):
     with open(POSITION_FILE, 'w') as f:
         json.dump(data, f)
 
-
 def clear_position():
     if os.path.exists(POSITION_FILE):
         os.remove(POSITION_FILE)
-
 
 def update_rsi_memory(rsi):
     memory = []
@@ -64,7 +61,6 @@ def update_rsi_memory(rsi):
     with open(RSI_MEMORY_FILE, 'w') as f:
         json.dump(memory, f)
 
-
 def is_rsi_high_for_6_periods():
     if not os.path.exists(RSI_MEMORY_FILE):
         return False
@@ -77,10 +73,7 @@ def is_rsi_high_for_6_periods():
         logger.error(f"❌ Ошибка при проверке RSI памяти: {e}")
         return False
 
-
 def close_position(position, reason="manual", signal=None, score=None):
-    from train_model import train_model
-
     symbol = position['symbol']
     side = 'sell' if position['type'] == 'buy' else 'buy'
     amount = position['amount']
@@ -93,13 +86,18 @@ def close_position(position, reason="manual", signal=None, score=None):
         if position['type'] == 'sell':
             profit = -profit
 
+        rsi = position.get("rsi")
+        macd = position.get("macd")
+
         log_closed_trade(
             entry_price=entry_price,
             close_price=price_now,
             pnl_percent=profit,
             reason=reason,
             signal=signal or position['type'].upper(),
-            score=score if score is not None else position.get("score", 0.0)
+            score=score if score is not None else position.get("score", 0.0),
+            rsi=rsi,
+            macd=macd
         )
 
         message = (
@@ -120,7 +118,6 @@ def close_position(position, reason="manual", signal=None, score=None):
     except Exception as e:
         logger.error(f"❌ Ошибка при закрытии позиции: {e}")
         send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
-
 
 def check_close_conditions(rsi):
     position = get_open_position()
@@ -146,8 +143,7 @@ def check_close_conditions(rsi):
     elif time_held > MAX_HOLD_MINUTES:
         close_position(position, reason="timeout")
 
-
-def open_position(signal, amount_usdt):
+def open_position(signal, amount_usdt, rsi=None, macd=None, score=None):
     symbol = "BTC/USDT"
     price = exchange.fetch_ticker(symbol)['last']
     amount = round(amount_usdt / price, 6)
@@ -162,7 +158,9 @@ def open_position(signal, amount_usdt):
             "entry_price": price,
             "amount": amount,
             "timestamp": datetime.utcnow().isoformat(),
-            "score": 0.0
+            "score": score or 0.0,
+            "rsi": rsi,
+            "macd": macd
         })
 
         if os.path.exists(RSI_MEMORY_FILE):
@@ -173,7 +171,6 @@ def open_position(signal, amount_usdt):
         logger.error(f"❌ Ошибка при создании ордера: {e}")
         send_telegram_message(CHAT_ID, f"❌ Ошибка при создании ордера: {e}")
         return None, price
-
 
 def check_and_trade():
     logger.info("🔁 check_and_trade() вызвана планировщиком.")
@@ -201,7 +198,7 @@ def check_and_trade():
             send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Ожидание закрытия.")
             return
 
-        order, exec_price = open_position(signal, TRADE_AMOUNT)
+        order, exec_price = open_position(signal, TRADE_AMOUNT, rsi=rsi, macd=macd, score=score)
         if order:
             message = (
                 f"🚀 Открыта сделка!\n"
