@@ -20,12 +20,14 @@ PROFIT_TARGET = 0.02  # 2%
 MAX_HOLD_MINUTES = 120
 
 POSITION_FILE = "open_position.json"
+RSI_MEMORY_FILE = "rsi_memory.json"
 
 exchange = ccxt.gateio({
     'apiKey': os.getenv("GATE_API_KEY"),
     'secret': os.getenv("GATE_API_SECRET"),
     'enableRateLimit': True
 })
+
 
 def get_open_position():
     if os.path.exists(POSITION_FILE):
@@ -36,13 +38,45 @@ def get_open_position():
                 logger.error(f"Ошибка чтения open_position.json: {e}")
     return None
 
+
 def save_position(data):
     with open(POSITION_FILE, 'w') as f:
         json.dump(data, f)
 
+
 def clear_position():
     if os.path.exists(POSITION_FILE):
         os.remove(POSITION_FILE)
+
+
+def update_rsi_memory(rsi):
+    memory = []
+    if os.path.exists(RSI_MEMORY_FILE):
+        try:
+            with open(RSI_MEMORY_FILE, 'r') as f:
+                memory = json.load(f)
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения {RSI_MEMORY_FILE}: {e}")
+
+    memory.append(rsi)
+    memory = memory[-6:]  # Храним последние 6 значений
+
+    with open(RSI_MEMORY_FILE, 'w') as f:
+        json.dump(memory, f)
+
+
+def is_rsi_high_for_6_periods():
+    if not os.path.exists(RSI_MEMORY_FILE):
+        return False
+
+    try:
+        with open(RSI_MEMORY_FILE, 'r') as f:
+            memory = json.load(f)
+        return len(memory) == 6 and all(r > 70 for r in memory)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке RSI памяти: {e}")
+        return False
+
 
 def close_position(position, reason="manual", signal=None, score=None):
     from train_model import train_model
@@ -87,6 +121,7 @@ def close_position(position, reason="manual", signal=None, score=None):
         logger.error(f"❌ Ошибка при закрытии позиции: {e}")
         send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
 
+
 def check_close_conditions(rsi):
     position = get_open_position()
     if not position:
@@ -100,12 +135,17 @@ def check_close_conditions(rsi):
     if position['type'] == 'sell':
         profit = -profit
 
+    update_rsi_memory(rsi)
+
     if profit >= PROFIT_TARGET:
         close_position(position, reason="profit")
     elif rsi > 85:
-        close_position(position, reason="rsi")
+        close_position(position, reason="rsi>85")
+    elif is_rsi_high_for_6_periods():
+        close_position(position, reason="rsi>70_90min")
     elif time_held > MAX_HOLD_MINUTES:
         close_position(position, reason="timeout")
+
 
 def open_position(signal, amount_usdt):
     symbol = "BTC/USDT"
@@ -124,11 +164,16 @@ def open_position(signal, amount_usdt):
             "timestamp": datetime.utcnow().isoformat(),
             "score": 0.0
         })
+
+        if os.path.exists(RSI_MEMORY_FILE):
+            os.remove(RSI_MEMORY_FILE)
+
         return order, price
     except Exception as e:
         logger.error(f"❌ Ошибка при создании ордера: {e}")
         send_telegram_message(CHAT_ID, f"❌ Ошибка при создании ордера: {e}")
         return None, price
+
 
 def check_and_trade():
     logger.info("🔁 check_and_trade() вызвана планировщиком.")
@@ -145,13 +190,13 @@ def check_and_trade():
     send_telegram_message(CHAT_ID, f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
 
     score = evaluate_signal(result)
-    log_trade(signal, score, price, rsi, macd, success=(score >= 0.7))
+    log_trade(signal, score, price, rsi, macd, success=(score >= 0.6))
 
     send_telegram_message(CHAT_ID, f"🧠 Оценка AI: {score:.2f}")
 
     check_close_conditions(rsi)
 
-    if signal in ["BUY", "SELL"]:
+    if signal in ["BUY", "SELL"] and score >= 0.6:
         if get_open_position():
             send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Ожидание закрытия.")
             return
