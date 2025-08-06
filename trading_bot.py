@@ -151,7 +151,7 @@ def check_and_trade():
 
     check_close_conditions(rsi)
 
-    if signal in ["BUY", "SELL"] and score >= 0.0:
+    if signal in ["BUY", "SELL"]:
         if get_open_position():
             send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Ожидание закрытия.")
             return
