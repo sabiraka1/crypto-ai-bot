@@ -5,6 +5,7 @@ from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from trading_bot import check_and_trade
 from telegram_bot import handle_telegram_command
+from log_cleaner import clean_logs  # 🧹
 
 # === Настройка логирования ===
 logging.basicConfig(level=logging.INFO)
@@ -39,11 +40,12 @@ def train_model_route():
         logger.error(f"❌ Ошибка обучения модели: {e}")
         return f"❌ Ошибка при обучении модели: {e}", 500
 
-# === Планировщик трейдинга (каждые 15 минут) ===
+# === Планировщик трейдинга (каждые 15 минут) + очистка (ежедневно) ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_trade, 'interval', minutes=15)
+scheduler.add_job(clean_logs, 'interval', days=1)  # 🧹 Очистка логов
 scheduler.start()
-logger.info("✅ Планировщик запущен (каждые 15 минут)")
+logger.info("✅ Планировщик запущен (трейдинг + очистка)")
 
 # === Автоматическая установка Webhook ===
 def set_webhook():
