@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import ccxt
 from datetime import datetime
 from dotenv import load_dotenv
@@ -9,6 +10,8 @@ from data_logger import log_trade, log_closed_trade
 from telegram_bot import send_telegram_message
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)  # ✅ логгер
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -42,9 +45,8 @@ def clear_position():
         os.remove(POSITION_FILE)
 
 
-# === Закрытие сделки с переобучением AI ===
 def close_position(position, reason="manual", signal=None, score=None):
-    from train_model import train_model  # ✅ импорт внутри функции
+    from train_model import train_model
 
     symbol = position['symbol']
     side = 'sell' if position['type'] == 'buy' else 'buy'
@@ -83,7 +85,7 @@ def close_position(position, reason="manual", signal=None, score=None):
         clear_position()
 
     except Exception as e:
-        print(f"❌ Ошибка при закрытии позиции: {e}")
+        logger.error(f"❌ Ошибка при закрытии позиции: {e}")
         send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
 
 
@@ -126,17 +128,22 @@ def open_position(signal, amount_usdt):
         })
         return order, price
     except Exception as e:
-        print(f"❌ Ошибка при создании ордера: {e}")
+        logger.error(f"❌ Ошибка при создании ордера: {e}")
         return None, price
 
 
 def check_and_trade():
+    logger.info("🔁 check_and_trade() вызвана планировщиком.")
+    send_telegram_message(CHAT_ID, "🔁 check_and_trade() запущена планировщиком.")
+
     result = generate_signal()
     signal = result["signal"]
     rsi = result["rsi"]
     macd = result["macd"]
     price = result["price"]
     patterns = result.get("patterns", [])
+
+    logger.info(f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
 
     score = evaluate_signal(result)
     log_trade(signal, score, price, rsi, macd, success=(score >= 0.7))
@@ -159,15 +166,6 @@ def check_and_trade():
                 f"💵 Объём: {TRADE_AMOUNT} USDT"
             )
             send_telegram_message(CHAT_ID, message)
-
-            save_position({
-                "symbol": "BTC/USDT",
-                "type": 'buy' if signal == "BUY" else 'sell',
-                "entry_price": exec_price,
-                "amount": round(TRADE_AMOUNT / exec_price, 6),
-                "timestamp": datetime.utcnow().isoformat(),
-                "score": score
-            })
         else:
             send_telegram_message(CHAT_ID, "❌ Ошибка при открытии ордера.")
     else:
