@@ -1,125 +1,188 @@
 import os
-import requests
+import json
+import logging
+import ccxt
+from datetime import datetime
 from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
-from grafik_olusturucu import draw_rsi_macd_chart
-from profit_analysis import generate_profit_chart  # 📊 График доходности
-from signal_analyzer import analyze_bad_signals  # ❌ Анализ ошибок
-from data_logger import log_test_trade
+from data_logger import log_trade, log_closed_trade
+from telegram_bot import send_telegram_message
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 10))
+PROFIT_TARGET = 0.02  # 2%
+MAX_HOLD_MINUTES = 120
 
-# === Отправка текстового сообщения ===
-def send_telegram_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+POSITION_FILE = "open_position.json"
+
+exchange = ccxt.gateio({
+    'apiKey': os.getenv("GATE_API_KEY"),
+    'secret': os.getenv("GATE_API_SECRET"),
+    'enableRateLimit': True
+})
+
+def get_open_position():
+    if os.path.exists(POSITION_FILE):
+        with open(POSITION_FILE, 'r') as f:
+            try:
+                return json.load(f)
+            except Exception as e:
+                logger.error(f"Ошибка чтения open_position.json: {e}")
+    return None
+
+def save_position(data):
+    with open(POSITION_FILE, 'w') as f:
+        json.dump(data, f)
+
+def clear_position():
+    if os.path.exists(POSITION_FILE):
+        os.remove(POSITION_FILE)
+
+def close_position(position, reason="manual", signal=None, score=None):
+    from train_model import train_model
+
+    symbol = position['symbol']
+    side = 'sell' if position['type'] == 'buy' else 'buy'
+    amount = position['amount']
+    entry_price = position['entry_price']
+    price_now = exchange.fetch_ticker(symbol)['last']
+
     try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"❌ Ошибка при отправке сообщения: {e}")
+        order = exchange.create_order(symbol, 'market', side, amount)
+        profit = (price_now - entry_price) / entry_price
+        if position['type'] == 'sell':
+            profit = -profit
 
-# === Отправка изображения ===
-def send_telegram_photo(chat_id, image_path, caption=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    try:
-        with open(image_path, 'rb') as photo:
-            files = {'photo': photo}
-            data = {'chat_id': chat_id}
-            if caption:
-                data['caption'] = caption
-            requests.post(url, data=data, files=files)
-    except Exception as e:
-        print(f"❌ Ошибка при отправке фото: {e}")
-
-# === Обработка команд Telegram ===
-def handle_telegram_command(data):
-    print("📨 Получено сообщение:", data)
-
-    message = data.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "").strip().lower()
-
-    if not chat_id or not text:
-        return
-
-    # ✅ Команда старт
-    if text in ["/start", "start", "привет", "работаешь?", "ты тут?"]:
-        send_telegram_message(chat_id, "🤖 Бот активен и работает 24/7! Напиши /test, /profit или /errors.")
-
-    # ✅ Команда тестового сигнала
-    elif text == "/test":
-        result = generate_signal()
-        signal = result.get("signal")
-        rsi = result.get("rsi")
-        macd = result.get("macd")
-        price = result.get("price")
-        patterns = result.get("patterns", [])
-
-        score = evaluate_signal(result)
-
-        # 💾 Логируем как тестовую сделку
-        log_test_trade(signal, score, price, rsi, macd)
-
-        caption = (
-            f"🧪 Тест сигнала\n"
-            f"📊 Сигнал: {signal}\n"
-            f"📉 RSI: {rsi:.2f}, 📈 MACD: {macd:.4f}\n"
-            f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
-            f"🤖 Оценка AI: {score:.2f}\n"
-            f"💰 Цена: {price:.2f}"
+        log_closed_trade(
+            entry_price=entry_price,
+            close_price=price_now,
+            pnl_percent=profit,
+            reason=reason,
+            signal=signal or position['type'].upper(),
+            score=score if score is not None else position.get("score", 0.0)
         )
 
-        if score >= 0.7:
-            action = "📈 AL" if signal == "BUY" else "📉 SAT"
-            caption += f"\n✅ Рекомендация: {action}"
+        message = (
+            f"❎ Сделка закрыта!\n"
+            f"📉 Тип: {side.upper()}\n"
+            f"💵 Вход: {entry_price:.2f}, Выход: {price_now:.2f}\n"
+            f"📊 Доходность: {profit*100:.2f}%\n"
+            f"📌 Причина: {reason.upper()}\n"
+            f"🤖 Переобучение AI модели..."
+        )
+        send_telegram_message(CHAT_ID, message)
 
-            image_path = draw_rsi_macd_chart(result)
-            if image_path:
-                send_telegram_photo(chat_id, image_path, caption)
-                return
+        train_model()
+        send_telegram_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
 
-        send_telegram_message(chat_id, caption)
+        clear_position()
 
-    # ✅ Команда доходности /profit
-    elif text == "/profit":
-        path, total_return = generate_profit_chart()
+    except Exception as e:
+        logger.error(f"❌ Ошибка при закрытии позиции: {e}")
+        send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
 
-        if path:
-            caption = (
-                f"💼 Общая доходность: {total_return*100:.2f}%\n"
-                f"📈 График: кумулятивная прибыль"
-            )
-            send_telegram_photo(chat_id, path, caption)
-        else:
-            send_telegram_message(chat_id, "ℹ️ Недостаточно данных для построения графика прибыли.")
+def check_close_conditions(rsi):
+    position = get_open_position()
+    if not position:
+        return
 
-    # ✅ Команда ошибок /errors
-    elif text == "/errors":
-        summary, explanations = analyze_bad_signals()
+    now = datetime.utcnow()
+    opened_at = datetime.fromisoformat(position['timestamp'])
+    time_held = (now - opened_at).total_seconds() / 60
+    price_now = exchange.fetch_ticker(position['symbol'])['last']
+    profit = (price_now - position['entry_price']) / position['entry_price']
+    if position['type'] == 'sell':
+        profit = -profit
 
-        if not summary:
-            send_telegram_message(chat_id, "ℹ️ Нет данных об ошибочных сигналах.")
+    if profit >= PROFIT_TARGET:
+        close_position(position, reason="profit")
+    elif rsi > 85:
+        close_position(position, reason="rsi")
+    elif time_held > MAX_HOLD_MINUTES:
+        close_position(position, reason="timeout")
+
+def open_position(signal, amount_usdt):
+    print(f"➡️ Попытка открыть позицию: сигнал={signal}, amount_usdt={amount_usdt}")
+    print("➡️ Проверка баланса...")
+    try:
+        balance = exchange.fetch_balance()
+        print("📊 Баланс:", balance['total']['USDT'], "USDT всего, доступно:", balance['free']['USDT'])
+    except Exception as bal_err:
+        print("❌ Ошибка при получении баланса:", bal_err)
+    symbol = "BTC/USDT"
+    price = exchange.fetch_ticker(symbol)['last']
+    amount = round(amount_usdt / price, 6)
+    print(f"➡️ Символ: {symbol}")
+    print(f"➡️ Цена: {price}")
+    print(f"➡️ Объём BTC: {amount}")
+    print(f"➡️ TRADE_AMOUNT USDT: {amount_usdt}")
+    side = 'buy' if signal == "BUY" else 'sell'
+
+    try:
+        send_telegram_message(CHAT_ID, f"📥 Попытка открыть ордер: {side.upper()} на {amount} {symbol}")
+        order = exchange.create_order(symbol, 'market', side, amount)
+        save_position({
+            "symbol": symbol,
+            "type": side,
+            "entry_price": price,
+            "amount": amount,
+            "timestamp": datetime.utcnow().isoformat(),
+            "score": 0.0
+        })
+        return order, price
+    except Exception as e:
+        import traceback
+        logger.error(f"❌ Ошибка при создании ордера: {e}\n{traceback.format_exc()}")
+        send_telegram_message(CHAT_ID, f"❌ Ошибка при создании ордера: {e}")
+        return None, price
+
+def check_and_trade():
+    logger.info("🔁 check_and_trade() вызвана планировщиком.")
+    send_telegram_message(CHAT_ID, "🔁 check_and_trade() запущена планировщиком.")
+
+    result = generate_signal()
+    signal = result["signal"]
+    rsi = result["rsi"]
+    macd = result["macd"]
+    price = result["price"]
+    patterns = result.get("patterns", [])
+
+    logger.info(f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
+    send_telegram_message(CHAT_ID, f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
+
+    score = evaluate_signal(result)
+    log_trade(signal, score, price, rsi, macd, success=(score >= 0.7))
+
+    send_telegram_message(CHAT_ID, f"🧠 Оценка AI: {score:.2f}")
+
+    check_close_conditions(rsi)
+
+    if signal in ["BUY", "SELL"] and score >= 0.0:
+        if get_open_position():
+            send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Ожидание закрытия.")
             return
 
-        message = "📉 Анализ ошибочных сигналов:\n"
-        for key, value in summary.items():
-            message += f"• {key}: {value}\n"
-
-        if explanations:
-            message += "\n❗ Примеры ошибок:\n" + "\n".join(explanations)
-
-        send_telegram_message(chat_id, message)
-
-    # 🧠 Умный ответ на некоторые вопросы
-    elif "прибыль" in text:
-        send_telegram_message(chat_id, "💡 Используй команду /profit для анализа доходности.")
-    elif "ошибк" in text:
-        send_telegram_message(chat_id, "📉 Введи /errors — покажу, какие сигналы были неудачными.")
-    elif "сигнал" in text:
-        send_telegram_message(chat_id, "⚡ Попробуй /test — я сгенерирую новый сигнал с графиком и оценкой.")
+        order, exec_price = open_position(signal, TRADE_AMOUNT)
+        if order:
+            message = (
+                f"🚀 Открыта сделка!\n"
+                f"Сигнал: {signal}\n"
+                f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
+                f"🤖 Оценка AI: {score:.2f}\n"
+                f"💰 Цена: {exec_price:.2f}\n"
+                f"💵 Объём: {TRADE_AMOUNT} USDT"
+            )
+            send_telegram_message(CHAT_ID, message)
+        else:
+            send_telegram_message(CHAT_ID, "❌ Ошибка при открытии ордера.")
     else:
-        send_telegram_message(chat_id, f"🤖 Неизвестная команда: {text}\nДоступно: /start, /test, /profit, /errors")
+        send_telegram_message(
+            CHAT_ID,
+            f"📊 Сигнал: {signal} (оценка {score:.2f}) — сделка не открыта."
+        )
