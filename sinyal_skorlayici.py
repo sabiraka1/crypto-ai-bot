@@ -7,9 +7,11 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# === Путь к модели ===
 MODEL_PATH = "models/ai_model.pkl"
 model = None
 
+# === Загрузка модели ===
 try:
     if os.path.exists(MODEL_PATH):
         model = joblib.load(MODEL_PATH)
@@ -19,9 +21,11 @@ try:
 except Exception as e:
     logger.error(f"❌ Ошибка загрузки модели: {e}")
 
+# === Кодировка сигналов ===
 def encode_signal(signal):
     return {'BUY': 1, 'SELL': -1, 'NONE': 0}.get(signal, 0)
 
+# === Оценка сигнала с AI или fallback ===
 def evaluate_signal(result):
     signal = result.get("signal")
     rsi = result.get("rsi")
@@ -51,6 +55,7 @@ def evaluate_signal(result):
     logger.warning("⚠️ Используется fallback логика для оценки сигнала.")
     return fallback_score(result)
 
+# === Fallback логика на основе правил ===
 def fallback_score(result):
     signal = result.get("signal")
     rsi = result.get("rsi")
@@ -58,6 +63,7 @@ def fallback_score(result):
     patterns = result.get("patterns", [])
     score = 0.0
 
+    # RSI логика
     if signal == "BUY" and rsi < 30:
         score += 0.3
     elif signal == "SELL" and rsi > 70:
@@ -65,11 +71,13 @@ def fallback_score(result):
     elif 45 <= rsi <= 55:
         score += 0.1
 
+    # MACD логика
     if signal == "BUY" and macd > 0:
         score += 0.3
     elif signal == "SELL" and macd < 0:
         score += 0.3
 
+    # Свечные паттерны
     strong_bullish = ["hammer", "engulfing_bullish"]
     strong_bearish = ["shooting_star", "engulfing_bearish"]
 
@@ -84,4 +92,5 @@ def fallback_score(result):
         logger.info(f"🔍 Ручной: Сильный сигнал {signal} с оценкой {score}")
     else:
         logger.info(f"ℹ️ Ручной: Слабый сигнал {signal} с оценкой {score}")
+
     return score
