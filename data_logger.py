@@ -1,6 +1,7 @@
 import csv
 import os
 from datetime import datetime
+from error_logger import log_error_signal  # ⬅️ Добавлено
 
 CSV_FILE = "sinyal_fiyat_analizi.csv"
 CLOSED_FILE = "closed_trades.csv"  # 📁 Файл логов закрытых сделок
@@ -32,7 +33,7 @@ def log_test_trade(signal, score, price, rsi, macd):
     log_trade(signal, score, price, rsi, macd, success=False)
 
 # === ✅ Лог закрытых сделок ===
-def log_closed_trade(entry_price, close_price, pnl_percent, reason, signal, score):
+def log_closed_trade(entry_price, close_price, pnl_percent, reason, signal, score, rsi=None, macd=None):
     file_exists = os.path.isfile(CLOSED_FILE)
 
     with open(CLOSED_FILE, mode='a', newline='', encoding='utf-8') as file:
@@ -52,3 +53,16 @@ def log_closed_trade(entry_price, close_price, pnl_percent, reason, signal, scor
             signal,
             round(score, 2)
         ])
+
+    # === 📉 Если сделка убыточна — лог ошибки
+    if pnl_percent < 0 and rsi is not None and macd is not None:
+        row = {
+            "signal": signal,
+            "score": score,
+            "rsi": rsi,
+            "macd": macd,
+            "price": close_price,
+            "pnl_percent": pnl_percent,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        log_error_signal(row)
