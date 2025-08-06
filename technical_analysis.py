@@ -1,10 +1,9 @@
 import ccxt
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator
-from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.trend import MACD, EMAIndicator, ADXIndicator
 from ta.volatility import BollingerBands
-from ta.volume import OnBalanceVolumeIndicator
 from ta.utils import dropna
 from datetime import datetime
 import warnings
@@ -49,12 +48,21 @@ def generate_signal():
 
     rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
     macd = MACD(df["close"]).macd_diff().iloc[-1]
-    pattern = detect_candle_pattern(df)
-    price = df["close"].iloc[-1]
+    ema_fast = EMAIndicator(df["close"], window=9).ema_indicator().iloc[-1]
+    ema_slow = EMAIndicator(df["close"], window=21).ema_indicator().iloc[-1]
+    bollinger = BollingerBands(df["close"])
+    bb_upper = bollinger.bollinger_hband().iloc[-1]
+    bb_lower = bollinger.bollinger_lband().iloc[-1]
+    adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
+    stoch_rsi = StochasticOscillator(df["close"]).stoch().iloc[-1]
 
-    if rsi < 30 and macd > 0:
+    price = df["close"].iloc[-1]
+    pattern = detect_candle_pattern(df)
+
+    # Условия для сигналов
+    if rsi < 30 and macd > 0 and ema_fast > ema_slow and price < bb_lower and adx > 20:
         signal = "BUY"
-    elif rsi > 70 and macd < 0:
+    elif rsi > 70 and macd < 0 and ema_fast < ema_slow and price > bb_upper and adx > 20:
         signal = "SELL"
     else:
         signal = "HOLD"
@@ -64,5 +72,11 @@ def generate_signal():
         "rsi": round(rsi, 2),
         "macd": round(macd, 2),
         "pattern": pattern,
-        "price": price
+        "price": price,
+        "ema_fast": round(ema_fast, 2),
+        "ema_slow": round(ema_slow, 2),
+        "bb_upper": round(bb_upper, 2),
+        "bb_lower": round(bb_lower, 2),
+        "adx": round(adx, 2),
+        "stoch_rsi": round(stoch_rsi, 2)
     }
