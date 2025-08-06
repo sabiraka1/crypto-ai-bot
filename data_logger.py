@@ -3,15 +3,19 @@ import os
 from datetime import datetime
 
 CSV_FILE = "sinyal_fiyat_analizi.csv"
-CLOSED_FILE = "closed_trades.csv"  # 📁 Новый файл для закрытых сделок
+CLOSED_FILE = "closed_trades.csv"  # 📁 Файл логов закрытых сделок
 
+# === 📌 Лог сигналов (BUY/SELL/None) ===
 def log_trade(signal, score, price, rsi, macd, success):
     file_exists = os.path.isfile(CSV_FILE)
 
     with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         if not file_exists:
-            writer.writerow(['datetime', 'signal', 'rsi', 'macd', 'price', 'score', 'success'])
+            writer.writerow([
+                'datetime', 'signal', 'rsi', 'macd',
+                'price', 'score', 'success'
+            ])
 
         writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -23,10 +27,11 @@ def log_trade(signal, score, price, rsi, macd, success):
             int(success)
         ])
 
+# === 🧪 Лог тестовых сигналов (по команде /test) ===
 def log_test_trade(signal, score, price, rsi, macd):
-    # Для тестового сигнала success всегда False
     log_trade(signal, score, price, rsi, macd, success=False)
 
+# === ✅ Лог закрытых сделок ===
 def log_closed_trade(entry_price, close_price, pnl_percent, reason, signal, score):
     file_exists = os.path.isfile(CLOSED_FILE)
 
