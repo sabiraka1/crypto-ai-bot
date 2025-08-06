@@ -1,88 +1,85 @@
-import os
 import telebot
-import pandas as pd
-import json
+from profit_chart import generate_profit_chart
 from signal_analyzer import analyze_bad_signals
+from position_tracker import get_position_status
 from train_model import train_model
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+from grafik_olusturucu import draw_chart
+from technical_analysis import generate_signal
+from sinyal_skorlayici import evaluate_signal
+from data_logger import log_test_trade
+from config import BOT_TOKEN, CHAT_ID
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-@bot.message_handler(commands=["start"])
-def handle_start(message):
-    bot.send_message(message.chat.id, "👋 Привет! Я трейдинг-бот. Готов к работе.")
+# === 🟢 /start и /help
+@bot.message_handler(commands=["start", "help"])
+def handle_start_help(message):
+    bot.send_message(
+        CHAT_ID,
+        "🤖 Бот активен и работает 24/7!\n\n"
+        "📌 Доступные команды:\n"
+        "/test — ручной тест сигнала\n"
+        "/train — переобучение модели\n"
+        "/status — текущая позиция\n"
+        "/profit — график прибыли\n"
+        "/errors — ошибки сигналов"
+    )
 
-@bot.message_handler(commands=["profit"])
-def handle_profit(message):
-    try:
-        df = pd.read_csv("closed_trades.csv")
-        if df.empty:
-            bot.send_message(message.chat.id, "📭 Пока нет завершённых сделок.")
-            return
+# === 🧪 /test — ручная проверка сигнала
+@bot.message_handler(commands=["test"])
+def handle_test(message):
+    result = generate_signal()
+    score = evaluate_signal(result)
+    draw_chart(result)
+    log_test_trade(result["signal"], score, result["price"], result["rsi"], result["macd"])
 
-        total = df["pnl_percent"].sum()
-        count = len(df)
-        win_count = len(df[df["pnl_percent"] > 0])
-        win_rate = round((win_count / count) * 100, 2)
+    bot.send_message(CHAT_ID, f"🧪 Сигнал: {result['signal']}\n"
+                              f"📈 RSI: {result['rsi']:.2f}, MACD: {result['macd']:.2f}\n"
+                              f"🤖 AI Оценка: {score:.2f}")
+    with open("charts/latest.png", "rb") as photo:
+        bot.send_photo(CHAT_ID, photo)
 
-        response = (
-            f"📈 Прибыль по {count} сделкам:\n\n"
-            f"💰 Общая доходность: {total:.2f}%\n"
-            f"✅ Побед: {win_count} ({win_rate}%)"
-        )
-        bot.send_message(message.chat.id, response)
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка при расчёте прибыли: {e}")
-
+# === 🔁 /train — ручное переобучение модели
 @bot.message_handler(commands=["train"])
 def handle_train(message):
-    try:
-        train_model()
-        bot.send_message(message.chat.id, "✅ AI-модель успешно переобучена!")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка при переобучении: {e}")
+    train_model()
+    bot.send_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
 
+# === 📈 /profit — график прибыли
+@bot.message_handler(commands=["profit"])
+def handle_profit(message):
+    path = generate_profit_chart()
+    if path:
+        with open(path, "rb") as photo:
+            bot.send_photo(CHAT_ID, photo)
+    else:
+        bot.send_message(CHAT_ID, "⚠️ Недостаточно данных для построения графика.")
+
+# === ℹ️ /status — статус открытой позиции
 @bot.message_handler(commands=["status"])
 def handle_status(message):
-    try:
-        with open("open_position.json", "r") as f:
-            pos = json.load(f)
+    msg = get_position_status()
+    bot.send_message(CHAT_ID, msg)
 
-        entry = pos["entry_price"]
-        time = pos["timestamp"]
-        typ = pos["type"]
-        score = pos.get("score", "—")
-
-        response = (
-            f"📌 Открытая позиция:\n\n"
-            f"Тип: {typ.upper()}\n"
-            f"Цена входа: {entry:.2f}\n"
-            f"Открыта: {time}\n"
-            f"AI Score: {score}"
-        )
-        bot.send_message(message.chat.id, response)
-    except:
-        bot.send_message(message.chat.id, "ℹ️ Позиция не открыта.")
-
+# === 📉 /errors — анализ ошибок
 @bot.message_handler(commands=["errors"])
 def handle_errors(message):
     summary, explanations = analyze_bad_signals(limit=5)
     
     if summary is None:
-        bot.send_message(message.chat.id, "⚠️ Недостаточно данных для анализа.")
+        bot.send_message(CHAT_ID, "⚠️ Недостаточно данных для анализа.")
         return
 
     stats = "\n".join([f"{k}: {v}" for k, v in summary.items()])
-    bot.send_message(message.chat.id, f"📉 Ошибки сигналов:\n\n{stats}")
+    bot.send_message(CHAT_ID, f"📉 Ошибки сигналов:\n\n{stats}")
 
     if explanations:
         text = "\n\n".join(explanations)
-        bot.send_message(message.chat.id, f"🧠 Причины последних ошибок:\n\n{text}")
+        bot.send_message(CHAT_ID, f"🧠 Причины последних ошибок:\n\n{text}")
     else:
-        bot.send_message(message.chat.id, "✅ Нет доступных объяснений.")
+        bot.send_message(CHAT_ID, "✅ Нет доступных объяснений.")
 
-# Запуск бота
-print("🤖 Telegram-бот запущен.")
-bot.polling(none_stop=True)
+# === Запуск
+def start_telegram_bot():
+    print("🚀 Telegram бот запущен...")
+    bot.polling(none_stop=True)
