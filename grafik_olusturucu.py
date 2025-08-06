@@ -2,7 +2,7 @@ import os
 import matplotlib
 matplotlib.use('Agg')  # важно для Replit/Render
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timedelta
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
 import pandas as pd
@@ -10,13 +10,32 @@ import ccxt
 
 exchange = ccxt.gateio()
 
+CHART_DIR = "charts"
+
 def fetch_ohlcv():
     bars = exchange.fetch_ohlcv('BTC/USDT', timeframe='15m', limit=50)
     df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
+def cleanup_old_charts():
+    if not os.path.exists(CHART_DIR):
+        return
+
+    now = datetime.now()
+    for filename in os.listdir(CHART_DIR):
+        file_path = os.path.join(CHART_DIR, filename)
+        if filename.endswith(".png"):
+            file_mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+            if now - file_mtime > timedelta(days=1):
+                try:
+                    os.remove(file_path)
+                    print(f"🧹 Удалён старый график: {filename}")
+                except Exception as e:
+                    print(f"❌ Ошибка при удалении {filename}: {e}")
+
 def draw_rsi_macd_chart(result):
+    cleanup_old_charts()
     df = fetch_ohlcv()
 
     rsi_indicator = RSIIndicator(close=df['close'], window=14)
@@ -65,9 +84,8 @@ def draw_rsi_macd_chart(result):
         ax1.text(last_row['timestamp'], last_row['close'] - 100,
                  f"Patterns: {', '.join(patterns)}", fontsize=10, color='orange')
 
-    # 💾 Сохраняем
-    os.makedirs("charts", exist_ok=True)
-    filename = f"charts/signal_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    os.makedirs(CHART_DIR, exist_ok=True)
+    filename = f"{CHART_DIR}/signal_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     plt.tight_layout()
     plt.savefig(filename)
     plt.close()
