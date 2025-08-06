@@ -1,9 +1,10 @@
-import requests
 import os
+import requests
 from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from grafik_olusturucu import draw_rsi_macd_chart
+from profit_chart import generate_profit_chart  # 📊 График доходности
 from data_logger import log_test_trade
 
 load_dotenv()
@@ -11,6 +12,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# === Отправка текстового сообщения ===
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
@@ -19,6 +21,7 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"❌ Ошибка при отправке сообщения: {e}")
 
+# === Отправка изображения ===
 def send_telegram_photo(chat_id, image_path, caption=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     try:
@@ -31,6 +34,7 @@ def send_telegram_photo(chat_id, image_path, caption=None):
     except Exception as e:
         print(f"❌ Ошибка при отправке фото: {e}")
 
+# === Обработка команд Telegram ===
 def handle_telegram_command(data):
     print("📨 Получено сообщение:", data)
 
@@ -41,9 +45,11 @@ def handle_telegram_command(data):
     if not chat_id or not text:
         return
 
+    # ✅ Команда старт
     if text.lower() in ["/start", "start"]:
         send_telegram_message(chat_id, "🤖 Бот активен и работает 24/7!")
 
+    # ✅ Команда тестового сигнала
     elif text.lower() == "/test":
         result = generate_signal()
         signal = result.get("signal")
@@ -54,7 +60,7 @@ def handle_telegram_command(data):
 
         score = evaluate_signal(result)
 
-        # 💾 Записываем тестовый сигнал
+        # 💾 Логируем как тестовую сделку
         log_test_trade(signal, score, price, rsi, macd)
 
         caption = (
@@ -77,5 +83,14 @@ def handle_telegram_command(data):
 
         send_telegram_message(chat_id, caption)
 
+    # ✅ Команда доходности /profit
+    elif text.lower() == "/profit":
+        image_path = generate_profit_chart()
+        if image_path:
+            send_telegram_photo(chat_id, image_path, "📈 Кумулятивная доходность")
+        else:
+            send_telegram_message(chat_id, "❌ График доходности не удалось сгенерировать.")
+
+    # ❓ Любая другая команда
     else:
         send_telegram_message(chat_id, f"📨 Вы написали: {text}")
