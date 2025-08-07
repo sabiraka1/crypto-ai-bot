@@ -398,5 +398,3 @@ def alive():
     except Exception as e:
         logger.error(f"❌ Ошибка проверки alive: {e}")
         return {"status": "error", "message": str(e)}, 500
-
-@app
