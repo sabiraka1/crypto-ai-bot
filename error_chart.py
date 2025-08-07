@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import Counter
 import os
-import seaborn as sns
 
 ERROR_FILE = "error_signals.csv"
 CHART_DIR = "charts"
