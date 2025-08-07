@@ -101,6 +101,15 @@ def load_data():
             feature_cols.append("market_state_encoded")
             logger.info("✅ Добавлено кодирование market_state")
         
+        
+        # ✅ Кодирование ema_signal (если есть)
+        if "ema_signal" in df.columns:
+            df["ema_signal_encoded"] = df["ema_signal"].map({
+                "bullish": 1, "bearish": -1
+            }).fillna(0)
+            feature_cols.append("ema_signal_encoded")
+            logger.info("✅ Добавлено кодирование ema_signal")
+
         X = df[feature_cols]
         y = df["result_encoded"]
         
@@ -247,6 +256,15 @@ def create_basic_model():
         
         feature_cols = ["rsi", "macd", "signal_encoded", "pattern_score", "confidence", 
                        "total_score", "macd_contribution", "ai_score"]
+        
+        # ✅ Кодирование ema_signal (если есть)
+        if "ema_signal" in df.columns:
+            df["ema_signal_encoded"] = df["ema_signal"].map({
+                "bullish": 1, "bearish": -1
+            }).fillna(0)
+            feature_cols.append("ema_signal_encoded")
+            logger.info("✅ Добавлено кодирование ema_signal")
+
         X = df[feature_cols]
         y = df["success"]
         
