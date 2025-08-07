@@ -98,5 +98,11 @@ def train_model():
     plt.savefig("charts/feature_importance.png")
     logger.info("📉 График важности признаков сохранён в charts/feature_importance.png")
 
+# ✅ Эта функция используется в telegram_bot.py
+def retrain_model():
+    logger.info("🔁 Старт переобучения модели...")
+    train_model()
+    logger.info("✅ Переобучение завершено!")
+
 if __name__ == "__main__":
     train_model()
