@@ -10,16 +10,16 @@ import matplotlib.pyplot as plt
 
 MODEL_PATH = "models/ai_model.pkl"
 OLD_MODEL_PATH = "models/ai_model_backup.pkl"
-CSV_FILE = "sinyal_fiyat_analizi.xlsx"
+CSV_FILE = "sinyal_fiyat_analizi.csv"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def load_data():
-    df = pd.read_excel(CSV_FILE)
-    df = df.dropna(subset=["signal", "rsi", "macd", "result"])
+    df = pd.read_csv(CSV_FILE)
+    df = df.dropna(subset=["signal", "rsi", "macd", "success"])
     df["signal_encoded"] = df["signal"].map({"BUY": 1, "SELL": -1, "NONE": 0}).fillna(0)
-    df["result_encoded"] = df["result"].map({"UP": 1, "DOWN": 0}).fillna(0)
+    df["result_encoded"] = df["success"].astype(int)
     df["ema_signal_encoded"] = df["ema_signal"].map({"bullish": 1, "bearish": -1}).fillna(0)
     df["bollinger_encoded"] = df["bollinger"].map({"low": 1, "high": -1}).fillna(0)
 
@@ -80,12 +80,12 @@ def train_model():
     plt.tight_layout()
     os.makedirs("charts", exist_ok=True)
     plt.savefig("charts/feature_importance.png")
-    logger.info("📉 График важности признаков сохранён в charts/feature_importance.png")
+    logger.info("📉 График сохранён в charts/feature_importance.png")
 
 def retrain_model():
-    logger.info("🔁 Старт переобучения модели...")
+    logger.info("🔁 Переобучение AI-модели...")
     train_model()
-    logger.info("✅ Переобучение завершено!")
+    logger.info("✅ Завершено!")
 
 if __name__ == "__main__":
     train_model()
