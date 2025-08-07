@@ -20,7 +20,7 @@ def analyze_bad_signals(limit=5):
         print("⚠️ Недостаточно данных для анализа.")
         return None, None
 
-    # Проверка наличия нужных колонок
+    # Проверка нужных колонок
     required_cols = {"success", "rsi", "macd", "adx", "stochrsi", "signal"}
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
@@ -31,7 +31,6 @@ def analyze_bad_signals(limit=5):
     if bad_signals.empty:
         return None, None
 
-    # === Общая сводка ===
     summary = {
         "❌ Всего неудачных сигналов": len(bad_signals),
         "📉 Средний RSI": round(bad_signals["rsi"].mean(), 2),
@@ -42,14 +41,11 @@ def analyze_bad_signals(limit=5):
         "⚖️ SELL ошибок": len(bad_signals[bad_signals["signal"] == "SELL"])
     }
 
-    # === Интерпретации последних N неудачных ===
     explanations = []
     for _, row in bad_signals.tail(limit).iterrows():
-        reason = explain_signal(row)
-        explanations.append(reason)
+        explanations.append(explain_signal(row))
 
     return summary, explanations
-
 
 def explain_signal(row):
     signal = row.get("signal", "")
@@ -61,46 +57,29 @@ def explain_signal(row):
     stoch = row.get("stochrsi", 0)
     ema = row.get("ema_signal", "")
     boll = row.get("bollinger", "")
-    pattern = row.get("pattern", "")
 
     comments = []
 
     if signal == "BUY":
-        if rsi > 65:
-            comments.append("RSI был высоким")
-        if macd < 0:
-            comments.append("MACD был отрицательным")
-        if ema != "bullish":
-            comments.append("EMA crossover не подтверждён")
-        if boll != "low":
-            comments.append("Цена не у нижней границы Bollinger")
-        if adx < 20:
-            comments.append("ADX показал слабый тренд")
-        if stoch > 80:
-            comments.append("StochRSI был перекуплен")
-        if score < 0.6:
-            comments.append("AI дал слабую оценку")
-        if not comments:
-            comments.append("рынок пошёл против сигнала")
+        if rsi > 65: comments.append("RSI был высоким")
+        if macd < 0: comments.append("MACD был отрицательным")
+        if ema != "bullish": comments.append("EMA crossover не подтверждён")
+        if boll != "low": comments.append("Цена не у нижней границы Bollinger")
+        if adx < 20: comments.append("ADX показал слабый тренд")
+        if stoch > 80: comments.append("StochRSI был перекуплен")
+        if score < 0.6: comments.append("AI дал слабую оценку")
+        if not comments: comments.append("рынок пошёл против сигнала")
         return f"❌ BUY @ {price:.2f} — {'; '.join(comments)}"
 
     elif signal == "SELL":
-        if rsi < 35:
-            comments.append("RSI был слишком низким")
-        if macd > 0:
-            comments.append("MACD был положительным")
-        if ema != "bearish":
-            comments.append("EMA crossover не подтверждён")
-        if boll != "high":
-            comments.append("Цена не у верхней границы Bollinger")
-        if adx < 20:
-            comments.append("ADX показал слабый тренд")
-        if stoch < 20:
-            comments.append("StochRSI был перепродан")
-        if score < 0.6:
-            comments.append("AI дал слабую оценку")
-        if not comments:
-            comments.append("рынок пошёл против сигнала")
+        if rsi < 35: comments.append("RSI был слишком низким")
+        if macd > 0: comments.append("MACD был положительным")
+        if ema != "bearish": comments.append("EMA crossover не подтверждён")
+        if boll != "high": comments.append("Цена не у верхней границы Bollinger")
+        if adx < 20: comments.append("ADX показал слабый тренд")
+        if stoch < 20: comments.append("StochRSI был перепродан")
+        if score < 0.6: comments.append("AI дал слабую оценку")
+        if not comments: comments.append("рынок пошёл против сигнала")
         return f"❌ SELL @ {price:.2f} — {'; '.join(comments)}"
 
     return f"❌ Неудачный сигнал @ {price:.2f}"
