@@ -1,97 +1,81 @@
 import ccxt
 import pandas as pd
+import numpy as np
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.trend import MACD, EMAIndicator, ADXIndicator
 from ta.volatility import BollingerBands
-from ta.utils import dropna
+from ta.volume import OnBalanceVolumeIndicator
+from candlestick import identify_candlestick_pattern
+from utils import detect_support_resistance
+import logging
 
-exchange = ccxt.gateio()
-symbol = "BTC/USDT"
-timeframe = "15m"
-limit = 100
+logger = logging.getLogger(__name__)
 
-rsi_history = []
-
-def fetch_ohlcv():
-    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df
-
-def detect_candle_pattern(df):
-    last = df.iloc[-1]
-    body = abs(last["close"] - last["open"])
-    range_ = last["high"] - last["low"]
-    upper_shadow = last["high"] - max(last["close"], last["open"])
-    lower_shadow = min(last["close"], last["open"]) - last["low"]
-
-    if body < range_ * 0.2 and upper_shadow > body and lower_shadow > body:
-        return "doji"
-    if lower_shadow > body * 2 and last["close"] > last["open"]:
-        return "hammer"
-    if upper_shadow > body * 2 and last["close"] < last["open"]:
-        return "shooting_star"
-    if last["close"] > last["open"] and df.iloc[-2]["close"] < df.iloc[-2]["open"] and last["open"] < df.iloc[-2]["close"] and last["close"] > df.iloc[-2]["open"]:
-        return "engulfing_bullish"
-    if last["close"] < last["open"] and df.iloc[-2]["close"] > df.iloc[-2]["open"] and last["open"] > df.iloc[-2]["close"] and last["close"] < df.iloc[-2]["open"]:
-        return "engulfing_bearish"
-    if upper_shadow < body * 0.2 and lower_shadow > body * 2:
-        return "hanging_man"
-    return None
 
 def generate_signal():
-    df = fetch_ohlcv()
-    df = dropna(df)
+    exchange = ccxt.gateio()
+    ohlcv = exchange.fetch_ohlcv("BTC/USDT", timeframe="15m", limit=100)
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-    rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
-    macd = MACD(df["close"]).macd_diff().iloc[-1]
-    ema_fast = EMAIndicator(df["close"], window=9).ema_indicator().iloc[-1]
-    ema_slow = EMAIndicator(df["close"], window=21).ema_indicator().iloc[-1]
-    bollinger = BollingerBands(df["close"])
-    bb_upper = bollinger.bollinger_hband().iloc[-1]
-    bb_lower = bollinger.bollinger_lband().iloc[-1]
-    adx = ADXIndicator(df["high"], df["low"], df["close"]).adx().iloc[-1]
-    stoch_rsi = StochasticOscillator(df["close"]).stoch().iloc[-1]
-    price = df["close"].iloc[-1]
-    pattern = detect_candle_pattern(df)
+    # Индикаторы
+    df["rsi"] = RSIIndicator(close=df["close"]).rsi()
+    macd = MACD(close=df["close"])
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["ema_9"] = EMAIndicator(close=df["close"], window=9).ema_indicator()
+    df["ema_21"] = EMAIndicator(close=df["close"], window=21).ema_indicator()
+    bollinger = BollingerBands(close=df["close"], window=20, window_dev=2)
+    df["bb_upper"] = bollinger.bollinger_hband()
+    df["bb_lower"] = bollinger.bollinger_lband()
+    df["adx"] = ADXIndicator(high=df["high"], low=df["low"], close=df["close"]).adx()
+    df["obv"] = OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"]).on_balance_volume()
+    df["stoch_rsi"] = StochasticOscillator(high=df["high"], low=df["low"], close=df["close"]).stoch()
 
-    if ema_fast > ema_slow:
-        ema_signal = "bullish"
-    elif ema_fast < ema_slow:
-        ema_signal = "bearish"
-    else:
-        ema_signal = "neutral"
+    # Последние значения
+    current_rsi = df["rsi"].iloc[-1]
+    current_macd = df["macd"].iloc[-1]
+    current_macd_signal = df["macd_signal"].iloc[-1]
+    current_price = df["close"].iloc[-1]
+    ema9 = df["ema_9"].iloc[-1]
+    ema21 = df["ema_21"].iloc[-1]
+    bb_upper = df["bb_upper"].iloc[-1]
+    bb_lower = df["bb_lower"].iloc[-1]
+    stoch_rsi = df["stoch_rsi"].iloc[-1]
 
-    if price < bb_lower:
-        bollinger_position = "low"
-    elif price > bb_upper:
-        bollinger_position = "high"
-    else:
-        bollinger_position = "middle"
+    # Candle Pattern (например, doji, hammer и т.д.)
+    pattern = identify_candlestick_pattern(df)
 
-    rsi_history.append(rsi)
-    if len(rsi_history) > 6:
-        rsi_history.pop(0)
-    rsi_overbought = all(r > 70 for r in rsi_history)
+    # Уровни поддержки/сопротивления
+    support, resistance = detect_support_resistance(df)
 
-    if rsi_overbought:
-        signal = "SELL"
-    elif rsi < 30 and macd > 0 and ema_fast > ema_slow and price < bb_lower and adx > 20:
+    # Сигнальная логика
+    signal = "HOLD"
+    if (
+        current_rsi < 30
+        and current_macd > current_macd_signal
+        and ema9 > ema21
+        and current_price < bb_lower
+        and stoch_rsi < 20
+    ):
         signal = "BUY"
-    elif rsi > 70 and macd < 0 and ema_fast < ema_slow and price > bb_upper and adx > 20:
+    elif (
+        current_rsi > 70
+        and current_macd < current_macd_signal
+        and ema9 < ema21
+        and current_price > bb_upper
+        and stoch_rsi > 80
+    ):
         signal = "SELL"
-    else:
-        signal = "HOLD"
+
+    logger.info(f"📈 RSI: {current_rsi:.2f}, MACD: {current_macd:.2f}, EMA9: {ema9:.2f}, EMA21: {ema21:.2f}")
+    logger.info(f"📊 Bollinger: [{bb_lower:.2f}, {bb_upper:.2f}], Stoch RSI: {stoch_rsi:.2f}")
+    logger.info(f"🕯️ Pattern: {pattern}, Support: {support}, Resistance: {resistance}")
+    logger.info(f"📢 Сигнал: {signal}")
 
     return {
         "signal": signal,
-        "rsi": round(rsi, 2),
-        "macd": round(macd, 2),
+        "rsi": current_rsi,
+        "macd": current_macd,
         "pattern": pattern,
-        "price": round(price, 2),
-        "ema_signal": ema_signal,
-        "bollinger": bollinger_position,
-        "adx": round(adx, 2),
-        "stochrsi": round(stoch_rsi, 2),
-        "patterns": [pattern] if pattern else []
+        "price": current_price
     }
