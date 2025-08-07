@@ -1,3 +1,5 @@
+# grafik_olusturucu.py
+
 import os
 import matplotlib
 matplotlib.use('Agg')  # важно для Replit/Render
@@ -34,10 +36,11 @@ def cleanup_old_charts():
                 except Exception as e:
                     print(f"❌ Ошибка при удалении {filename}: {e}")
 
-def draw_rsi_macd_chart(result):
+def draw_chart(result):
     cleanup_old_charts()
     df = fetch_ohlcv()
 
+    # Расчёт индикаторов
     rsi_indicator = RSIIndicator(close=df['close'], window=14)
     df['rsi'] = rsi_indicator.rsi()
 
@@ -49,7 +52,7 @@ def draw_rsi_macd_chart(result):
     signal = result.get('signal', 'NONE')
     rsi = result.get('rsi', 0)
     macd_val = result.get('macd', 0)
-    patterns = result.get('patterns', [])  # ← список, не строка
+    patterns = result.get('patterns', [])
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
@@ -79,7 +82,7 @@ def draw_rsi_macd_chart(result):
                  arrowprops=dict(facecolor=color, shrink=0.05),
                  fontsize=10, color=color)
 
-    # 📍 Паттерны (если есть)
+    # 📍 Паттерны
     if patterns:
         ax1.text(last_row['timestamp'], last_row['close'] - 100,
                  f"Patterns: {', '.join(patterns)}", fontsize=10, color='orange')
