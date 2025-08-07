@@ -133,17 +133,17 @@ def open_position(signal, usdt, rsi=None, macd=None, score=None):
         return False, price
 
 def check_and_trade():
-    send_telegram_message(CHAT_ID, \"\\U0001f501 check_and_trade() запущен\")
+    send_telegram_message(CHAT_ID, "🔁 check_and_trade() запущен")
     result = generate_signal()
-    signal = result[\"signal\"]
+    signal = result["signal"]
     score = evaluate_signal(result)
-    log_trade(signal, score, result[\"price\"], result[\"rsi\"], result[\"macd\"], success=(score >= 0.6))
-    check_close_conditions(result[\"rsi\"])
+    log_trade(signal, score, result["price"], result["rsi"], result["macd"], success=(score >= 0.6))
+    check_close_conditions(result["rsi"])
 
-    if signal in [\"BUY\", \"SELL\"] and score >= 0.6:
+    if signal in ["BUY", "SELL"] and score >= 0.6:
         if get_open_position():
-            send_telegram_message(CHAT_ID, \"⚠️ Сделка уже открыта. Жду закрытия.\")
+            send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Жду закрытия.")
         else:
-            ok, price = open_position(signal, TRADE_AMOUNT, result[\"rsi\"], result[\"macd\"], score)
+            ok, price = open_position(signal, TRADE_AMOUNT, result["rsi"], result["macd"], score)
             if ok:
-                send_telegram_message(CHAT_ID, f\"🚀 Сделка открыта: {signal} @ {price:.2f}\")
+                send_telegram_message(CHAT_ID, f"🚀 Сделка открыта: {signal} @ {price:.2f}")
