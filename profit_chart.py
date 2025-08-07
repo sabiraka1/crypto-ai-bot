@@ -2,36 +2,33 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 
+CLOSED_FILE = "closed_trades.csv"
+CHART_PATH = "charts/profit_chart.png"
+
 def generate_profit_chart():
-    file = "closed_trades.csv"
-    if not os.path.exists(file):
-        print("❌ Нет данных о закрытых сделках.")
-        return None
+    if not os.path.exists(CLOSED_FILE):
+        return None, 0.0
 
-    df = pd.read_csv(file)
-    if df.empty:
-        print("❌ Файл пуст.")
-        return None
+    df = pd.read_csv(CLOSED_FILE)
+    if len(df) < 2:
+        return None, 0.0
 
-    # Убедимся, что нужные колонки есть
-    if 'pnl_percent' not in df.columns:
-        print("❌ Нет столбца 'pnl_percent'.")
-        return None
+    df["pnl_percent"] = df["pnl_percent"] / 100
+    df["cumulative_return"] = (1 + df["pnl_percent"]).cumprod()
+    df["close_datetime"] = pd.to_datetime(df["close_datetime"])
 
-    # Кумулятивная доходность
-    df['cumulative'] = df['pnl_percent'].cumsum()
-    df['close_datetime'] = pd.to_datetime(df['close_datetime'])
-
-    # Построение графика
     plt.figure(figsize=(10, 5))
-    plt.plot(df['close_datetime'], df['cumulative'], marker='o', linestyle='-', linewidth=2)
-    plt.xlabel("Время закрытия")
-    plt.ylabel("Кумулятивная доходность (%)")
-    plt.title("📈 Доходность стратегии")
+    plt.plot(df["close_datetime"], df["cumulative_return"], marker='o')
+    plt.xticks(rotation=45)
     plt.grid(True)
+    plt.title("📈 Кумулятивная доходность")
+    plt.xlabel("Дата")
+    plt.ylabel("Доход (x)")
     plt.tight_layout()
-    
-    output_file = "profit_chart.png"
-    plt.savefig(output_file)
-    print(f"✅ График сохранён как {output_file}")
-    return output_file
+
+    os.makedirs("charts", exist_ok=True)
+    plt.savefig(CHART_PATH)
+    plt.close()
+
+    final_return = df["cumulative_return"].iloc[-1] - 1
+    return CHART_PATH, final_return
