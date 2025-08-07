@@ -17,24 +17,15 @@ logger = logging.getLogger(__name__)
 
 def load_data():
     df = pd.read_excel(CSV_FILE)
-
-    # Очистка и кодировка
     df = df.dropna(subset=["signal", "rsi", "macd", "result"])
     df["signal_encoded"] = df["signal"].map({"BUY": 1, "SELL": -1, "NONE": 0}).fillna(0)
     df["result_encoded"] = df["result"].map({"UP": 1, "DOWN": 0}).fillna(0)
-
-    # Кодировка ema_signal
     df["ema_signal_encoded"] = df["ema_signal"].map({"bullish": 1, "bearish": -1}).fillna(0)
     df["bollinger_encoded"] = df["bollinger"].map({"low": 1, "high": -1}).fillna(0)
 
     features = [
-        "rsi",
-        "macd",
-        "signal_encoded",
-        "stochrsi",
-        "adx",
-        "ema_signal_encoded",
-        "bollinger_encoded"
+        "rsi", "macd", "signal_encoded",
+        "stochrsi", "adx", "ema_signal_encoded", "bollinger_encoded"
     ]
     target = "result_encoded"
 
@@ -47,21 +38,17 @@ def train_model():
         logger.warning("⚠️ Недостаточно данных для обучения модели!")
         return
 
-    # Разделение на train/test
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-    # Обучение новой модели
     new_model = RandomForestClassifier(n_estimators=100, random_state=42)
     new_model.fit(X_train, y_train)
 
-    # Оценка
     y_pred = new_model.predict(X_test)
     new_acc = accuracy_score(y_test, y_pred)
     logger.info(f"📈 Точность новой модели: {new_acc:.2f}")
 
-    # Проверка старой модели (если есть)
     old_acc = 0
     if os.path.exists(MODEL_PATH):
         try:
@@ -72,7 +59,6 @@ def train_model():
         except Exception as e:
             logger.warning(f"⚠️ Ошибка при проверке старой модели: {e}")
 
-    # Сравнение и сохранение
     if new_acc >= old_acc:
         if os.path.exists(MODEL_PATH):
             os.rename(MODEL_PATH, OLD_MODEL_PATH)
@@ -83,13 +69,11 @@ def train_model():
     else:
         logger.warning("❌ Новая модель хуже! Старая оставлена.")
 
-    # Вывод важности признаков
     importances = new_model.feature_importances_
     logger.info("📊 Важность признаков:")
     for name, score in zip(feature_names, importances):
         logger.info(f"{name}: {score:.2f}")
 
-    # График
     plt.figure(figsize=(10, 4))
     plt.bar(feature_names, importances, color='green')
     plt.title("Feature Importance")
@@ -98,7 +82,7 @@ def train_model():
     plt.savefig("charts/feature_importance.png")
     logger.info("📉 График важности признаков сохранён в charts/feature_importance.png")
 
-# ✅ Эта функция используется в telegram_bot.py
+# 🔁 Для Telegram: функция переобучения
 def retrain_model():
     logger.info("🔁 Старт переобучения модели...")
     train_model()
