@@ -1,25 +1,19 @@
-import os
-import json
-import logging
+import os, json, logging
 import ccxt
 from datetime import datetime
 from dotenv import load_dotenv
 from sinyal_skorlayici import evaluate_signal
 from technical_analysis import generate_signal
 from data_logger import log_trade, log_closed_trade
-from telegram_bot import send_telegram_message
+from telegram_bot import bot
 from train_model import train_model
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 10))
-PROFIT_TARGET = 0.02  # 2%
+PROFIT_TARGET = 0.02
 MAX_HOLD_MINUTES = 120
-
 POSITION_FILE = "open_position.json"
 RSI_MEMORY_FILE = "rsi_memory.json"
 
@@ -29,13 +23,16 @@ exchange = ccxt.gateio({
     'enableRateLimit': True
 })
 
+def send_telegram_message(chat_id, text):
+    try:
+        bot.send_message(chat_id, text)
+    except Exception as e:
+        print(f"Ошибка Telegram: {e}")
+
 def get_open_position():
     if os.path.exists(POSITION_FILE):
         with open(POSITION_FILE, 'r') as f:
-            try:
-                return json.load(f)
-            except Exception as e:
-                logger.error(f"Ошибка чтения open_position.json: {e}")
+            return json.load(f)
     return None
 
 def save_position(data):
@@ -49,170 +46,104 @@ def clear_position():
 def update_rsi_memory(rsi):
     memory = []
     if os.path.exists(RSI_MEMORY_FILE):
-        try:
-            with open(RSI_MEMORY_FILE, 'r') as f:
-                memory = json.load(f)
-        except Exception as e:
-            logger.error(f"❌ Ошибка чтения {RSI_MEMORY_FILE}: {e}")
-
+        with open(RSI_MEMORY_FILE, 'r') as f:
+            memory = json.load(f)
     memory.append(rsi)
-    memory = memory[-6:]  # Храним последние 6 значений
-
+    memory = memory[-6:]
     with open(RSI_MEMORY_FILE, 'w') as f:
         json.dump(memory, f)
 
-def is_rsi_high_for_6_periods():
-    if not os.path.exists(RSI_MEMORY_FILE):
-        return False
-
-    try:
+def is_rsi_high():
+    if os.path.exists(RSI_MEMORY_FILE):
         with open(RSI_MEMORY_FILE, 'r') as f:
             memory = json.load(f)
         return len(memory) == 6 and all(r > 70 for r in memory)
-    except Exception as e:
-        logger.error(f"❌ Ошибка при проверке RSI памяти: {e}")
-        return False
+    return False
 
-def close_position(position, reason="manual", signal=None, score=None):
+def close_position(position, reason, signal=None, score=None):
     symbol = position['symbol']
     side = 'sell' if position['type'] == 'buy' else 'buy'
+    price_now = exchange.fetch_ticker(symbol)['last']
     amount = position['amount']
     entry_price = position['entry_price']
-    price_now = exchange.fetch_ticker(symbol)['last']
 
     try:
-        order = exchange.create_order(symbol, 'market', side, amount)
+        exchange.create_order(symbol, 'market', side, amount)
         profit = (price_now - entry_price) / entry_price
         if position['type'] == 'sell':
             profit = -profit
 
-        rsi = position.get("rsi")
-        macd = position.get("macd")
+        log_closed_trade(entry_price, price_now, profit, reason,
+                         signal or position['type'].upper(), score or 0.0,
+                         position.get("rsi"), position.get("macd"))
 
-        log_closed_trade(
-            entry_price=entry_price,
-            close_price=price_now,
-            pnl_percent=profit,
-            reason=reason,
-            signal=signal or position['type'].upper(),
-            score=score if score is not None else position.get("score", 0.0),
-            rsi=rsi,
-            macd=macd
+        send_telegram_message(CHAT_ID,
+            f"❎ Сделка закрыта\nЦена: {entry_price} → {price_now}\nДоход: {profit*100:.2f}%\nПричина: {reason}"
         )
-
-        message = (
-            f"❎ Сделка закрыта!\n"
-            f"📉 Тип: {side.upper()}\n"
-            f"💵 Вход: {entry_price:.2f}, Выход: {price_now:.2f}\n"
-            f"📊 Доходность: {profit*100:.2f}%\n"
-            f"📌 Причина: {reason.upper()}\n"
-            f"🤖 Переобучение AI модели..."
-        )
-        send_telegram_message(CHAT_ID, message)
-
         train_model()
-        send_telegram_message(CHAT_ID, "✅ AI-модель успешно переобучена и сохранена!")
-
         clear_position()
-
     except Exception as e:
-        logger.error(f"❌ Ошибка при закрытии позиции: {e}")
-        send_telegram_message(CHAT_ID, "❌ Ошибка при закрытии позиции!")
+        send_telegram_message(CHAT_ID, f"❌ Ошибка закрытия сделки: {e}")
 
 def check_close_conditions(rsi):
     position = get_open_position()
     if not position:
         return
-
     now = datetime.utcnow()
     opened_at = datetime.fromisoformat(position['timestamp'])
-    time_held = (now - opened_at).total_seconds() / 60
+    held = (now - opened_at).total_seconds() / 60
     price_now = exchange.fetch_ticker(position['symbol'])['last']
     profit = (price_now - position['entry_price']) / position['entry_price']
     if position['type'] == 'sell':
         profit = -profit
-
     update_rsi_memory(rsi)
 
     if profit >= PROFIT_TARGET:
-        close_position(position, reason="profit")
+        close_position(position, "profit")
     elif rsi > 85:
-        close_position(position, reason="rsi>85")
-    elif is_rsi_high_for_6_periods():
-        close_position(position, reason="rsi>70_90min")
-    elif time_held > MAX_HOLD_MINUTES:
-        close_position(position, reason="timeout")
+        close_position(position, "rsi>85")
+    elif is_rsi_high():
+        close_position(position, "rsi>70_90min")
+    elif held > MAX_HOLD_MINUTES:
+        close_position(position, "timeout")
 
-def open_position(signal, amount_usdt, rsi=None, macd=None, score=None):
+def open_position(signal, usdt, rsi=None, macd=None, score=None):
     symbol = "BTC/USDT"
     price = exchange.fetch_ticker(symbol)['last']
-    amount = round(amount_usdt / price, 6)
+    amount = round(usdt / price, 6)
     side = 'buy' if signal == "BUY" else 'sell'
 
     try:
-        send_telegram_message(CHAT_ID, f"📥 Попытка открыть ордер: {side.upper()} на {amount} {symbol}")
-        order = exchange.create_order(symbol, 'market', side, amount)
+        exchange.create_order(symbol, 'market', side, amount)
         save_position({
             "symbol": symbol,
             "type": side,
             "entry_price": price,
             "amount": amount,
             "timestamp": datetime.utcnow().isoformat(),
-            "score": score or 0.0,
             "rsi": rsi,
-            "macd": macd
+            "macd": macd,
+            "score": score or 0.0
         })
-
         if os.path.exists(RSI_MEMORY_FILE):
             os.remove(RSI_MEMORY_FILE)
-
-        return order, price
+        return True, price
     except Exception as e:
-        logger.error(f"❌ Ошибка при создании ордера: {e}")
-        send_telegram_message(CHAT_ID, f"❌ Ошибка при создании ордера: {e}")
-        return None, price
+        send_telegram_message(CHAT_ID, f"❌ Ошибка открытия ордера: {e}")
+        return False, price
 
 def check_and_trade():
-    logger.info("🔁 check_and_trade() вызвана планировщиком.")
-    send_telegram_message(CHAT_ID, "🔁 check_and_trade() запущена планировщиком.")
-
+    send_telegram_message(CHAT_ID, \"\\U0001f501 check_and_trade() запущен\")
     result = generate_signal()
-    signal = result["signal"]
-    rsi = result["rsi"]
-    macd = result["macd"]
-    price = result["price"]
-    patterns = result.get("patterns", [])
-
-    logger.info(f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
-    send_telegram_message(CHAT_ID, f"📊 Сигнал: {signal}, RSI: {rsi:.2f}, MACD: {macd:.2f}, Цена: {price}")
-
+    signal = result[\"signal\"]
     score = evaluate_signal(result)
-    log_trade(signal, score, price, rsi, macd, success=(score >= 0.6))
+    log_trade(signal, score, result[\"price\"], result[\"rsi\"], result[\"macd\"], success=(score >= 0.6))
+    check_close_conditions(result[\"rsi\"])
 
-    send_telegram_message(CHAT_ID, f"🧠 Оценка AI: {score:.2f}")
-
-    check_close_conditions(rsi)
-
-    if signal in ["BUY", "SELL"] and score >= 0.6:
+    if signal in [\"BUY\", \"SELL\"] and score >= 0.6:
         if get_open_position():
-            send_telegram_message(CHAT_ID, "⚠️ Сделка уже открыта. Ожидание закрытия.")
-            return
-
-        order, exec_price = open_position(signal, TRADE_AMOUNT, rsi=rsi, macd=macd, score=score)
-        if order:
-            message = (
-                f"🚀 Открыта сделка!\n"
-                f"Сигнал: {signal}\n"
-                f"📌 Паттерны: {', '.join(patterns) if patterns else 'нет'}\n"
-                f"🤖 Оценка AI: {score:.2f}\n"
-                f"💰 Цена: {exec_price:.2f}\n"
-                f"💵 Объём: {TRADE_AMOUNT} USDT"
-            )
-            send_telegram_message(CHAT_ID, message)
+            send_telegram_message(CHAT_ID, \"⚠️ Сделка уже открыта. Жду закрытия.\")
         else:
-            send_telegram_message(CHAT_ID, "❌ Ошибка при открытии ордера.")
-    else:
-        send_telegram_message(
-            CHAT_ID,
-            f"📊 Сигнал: {signal} (оценка {score:.2f}) — сделка не открыта."
-        )
+            ok, price = open_position(signal, TRADE_AMOUNT, result[\"rsi\"], result[\"macd\"], score)
+            if ok:
+                send_telegram_message(CHAT_ID, f\"🚀 Сделка открыта: {signal} @ {price:.2f}\")
