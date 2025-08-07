@@ -29,7 +29,7 @@ def cleanup_old_charts():
                 try:
                     os.remove(file_path)
                 except Exception as e:
-                    print(f"❌ Ошибка при удалении {filename}: {e}")
+                    print(f"❌ Ошибка удаления {filename}: {e}")
 
 def draw_rsi_macd_chart(result):
     cleanup_old_charts()
