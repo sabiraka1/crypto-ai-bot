@@ -1,55 +1,78 @@
-# telegram_bot.py
+# telegram_bot.py (webhook-compatible)
 
 import os
-import telebot
-from signal_analyzer import analyze_bad_signals
-from position_status import get_open_position_status
-from profit_chart import generate_profit_chart
-from train_model import retrain_model
-from sinyal_skorlayici import generate_ai_signal, plot_last_signal
+from dotenv import load_dotenv
+from telebot import TeleBot
+
+load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
+bot = TeleBot(BOT_TOKEN)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Импорт функций
+from technical_analysis import generate_signal
+from sinyal_skorlayici import evaluate_signal
+from grafik_olusturucu import draw_chart
+from data_logger import log_test_trade
+from profit_chart import generate_profit_chart
+from signal_analyzer import analyze_bad_signals
+from train_model import retrain_model
+from position_status import get_open_position_status
 
-def process_telegram_command(command):
-    if command == "/start" or command == "/help":
-        return (
-            "🤖 Бот работает 24/7\n\n"
+
+def handle_command(message):
+    text = message.get("text", "")
+    chat_id = message["chat"]["id"]
+
+    if text in ["/start", "/help"]:
+        bot.send_message(chat_id, (
+            "🤖 Бот активен и работает 24/7!\n\n"
             "📌 Доступные команды:\n"
             "/test — ручной тест сигнала\n"
             "/train — переобучение модели\n"
             "/status — текущая позиция\n"
             "/profit — график прибыли\n"
             "/errors — ошибки сигналов"
+        ))
+
+    elif text == "/test":
+        signal_data = generate_signal()
+        signal, rsi, macd, pattern, price = signal_data
+        score = evaluate_signal(signal_data)
+        chart_path = draw_chart(signal_data, score)
+        log_test_trade(signal, score, price, rsi, macd)
+
+        bot.send_message(chat_id,
+            f"🧪 Тест сигнала\n"
+            f"Сигнал: {signal}\nRSI: {rsi}, MACD: {macd}\n"
+            f"📈 Оценка AI: {score:.2f}\n💰 Цена: {price}"
         )
+        if chart_path:
+            with open(chart_path, "rb") as img:
+                bot.send_photo(chat_id, img)
 
-    elif command == "/status":
-        return get_open_position_status()
+    elif text == "/train":
+        retrain_model()
+        bot.send_message(chat_id, "🧠 Модель успешно переобучена!")
 
-    elif command == "/train":
-        result = retrain_model()
-        return f"📊 Модель переобучена!\n{result}"
+    elif text == "/status":
+        status = get_open_position_status()
+        bot.send_message(chat_id, status)
 
-    elif command == "/test":
-        signal, score, rsi, macd, pattern = generate_ai_signal()
-        path = plot_last_signal(signal, score)
-        bot.send_photo(CHAT_ID, photo=open(path, "rb"))
-        return f"🧪 Сигнал: {signal}\n📊 Score: {score:.2f}\nRSI: {rsi:.1f}, MACD: {macd:.2f}, Pattern: {pattern}"
+    elif text == "/profit":
+        chart_path = generate_profit_chart()
+        if chart_path:
+            with open(chart_path, "rb") as img:
+                bot.send_photo(chat_id, img)
+        else:
+            bot.send_message(chat_id, "❌ Недостаточно данных для графика прибыли.")
 
-    elif command == "/profit":
-        path = generate_profit_chart()
-        bot.send_photo(CHAT_ID, photo=open(path, "rb"))
-        return "📈 Прибыль на графике выше."
-
-    elif command == "/errors":
+    elif text == "/errors":
         summary, explanations = analyze_bad_signals()
         if not summary:
-            return "✅ Ошибок не найдено или мало данных."
-        msg = "\n".join([f"{k}: {v}" for k, v in summary.items()])
-        msg += "\n\n🧠 Примеры ошибок:\n" + "\n".join(explanations)
-        return msg
+            bot.send_message(chat_id, "✅ Ошибок сигналов не обнаружено.")
+            return
 
-    else:
-        return "⚠️ Неизвестная команда. Напиши /help"
+        bot.send_message(chat_id, "\n".join([f"{k}: {v}" for k, v in summary.items()]))
+        if explanations:
+            bot.send_message(chat_id, "\n".join(explanations[:5]))
