@@ -1,5 +1,3 @@
-# error_logger.py
-
 import pandas as pd
 import os
 from signal_analyzer import explain_signal
