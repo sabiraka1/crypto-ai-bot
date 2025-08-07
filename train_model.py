@@ -44,7 +44,8 @@ def load_data():
         df["signal_encoded"] = df["signal"].map({
             "BUY": 1, "STRONG_BUY": 1.5, 
             "SELL": -1, "STRONG_SELL": -1.5, 
-            "HOLD": 0, "NONE": 0, "ERROR": 0
+            "CRITICAL_SELL": -2,  # ✅ ДОБАВЛЕНО для Enhanced системы
+            "HOLD": 0, "WAIT": 0, "NONE": 0, "ERROR": 0
         }).fillna(0)
         
         df["result_encoded"] = df["success"].astype(int)
@@ -52,15 +53,18 @@ def load_data():
         # Дополнительные признаки если они есть
         feature_cols = ["rsi", "macd", "signal_encoded"]
         
-        # Добавляем дополнительные признаки если они существуют
+        # ✅ РАСШИРЕНЫ признаки для Enhanced системы
         optional_features = [
-            "pattern_score", "confidence", "buy_score", "sell_score"
+            "pattern_score", "confidence", "buy_score", "sell_score",
+            "total_score", "macd_contribution", "ai_score",  # Enhanced поля
+            "price_change_24h", "macd_histogram"             # Дополнительные поля
         ]
         
         for feat in optional_features:
             if feat in df.columns:
                 df[feat] = pd.to_numeric(df[feat], errors='coerce').fillna(0)
                 feature_cols.append(feat)
+                logger.info(f"✅ Добавлен признак: {feat}")
         
         # Кодирование паттернов если есть
         if "pattern_direction" in df.columns:
@@ -69,11 +73,36 @@ def load_data():
                 "INDECISION": 0, "NEUTRAL": 0
             }).fillna(0)
             feature_cols.append("pattern_direction_encoded")
+            logger.info("✅ Добавлено кодирование pattern_direction")
+        
+        # ✅ ДОБАВЛЕНО: Кодирование трендов для Enhanced системы
+        if "trend_1d" in df.columns:
+            df["trend_1d_encoded"] = df["trend_1d"].map({
+                "BULLISH": 1, "BEARISH": -1, "NEUTRAL": 0, "UNKNOWN": 0
+            }).fillna(0)
+            feature_cols.append("trend_1d_encoded")
+            logger.info("✅ Добавлено кодирование trend_1d")
+            
+        if "trend_4h" in df.columns:
+            df["trend_4h_encoded"] = df["trend_4h"].map({
+                "BULLISH": 1, "BEARISH": -1, "NEUTRAL": 0, "UNKNOWN": 0
+            }).fillna(0)
+            feature_cols.append("trend_4h_encoded")
+            logger.info("✅ Добавлено кодирование trend_4h")
+        
+        if "market_state" in df.columns:
+            df["market_state_encoded"] = df["market_state"].map({
+                "NORMAL": 0, "HIGH_VOLATILITY": 0.5, 
+                "OVERHEATED_BULLISH": 1, "OVERSOLD_BEARISH": -1,
+                "OVERHEATED": 1  # Дополнительное значение
+            }).fillna(0)
+            feature_cols.append("market_state_encoded")
+            logger.info("✅ Добавлено кодирование market_state")
         
         X = df[feature_cols]
         y = df["result_encoded"]
         
-        logger.info(f"📈 Признаки: {feature_cols}")
+        logger.info(f"📈 Признаки ({len(feature_cols)}): {feature_cols}")
         logger.info(f"📊 Распределение классов: {y.value_counts().to_dict()}")
         
         return X, y, feature_cols
@@ -98,8 +127,10 @@ def train_model():
     
     try:
         # Разделение данных
+        # ✅ ИСПРАВЛЕНО: Добавлена проверка на количество классов
+        stratify_param = y if len(y.unique()) > 1 else None
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
+            X, y, test_size=0.2, random_state=42, stratify=stratify_param
         )
         
         # Обучение новой модели
@@ -123,9 +154,14 @@ def train_model():
         if os.path.exists(MODEL_PATH):
             try:
                 old_model = joblib.load(MODEL_PATH)
-                y_pred_old = old_model.predict(X_test)
-                old_acc = accuracy_score(y_test, y_pred_old)
-                logger.info(f"📉 Точность старой модели: {old_acc:.3f}")
+                # ✅ ДОБАВЛЕНО: Проверка совместимости признаков
+                if hasattr(old_model, 'n_features_in_') and old_model.n_features_in_ == X_test.shape[1]:
+                    y_pred_old = old_model.predict(X_test)
+                    old_acc = accuracy_score(y_test, y_pred_old)
+                    logger.info(f"📉 Точность старой модели: {old_acc:.3f}")
+                else:
+                    logger.warning("⚠️ Старая модель несовместима - будет заменена")
+                    old_acc = 0
             except Exception as e:
                 logger.warning(f"⚠️ Ошибка при проверке старой модели: {e}")
         
@@ -157,19 +193,22 @@ def train_model():
             logger.info(f"  {name}: {score:.3f}")
         
         # Создание графика важности признаков
-        plt.figure(figsize=(12, 6))
-        plt.bar(feature_names, importances, color='green', alpha=0.7)
-        plt.title("🔍 Важность признаков модели")
-        plt.xlabel("Признаки")
-        plt.ylabel("Важность")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        # Сохранение графика
-        os.makedirs("charts", exist_ok=True)
-        plt.savefig("charts/feature_importance.png", dpi=300, bbox_inches='tight')
-        plt.close()
-        logger.info("📊 График важности признаков сохранен")
+        try:
+            plt.figure(figsize=(12, 6))
+            plt.bar(feature_names, importances, color='green', alpha=0.7)
+            plt.title("🔍 Важность признаков модели")
+            plt.xlabel("Признаки")
+            plt.ylabel("Важность")
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            
+            # Сохранение графика
+            os.makedirs("charts", exist_ok=True)
+            plt.savefig("charts/feature_importance.png", dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info("📊 График важности признаков сохранен")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка создания графика: {e}")
         
     except Exception as e:
         logger.error(f"❌ Ошибка обучения модели: {e}")
@@ -178,7 +217,7 @@ def create_basic_model():
     """Создание базовой модели с примерными данными"""
     logger.info("🏗️ Создание базовой модели...")
     
-    # Примерные данные для начального обучения
+    # ✅ РАСШИРЕНЫ примерные данные для Enhanced системы
     data = {
         "rsi": [25, 70, 45, 80, 30, 65, 50, 40, 60, 35, 75, 28, 55, 85, 20],
         "macd": [0.5, -0.3, 0.1, -0.4, 0.6, -0.2, 0.0, 0.3, -0.1, 0.4, -0.5, 0.7, 0.2, -0.6, 0.8],
@@ -191,7 +230,14 @@ def create_basic_model():
     df["pattern_score"] = np.random.uniform(0, 6, len(df))
     df["confidence"] = np.random.uniform(20, 90, len(df))
     
-    X = df[["rsi", "macd", "signal_encoded", "pattern_score", "confidence"]]
+    # ✅ ДОБАВЛЕНЫ Enhanced поля для базовой модели
+    df["total_score"] = np.random.uniform(0, 5, len(df))
+    df["macd_contribution"] = np.random.uniform(0, 3, len(df))
+    df["ai_score"] = np.random.uniform(0.1, 0.9, len(df))
+    
+    feature_cols = ["rsi", "macd", "signal_encoded", "pattern_score", "confidence", 
+                   "total_score", "macd_contribution", "ai_score"]
+    X = df[feature_cols]
     y = df["success"]
     
     # Обучение базовой модели
@@ -205,7 +251,7 @@ def create_basic_model():
 
 def retrain_model():
     """Функция для переобучения модели (вызывается из телеграм бота)"""
-    logger.info("🔁 Запуск переобучения модели...")
+    logger.info("🔁 Переобучение AI-модели...")
     try:
         train_model()
         logger.info("✅ Переобучение завершено успешно")
