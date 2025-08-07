@@ -4,33 +4,29 @@ import json
 import os
 from datetime import datetime
 
-OPEN_POS_FILE = "open_position.json"
+POSITION_FILE = "open_position.json"
 
 def get_open_position_status():
-    if not os.path.exists(OPEN_POS_FILE):
-        return "📦 Позиция не найдена (файл не существует)."
+    if not os.path.exists(POSITION_FILE):
+        return "📭 Открытая позиция не найдена."
 
-    try:
-        with open(OPEN_POS_FILE, "r") as f:
-            data = json.load(f)
-    except Exception as e:
-        return f"❌ Ошибка чтения позиции: {e}"
+    with open(POSITION_FILE, "r", encoding="utf-8") as file:
+        data = json.load(file)
 
-    if not data or "price" not in data:
-        return "📦 Нет открытой позиции."
+    entry_price = data.get("entry_price")
+    entry_time = data.get("entry_time")
+    position_type = data.get("type")
 
-    signal = data.get("signal", "N/A")
-    price = data.get("price", 0)
-    timestamp = data.get("timestamp", None)
+    if not all([entry_price, entry_time, position_type]):
+        return "📭 Открытая позиция не найдена."
 
-    try:
-        opened = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-    except:
-        opened = "неизвестно"
+    entry_dt = datetime.strptime(entry_time, "%Y-%m-%d %H:%M:%S")
+    minutes = int((datetime.now() - entry_dt).total_seconds() // 60)
 
     return (
-        f"📈 Открытая позиция:\n"
-        f"Тип: {signal}\n"
-        f"Цена входа: {price}\n"
-        f"Время открытия: {opened}"
+        f"📌 Открытая позиция:\n"
+        f"Тип: {position_type.upper()}\n"
+        f"Цена входа: {entry_price}\n"
+        f"Открыта: {entry_time}\n"
+        f"Прошло: {minutes} мин"
     )
