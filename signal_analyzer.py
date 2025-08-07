@@ -11,7 +11,7 @@ def analyze_bad_signals(limit=5):
         return None, None
 
     try:
-        df = pd.read_csv(CSV_FILE)
+        df = pd.read_csv(CSV_FILE, on_bad_lines='skip')
     except Exception as e:
         print(f"❌ Ошибка чтения CSV: {e}")
         return None, None
@@ -20,7 +20,6 @@ def analyze_bad_signals(limit=5):
         print("⚠️ Недостаточно данных для анализа.")
         return None, None
 
-    # Проверка нужных колонок
     required_cols = {"success", "rsi", "macd", "adx", "stochrsi", "signal"}
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
@@ -43,9 +42,11 @@ def analyze_bad_signals(limit=5):
 
     explanations = []
     for _, row in bad_signals.tail(limit).iterrows():
-        explanations.append(explain_signal(row))
+        reason = explain_signal(row)
+        explanations.append(reason)
 
     return summary, explanations
+
 
 def explain_signal(row):
     signal = row.get("signal", "")
@@ -57,6 +58,7 @@ def explain_signal(row):
     stoch = row.get("stochrsi", 0)
     ema = row.get("ema_signal", "")
     boll = row.get("bollinger", "")
+    pattern = row.get("pattern", "")
 
     comments = []
 
