@@ -63,7 +63,6 @@ def train_model():
         if os.path.exists(MODEL_PATH):
             os.rename(MODEL_PATH, OLD_MODEL_PATH)
             logger.info("🗂️ Старая модель сохранена как резервная.")
-
         joblib.dump(new_model, MODEL_PATH)
         logger.info("✅ Новая AI-модель сохранена.")
     else:
@@ -79,10 +78,10 @@ def train_model():
     plt.title("Feature Importance")
     plt.xticks(rotation=45)
     plt.tight_layout()
+    os.makedirs("charts", exist_ok=True)
     plt.savefig("charts/feature_importance.png")
     logger.info("📉 График важности признаков сохранён в charts/feature_importance.png")
 
-# 🔁 Для Telegram: функция переобучения
 def retrain_model():
     logger.info("🔁 Старт переобучения модели...")
     train_model()
