@@ -12,4 +12,3 @@ gunicorn
 openpyxl
 xgboost
 pyTelegramBotAPI
-candlestick
