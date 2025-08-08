@@ -4,7 +4,6 @@ from datetime import datetime
 
 from config.settings import TradingConfig
 
-# Безопасная работа с CSV
 try:
     from utils.csv_handler import CSVHandler
 except Exception:
@@ -12,12 +11,11 @@ except Exception:
 
 CFG = TradingConfig()
 
-
 class PositionManager:
     """Управление открытой позицией"""
 
-    TP_PERCENT = CFG.TAKE_PROFIT_PCT / 100  # тейк-профит в долях
-    SL_PERCENT = -CFG.STOP_LOSS_PCT / 100  # стоп-лосс в долях
+    TP_PERCENT = CFG.TAKE_PROFIT_PCT / 100
+    SL_PERCENT = -CFG.STOP_LOSS_PCT / 100
     TP1_ATR = 1.5
     TP2_ATR = 3.0
     SL_ATR = 1.0
@@ -28,7 +26,6 @@ class PositionManager:
         self.notify_entry = notify_entry_func
         self.notify_close = notify_close_func
 
-    # ========= ОТКРЫТИЕ LONG =========
     def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float,
                   buy_score: float = None, ai_score: float = None, amount_frac: float = None):
         st = self.state.state
@@ -60,16 +57,13 @@ class PositionManager:
 
         try:
             if self.notify_entry:
-                self.notify_entry(
-                    symbol, entry_price, amount_usd,
-                    st['tp_price_pct'], st['sl_price_pct'],
-                    st['tp1_atr'], st['tp2_atr'],
-                    buy_score=buy_score, ai_score=ai_score, amount_frac=amount_frac
-                )
+                self.notify_entry(symbol, entry_price, amount_usd,
+                                  st['tp_price_pct'], st['sl_price_pct'],
+                                  st['tp1_atr'], st['tp2_atr'],
+                                  buy_score=buy_score, ai_score=ai_score, amount_frac=amount_frac)
         except Exception as e:
             logging.error(f"notify_entry error: {e}")
 
-    # ========= ЗАКРЫТИЕ ПОЗИЦИИ =========
     def close_all(self, symbol: str, exit_price: float, reason: str):
         st = self.state.state
         if not st.get('in_position'):
@@ -87,7 +81,6 @@ class PositionManager:
         pnl_abs = (exit_price - entry_price) * qty_base
         pnl_pct = (exit_price - entry_price) / entry_price * 100.0 if entry_price else 0.0
 
-        # Лог в CSV
         if CSVHandler:
             try:
                 CSVHandler.log_closed_trade(datetime.utcnow(), symbol, entry_price, exit_price,
@@ -95,32 +88,19 @@ class PositionManager:
             except Exception as e:
                 logging.error(f"CSV log closed trade error: {e}")
 
-        # Уведомление в Telegram
         try:
             if self.notify_close:
-                self.notify_close(
-                    symbol=symbol,
-                    price=float(exit_price),
-                    reason=reason,
-                    pnl_pct=float(pnl_pct),
-                    pnl_abs=float(pnl_abs),
-                    buy_score=st.get('buy_score'),
-                    ai_score=st.get('ai_score'),
-                    amount_usd=qty_usd
-                )
+                self.notify_close(symbol=symbol, price=float(exit_price), reason=reason,
+                                  pnl_pct=float(pnl_pct), pnl_abs=float(pnl_abs),
+                                  buy_score=st.get('buy_score'), ai_score=st.get('ai_score'),
+                                  amount_usd=qty_usd)
         except Exception as e:
             logging.error(f"notify_close error: {e}")
 
-        st.update({
-            'in_position': False,
-            'close_price': exit_price,
-            'last_reason': reason
-        })
+        st.update({'in_position': False, 'close_price': exit_price, 'last_reason': reason})
         self.state.save_state()
 
-    # ========= УПРАВЛЕНИЕ ПОЗИЦИЕЙ =========
     def manage(self, symbol: str, last_price: float, atr: float):
-        """Сопровождение позиции: трейлинг, тейк-профит, стоп-лосс"""
         st = self.state.state
         if not st.get("in_position"):
             return
@@ -137,17 +117,14 @@ class PositionManager:
         if entry <= 0:
             return
 
-        # Стоп-лосс
         if (sl_pct and last_price <= sl_pct) or (sl_atr and last_price <= sl_atr):
             self.close_all(symbol, last_price, "SL_hit")
             return
 
-        # Тейк-профит (полный выход)
         if (tp_pct and last_price >= tp_pct) or (tp2_atr and last_price >= tp2_atr):
             self.close_all(symbol, last_price, "TP_hit")
             return
 
-        # Частичное закрытие и включение трейлинга
         if (not partial_taken) and tp1_atr and last_price >= tp1_atr:
             qty_total = float(st.get("qty_usd", 0.0)) / last_price
             qty_sell = qty_total / 2
@@ -164,7 +141,6 @@ class PositionManager:
                 self.state.save_state()
             return
 
-        # Трейлинг стоп
         if trailing_on:
             new_sl_atr = last_price - self.SL_ATR * atr
             if new_sl_atr > sl_atr:
@@ -172,6 +148,5 @@ class PositionManager:
                 st["sl_price_pct"] = max(st["sl_price_pct"], last_price * (1 + self.SL_PERCENT))
                 self.state.save_state()
 
-    # ========= Альтернативное имя =========
     def close_position(self, symbol: str, exit_price: float, reason: str):
         self.close_all(symbol, exit_price, reason)
