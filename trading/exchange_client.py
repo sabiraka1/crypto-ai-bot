@@ -15,7 +15,10 @@ class ExchangeClient:
             'apiKey': api_key or os.getenv("GATE_API_KEY"),
             'secret': api_secret or os.getenv("GATE_API_SECRET"),
             'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
+            'options': {
+                'defaultType': 'spot',
+                'createMarketBuyOrderRequiresPrice': False  # ✅ Разрешаем указывать сумму в USDT
+            }
         })
         self.markets = None
         try:
@@ -52,47 +55,26 @@ class ExchangeClient:
         balance = self._safe(self.exchange.fetch_balance)
         return float(balance['free'].get(asset, 0))
 
-    # ---------- precision & amount ----------
-    def _amount_from_usd(self, symbol: str, usd: float, last_price: float) -> float:
-        if last_price <= 0:
-            return 0.0
-        amt = usd / last_price
-        try:
-            if self.markets and symbol in self.markets:
-                amt = float(self.exchange.amount_to_precision(symbol, amt))
-                info = self.markets.get(symbol, {})
-                limits = info.get('limits', {})
-                min_amount = (limits.get('amount', {}) or {}).get('min')
-                if min_amount and amt < float(min_amount):
-                    amt = float(min_amount)
-        except Exception as e:
-            logging.warning(f"⚠️ amount precision/limit warning: {e}")
-        return float(amt)
-
-    def _apply_precision(self, symbol: str, amount: float) -> float:
-        try:
-            if self.markets and symbol in self.markets:
-                amount = float(self.exchange.amount_to_precision(symbol, amount))
-                min_amount = self.markets[symbol]['limits']['amount']['min']
-                if float(amount) < min_amount:
-                    amount = min_amount
-        except Exception as e:
-            logging.warning(f"⚠️ precision apply warning: {e}")
-        return float(amount)
-
     # ---------- orders ----------
-    def create_market_buy_order(self, symbol: str, usd: float):
-        last = self.get_last_price(symbol)
-        amount = self._amount_from_usd(symbol, usd, last)
-        order = self._safe(self.exchange.create_order, symbol, 'market', 'buy', amount)
-        self._log_trade("BUY", symbol, amount, last)
+    def create_market_buy_order(self, symbol: str, usd_amount: float):
+        """
+        Создаёт маркет-ордер на покупку на сумму в USDT (quote currency).
+        """
+        order = self._safe(
+            self.exchange.create_order,
+            symbol,
+            'market',
+            'buy',
+            usd_amount,  # ✅ Это USDT, а не количество монет
+            None,        # price не нужен
+            {'cost': usd_amount}  # Явно указываем стоимость сделки
+        )
+        self._log_trade("BUY", symbol, usd_amount, self.get_last_price(symbol))
         return order
 
     def create_market_sell_order(self, symbol: str, amount: float):
-        amount = self._apply_precision(symbol, amount)
-        last = self.get_last_price(symbol)
         order = self._safe(self.exchange.create_order, symbol, 'market', 'sell', amount)
-        self._log_trade("SELL", symbol, amount, last)
+        self._log_trade("SELL", symbol, amount, self.get_last_price(symbol))
         return order
 
     # ---------- short aliases ----------
