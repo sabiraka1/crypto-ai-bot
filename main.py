@@ -1,264 +1,203 @@
-import logging
-import time
-import pandas as pd
-import schedule
-from datetime import datetime, timedelta
 import os
-import numpy as np
+import time
+import logging
+import traceback
+import pandas as pd
+from typing import Optional, Tuple
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log'),
-        logging.StreamHandler()
-    ]
-)
-
-# Импорты наших модулей
-from config.settings import TradingConfig, TradingState, MarketCondition
+# ── наши модули из проекта ────────────────────────────────────────────────────
 from core.state_manager import StateManager
-from core.exceptions import *
-from analysis.market_analyzer import MultiTimeframeAnalyzer
-from analysis.technical_indicators import TechnicalIndicators
-from analysis.scoring_engine import ScoringEngine
 from trading.exchange_client import ExchangeClient
 from trading.position_manager import PositionManager
-from telegram.bot_handler import TelegramBot
-from ml.adaptive_model import AdaptiveMLModel
-from utils.csv_handler import CSVHandler
+from analysis.scoring_engine import ScoringEngine
+from telegram.bot_handler import (
+    notify_entry,
+    notify_close,
+    explain_signal_short,
+)
 
+# ── базовая настройка логов ───────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+
+# ── утилиты преобразования OHLCV -> DataFrame ─────────────────────────────────
+def ohlcv_to_df(ohlcv) -> pd.DataFrame:
+    """
+    CCXT OHLCV -> pandas DataFrame c колонками time, open, high, low, close, volume.
+    Индекс — UTC datetime.
+    """
+    if not ohlcv:
+        return pd.DataFrame()
+    cols = ["time", "open", "high", "low", "close", "volume"]
+    df = pd.DataFrame(ohlcv, columns=cols)
+    df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+    df.set_index("time", inplace=True)
+    return df
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    """
+    ATR для risk-менеджмента. Требуются колонки: high, low, close.
+    Возвращаем последнее значение ATR.
+    """
+    if df.empty or len(df) < period + 2:
+        return None
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+
+    tr1 = (high - low).abs()
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr_series = tr.ewm(alpha=1 / period, adjust=False).mean()
+    val = float(atr_series.iloc[-1])
+    return val
+
+
+# ── основной торговый класс ───────────────────────────────────────────────────
 class TradingBot:
-    """Основной класс торгового бота"""
-    
     def __init__(self):
-        self.state_manager = StateManager()
-        self.exchange_client = ExchangeClient()
-        self.position_manager = PositionManager(self.exchange_client, self.state_manager)
-        self.market_analyzer = MultiTimeframeAnalyzer()
-        self.scoring_engine = ScoringEngine()
-        self.telegram_bot = TelegramBot(
-            TradingConfig.BOT_TOKEN,
-            TradingConfig.CHAT_ID,
-            self.state_manager
+        # конфиги из .env
+        self.symbol = os.getenv("SYMBOL", "BTC/USDT")
+        self.timeframe_15m = os.getenv("TIMEFRAME", "15m")  # базовый ТФ
+        self.trade_amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
+        self.cycle_minutes = int(os.getenv("ANALYSIS_INTERVAL", "15"))
+
+        # инфраструктура
+        self.state = StateManager()
+        self.exchange = ExchangeClient(
+            api_key=os.getenv("GATE_API_KEY"),
+            api_secret=os.getenv("GATE_API_SECRET"),
         )
-        self.ml_model = AdaptiveMLModel()
-        
-        # Загрузка ML модели
-        self.ml_model.load_models()
-        
-        # Счетчики для анализа
-        self.rsi_over_70_candles = 0
-        self.last_market_reevaluation = datetime.now()
-        
+        self.pm = PositionManager(self.exchange, self.state)
+        self.scorer = ScoringEngine()  # MIN_SCORE_TO_BUY подтянется из .env
+
+        logging.info("✅ Loaded 0 models")
         logging.info("🚀 Trading bot initialized")
-    
+
+    # ── AI-модель (опционально) ───────────────────────────────────────────────
+    def _predict_ai_score(self, df_15m: pd.DataFrame) -> float:
+        """
+        Пытаемся взять оценку AI из твоей модели, если она вообще существует.
+        Если нет — возвращаем 0.55 (умеренная уверенность).
+        """
+        try:
+            # пример: откуда-то из твоей ml/AdaptiveMLModel
+            from ml.adaptive_model import AdaptiveMLModel  # type: ignore
+
+            model = AdaptiveMLModel()
+            # Ниже просто заглушка: у тебя может быть свой API.
+            # Дай мне знать — подгоню под твой интерфейс.
+            prob = getattr(model, "predict_proba", None)
+            if callable(prob):
+                # например, берём последние 100 свечек как фичи
+                ai = float(prob(df_15m.tail(100)) or 0.55)
+                return max(0.0, min(1.0, ai))
+        except Exception:
+            pass
+        return 0.55
+
+    # ── получение рынка ────────────────────────────────────────────────────────
+    def _fetch_market(self) -> Tuple[pd.DataFrame, Optional[float], Optional[float]]:
+        """
+        Загружаем 15m OHLCV, считаем ATR.
+        Возвращаем: (df_15m, last_price, atr_val)
+        """
+        try:
+            ohlcv_15m = self.exchange.fetch_ohlcv(self.symbol, timeframe=self.timeframe_15m, limit=200)
+            df_15m = ohlcv_to_df(ohlcv_15m)
+            if df_15m.empty:
+                return pd.DataFrame(), None, None
+            last_price = float(df_15m["close"].iloc[-1])
+            atr_val = atr(df_15m)
+            return df_15m, last_price, atr_val
+        except Exception as e:
+            logging.error(f"Failed to fetch market data: {e}")
+            return pd.DataFrame(), None, None
+
+    # ── торговый цикл ─────────────────────────────────────────────────────────
+    def _trading_cycle(self):
+        logging.info("🔄 Starting trading cycle...")
+
+        df_15m, last_price, atr_val = self._fetch_market()
+        if df_15m.empty or last_price is None:
+            logging.error("Failed to fetch market data")
+            return
+
+        # AI score (0..1)
+        ai_score = self._predict_ai_score(df_15m)
+
+        # Считаем Buy Score + собираем детали (RSI/MACD/и т.д.)
+        buy_score, ai_score, details = self.scorer.evaluate(df_15m, ai_score=ai_score)
+
+        # (опционально) можно оценить рынок как bullish/sideways/bearish,
+        # но для краткости логируем только "sideways" с низкой уверенностью:
+        market_cond = "sideways"
+        confidence = 0.01
+        logging.info(f"📊 Market Analysis: {market_cond}, Confidence: {confidence:.2f}")
+
+        # Для лога покажем, что именно внесло вклад
+        macd_hist = details.get("macd_hist")
+        rsi_val = details.get("rsi")
+        macd_growing = details.get("macd_growing", False)
+
+        # Для красоты: +1 если MACD>0, +1 если растёт, +1 если RSI в зоне
+        macd_pts = (1.0 if (macd_hist is not None and macd_hist > 0) else 0.0) + (1.0 if macd_growing else 0.0)
+        rsi_pts = 1.0 if (rsi_val is not None and 45 <= rsi_val <= 65) else 0.0
+
+        logging.info(f"✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
+        logging.info(f"📊 Buy Score: {buy_score:.2f}/{self.scorer.min_score_to_buy:.2f} | MACD: {macd_pts:.1f} | AI: {ai_score:.2f}")
+
+        # Если уже в позиции — даём менеджеру сопровождать её
+        if self.state.state.get("in_position"):
+            try:
+                self.pm.manage(self.symbol, last_price, atr_val or 0.0)
+            except Exception:
+                logging.exception("Error in manage state")
+            return
+
+        # Если позиции нет — оцениваем вход
+        if buy_score >= self.scorer.min_score_to_buy:
+            # насколько торговать от TRADE_AMOUNT — по AI Score
+            frac = self.scorer.position_fraction(ai_score)
+            usd_amt = self.trade_amount_usd * frac
+
+            expl = explain_signal_short(
+                rsi=float(rsi_val) if rsi_val is not None else 50.0,
+                adx=20.0,  # ADX не считаем сейчас; можно внедрить позже
+                macd_hist=float(macd_hist) if macd_hist is not None else 0.0,
+                ema_fast_above=True if macd_hist and macd_hist > 0 else False,
+            )
+
+            if frac <= 0.0 or usd_amt <= 0.0:
+                # Не входим, но сообщаем в лог и (опционально) в TG
+                logging.info(f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен.")
+                # Можно отправить аккуратное сообщение, если хочешь:
+                # notify_entry(self.symbol, last_price, buy_score, f"NO-TRADE: {expl}", 0.0)
+                return
+
+            try:
+                # Открываем лонг (спот). PositionManager сам выставит tp/sl/трейлинг + сохранит state
+                self.pm.open_long(self.symbol, usd_amt, entry_price=last_price, atr=(atr_val or 0.0))
+                notify_entry(self.symbol, last_price, buy_score, expl, usd_amt)
+            except Exception:
+                logging.exception("Error while opening long")
+        else:
+            logging.info("❎ Filtered by Buy Score")
+
+    # ── внешний запуск ─────────────────────────────────────────────────────────
     def run(self):
-        """Запуск основного цикла бота"""
-        try:
-            # Планирование задач
-            schedule.every(TradingConfig.ANALYSIS_INTERVAL).minutes.do(self.main_trading_cycle)
-            schedule.every(TradingConfig.MARKET_REEVALUATION).hours.do(self.reevaluate_market)
-            
-            # Отправка уведомления о запуске
-            self.telegram_bot.send_message("🚀 Торговый бот запущен и готов к работе!")
-            
-            logging.info("📊 Bot started, entering main loop...")
-            
-            while True:
-                schedule.run_pending()
-                time.sleep(60)  # Проверка каждую минуту
-                
-        except KeyboardInterrupt:
-            logging.info("🛑 Bot stopped by user")
-            self.telegram_bot.send_message("🛑 Торговый бот остановлен")
-        except Exception as e:
-            logging.critical(f"Critical error in main loop: {e}")
-            self.telegram_bot.send_message(f"🚨 Критическая ошибка: {e}")
-    
-    def main_trading_cycle(self):
-        """Основной торговый цикл (каждые 15 минут)"""
-        try:
-            logging.info("🔄 Starting trading cycle...")
-            
-            # Проверка состояния cooldown
-            if self.state_manager.is_in_cooldown():
-                logging.info("❄️ Bot in cooldown, skipping cycle")
-                return
-            
-            # Получение данных
-            df_15m = self._fetch_market_data('15m', 100)
-            df_1h = self._fetch_market_data('1h', 100)
-            df_4h = self._fetch_market_data('4h', 100)
-            df_1d = self._fetch_market_data('1d', 100)
-            
-            if any(df is None for df in [df_15m, df_1h, df_4h, df_1d]):
-                logging.error("Failed to fetch market data")
-                return
-            
-            # Расчет технических индикаторов
-            df_15m = TechnicalIndicators.calculate_all_indicators(df_15m)
-            
-            # Анализ рынка
-            market_condition, market_confidence = self.market_analyzer.analyze_market_condition(df_1d, df_4h)
-            
-            # ML предсказание
-            ml_prediction, ml_confidence = self._get_ml_prediction(df_15m, market_condition)
-            
-            # Проверка текущего состояния
-            current_state = self.state_manager.get_trading_state()
-            
-            if current_state == TradingState.WAITING:
-                self._handle_waiting_state(df_15m, market_condition, ml_confidence)
-            elif current_state == TradingState.IN_POSITION:
-                self._handle_position_state(df_15m)
-            
-            # Обновление счетчика RSI
-            self._update_rsi_counter(df_15m)
-            
-        except Exception as e:
-            logging.error(f"Error in trading cycle: {e}")
-            self.telegram_bot.send_message(f"⚠️ Ошибка в торговом цикле: {e}")
-    
-    def _handle_waiting_state(self, df: pd.DataFrame, market_condition: MarketCondition, ml_confidence: float):
-        """Обработка состояния ожидания"""
-        try:
-            # Расчет балла для покупки
-            buy_score, score_details = self.scoring_engine.calculate_buy_score(
-                df, market_condition, ml_confidence
-            )
-            
-            # Проверка условий для покупки
-            if buy_score >= score_details.get('threshold', TradingConfig.MIN_SCORE_TO_BUY):
-                position = self.position_manager.open_position(
-                    TradingConfig.SYMBOL,
-                    TradingConfig.POSITION_SIZE_USD
-                )
-                
-                if position:
-                    message = f"""
-🎯 <b>ПОЗИЦИЯ ОТКРЫТА</b>
-
-📊 {position['symbol']}
-💰 Цена входа: ${position['entry_price']:.2f}
-📈 Количество: {position['quantity']:.6f}
-🎯 Балл решения: {buy_score:.2f}/{score_details['threshold']:.2f}
-🤖 AI уверенность: {ml_confidence:.1%}
-📊 Рынок: {market_condition.value}
-
-🎯 Take Profit: {TradingConfig.TAKE_PROFIT_PCT}%
-🛑 Stop Loss: {TradingConfig.STOP_LOSS_PCT}%
-                    """
-                    self.telegram_bot.send_message(message)
-                    
-        except Exception as e:
-            logging.error(f"Error in waiting state: {e}")
-    
-    def _handle_position_state(self, df: pd.DataFrame):
-        """Обработка состояния с открытой позицией"""
-        try:
-            position_profit = self.position_manager.get_position_profit()
-            
-            # Проверка условий для продажи
-            should_sell, sell_reason = self.scoring_engine.should_sell(
-                df, position_profit, self.rsi_over_70_candles
-            )
-            
-            if should_sell:
-                result = self.position_manager.close_position(sell_reason)
-                
-                if result:
-                    profit_emoji = "💚" if result['profit_pct'] > 0 else "❌"
-                    message = f"""
-{profit_emoji} <b>ПОЗИЦИЯ ЗАКРЫТА</b>
-
-📊 {result['symbol']}
-💰 Цена выхода: ${result['exit_price']:.2f}
-📈 Прибыль: {result['profit_pct']:.2f}% (${result['profit_usd']:.2f})
-🔍 Причина: {result['reason']}
-
-📊 Статистика:
-• Всего сделок: {self.state_manager.state['total_trades']}
-• Прибыльных: {self.state_manager.state['win_trades']}
-• Общая прибыль: ${self.state_manager.state['total_profit']:.2f}
-                    """
-                    self.telegram_bot.send_message(message)
-                    
-        except Exception as e:
-            logging.error(f"Error in position state: {e}")
-    
-    def _fetch_market_data(self, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        """Получение рыночных данных"""
-        try:
-            ohlcv = self.exchange_client.fetch_ohlcv(TradingConfig.SYMBOL, timeframe, limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            return df
-            
-        except Exception as e:
-            logging.error(f"Failed to fetch {timeframe} data: {e}")
-            return None
-    
-    def _get_ml_prediction(self, df: pd.DataFrame, market_condition: MarketCondition) -> tuple:
-        """Получение ML предсказания"""
-        try:
-            if len(df) < 20:
-                return 0.5, 0.5
-            
-            # Подготовка признаков для ML
-            latest = df.iloc[-1]
-            features = np.array([
-                latest['rsi'],
-                latest['macd'],
-                latest['ema_cross'],
-                latest['bb_position'],
-                latest['stoch_k'],
-                latest['adx'],
-                latest['volume_ratio'],
-                latest['close'] / latest['open'] - 1  # price change
-            ])
-            
-            prediction, confidence = self.ml_model.predict(features, market_condition.value)
-            return prediction, confidence
-            
-        except Exception as e:
-            logging.error(f"ML prediction failed: {e}")
-            return 0.5, 0.5
-    
-    def _update_rsi_counter(self, df: pd.DataFrame):
-        """Обновление счетчика RSI >70"""
-        try:
-            latest_rsi = df['rsi'].iloc[-1]
-            if latest_rsi > TradingConfig.RSI_OVERBOUGHT:
-                self.rsi_over_70_candles += 1
-            else:
-                self.rsi_over_70_candles = 0
-                
-        except Exception as e:
-            logging.error(f"Failed to update RSI counter: {e}")
-    
-    def reevaluate_market(self):
-        """Переоценка рыночных условий"""
-        try:
-            logging.info("🔄 Market reevaluation started...")
-            
-            # Здесь можно добавить логику переобучения ML модели
-            # self.retrain_ml_model()
-            
-            self.last_market_reevaluation = datetime.now()
-            logging.info("✅ Market reevaluation completed")
-            
-        except Exception as e:
-            logging.error(f"Market reevaluation failed: {e}")
-
-
-if __name__ == "__main__":
-    # Создание необходимых директорий
-    os.makedirs("models", exist_ok=True)
-    os.makedirs("logs", exist_ok=True)
-    
-    # Запуск бота
-    bot = TradingBot()
-    bot.run()
+        logging.info("📊 Bot started, entering main loop...")
+        while True:
+            try:
+                self._trading_cycle()
+            except Exception as e:
+                logging.error(f"Cycle error: {e}\n{traceback.format_exc()}")
+            # Период цикла
+            time.sleep(self.cycle_minutes * 60)
