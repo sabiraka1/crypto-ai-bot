@@ -17,29 +17,23 @@ class ExchangeClient:
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'spot',
-                # ✅ покупаем по сумме (USDT), без передачи price
-                'createMarketBuyOrderRequiresPrice': False,
-                # ✅ ccxt будет автоматически корректировать дрифт времени
-                'adjustForTimeDifference': True,
+                'createMarketBuyOrderRequiresPrice': False,  # покупаем по сумме (USDT)
+                'adjustForTimeDifference': True,             # автокоррекция времени
             }
         })
 
         self.markets = None
         try:
-            # проверим, что ключи заданы (кинет исключение, если пустые)
             self.exchange.check_required_credentials()
         except Exception:
-            # не падаем — позволяем работать и в режиме без ключей (чтение)
             pass
 
         try:
-            # короткая попытка синхронизировать время (если биржа поддерживает)
             try:
                 server_time = self.exchange.fetch_time()
                 drift_ms = int(server_time) - int(time.time() * 1000)
                 logging.info(f"⏱️ Gate.io time drift ~ {drift_ms} ms")
             except Exception:
-                # не критично, просто логируем
                 logging.debug("fetch_time not available")
 
             self.markets = self.exchange.load_markets()
@@ -62,7 +56,6 @@ class ExchangeClient:
         """Лёгкий тест авторизации: пробуем запросить баланс."""
         try:
             bal = self._safe(self.exchange.fetch_balance)
-            # если ключи только для чтения — всё равно ок
             total = bal.get('total', {}) or {}
             logging.info(f"🔐 Auth OK, assets: {len(total)}")
             return True
@@ -72,11 +65,9 @@ class ExchangeClient:
 
     # ---------- OHLCV & ticker ----------
     def fetch_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 200) -> List[List[Any]]:
-        """CCXT OHLCV: [ts, open, high, low, close, volume]"""
         return self._safe(self.exchange.fetch_ohlcv, symbol, timeframe, None, limit)
 
     def ticker(self, symbol: str) -> Dict[str, Any]:
-        """Ticker: {'last': ..., 'close': ...}"""
         return self._safe(self.exchange.fetch_ticker, symbol)
 
     def get_last_price(self, symbol: str) -> float:
@@ -92,7 +83,7 @@ class ExchangeClient:
     def create_market_buy_order(self, symbol: str, usd_amount: float):
         """
         Создаёт маркет-ордер на покупку по сумме в USDT (quote).
-        CCXT + Gate.io примут это при createMarketBuyOrderRequiresPrice=False.
+        Gate.io примет это при createMarketBuyOrderRequiresPrice=False.
         """
         order = self._safe(
             self.exchange.create_order,
@@ -107,7 +98,6 @@ class ExchangeClient:
         return order
 
     def create_market_sell_order(self, symbol: str, amount: float):
-        # для sell передаём количество базовой валюты
         order = self._safe(self.exchange.create_order, symbol, 'market', 'sell', amount)
         self._log_trade("SELL", symbol, amount, self.get_last_price(symbol))
         return order

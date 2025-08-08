@@ -2,19 +2,18 @@ import os
 import logging
 import requests
 import pandas as pd
-from typing import Optional, Callable, List
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from typing import Optional, Callable, List
 
 from analysis import scoring_engine
 from trading.exchange_client import ExchangeClient
 
 # ==== ENV ====
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("CHAT_ID", "").strip()
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
-
 
 # ==== Telegram helpers ====
 def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
@@ -29,10 +28,8 @@ def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
     except Exception as e:
         logging.exception("Telegram request failed: %s", e)
 
-
 def send_message(text: str) -> None:
     _tg_request("sendMessage", {"chat_id": CHAT_ID, "text": text})
-
 
 def send_photo(image_path: str, caption: Optional[str] = None) -> None:
     if not os.path.exists(image_path):
@@ -45,21 +42,19 @@ def send_photo(image_path: str, caption: Optional[str] = None) -> None:
             data["caption"] = caption
         _tg_request("sendPhoto", data, files=files)
 
-
 # ==== Commands ====
 def cmd_start() -> None:
     send_message(
         "🚀 Торговый бот запущен!\n\n"
-        "/status – позиция\n"
-        "/profit – PnL\n"
-        "/errors – ошибки\n"
-        "/lasttrades – последние сделки\n"
-        "/train – обучение\n"
-        "/test – тест-сигнал\n"
-        "/testbuy – тестовая покупка\n"
-        "/testsell – тестовая продажа"
+        "/status – Показать открытую позицию\n"
+        "/profit – Общий PnL и Winrate\n"
+        "/errors – Последние ошибки из лога\n"
+        "/lasttrades – Последние сделки\n"
+        "/train – Обучить модель\n"
+        "/test – Тест сигнала\n"
+        "/testbuy – Тестовая покупка\n"
+        "/testsell – Тестовая продажа"
     )
-
 
 def cmd_status(state_manager, price_getter: Callable[[], Optional[float]]) -> None:
     st = getattr(state_manager, "state", {}) or {}
@@ -85,7 +80,6 @@ def cmd_status(state_manager, price_getter: Callable[[], Optional[float]]) -> No
         txt.append(f"TP≈{tp:.4f} | SL≈{sl:.4f}")
     send_message("\n".join(txt))
 
-
 def cmd_profit() -> None:
     path = "closed_trades.csv"
     if not os.path.exists(path):
@@ -102,7 +96,6 @@ def cmd_profit() -> None:
         logging.error("cmd_profit error: %s", e)
         send_message(f"⚠️ Ошибка: {e}")
 
-
 def cmd_errors() -> None:
     path = "bot_activity.log"
     if not os.path.exists(path):
@@ -114,7 +107,6 @@ def cmd_errors() -> None:
         send_message("Последние строки лога:\n" + "".join(lines))
     except Exception as e:
         send_message(f"⚠️ Ошибка чтения лога: {e}")
-
 
 def cmd_lasttrades() -> None:
     path = "closed_trades.csv"
@@ -134,8 +126,6 @@ def cmd_lasttrades() -> None:
     except Exception as e:
         send_message(f"⚠️ Ошибка чтения сделок: {e}")
 
-
-# ==== Добавляем недостающую функцию cmd_train ====
 def cmd_train(train_func) -> None:
     send_message("🧠 Запуск обучения модели...")
     try:
@@ -147,35 +137,6 @@ def cmd_train(train_func) -> None:
     except Exception as e:
         logging.error(f"cmd_train error: {e}")
         send_message(f"❌ Ошибка обучения: {e}")
-
-
-# ==== Notifications ====
-def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: float, tp1: float, tp2: float,
-                 buy_score: float = None, ai_score: float = None, amount_frac: float = None):
-    expl = []
-    if buy_score is not None and ai_score is not None:
-        expl.append(f"Buy {buy_score:.2f} / AI {ai_score:.2f}")
-    if amount_frac is not None:
-        expl.append(f"Size {int(amount_frac * 100)}%")
-    send_message(
-        f"📥 Вход LONG {symbol} @ {price}\n" +
-        (" | ".join(expl) if expl else "") +
-        f"\nСумма: ${amount_usd}\nTP%: {tp:.2f} | SL%: {sl:.2f}\nTP1: {tp1:.2f} | TP2: {tp2:.2f}"
-    )
-
-
-def notify_close(symbol: str, price: float, reason: str, pnl_pct: float, pnl_abs: float = None,
-                 buy_score: float = None, ai_score: float = None, amount_usd: float = None):
-    extra = []
-    if buy_score is not None and ai_score is not None:
-        extra.append(f"Buy {buy_score:.2f} / AI {ai_score:.2f}")
-    if amount_usd is not None:
-        extra.append(f"Size ${amount_usd:.2f}")
-    base = f"📤 Закрытие {symbol} @ {price}\n{reason} | PnL {pnl_pct:.2f}%" + ("\n" + " | ".join(extra) if extra else "")
-    if pnl_abs is not None:
-        base += f" ({pnl_abs:.2f}$)"
-    send_message(base)
-
 
 # ==== Test commands ====
 def cmd_test(symbol: str = None, timeframe: str = None):
@@ -207,50 +168,29 @@ def cmd_test(symbol: str = None, timeframe: str = None):
         logging.exception("cmd_test error")
         send_message(f"❌ TEST ошибка: {e}")
 
-
-def cmd_testbuy(state_manager, exchange_client, symbol: str = None, amount_usd: float = None):
-    # ИМПОРТ ПЕРЕНЕСЕН В НАЧАЛО ФАЙЛА - см. ниже
-    from trading.position_manager import PositionManager
-    
-    symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
-    if amount_usd is None:
-        amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
-    
-    # Создаем PositionManager с функциями уведомлений
-    pm = PositionManager(exchange_client, state_manager, notify_entry, notify_close)
-    
+# ==== Router ====
+def process_command(text: str, state_manager, exchange_client: ExchangeClient, train_func: Optional[Callable] = None):
+    text = (text or "").strip()
+    if not text.startswith("/"):
+        return
     try:
-        last = exchange_client.get_last_price(symbol)
-        buy_score, ai_score = None, None
-        try:
-            ohlcv = exchange_client.fetch_ohlcv(symbol, timeframe=os.getenv("TIMEFRAME", "15m"), limit=200)
-            df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
-            df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-            df.set_index("time", inplace=True)
-            engine = scoring_engine.ScoringEngine()
-            buy_score, ai_score, _ = engine.score(df)
-        except Exception:
-            pass
-        pm.open_long(symbol, amount_usd, last, atr=0.0, buy_score=buy_score, ai_score=ai_score)
-        send_message(f"✅ TESTBUY выполнен: {symbol} на ${amount_usd:.2f}")
+        sym = os.getenv("SYMBOL", "BTC/USDT")
+        if text.startswith("/start"):
+            return cmd_start()
+        if text.startswith("/status"):
+            return cmd_status(state_manager, lambda: exchange_client.get_last_price(sym))
+        if text.startswith("/profit"):
+            return cmd_profit()
+        if text.startswith("/errors"):
+            return cmd_errors()
+        if text.startswith("/lasttrades"):
+            return cmd_lasttrades()
+        if text.startswith("/train"):
+            return cmd_train(train_func if train_func else (lambda: False))
+        if text.startswith("/test"):
+            return cmd_test()
+        logging.info(f"Unknown or unsupported command: {text}")
+        send_message(f"❓ Неизвестная команда: {text}")
     except Exception as e:
-        logging.error(f"cmd_testbuy error: {e}")
-        send_message(f"❌ TESTBUY ошибка: {e}")
-
-
-def cmd_testsell(state_manager, exchange_client, symbol: str = None):
-    # ИМПОРТ ПЕРЕНЕСЕН В НАЧАЛО ФАЙЛА - см. ниже
-    from trading.position_manager import PositionManager
-    
-    symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
-    
-    # Создаем PositionManager с функциями уведомлений
-    pm = PositionManager(exchange_client, state_manager, notify_entry, notify_close)
-    
-    try:
-        last = exchange_client.get_last_price(symbol)
-        pm.close_position(symbol, last, reason="manual_testsell")
-        send_message(f"✅ TESTSELL выполнен: {symbol}")
-    except Exception as e:
-        logging.error(f"cmd_testsell error: {e}")
-        send_message(f"❌ TESTSELL ошибка: {e}")
+        logging.exception(f"process_command error: {e}")
+        send_message(f"⚠️ Ошибка обработки команды: {e}")
