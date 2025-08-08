@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # уведомления в TG из bot_handler
 try:
@@ -15,7 +15,17 @@ try:
 except Exception:
     CSVHandler = None
 
-# … твои импорты/константы/класс/инициализация остаются без изменений …
+
+class PositionManager:
+    TP_PERCENT = 0.02
+    SL_PERCENT = -0.02
+    TP1_ATR = 1.5
+    TP2_ATR = 3.0
+    SL_ATR = 1.0
+
+    def __init__(self, exchange_client, state_manager):
+        self.ex = exchange_client
+        self.state = state_manager
 
     # ========= ВХОД =========
     def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float,
@@ -35,18 +45,14 @@ except Exception:
             'symbol': symbol,
             'entry_price': entry_price,
             'qty_usd': amount_usd,
-            # процентные предохранители
             'tp_price_pct': entry_price * (1 + self.TP_PERCENT),
             'sl_price_pct': entry_price * (1 + self.SL_PERCENT),
-            # ATR-уровни
             'tp1_atr': entry_price + self.TP1_ATR * atr,
             'tp2_atr': entry_price + self.TP2_ATR * atr,
             'sl_atr': entry_price - self.SL_ATR * atr,
-            # трейлинг
             'trailing_on': False,
             'partial_taken': False,
             'open_time': datetime.utcnow().isoformat(),
-            # ⬇️ сохраняем для уведомлений/аналитики на выходе
             'buy_score': buy_score,
             'ai_score': ai_score
         })
@@ -54,7 +60,6 @@ except Exception:
 
         logging.info(f"Opened LONG {symbol} @ {entry_price:.4f} amount=${amount_usd:.2f}")
 
-        # 🔔 TG уведомление о входе
         try:
             if notify_entry:
                 notify_entry(
@@ -74,35 +79,29 @@ except Exception:
 
         return order
 
-    # ========= ВЕДЕНИЕ =========
-    # … остаётся без изменений …
-
     # ========= ВЫХОД =========
     def close_all(self, symbol: str, exit_price: float, reason: str):
         st = self.state.state
         if not st.get('in_position'):
             return
-        # рыночное закрытие лонга: продаём на сумму в USD, пересчитав в количество
+
         qty = st['qty_usd'] / exit_price if exit_price else 0
         try:
             self.ex.create_market_sell_order(symbol, qty)
         except Exception as e:
             logging.error(f"close_all sell error: {e}")
 
-        # PnL
         entry = float(st.get('entry_price') or 0.0)
         pnl_pct = ((exit_price - entry) / entry * 100.0) if entry else 0.0
         qty_usd = float(st.get('qty_usd') or 0.0)
         pnl_abs = (exit_price - entry) * (qty_usd / entry) if entry else 0.0
 
-        # лог в CSV
         try:
             if CSVHandler:
                 CSVHandler.append_closed_trade(symbol, entry, exit_price, pnl_pct, pnl_abs, reason)
         except Exception as e:
             logging.error(f"CSV log closed trade error: {e}")
 
-        # 🔔 TG уведомление о выходе (+добавили Buy/AI/Size)
         try:
             if notify_close:
                 notify_close(
@@ -118,13 +117,9 @@ except Exception:
         except Exception as e:
             logging.error(f"notify_close error: {e}")
 
-        # сброс состояния
         st.update({
             'in_position': False,
             'close_price': exit_price,
             'last_reason': reason
         })
         self.state.save_state()
-
-    # ========= Совместимость / вспомогательные =========
-    # … без изменений …
