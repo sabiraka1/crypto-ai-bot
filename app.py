@@ -1,114 +1,62 @@
 import os
 import logging
-from flask import Flask, jsonify, request
-from dotenv import load_dotenv
+import threading
+from flask import Flask, request, jsonify
 
-# Загружаем переменные окружения
-load_dotenv()
+# важно: у тебя в main.py класс называется TradingBot (не CryptoBot)
+from main import TradingBot
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot_activity.log", encoding="utf-8")
+    ],
 )
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Импортируем основные модули проекта
-try:
-    from main import CryptoBot
-    logger.info("Модули успешно импортированы")
-except ImportError as e:
-    logger.error(f"Ошибка импорта модулей: {e}")
-    CryptoBot = None
+# --- запустим бота в фоновом потоке ---
+_bot_instance = TradingBot()
 
-@app.route('/')
-def home():
-    """Главная страница для проверки работы сервиса"""
-    return jsonify({
-        "status": "running",
-        "service": "Crypto AI Bot",
-        "message": "Бот работает и готов к торговле"
-    })
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint для Render"""
+def _run_bot():
     try:
-        # Проверяем основные компоненты
-        status = {
-            "status": "healthy",
-            "bot_token": "configured" if os.getenv('BOT_TOKEN') else "missing",
-            "api_keys": "configured" if os.getenv('GATE_API_KEY') else "missing",
-            "timestamp": str(__import__('datetime').datetime.now())
-        }
-        return jsonify(status)
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+        logging.info("🚀 Trading bot starting...")
+        _bot_instance.run()
+    except Exception:
+        logging.exception("Trading bot crashed")
 
-@app.route('/webhook', methods=['POST'])
+threading.Thread(target=_run_bot, daemon=True).start()
+
+# --- healthcheck для Render ---
+@app.route("/alive", methods=["GET"])
+def alive():
+    return jsonify({"ok": True, "status": "running"}), 200
+
+# --- Telegram webhook (опционально, если захочешь команды на вебхуке) ---
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    """Webhook для Telegram (если используется)"""
     try:
-        # Временно закомментировано - используется polling режим
-        # update = telegram.Update.de_json(request.get_json(force=True), bot)
-        # dispatcher.process_update(update)
-        return jsonify({"status": "ok"})
+        data = request.get_json(force=True, silent=True) or {}
+        msg = (data.get("message") or data.get("edited_message") or {})
+        text = (msg.get("text") or "").strip()
+        # Пример простого роутинга команд (если нужно):
+        # from telegram.bot_handler import cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train
+        # from core.state_manager import StateManager
+        # from trading.exchange_client import ExchangeClient
+        # if text == "/status":
+        #     state = StateManager()
+        #     ex = ExchangeClient(api_key=os.getenv("GATE_API_KEY"), api_secret=os.getenv("GATE_API_SECRET"))
+        #     cmd_status(state, lambda: ex.ticker(os.getenv("SYMBOL", "BTC/USDT")).get("last"))
+        # elif text == "/profit":
+        #     cmd_profit()
+        # ...
+        return jsonify({"ok": True}), 200
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.exception("webhook error")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route('/bot/start', methods=['POST'])
-def start_bot():
-    """Запуск бота"""
-    try:
-        if CryptoBot is None:
-            return jsonify({"error": "Bot modules not available"}), 500
-            
-        # Здесь должна быть логика запуска бота
-        logger.info("Получен запрос на запуск бота")
-        return jsonify({"status": "Bot starting", "message": "Бот запускается..."})
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/bot/status')
-def bot_status():
-    """Статус бота"""
-    try:
-        return jsonify({
-            "status": "active",
-            "trade_amount": os.getenv('TRADE_AMOUNT', '50'),
-            "timezone": os.getenv('TZ', 'UTC')
-        })
-    except Exception as e:
-        logger.error(f"Ошибка получения статуса: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Endpoint not found"}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"Internal server error: {error}")
-    return jsonify({"error": "Internal server error"}), 500
-
-if __name__ == '__main__':
-    # Получаем порт из переменных окружения (для Render)
-    port = int(os.environ.get('PORT', 5000))
-    
-    # Настройки для продакшена
-    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    
-    logger.info(f"Запуск Flask приложения на порту {port}")
-    logger.info(f"Debug режим: {debug_mode}")
-    
-    # Запускаем приложение
-    app.run(
-        host='0.0.0.0',  # Важно для Render
-        port=port,
-        debug=debug_mode
-    )
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
