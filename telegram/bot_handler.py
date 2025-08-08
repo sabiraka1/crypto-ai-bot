@@ -15,6 +15,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+TRADES_LOG_PATH = "trades.log"
+
 def _post(method: str, **payload):
     try:
         r = requests.post(f"{API}/{method}", json=payload, timeout=20)
@@ -87,22 +89,48 @@ def cmd_status(state_manager, get_price_fn):
             f"Текущая: {last} | PnL: {pnl:.2f}%"
         )
     else:
+        # Если позиции нет — покажем последний BUY из trades.log
+        if os.path.exists(TRADES_LOG_PATH):
+            try:
+                with open(TRADES_LOG_PATH, "r") as f:
+                    lines = [l.strip() for l in f.readlines() if "BUY" in l.upper()]
+                if lines:
+                    last_buy = lines[-1]
+                    send_message(f"🟢 Позиции нет\nПоследний вход: {last_buy}")
+                    return
+            except Exception as e:
+                logging.error(f"Error reading trades.log: {e}")
         send_message("🟢 Позиции нет")
 
 def cmd_profit(closed_csv_path="closed_trades.csv"):
-    if not os.path.exists(closed_csv_path):
-        send_message("📭 Сделок ещё нет"); return
-    df = pd.read_csv(closed_csv_path)
-    if df.empty:
-        send_message("📭 Сделок ещё нет"); return
-    if "pnl_abs" in df.columns:
-        pnl = df["pnl_abs"].sum()
-        winrate = (df["pnl_abs"] > 0).mean() * 100
+    pnl = 0.0
+    winrate = 0.0
+    trades_info = ""
+
+    if os.path.exists(closed_csv_path):
+        df = pd.read_csv(closed_csv_path)
+        if not df.empty:
+            if "pnl_abs" in df.columns:
+                pnl = df["pnl_abs"].sum()
+                winrate = (df["pnl_abs"] > 0).mean() * 100
+            else:
+                df["pnl_abs"] = (df["close_price"] - df["entry_price"])
+                pnl = df["pnl_abs"].sum()
+                winrate = (df["pnl_abs"] > 0).mean() * 100
+
+    # Добавляем последние сделки из trades.log
+    if os.path.exists(TRADES_LOG_PATH):
+        try:
+            with open(TRADES_LOG_PATH, "r") as f:
+                last_trades = f.readlines()[-5:]
+            trades_info = "\n📜 Последние ордера:\n" + "".join(last_trades)
+        except Exception as e:
+            logging.error(f"Error reading trades.log: {e}")
+
+    if pnl == 0 and not trades_info:
+        send_message("📭 Сделок ещё нет")
     else:
-        df["pnl_abs"] = (df["close_price"] - df["entry_price"])
-        pnl = df["pnl_abs"].sum()
-        winrate = (df["pnl_abs"] > 0).mean() * 100
-    send_message(f"💰 PnL: {pnl:.2f}\nWinrate: {winrate:.1f}%")
+        send_message(f"💰 PnL: {pnl:.2f}\nWinrate: {winrate:.1f}%{trades_info}")
 
 def cmd_errors(csv_path="sinyal_fiyat_analizi.csv"):
     if not os.path.exists(csv_path):
@@ -151,14 +179,24 @@ def notify_entry(symbol: str, price: float, score: float, expl: str, amount_usd:
         f"AI: {score:.2f} | {expl}\n"
         f"Сумма: {amount_usd:.0f}$"
     )
+    try:
+        with open(TRADES_LOG_PATH, "a") as f:
+            f.write(f"{datetime.now()} BUY {symbol} @ {price} | score={score:.2f}\n")
+    except Exception as e:
+        logging.error(f"Error writing trades.log: {e}")
 
 def notify_close(symbol: str, price: float, reason: str, pnl_pct: float):
     send_message(
         f"📤 Закрытие {symbol} @ {price}\n"
         f"{reason} | PnL {pnl_pct:.2f}%"
     )
+    try:
+        with open(TRADES_LOG_PATH, "a") as f:
+            f.write(f"{datetime.now()} SELL {symbol} @ {price} | pnl={pnl_pct:.2f}% | {reason}\n")
+    except Exception as e:
+        logging.error(f"Error writing trades.log: {e}")
 
-# --- КЛАСС-ОБЁРТКА, чтобы main.py мог работать без изменений ---
+# --- КЛАСС-ОБЁРТКА ---
 class TelegramBot:
     """Тонкая обёртка над текущими функциями, чтобы main.py мог вызывать как класс."""
     def __init__(self, token: str, chat_id: str, state_manager=None):

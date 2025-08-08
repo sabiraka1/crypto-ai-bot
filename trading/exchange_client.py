@@ -1,65 +1,56 @@
 import ccxt
 import os
-import time
 import logging
-from typing import Dict, Optional
-
-class APIException(Exception):
-    pass
+from datetime import datetime
 
 class ExchangeClient:
-    """Gate.io spot via ccxt with helpers."""
-    def __init__(self, api_key: Optional[str]=None, api_secret: Optional[str]=None):
+    def __init__(self, api_key=None, api_secret=None):
+        self.api_key = api_key or os.getenv('GATE_API_KEY')
+        self.api_secret = api_secret or os.getenv('GATE_API_SECRET')
         self.exchange = ccxt.gateio({
-            'apiKey': api_key or os.getenv("GATE_API_KEY"),
-            'secret': api_secret or os.getenv("GATE_API_SECRET"),
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
+            'apiKey': self.api_key,
+            'secret': self.api_secret,
+            'enableRateLimit': True
         })
-        self.markets = None
-        try:
-            self.markets = self.exchange.load_markets()
-        except Exception as e:
-            logging.error(f"load_markets failed: {e}")
+        self.markets = self.exchange.load_markets()
+        logging.info("✅ Exchange client initialized and markets loaded")
 
-    def _safe(self, fn, *args, **kwargs):
-        for _ in range(3):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as e:
-                logging.error(f"ccxt call failed: {e}")
-                time.sleep(2)
-        raise APIException("exchange call failed after retries")
+    def _log_trade(self, action, symbol, amount, price):
+        """Логирование сделки в файл и консоль"""
+        msg = f"[TRADE] {datetime.utcnow()} UTC | {action.upper()} {amount} {symbol} @ {price} USDT"
+        logging.info(msg)
+        with open("trades.log", "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
 
-    def ticker(self, symbol: str) -> Dict:
-        return self._safe(self.exchange.fetch_ticker, symbol)
+    def get_balance(self, asset):
+        balance = self.exchange.fetch_balance()
+        return balance['free'].get(asset, 0)
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 200):
-        return self._safe(self.exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+    def get_last_price(self, symbol):
+        ticker = self.exchange.fetch_ticker(symbol)
+        return ticker['last']
 
-    def _amount_from_usd(self, symbol: str, usd: float, last_price: float) -> float:
-        if last_price <= 0:
-            return 0.0
-        amt = usd / last_price
-        try:
-            if self.markets and symbol in self.markets:
-                amt = float(self.exchange.amount_to_precision(symbol, amt))
-                # опционально проверим минималки
-                info = self.markets.get(symbol, {})
-                limits = info.get('limits', {})
-                min_amount = (limits.get('amount', {}) or {}).get('min')
-                if min_amount and amt < float(min_amount):
-                    # округлим вверх до минимума
-                    amt = float(min_amount)
-        except Exception as e:
-            logging.warning(f"amount precision/limit warning: {e}")
-        return float(amt)
+    def _apply_precision(self, symbol, amount):
+        """Применяем точность и проверяем минимальный объём"""
+        amount = self.exchange.amount_to_precision(symbol, amount)
+        min_amount = self.markets[symbol]['limits']['amount']['min']
+        if float(amount) < min_amount:
+            amount = min_amount
+        return float(amount)
 
-    def create_market_buy_order(self, symbol: str, usd: float):
-        t = self.ticker(symbol)
-        last = float(t.get('last') or t.get('close'))
-        amount = self._amount_from_usd(symbol, usd, last)
-        return self._safe(self.exchange.create_order, symbol, 'market', 'buy', amount)
+    def buy(self, symbol, amount_usd):
+        """Маркет-покупка на указанную сумму в USD"""
+        last_price = self.get_last_price(symbol)
+        amount = amount_usd / last_price
+        amount = self._apply_precision(symbol, amount)
+        order = self.exchange.create_market_buy_order(symbol, amount)
+        self._log_trade("buy", symbol, amount, last_price)
+        return order
 
-    def create_market_sell_order(self, symbol: str, amount: float):
-        return self._safe(self.exchange.create_order, symbol, 'market', 'sell', amount)
+    def sell(self, symbol, amount):
+        """Маркет-продажа"""
+        amount = self._apply_precision(symbol, amount)
+        last_price = self.get_last_price(symbol)
+        order = self.exchange.create_market_sell_order(symbol, amount)
+        self._log_trade("sell", symbol, amount, last_price)
+        return order
