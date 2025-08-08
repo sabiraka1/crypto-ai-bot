@@ -1,6 +1,19 @@
 import logging
 from datetime import datetime, timedelta
 
+# уведомления в TG
+try:
+    from telegram.bot_handler import notify_entry, notify_close
+except Exception:
+    notify_entry = None
+    notify_close = None
+
+# безопасная работа с CSV
+try:
+    from utils.csv_handler import CSVHandler
+except Exception:
+    CSVHandler = None
+
 class PositionManager:
     """
     Управление позицией: открытие/ведение/закрытие.
@@ -27,7 +40,7 @@ class PositionManager:
         # Лимит времени
         self.TIMEOUT_HOURS = 2
 
-    # ========= ТЕ ЖЕ ТВОИ МЕТОДЫ =========
+    # ========= ТВОИ МЕТОДЫ (с уведомлениями) =========
     def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float):
         st = self.state.state
         if st.get('in_position'):
@@ -57,7 +70,24 @@ class PositionManager:
             'open_time': datetime.utcnow().isoformat()
         })
         self.state.save_state()
+
         logging.info(f"Opened LONG {symbol} @ {entry_price:.4f}")
+
+        # 🔔 TG уведомление о входе
+        try:
+            if notify_entry:
+                notify_entry(
+                    symbol=symbol,
+                    price=float(entry_price),
+                    amount_usd=float(amount_usd),
+                    tp=float(st['tp_price_pct']),
+                    sl=float(st['sl_price_pct']),
+                    tp1=float(st['tp1_atr']),
+                    tp2=float(st['tp2_atr'])
+                )
+        except Exception as e:
+            logging.error(f"notify_entry error: {e}")
+
         return order
 
     def manage(self, symbol: str, last_price: float, atr: float):
@@ -106,6 +136,7 @@ class PositionManager:
         st = self.state.state
         if not st.get('in_position'):
             return
+
         # рыночное закрытие лонга: продаём на сумму в USD, пересчитав в количество
         qty = st['qty_usd'] / exit_price if exit_price else 0
         try:
@@ -113,10 +144,31 @@ class PositionManager:
         except Exception as e:
             logging.error(f"close_all sell error: {e}")
 
-        pnl_pct = 0.0
-        if st.get('entry_price'):
-            pnl_pct = (exit_price - st['entry_price']) / st['entry_price'] * 100.0
+        # PnL
+        entry = float(st.get('entry_price') or 0.0)
+        pnl_pct = ((exit_price - entry) / entry * 100.0) if entry else 0.0
+        # эквивалент по USD: qty_usd / entry = фактическое количество
+        qty_usd = float(st.get('qty_usd') or 0.0)
+        pnl_abs = (exit_price - entry) * (qty_usd / entry) if entry else 0.0
 
+        # лог в CSV (если есть утилита)
+        try:
+            if CSVHandler:
+                CSVHandler.append_to_csv({
+                    "time": datetime.utcnow().isoformat(),
+                    "symbol": symbol,
+                    "side": "LONG",
+                    "entry_price": entry,
+                    "close_price": float(exit_price),
+                    "qty_usd": qty_usd,
+                    "pnl_abs": float(pnl_abs),
+                    "pnl_pct": float(pnl_pct),
+                    "reason": reason
+                }, "closed_trades.csv")
+        except Exception as e:
+            logging.error(f"write closed_trades.csv failed: {e}")
+
+        # обновляем состояние
         st.update({
             'in_position': False,
             'last_exit_price': exit_price,
@@ -124,16 +176,28 @@ class PositionManager:
             'last_close_reason': reason
         })
         self.state.save_state()
+
         logging.info(f"Closed LONG @ {exit_price:.4f} reason={reason} pnl={pnl_pct:.2f}%")
 
-    # ========= ТОНКИЕ ОБЁРТКИ ДЛЯ СОВМЕСТИМОСТИ =========
-    # Нужны, чтобы основной цикл мог звать open_position/close_position, как в логах.
+        # 🔔 TG уведомление о выходе
+        try:
+            if notify_close:
+                notify_close(
+                    symbol=symbol,
+                    price=float(exit_price),
+                    reason=reason,
+                    pnl_pct=float(pnl_pct),
+                    pnl_abs=float(pnl_abs)
+                )
+        except Exception as e:
+            logging.error(f"notify_close error: {e}")
 
+    # ========= Совместимость с основным циклом =========
     def open_position(self, exchange_client, symbol: str, usd_amount: float):
         """
         Совместимость с вызовом из основного цикла:
         - берём текущую цену через exchange_client/self.ex
-        - ATR для старта можно передать 0.0 (предохранители по % всё равно работают)
+        - ATR для старта 0.0 (процентные предохранители всё равно работают)
         """
         try:
             price = (exchange_client or self.ex).get_last_price(symbol)

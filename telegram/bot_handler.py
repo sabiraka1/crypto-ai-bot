@@ -62,6 +62,30 @@ def explain_signal_short(rsi: float, adx: float, macd_hist: float, ema_fast_abov
     parts.append("MACD+" if macd_hist > 0 else "MACD-")
     return " / ".join(parts)
 
+# ---------- НОВОЕ: уведомления вход/выход ----------
+def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: float,
+                 tp1: float = None, tp2: float = None):
+    text = (
+        f"📥 Открыт LONG {symbol}\n"
+        f"Вход: {price:.2f}\n"
+        f"Сумма: {amount_usd:.0f} USDT\n"
+        f"TP% предохран.: {tp:.2f}\n"
+        f"SL% предохран.: {sl:.2f}"
+    )
+    if tp1 is not None and tp2 is not None:
+        text += f"\nATR уровни: TP1 {tp1:.2f} | TP2 {tp2:.2f}"
+    send_message(text)
+
+def notify_close(symbol: str, price: float, reason: str, pnl_pct: float, pnl_abs: float):
+    sign = "🟢" if pnl_abs >= 0 else "🔴"
+    text = (
+        f"📤 Закрыт LONG {symbol}\n"
+        f"Выход: {price:.2f}\n"
+        f"Причина: {reason}\n"
+        f"{sign} PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)"
+    )
+    send_message(text)
+
 # -------------------- Команды --------------------
 def cmd_start():
     send_message(
