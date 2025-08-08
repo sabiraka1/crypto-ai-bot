@@ -11,3 +11,4 @@ aiohttp==3.8.5
 ccxt==4.0.104
 pandas-ta==0.3.14b0
 plotly==5.17.0
+matplotlib==3.9.1
