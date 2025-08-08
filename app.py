@@ -24,13 +24,8 @@ def webhook():
             
             # Обработка команд
             if text.startswith('/'):
-                try:
-                    response = trading_bot.telegram_bot.handle_command(text)
-                    trading_bot.telegram_bot.send_message(response)
-                except Exception as cmd_error:
-                    error_msg = f"❌ Ошибка команды: {str(cmd_error)}"
-                    trading_bot.telegram_bot.send_message(error_msg)
-                    logging.error(f"Command error: {cmd_error}")
+                response = trading_bot.telegram_bot.handle_command(text)
+                trading_bot.telegram_bot.send_message(response)
         
         return jsonify({'status': 'ok'})
         
