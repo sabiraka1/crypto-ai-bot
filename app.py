@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import logging
 import threading
 import time
+import os
 from main import TradingBot
 
 app = Flask(__name__)
@@ -23,8 +24,13 @@ def webhook():
             
             # Обработка команд
             if text.startswith('/'):
-                response = trading_bot.telegram_bot.handle_command(text)
-                trading_bot.telegram_bot.send_message(response)
+                try:
+                    response = trading_bot.telegram_bot.handle_command(text)
+                    trading_bot.telegram_bot.send_message(response)
+                except Exception as cmd_error:
+                    error_msg = f"❌ Ошибка команды: {str(cmd_error)}"
+                    trading_bot.telegram_bot.send_message(error_msg)
+                    logging.error(f"Command error: {cmd_error}")
         
         return jsonify({'status': 'ok'})
         
@@ -73,6 +79,3 @@ if __name__ == '__main__':
     # Запуск Flask приложения
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-
-
-## 📁 Procfile
