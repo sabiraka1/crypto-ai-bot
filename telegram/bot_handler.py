@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 import pandas as pd
-from typing import Optional, Callable, List
+from typing import Optional, Callable
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -10,18 +10,19 @@ import matplotlib.pyplot as plt
 from analysis import scoring_engine
 from trading.exchange_client import ExchangeClient
 
+# === Telegram Config ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
 
+# ====== Вспомогательные функции ======
 def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
     if not TELEGRAM_API or not CHAT_ID:
-        logging.warning("Telegram not configured")
+        logging.warning("Telegram не настроен (BOT_TOKEN / CHAT_ID отсутствует)")
         return
-    url = f"{TELEGRAM_API}/{method}"
     try:
-        resp = requests.post(url, data=data, files=files, timeout=15)
+        resp = requests.post(f"{TELEGRAM_API}/{method}", data=data, files=files, timeout=15)
         if resp.status_code != 200:
             logging.error("Telegram API error: %s %s", resp.status_code, resp.text[:200])
     except Exception as e:
@@ -34,7 +35,7 @@ def send_message(text: str) -> None:
 
 def send_photo(image_path: str, caption: Optional[str] = None) -> None:
     if not os.path.exists(image_path):
-        logging.warning("send_photo: file not found: %s", image_path)
+        logging.warning(f"send_photo: file not found: {image_path}")
         return
     with open(image_path, "rb") as f:
         files = {"photo": f}
@@ -44,15 +45,18 @@ def send_photo(image_path: str, caption: Optional[str] = None) -> None:
         _tg_request("sendPhoto", data, files=files)
 
 
+# ====== Команды ======
 def cmd_start() -> None:
     send_message(
         "🚀 Торговый бот запущен!\n\n"
-        "/status – позиция\n"
-        "/profit – PnL\n"
-        "/errors – ошибки\n"
+        "/status – текущая позиция\n"
+        "/profit – PnL статистика\n"
+        "/errors – последние ошибки\n"
         "/lasttrades – последние сделки\n"
-        "/train – обучение\n"
-        "/test – тест-сигнал"
+        "/train – обучение AI модели\n"
+        "/test – тест-сигнал\n"
+        "/testbuy – ручной вход\n"
+        "/testsell – ручное закрытие"
     )
 
 
@@ -61,6 +65,7 @@ def cmd_status(state_manager, price_getter: Callable[[], Optional[float]]) -> No
     if not st.get("in_position"):
         send_message("🟢 Позиции нет")
         return
+
     sym = st.get("symbol", "BTC/USDT")
     entry = float(st.get("entry_price") or 0.0)
     last = None
@@ -70,40 +75,47 @@ def cmd_status(state_manager, price_getter: Callable[[], Optional[float]]) -> No
             last = float(last)
     except Exception:
         pass
+
     txt = [f"📌 Позиция LONG {sym} @ {entry:.4f}"]
     if last:
         pnl_pct = (last - entry) / entry * 100.0 if entry else 0.0
         txt.append(f"Текущая цена: {last:.4f} | PnL {pnl_pct:.2f}%")
-    tp = st.get("tp_price_pct"); sl = st.get("sl_price_pct")
+
+    tp = st.get("tp_price_pct")
+    sl = st.get("sl_price_pct")
     if tp and sl:
         txt.append(f"TP≈{tp:.4f} | SL≈{sl:.4f}")
+
     send_message("\n".join(txt))
 
 
 def cmd_profit() -> None:
     path = "closed_trades.csv"
     if not os.path.exists(path):
-        send_message("📊 PnL: 0.00\nWinrate: 0.0%")
+        send_message("📊 PnL: 0.00\nWinrate: 0.0%\nСделок нет")
         return
     try:
         df = pd.read_csv(path)
         pnl = float(df.get("pnl_abs", pd.Series([0.0])).sum())
         wins = int((df.get("pnl_pct", pd.Series([])) > 0).sum())
-        total = int(len(df))
+        total = len(df)
         wr = (wins / total * 100.0) if total else 0.0
         send_message(f"📊 PnL: {pnl:.2f}\nWinrate: {wr:.1f}%\nТрейдов: {total}")
     except Exception as e:
         logging.error("cmd_profit error: %s", e)
-        send_message(f"⚠️ Ошибка: {e}")
+        send_message(f"⚠️ Ошибка при расчете PnL: {e}")
 
 
-def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: float, tp1: float, tp2: float,
+# ====== Уведомления ======
+def notify_entry(symbol: str, price: float, amount_usd: float,
+                 tp: float, sl: float, tp1: float, tp2: float,
                  buy_score: float = None, ai_score: float = None, amount_frac: float = None):
     expl = []
     if buy_score is not None and ai_score is not None:
         expl.append(f"Buy {buy_score:.2f} / AI {ai_score:.2f}")
     if amount_frac is not None:
-        expl.append(f"Size {int(amount_frac*100)}%")
+        expl.append(f"Size {int(amount_frac * 100)}%")
+
     send_message(
         f"📥 Вход LONG {symbol} @ {price}\n" +
         (" | ".join(expl) if expl else "") +
@@ -111,14 +123,19 @@ def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: fl
     )
 
 
-def notify_close(symbol: str, price: float, reason: str, pnl_pct: float, pnl_abs: float = None,
-                 buy_score: float = None, ai_score: float = None, amount_usd: float = None):
+def notify_close(symbol: str, price: float, reason: str, pnl_pct: float,
+                 pnl_abs: float = None, buy_score: float = None,
+                 ai_score: float = None, amount_usd: float = None):
     extra = []
     if buy_score is not None and ai_score is not None:
         extra.append(f"Buy {buy_score:.2f} / AI {ai_score:.2f}")
     if amount_usd is not None:
         extra.append(f"Size ${amount_usd:.2f}")
-    base = f"📤 Закрытие {symbol} @ {price}\n{reason} | PnL {pnl_pct:.2f}%" + ("\n" + " | ".join(extra) if extra else "")
+
+    base = f"📤 Закрытие {symbol} @ {price}\n{reason} | PnL {pnl_pct:.2f}%"
+    if extra:
+        base += "\n" + " | ".join(extra)
     if pnl_abs is not None:
         base += f" ({pnl_abs:.2f}$)"
+
     send_message(base)
