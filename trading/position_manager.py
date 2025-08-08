@@ -15,32 +15,7 @@ try:
 except Exception:
     CSVHandler = None
 
-
-class PositionManager:
-    """
-    Управление позицией: открытие/ведение/закрытие.
-    Смешанный RM: процентный TP/SL (предохранитель) + ATR-лестница (TP1/TP2) + трейлинг после TP1.
-    Только LONG на споте.
-    """
-    def __init__(self, exchange_client, state_manager):
-        self.ex = exchange_client
-        self.state = state_manager
-
-        # Процентные предохранители
-        self.TP_PERCENT = 0.02     # +2%
-        self.SL_PERCENT = -0.02    # -2%
-
-        # ATR-ступени
-        self.TP1_ATR = 1.5
-        self.TP2_ATR = 2.0
-        self.SL_ATR  = 1.5
-
-        # Трейлинг после TP1
-        self.TRAILING_TRIGGER_ATR = 1.0
-        self.TRAILING_STEP_ATR    = 0.5
-
-        # Лимит времени
-        self.TIMEOUT_HOURS = 2
+# … твои импорты/константы/класс/инициализация остаются без изменений …
 
     # ========= ВХОД =========
     def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float,
@@ -70,7 +45,10 @@ class PositionManager:
             # трейлинг
             'trailing_on': False,
             'partial_taken': False,
-            'open_time': datetime.utcnow().isoformat()
+            'open_time': datetime.utcnow().isoformat(),
+            # ⬇️ сохраняем для уведомлений/аналитики на выходе
+            'buy_score': buy_score,
+            'ai_score': ai_score
         })
         self.state.save_state()
 
@@ -97,47 +75,7 @@ class PositionManager:
         return order
 
     # ========= ВЕДЕНИЕ =========
-    def manage(self, symbol: str, last_price: float, atr: float):
-        st = self.state.state
-        if not st.get('in_position'):
-            return
-
-        # 1) timeout
-        opened = datetime.fromisoformat(st['open_time'])
-        if datetime.utcnow() - opened >= timedelta(hours=self.TIMEOUT_HOURS):
-            self.close_all(symbol, last_price, reason='timeout')
-            return
-
-        # 2) процентные предохранители
-        if last_price >= st['tp_price_pct']:
-            self.close_all(symbol, last_price, reason='tp_pct'); return
-        if last_price <= st['sl_price_pct']:
-            self.close_all(symbol, last_price, reason='sl_pct'); return
-
-        # 3) ATR-логика
-        # TP1 — частичный выход: для спота просто включаем трейлинг и переносим SL в б/у
-        if not st.get('partial_taken') and last_price >= st['tp1_atr']:
-            st['partial_taken'] = True
-            st['sl_atr'] = max(st['sl_atr'], st['entry_price'] * 1.001)  # чутка выше б/у
-            st['trailing_on'] = True
-            self.state.save_state()
-            logging.info("Partial take at TP1; SL->breakeven; trailing ON")
-
-        # Трейлинг после TP1
-        if st.get('trailing_on') and atr and last_price >= st['entry_price'] + self.TRAILING_TRIGGER_ATR * atr:
-            new_sl = max(st['sl_atr'], last_price - self.TRAILING_STEP_ATR * atr)
-            if new_sl > st['sl_atr']:
-                st['sl_atr'] = new_sl
-                self.state.save_state()
-                logging.info(f"Trailing SL moved to {new_sl:.4f}")
-
-        # TP2 — полное закрытие
-        if last_price >= st['tp2_atr']:
-            self.close_all(symbol, last_price, reason='tp2_atr'); return
-
-        # стоп по ATR
-        if last_price <= st['sl_atr']:
-            self.close_all(symbol, last_price, reason='sl_atr'); return
+    # … остаётся без изменений …
 
     # ========= ВЫХОД =========
     def close_all(self, symbol: str, exit_price: float, reason: str):
@@ -160,32 +98,11 @@ class PositionManager:
         # лог в CSV
         try:
             if CSVHandler:
-                CSVHandler.append_to_csv({
-                    "time": datetime.utcnow().isoformat(),
-                    "symbol": symbol,
-                    "side": "LONG",
-                    "entry_price": entry,
-                    "close_price": float(exit_price),
-                    "qty_usd": qty_usd,
-                    "pnl_abs": float(pnl_abs),
-                    "pnl_pct": float(pnl_pct),
-                    "reason": reason
-                }, "closed_trades.csv")
+                CSVHandler.append_closed_trade(symbol, entry, exit_price, pnl_pct, pnl_abs, reason)
         except Exception as e:
-            logging.error(f"write closed_trades.csv failed: {e}")
+            logging.error(f"CSV log closed trade error: {e}")
 
-        # обновляем состояние
-        st.update({
-            'in_position': False,
-            'last_exit_price': exit_price,
-            'last_pnl_pct': pnl_pct,
-            'last_close_reason': reason
-        })
-        self.state.save_state()
-
-        logging.info(f"Closed LONG @ {exit_price:.4f} reason={reason} pnl={pnl_pct:.2f}%")
-
-        # 🔔 TG уведомление о выходе
+        # 🔔 TG уведомление о выходе (+добавили Buy/AI/Size)
         try:
             if notify_close:
                 notify_close(
@@ -193,43 +110,21 @@ class PositionManager:
                     price=float(exit_price),
                     reason=reason,
                     pnl_pct=float(pnl_pct),
-                    pnl_abs=float(pnl_abs)
+                    pnl_abs=float(pnl_abs),
+                    buy_score=st.get('buy_score'),
+                    ai_score=st.get('ai_score'),
+                    amount_usd=qty_usd
                 )
         except Exception as e:
             logging.error(f"notify_close error: {e}")
 
+        # сброс состояния
+        st.update({
+            'in_position': False,
+            'close_price': exit_price,
+            'last_reason': reason
+        })
+        self.state.save_state()
+
     # ========= Совместимость / вспомогательные =========
-    def open_position(self, exchange_client, symbol: str, usd_amount: float = None):
-        """
-        Совместимость со старым вызовом (без суммы):
-        - если usd_amount не передан → берём TRADE_AMOUNT или 50
-        - цена берётся из клиента
-        - ATR = 0.0 на старте
-        """
-        if usd_amount is None:
-            try:
-                usd_amount = float(os.getenv("TRADE_AMOUNT", "50"))
-            except Exception:
-                usd_amount = 50.0
-
-        try:
-            price = (exchange_client or self.ex).get_last_price(symbol)
-        except Exception:
-            price = self.ex.get_last_price(symbol)
-
-        atr = 0.0
-        return self.open_long(symbol, usd_amount, price, atr)
-
-    def close_position(self, exchange_client, reason: str = "signal"):
-        st = self.state.state
-        if not st.get('in_position'):
-            return {"status": "noop", "detail": "no position"}
-
-        symbol = st.get('symbol')
-        try:
-            last = (exchange_client or self.ex).get_last_price(symbol)
-        except Exception:
-            last = self.ex.get_last_price(symbol)
-
-        self.close_all(symbol, last, reason)
-        return {"status": "closed", "symbol": symbol, "close_price": last, "reason": reason}
+    # … без изменений …

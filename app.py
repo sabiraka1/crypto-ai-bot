@@ -7,22 +7,18 @@ from main import TradingBot
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient
 from telegram.bot_handler import (
-    cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train, cmd_test
+    cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train, cmd_test, cmd_testbuy, cmd_testsell
 )
 
 # --- тихий /train: не падаем, если нужны X/y ---
 def _train_model_safe():
     try:
         from ml.adaptive_model import AdaptiveMLModel
-        m = AdaptiveMLModel()
-        if hasattr(m, "train") and m.train.__code__.co_argcount == 1:
-            m.train()
-        elif hasattr(m, "fit") and m.fit.__code__.co_argcount == 1:
-            m.fit()
-        else:
-            logging.info("AdaptiveMLModel: пропустил обучение (нужны X, y).")
+        AdaptiveMLModel().train()
+        return True
     except Exception as e:
-        logging.error(f"Train model error: {e}")
+        logging.error("train error: %s", e)
+        return False
 
 # --- логирование ---
 logging.basicConfig(
@@ -37,24 +33,11 @@ logging.basicConfig(
 app = Flask(__name__)
 
 # --- единый ExchangeClient (singleton для процесса) ---
-_GLOBAL_EX = ExchangeClient(
-    api_key=os.getenv("GATE_API_KEY"),
-    api_secret=os.getenv("GATE_API_SECRET")
-)
+_GLOBAL_EX = ExchangeClient()
 
-# --- запускаем торгового бота в фоне ---
-_bot_instance = TradingBot()
-def _run_bot():
-    try:
-        logging.info("🚀 Trading bot starting...")
-        _bot_instance.run()
-    except Exception:
-        logging.exception("Trading bot crashed")
-threading.Thread(target=_run_bot, daemon=True).start()
-
-# --- health & корень (убираем 404 на /) ---
-@app.route("/alive", methods=["GET"])
-def alive():
+# --- домашняя страница/health ---
+@app.route("/health", methods=["GET"])
+def health():
     return jsonify({"ok": True, "status": "running"}), 200
 
 @app.route("/", methods=["GET"])
@@ -97,6 +80,12 @@ def webhook():
 
         elif text in ("/test", "test"):
             cmd_test(symbol)
+
+        elif text in ("/testbuy", "testbuy"):
+            cmd_testbuy(state, ex, symbol=symbol)
+
+        elif text in ("/testsell", "testsell"):
+            cmd_testsell(state, ex, symbol=symbol)
 
         else:
             logging.info(f"⚠️ Unknown command ignored: {text}")
