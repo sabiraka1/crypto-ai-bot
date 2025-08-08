@@ -10,59 +10,78 @@ from telegram.bot_handler import (
     cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train
 )
 
-# опциональная интеграция обучения
+# -------------------- тихий /train --------------------
 def _train_model_safe():
+    """
+    Не падаем, если модели нужны X/y/market_conditions.
+    Пытаемся вызвать .train()/.fit() без аргументов, иначе пишем в лог.
+    """
     try:
         from ml.adaptive_model import AdaptiveMLModel
         m = AdaptiveMLModel()
-        try:
+        if hasattr(m, "train") and m.train.__code__.co_argcount == 1:
             m.train()
-        except AttributeError:
-            # если метод называется иначе
-            if hasattr(m, "fit"):
-                m.fit()
+        elif hasattr(m, "fit") and m.fit.__code__.co_argcount == 1:
+            m.fit()
+        else:
+            logging.info("AdaptiveMLModel: пропустил обучение (нужны X, y).")
     except Exception as e:
         logging.error(f"Train model error: {e}")
 
+# -------------------- логирование --------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot_activity.log", encoding="utf-8")],
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot_activity.log", encoding="utf-8")
+    ],
 )
 
 app = Flask(__name__)
 
-# --- запустим торгового бота в фоновом потоке ---
+# -------------------- единый ExchangeClient --------------------
+# Создаётся один раз при старте приложения
+_GLOBAL_EX = ExchangeClient(
+    api_key=os.getenv("GATE_API_KEY"),
+    api_secret=os.getenv("GATE_API_SECRET")
+)
+
+# -------------------- запуск торгового бота в отдельном потоке --------------------
 _bot_instance = TradingBot()
+
 def _run_bot():
     try:
         logging.info("🚀 Trading bot starting...")
         _bot_instance.run()
     except Exception:
         logging.exception("Trading bot crashed")
+
 threading.Thread(target=_run_bot, daemon=True).start()
 
+# -------------------- health --------------------
 @app.route("/alive", methods=["GET"])
 def alive():
     return jsonify({"ok": True, "status": "running"}), 200
 
+# -------------------- Telegram Webhook --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True, silent=True) or {}
         msg = (data.get("message") or data.get("edited_message") or {}) or {}
         text = (msg.get("text") or "").strip()
-
         if not text:
             return jsonify({"ok": True}), 200
 
-        # подготовим зависимости для команд
         state = StateManager()
-        ex = ExchangeClient(api_key=os.getenv("GATE_API_KEY"), api_secret=os.getenv("GATE_API_SECRET"))
+        ex = _GLOBAL_EX
         symbol = os.getenv("SYMBOL", "BTC/USDT")
 
-        # простой роутинг
-        if text in ("/start", "start"):
+        logging.info(f"📩 Received command: {text}")
+
+        # Обработка команд
+        if text in ("/start", "start", "/help", "help"):
             cmd_start()
 
         elif text in ("/status", "status"):
@@ -81,14 +100,10 @@ def webhook():
             cmd_train(_train_model_safe)
 
         else:
-            # необязательный эхо / help
-            if text == "/help":
-                cmd_start()
-            else:
-                # игнор прочего текста
-                pass
+            logging.info(f"⚠️ Unknown command ignored: {text}")
 
         return jsonify({"ok": True}), 200
+
     except Exception as e:
         logging.exception("webhook error")
         return jsonify({"ok": False, "error": str(e)}), 500

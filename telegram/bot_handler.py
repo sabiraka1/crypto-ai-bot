@@ -60,7 +60,7 @@ def explain_signal_short(rsi: float, adx: float, macd_hist: float, ema_fast_abov
     parts.append("MACD+" if macd_hist > 0 else "MACD-")
     return " / ".join(parts)
 
-# --- команды, если будешь вызывать из webhook/polling ---
+# -------------------- команды --------------------
 def cmd_start():
     send_message(
         "🤖 Crypto AI Bot\n"
@@ -92,55 +92,91 @@ def cmd_status(state_manager, get_price_fn):
         # Если позиции нет — покажем последний BUY из trades.log
         if os.path.exists(TRADES_LOG_PATH):
             try:
-                with open(TRADES_LOG_PATH, "r") as f:
+                with open(TRADES_LOG_PATH, "r", encoding="utf-8") as f:
                     lines = [l.strip() for l in f.readlines() if "BUY" in l.upper()]
                 if lines:
-                    last_buy = lines[-1]
-                    send_message(f"🟢 Позиции нет\nПоследний вход: {last_buy}")
+                    send_message(f"🟢 Позиции нет\nПоследний вход: {lines[-1]}")
                     return
             except Exception as e:
                 logging.error(f"Error reading trades.log: {e}")
         send_message("🟢 Позиции нет")
 
-def cmd_profit(closed_csv_path="closed_trades.csv"):
-    pnl = 0.0
+def cmd_profit(closed_csv_path="closed_trades.csv", open_log_path="trades.log"):
+    """
+    PnL по закрытым сделкам:
+    - если есть qty_usd: pnl = (close - entry) * qty_usd / entry
+    - иначе используем TRADE_AMOUNT из .env
+    Плюс вывод последних ордеров из trades.log.
+    """
+    TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "50"))
+    total_pnl = 0.0
     winrate = 0.0
-    trades_info = ""
+    lines = []
 
+    # --- Закрытые сделки ---
     if os.path.exists(closed_csv_path):
-        df = pd.read_csv(closed_csv_path)
-        if not df.empty:
-            if "pnl_abs" in df.columns:
-                pnl = df["pnl_abs"].sum()
-                winrate = (df["pnl_abs"] > 0).mean() * 100
-            else:
-                df["pnl_abs"] = (df["close_price"] - df["entry_price"])
-                pnl = df["pnl_abs"].sum()
-                winrate = (df["pnl_abs"] > 0).mean() * 100
-
-    # Добавляем последние сделки из trades.log
-    if os.path.exists(TRADES_LOG_PATH):
         try:
-            with open(TRADES_LOG_PATH, "r") as f:
-                last_trades = f.readlines()[-5:]
-            trades_info = "\n📜 Последние ордера:\n" + "".join(last_trades)
+            df = pd.read_csv(closed_csv_path)
+            if not df.empty:
+                if {"entry_price", "close_price"}.issubset(df.columns):
+                    if "qty_usd" in df.columns:
+                        pnl_series = (df["close_price"] - df["entry_price"]) * (df["qty_usd"] / df["entry_price"].replace(0, pd.NA))
+                    else:
+                        pnl_series = (df["close_price"] - df["entry_price"]) * (TRADE_AMOUNT / df["entry_price"].replace(0, pd.NA))
+                    pnl_series = pnl_series.fillna(0)
+                    total_pnl = float(pnl_series.sum())
+                    winrate = float((pnl_series > 0).mean() * 100) if len(pnl_series) else 0.0
+                elif "pnl_abs" in df.columns:
+                    total_pnl = float(df["pnl_abs"].sum())
+                    winrate = float((df["pnl_abs"] > 0).mean() * 100)
+                else:
+                    lines.append("⚠️ Формат closed_trades.csv неизвестен")
+            else:
+                lines.append("📭 Закрытых сделок нет")
         except Exception as e:
-            logging.error(f"Error reading trades.log: {e}")
-
-    if pnl == 0 and not trades_info:
-        send_message("📭 Сделок ещё нет")
+            logging.error(f"cmd_profit read csv error: {e}")
+            lines.append("⚠️ Не удалось прочитать closed_trades.csv")
     else:
-        send_message(f"💰 PnL: {pnl:.2f}\nWinrate: {winrate:.1f}%{trades_info}")
+        lines.append("📭 Закрытых сделок нет")
+
+    # --- Последние ордера из trades.log ---
+    if os.path.exists(open_log_path):
+        try:
+            with open(open_log_path, "r", encoding="utf-8") as f:
+                raw = [ln.strip() for ln in f.readlines() if ln.strip()]
+            if raw:
+                lines.append("\n📜 Последние ордера:")
+                for row in raw[-5:]:
+                    lines.append(row)
+            else:
+                lines.append("📜 Журнал ордеров пуст")
+        except Exception as e:
+            logging.error(f"cmd_profit read log error: {e}")
+            lines.append("⚠️ Не удалось прочитать trades.log")
+    else:
+        lines.append("📂 trades.log ещё не создан")
+
+    msg = f"💰 PnL: {total_pnl:.2f}\n📊 Winrate: {winrate:.1f}%"
+    if lines:
+        msg += "\n" + "\n".join(lines)
+    send_message(msg)
 
 def cmd_errors(csv_path="sinyal_fiyat_analizi.csv"):
     if not os.path.exists(csv_path):
-        send_message("❌ Нет данных ошибок"); return
-    df = pd.read_csv(csv_path)
+        send_message("📂 Лог ошибок ещё не сформирован"); return
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        logging.error(f"cmd_errors read error: {e}")
+        send_message("⚠️ Не удалось прочитать лог ошибок"); return
+
     if "result" not in df.columns:
-        send_message("❌ В CSV нет колонки result"); return
+        send_message("ℹ️ Лог ещё не размечен (нет колонки result)"); return
+
     bad = df[df["result"] == 0].tail(5)
     if bad.empty:
-        send_message("✅ Ошибок нет"); return
+        send_message("✅ Ошибок не зафиксировано"); return
+
     lines = ["❌ Последние ошибки:"]
     for _, r in bad.iterrows():
         t = r.get("time", "")
@@ -172,7 +208,7 @@ def cmd_train(train_fn, count_samples: int = None):
         msg += f"\n📊 Обучено на: {count_samples} записях"
     send_message(msg)
 
-# --- уведомления вход/выход ---
+# -------------------- уведомления вход/выход --------------------
 def notify_entry(symbol: str, price: float, score: float, expl: str, amount_usd: float):
     send_message(
         f"📥 Вход LONG {symbol} @ {price}\n"
@@ -180,7 +216,7 @@ def notify_entry(symbol: str, price: float, score: float, expl: str, amount_usd:
         f"Сумма: {amount_usd:.0f}$"
     )
     try:
-        with open(TRADES_LOG_PATH, "a") as f:
+        with open(TRADES_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now()} BUY {symbol} @ {price} | score={score:.2f}\n")
     except Exception as e:
         logging.error(f"Error writing trades.log: {e}")
@@ -191,12 +227,12 @@ def notify_close(symbol: str, price: float, reason: str, pnl_pct: float):
         f"{reason} | PnL {pnl_pct:.2f}%"
     )
     try:
-        with open(TRADES_LOG_PATH, "a") as f:
+        with open(TRADES_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now()} SELL {symbol} @ {price} | pnl={pnl_pct:.2f}% | {reason}\n")
     except Exception as e:
         logging.error(f"Error writing trades.log: {e}")
 
-# --- КЛАСС-ОБЁРТКА ---
+# -------------------- КЛАСС-ОБЁРТКА --------------------
 class TelegramBot:
     """Тонкая обёртка над текущими функциями, чтобы main.py мог вызывать как класс."""
     def __init__(self, token: str, chat_id: str, state_manager=None):
