@@ -27,6 +27,7 @@ class PositionManager:
         # Лимит времени
         self.TIMEOUT_HOURS = 2
 
+    # ========= ТЕ ЖЕ ТВОИ МЕТОДЫ =========
     def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float):
         st = self.state.state
         if st.get('in_position'):
@@ -124,3 +125,36 @@ class PositionManager:
         })
         self.state.save_state()
         logging.info(f"Closed LONG @ {exit_price:.4f} reason={reason} pnl={pnl_pct:.2f}%")
+
+    # ========= ТОНКИЕ ОБЁРТКИ ДЛЯ СОВМЕСТИМОСТИ =========
+    # Нужны, чтобы основной цикл мог звать open_position/close_position, как в логах.
+
+    def open_position(self, exchange_client, symbol: str, usd_amount: float):
+        """
+        Совместимость с вызовом из основного цикла:
+        - берём текущую цену через exchange_client/self.ex
+        - ATR для старта можно передать 0.0 (предохранители по % всё равно работают)
+        """
+        try:
+            price = (exchange_client or self.ex).get_last_price(symbol)
+        except Exception:
+            price = self.ex.get_last_price(symbol)
+        atr = 0.0
+        return self.open_long(symbol, usd_amount, price, atr)
+
+    def close_position(self, exchange_client, reason: str = "signal"):
+        """
+        Совместимость: закрыть всю позицию по текущей цене и причине.
+        """
+        st = self.state.state
+        if not st.get('in_position'):
+            return {"status": "noop", "detail": "no position"}
+
+        symbol = st.get('symbol')
+        try:
+            last = (exchange_client or self.ex).get_last_price(symbol)
+        except Exception:
+            last = self.ex.get_last_price(symbol)
+
+        self.close_all(symbol, last, reason)
+        return {"status": "closed", "symbol": symbol, "close_price": last, "reason": reason}
