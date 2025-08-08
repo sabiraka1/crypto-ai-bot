@@ -141,3 +141,19 @@ class ScoringEngine:
 
         is_growing = last > prev
         return last, is_growing
+    # ---- Backwards compatibility shims ----
+    def score(self, df, ai_score=None):
+        """
+        Совместимость со старым кодом:
+        раньше все вызывали score(df), теперь используем evaluate(df, ai_score).
+        Возвращает (buy_score, ai_score, details)
+        """
+        return self.evaluate(df, ai_score=ai_score)
+
+    def calculate_scores(self, df, ai_score=None):
+        """
+        Унифицированная точка входа для внешнего кода.
+        Возвращает (buy_score, ai_score, details)
+        """
+        return self.evaluate(df, ai_score=ai_score)
+

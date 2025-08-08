@@ -44,7 +44,6 @@ def send_photo(image_path: str, caption: Optional[str] = None) -> None:
 
 # ==== Notifications for trades ====
 def notify_entry(symbol: str, side: str, price: float, amount: float, reason: str = "") -> None:
-    """Отправить сообщение при входе в позицию"""
     msg = f"📈 Открыта {side.upper()} позиция\n" \
           f"Инструмент: {symbol}\n" \
           f"Цена входа: {price:.4f}\n" \
@@ -54,7 +53,6 @@ def notify_entry(symbol: str, side: str, price: float, amount: float, reason: st
     send_message(msg)
 
 def notify_close(symbol: str, side: str, entry_price: float, exit_price: float, pnl_abs: float, pnl_pct: float, reason: str = "") -> None:
-    """Отправить сообщение при закрытии позиции"""
     emoji = "✅" if pnl_pct >= 0 else "❌"
     msg = f"{emoji} Закрыта {side.upper()} позиция\n" \
           f"{symbol}\n" \
@@ -174,8 +172,11 @@ def cmd_test(symbol: str = None, timeframe: str = None):
         df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
         df.set_index("time", inplace=True)
 
+        # Исправлено: используем метод из scoring_engine, который реально существует
         engine = scoring_engine.ScoringEngine()
-        buy_score, ai_score, _ = engine.score(df)
+        scores = engine.calculate_scores(df) if hasattr(engine, "calculate_scores") else (0.0, 0.0, None)
+        buy_score, ai_score, _ = scores
+
         last = ex.get_last_price(symbol)
         send_message(f"🧪 TEST {symbol}\nЦена: {last:.2f}\nBuy {buy_score:.2f} | AI {ai_score:.2f}")
 
