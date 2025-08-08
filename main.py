@@ -8,13 +8,8 @@ from typing import Optional, Tuple
 # ── наши модули из проекта ────────────────────────────────────────────────────
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient
-#⛔️ ЦИКЛ! Было: from trading.position_manager import PositionManager
 from analysis.scoring_engine import ScoringEngine
-from telegram.bot_handler import (
-    notify_entry,
-    notify_close,  # может не использоваться, но оставляю как в твоём файле
-    # explain_signal_short  ← УДАЛЕНО: этой функции нет в bot_handler.py
-)
+from telegram.bot_handler import notify_entry, notify_close
 
 # ── базовая настройка логов ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -76,9 +71,9 @@ class TradingBot:
             api_secret=os.getenv("GATE_API_SECRET"),
         )
 
-        # ⬇️ ленивый импорт, чтобы разорвать циклический импорт при старте
+        # ⬇️ Создаем PositionManager с функциями уведомлений
         from trading.position_manager import PositionManager
-        self.pm = PositionManager(self.exchange, self.state)
+        self.pm = PositionManager(self.exchange, self.state, notify_entry, notify_close)
 
         self.scorer = ScoringEngine()  # MIN_SCORE_TO_BUY подтянется из .env
 
@@ -194,8 +189,7 @@ class TradingBot:
             try:
                 # Открываем лонг (спот). PositionManager сам выставит tp/sl/трейлинг + сохранит state
                 self.pm.open_long(self.symbol, usd_amt, entry_price=last_price, atr=(atr_val or 0.0))
-                # Оставляю вызов notify_entry в твоём исходном формате аргументов
-                notify_entry(self.symbol, last_price, buy_score, expl, usd_amt)
+                logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_amt:.2f}")
             except Exception:
                 logging.exception("Error while opening long")
         else:

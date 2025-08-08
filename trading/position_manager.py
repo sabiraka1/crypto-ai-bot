@@ -2,13 +2,6 @@ import os
 import logging
 from datetime import datetime
 
-# Уведомления в TG из bot_handler
-try:
-    from telegram.bot_handler import notify_entry, notify_close
-except Exception:
-    notify_entry = None
-    notify_close = None
-
 # Безопасная работа с CSV
 try:
     from utils.csv_handler import CSVHandler
@@ -23,9 +16,12 @@ class PositionManager:
     TP2_ATR = 3.0
     SL_ATR = 1.0
 
-    def __init__(self, exchange_client, state_manager):
+    def __init__(self, exchange_client, state_manager, notify_entry_func=None, notify_close_func=None):
         self.ex = exchange_client
         self.state = state_manager
+        # Функции уведомлений передаются извне
+        self.notify_entry = notify_entry_func
+        self.notify_close = notify_close_func
 
     # ========= ОТКРЫТИЕ LONG =========
     def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float,
@@ -62,8 +58,8 @@ class PositionManager:
 
         # Отправка уведомления в Telegram
         try:
-            if notify_entry:
-                notify_entry(
+            if self.notify_entry:
+                self.notify_entry(
                     symbol=symbol,
                     price=float(entry_price),
                     amount_usd=float(amount_usd),
@@ -107,8 +103,8 @@ class PositionManager:
 
         # Уведомление в Telegram
         try:
-            if notify_close:
-                notify_close(
+            if self.notify_close:
+                self.notify_close(
                     symbol=symbol,
                     price=float(exit_price),
                     reason=reason,
@@ -127,3 +123,27 @@ class PositionManager:
             'last_reason': reason
         })
         self.state.save_state()
+
+    # ========= УПРАВЛЕНИЕ ПОЗИЦИЕЙ (добавлен недостающий метод) =========
+    def manage(self, symbol: str, current_price: float, atr: float):
+        """Метод для управления открытой позицией (трейлинг, частичное закрытие)"""
+        st = self.state.state
+        if not st.get('in_position'):
+            return
+
+        entry_price = float(st.get('entry_price', 0))
+        if entry_price <= 0:
+            return
+
+        # Простая логика: если цена выросла на 4%, закрываем
+        pnl_pct = (current_price - entry_price) / entry_price * 100.0
+        
+        if pnl_pct >= 4.0:  # 4% прибыль
+            self.close_all(symbol, current_price, "TP_4%")
+        elif pnl_pct <= -3.0:  # -3% убыток
+            self.close_all(symbol, current_price, "SL_3%")
+
+    # ========= АЛЬТЕРНАТИВНОЕ ИМЯ МЕТОДА (для совместимости) =========
+    def close_position(self, symbol: str, exit_price: float, reason: str):
+        """Альтернативное имя для close_all (для совместимости)"""
+        self.close_all(symbol, exit_price, reason)

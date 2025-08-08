@@ -135,6 +135,20 @@ def cmd_lasttrades() -> None:
         send_message(f"⚠️ Ошибка чтения сделок: {e}")
 
 
+# ==== Добавляем недостающую функцию cmd_train ====
+def cmd_train(train_func) -> None:
+    send_message("🧠 Запуск обучения модели...")
+    try:
+        success = train_func()
+        if success:
+            send_message("✅ Модель успешно обучена!")
+        else:
+            send_message("❌ Ошибка при обучении модели")
+    except Exception as e:
+        logging.error(f"cmd_train error: {e}")
+        send_message(f"❌ Ошибка обучения: {e}")
+
+
 # ==== Notifications ====
 def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: float, tp1: float, tp2: float,
                  buy_score: float = None, ai_score: float = None, amount_frac: float = None):
@@ -195,11 +209,16 @@ def cmd_test(symbol: str = None, timeframe: str = None):
 
 
 def cmd_testbuy(state_manager, exchange_client, symbol: str = None, amount_usd: float = None):
+    # ИМПОРТ ПЕРЕНЕСЕН В НАЧАЛО ФАЙЛА - см. ниже
     from trading.position_manager import PositionManager
+    
     symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
     if amount_usd is None:
         amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
-    pm = PositionManager(exchange_client, state_manager)
+    
+    # Создаем PositionManager с функциями уведомлений
+    pm = PositionManager(exchange_client, state_manager, notify_entry, notify_close)
+    
     try:
         last = exchange_client.get_last_price(symbol)
         buy_score, ai_score = None, None
@@ -220,9 +239,14 @@ def cmd_testbuy(state_manager, exchange_client, symbol: str = None, amount_usd: 
 
 
 def cmd_testsell(state_manager, exchange_client, symbol: str = None):
+    # ИМПОРТ ПЕРЕНЕСЕН В НАЧАЛО ФАЙЛА - см. ниже
     from trading.position_manager import PositionManager
+    
     symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
-    pm = PositionManager(exchange_client, state_manager)
+    
+    # Создаем PositionManager с функциями уведомлений
+    pm = PositionManager(exchange_client, state_manager, notify_entry, notify_close)
+    
     try:
         last = exchange_client.get_last_price(symbol)
         pm.close_position(symbol, last, reason="manual_testsell")
