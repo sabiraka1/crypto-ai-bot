@@ -1,3 +1,4 @@
+import os
 import logging
 from datetime import datetime, timedelta
 
@@ -13,6 +14,7 @@ try:
     from utils.csv_handler import CSVHandler
 except Exception:
     CSVHandler = None
+
 
 class PositionManager:
     """
@@ -193,16 +195,24 @@ class PositionManager:
             logging.error(f"notify_close error: {e}")
 
     # ========= Совместимость с основным циклом =========
-    def open_position(self, exchange_client, symbol: str, usd_amount: float):
+    def open_position(self, exchange_client, symbol: str, usd_amount: float = None):
         """
         Совместимость с вызовом из основного цикла:
+        - если usd_amount не передан (старый main), берём из .env TRADE_AMOUNT или 50
         - берём текущую цену через exchange_client/self.ex
         - ATR для старта 0.0 (процентные предохранители всё равно работают)
         """
+        if usd_amount is None:
+            try:
+                usd_amount = float(os.getenv("TRADE_AMOUNT", "50"))
+            except Exception:
+                usd_amount = 50.0
+
         try:
             price = (exchange_client or self.ex).get_last_price(symbol)
         except Exception:
             price = self.ex.get_last_price(symbol)
+
         atr = 0.0
         return self.open_long(symbol, usd_amount, price, atr)
 
