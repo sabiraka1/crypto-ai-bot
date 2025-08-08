@@ -48,6 +48,18 @@ def health_check():
         logger.error(f"Health check failed: {e}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook для Telegram (если используется)"""
+    try:
+        # Временно закомментировано - используется polling режим
+        # update = telegram.Update.de_json(request.get_json(force=True), bot)
+        # dispatcher.process_update(update)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/bot/start', methods=['POST'])
 def start_bot():
     """Запуск бота"""
