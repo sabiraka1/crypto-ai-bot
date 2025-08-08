@@ -17,11 +17,31 @@ class ExchangeClient:
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'spot',
-                'createMarketBuyOrderRequiresPrice': False  # ✅ Разрешаем указывать сумму в USDT
+                # ✅ покупаем по сумме (USDT), без передачи price
+                'createMarketBuyOrderRequiresPrice': False,
+                # ✅ ccxt будет автоматически корректировать дрифт времени
+                'adjustForTimeDifference': True,
             }
         })
+
         self.markets = None
         try:
+            # проверим, что ключи заданы (кинет исключение, если пустые)
+            self.exchange.check_required_credentials()
+        except Exception:
+            # не падаем — позволяем работать и в режиме без ключей (чтение)
+            pass
+
+        try:
+            # короткая попытка синхронизировать время (если биржа поддерживает)
+            try:
+                server_time = self.exchange.fetch_time()
+                drift_ms = int(server_time) - int(time.time() * 1000)
+                logging.info(f"⏱️ Gate.io time drift ~ {drift_ms} ms")
+            except Exception:
+                # не критично, просто логируем
+                logging.debug("fetch_time not available")
+
             self.markets = self.exchange.load_markets()
             logging.info("✅ Exchange client initialized and markets loaded")
         except Exception as e:
@@ -36,6 +56,19 @@ class ExchangeClient:
                 logging.error(f"⚠️ ccxt call failed: {e}")
                 time.sleep(1.5)
         raise APIException("exchange call failed after retries")
+
+    # ---------- diagnostics ----------
+    def test_connection(self) -> bool:
+        """Лёгкий тест авторизации: пробуем запросить баланс."""
+        try:
+            bal = self._safe(self.exchange.fetch_balance)
+            # если ключи только для чтения — всё равно ок
+            total = bal.get('total', {}) or {}
+            logging.info(f"🔐 Auth OK, assets: {len(total)}")
+            return True
+        except Exception as e:
+            logging.error(f"❌ Auth/Balance test failed: {e}")
+            return False
 
     # ---------- OHLCV & ticker ----------
     def fetch_ohlcv(self, symbol: str, timeframe: str = '15m', limit: int = 200) -> List[List[Any]]:
@@ -53,26 +86,28 @@ class ExchangeClient:
     # ---------- balance ----------
     def get_balance(self, asset: str) -> float:
         balance = self._safe(self.exchange.fetch_balance)
-        return float(balance['free'].get(asset, 0))
+        return float((balance.get('free') or {}).get(asset, 0))
 
     # ---------- orders ----------
     def create_market_buy_order(self, symbol: str, usd_amount: float):
         """
-        Создаёт маркет-ордер на покупку на сумму в USDT (quote currency).
+        Создаёт маркет-ордер на покупку по сумме в USDT (quote).
+        CCXT + Gate.io примут это при createMarketBuyOrderRequiresPrice=False.
         """
         order = self._safe(
             self.exchange.create_order,
             symbol,
             'market',
             'buy',
-            usd_amount,  # ✅ Это USDT, а не количество монет
-            None,        # price не нужен
-            {'cost': usd_amount}  # Явно указываем стоимость сделки
+            usd_amount,      # сумма в USDT
+            None,            # price не нужен
+            {'cost': usd_amount}  # дублируем стоимость явно
         )
         self._log_trade("BUY", symbol, usd_amount, self.get_last_price(symbol))
         return order
 
     def create_market_sell_order(self, symbol: str, amount: float):
+        # для sell передаём количество базовой валюты
         order = self._safe(self.exchange.create_order, symbol, 'market', 'sell', amount)
         self._log_trade("SELL", symbol, amount, self.get_last_price(symbol))
         return order
