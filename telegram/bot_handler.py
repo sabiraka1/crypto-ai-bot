@@ -81,6 +81,48 @@ def notify_skip_entry(symbol: str, reason: str, buy_score: float, ai_score: floa
         f"Buy {buy_score:.2f} (мин {min_buy:.2f}) | AI {ai_score:.2f}"
     )
 
+# ====== КОРОТКОЕ ОБЪЯСНЕНИЕ СИГНАЛА (для main.py) ======
+def explain_signal_short(rsi: float, adx: float, macd_hist: float, ema_fast_above: bool) -> str:
+    """
+    Короткое текстовое объяснение сигнала для уведомлений.
+    Параметры:
+      rsi            – текущий RSI
+      adx            – текущий ADX (может быть заглушкой)
+      macd_hist      – текущее значение гистограммы MACD
+      ema_fast_above – True, если быстрая EMA выше медленной (сигнал на силу тренда)
+    """
+    # зона RSI
+    if rsi is None:
+        rsi_note = "RSI: n/a"
+    elif rsi < 30:
+        rsi_note = f"RSI {rsi:.1f} (перепродан)"
+    elif rsi > 70:
+        rsi_note = f"RSI {rsi:.1f} (перекуплен)"
+    elif 45 <= rsi <= 65:
+        rsi_note = f"RSI {rsi:.1f} (здоровая зона)"
+    else:
+        rsi_note = f"RSI {rsi:.1f}"
+
+    # MACD
+    if macd_hist is None:
+        macd_note = "MACD hist n/a"
+    else:
+        macd_note = "MACD hist {:.4f} ({})".format(
+            macd_hist,
+            "бычий" if macd_hist > 0 else "медвежий"
+        )
+
+    # EMA отношение
+    trend_note = "EMA12>EMA26" if ema_fast_above else "EMA12<=EMA26"
+
+    # ADX (может быть заглушкой)
+    if adx is None:
+        adx_note = "ADX: n/a"
+    else:
+        adx_note = f"ADX {adx:.1f}"
+
+    return f"{rsi_note} | {macd_note} | {trend_note} | {adx_note}"
+
 # ====== TEST: краткий анализ без сделки ======
 def cmd_test(symbol: str = None, timeframe: str = None):
     """
