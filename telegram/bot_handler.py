@@ -11,8 +11,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from analysis import scoring_engine
-from trading.position_manager import PositionManager
-from trading.exchange_client import ExchangeClient  # ← добавил
+# ❌ УБРАНО: from trading.position_manager import PositionManager
+from trading.exchange_client import ExchangeClient  # ← оставляем
 
 # ========= ENV / Telegram API =========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -124,6 +124,9 @@ def cmd_testbuy(state_manager, exchange_client, symbol: str = None, amount_usd: 
     Принудительно открыть LONG (для проверки всей цепочки).
     Если amount_usd не передан — берём TRADE_AMOUNT из .env (или 50).
     """
+    # ⬇️ локальный импорт, чтобы избежать циклического импорта при старте
+    from trading.position_manager import PositionManager
+
     symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
     if amount_usd is None:
         try:
@@ -155,6 +158,9 @@ def cmd_testsell(state_manager, exchange_client, symbol: str = None):
     """
     Принудительно закрыть позицию по рынку (для проверки).
     """
+    # ⬇️ локальный импорт, чтобы избежать циклического импорта при старте
+    from trading.position_manager import PositionManager
+
     symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
     pm = PositionManager(exchange_client, state_manager)
     try:

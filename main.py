@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 # ── наши модули из проекта ────────────────────────────────────────────────────
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient
-from trading.position_manager import PositionManager
+# ⛔️ ЦИКЛ! Было: from trading.position_manager import PositionManager
 from analysis.scoring_engine import ScoringEngine
 from telegram.bot_handler import (
     notify_entry,
@@ -75,7 +75,11 @@ class TradingBot:
             api_key=os.getenv("GATE_API_KEY"),
             api_secret=os.getenv("GATE_API_SECRET"),
         )
+
+        # ⬇️ ленивый импорт, чтобы разорвать циклический импорт при старте
+        from trading.position_manager import PositionManager
         self.pm = PositionManager(self.exchange, self.state)
+
         self.scorer = ScoringEngine()  # MIN_SCORE_TO_BUY подтянется из .env
 
         logging.info("✅ Loaded 0 models")
@@ -178,14 +182,12 @@ class TradingBot:
             if frac <= 0.0 or usd_amt <= 0.0:
                 # Не входим, но сообщаем в лог и (опционально) в TG
                 logging.info(f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен.")
-                # Можно отправить аккуратное сообщение, если хочешь:
-                # notify_entry(self.symbol, last_price, buy_score, f"NO-TRADE: {expl}", 0.0)
                 return
 
             try:
                 # Открываем лонг (спот). PositionManager сам выставит tp/sl/трейлинг + сохранит state
                 self.pm.open_long(self.symbol, usd_amt, entry_price=last_price, atr=(atr_val or 0.0))
-                notify_entry(self.symbol, last_price, buy_score, expl, usd_amt)
+                notify_entry(self.symbol, last_price, buy_score, expl, usd_amt)  # оставил как у тебя
             except Exception:
                 logging.exception("Error while opening long")
         else:
