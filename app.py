@@ -10,9 +10,8 @@ from telegram.bot_handler import (
     cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train, cmd_test
 )
 
-# -------------------- тихий /train --------------------
+# --- тихий /train: не падаем, если нужны X/y ---
 def _train_model_safe():
-    """Пробуем переобучить модель, не падаем при отсутствии данных."""
     try:
         from ml.adaptive_model import AdaptiveMLModel
         m = AdaptiveMLModel()
@@ -25,42 +24,44 @@ def _train_model_safe():
     except Exception as e:
         logging.error(f"Train model error: {e}")
 
-# -------------------- логирование --------------------
+# --- логирование ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot_activity.log", encoding="utf-8")
+        logging.FileHandler("bot_activity.log", encoding="utf-8"),
     ],
 )
 
 app = Flask(__name__)
 
-# -------------------- единый ExchangeClient --------------------
+# --- единый ExchangeClient (singleton для процесса) ---
 _GLOBAL_EX = ExchangeClient(
     api_key=os.getenv("GATE_API_KEY"),
     api_secret=os.getenv("GATE_API_SECRET")
 )
 
-# -------------------- запуск торгового бота --------------------
+# --- запускаем торгового бота в фоне ---
 _bot_instance = TradingBot()
-
 def _run_bot():
     try:
         logging.info("🚀 Trading bot starting...")
         _bot_instance.run()
     except Exception:
         logging.exception("Trading bot crashed")
-
 threading.Thread(target=_run_bot, daemon=True).start()
 
-# -------------------- health --------------------
+# --- health & корень (убираем 404 на /) ---
 @app.route("/alive", methods=["GET"])
 def alive():
     return jsonify({"ok": True, "status": "running"}), 200
 
-# -------------------- Telegram Webhook --------------------
+@app.route("/", methods=["GET"])
+def home():
+    return "Crypto AI Bot: OK", 200
+
+# --- Telegram webhook ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:

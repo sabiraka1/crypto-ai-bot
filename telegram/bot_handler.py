@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Optional
 
+# headless charts
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -43,8 +44,10 @@ def send_photo_bytes(img: bytes, caption: str = ""):
 def send_chart(df: pd.DataFrame, entry: float = None, exit_: float = None, title: str = "Chart"):
     fig = plt.figure()
     plt.plot(df.index, df["close"])
-    if entry: plt.axhline(entry, linestyle="--", color="green")
-    if exit_: plt.axhline(exit_, linestyle=":", color="red")
+    if entry is not None:
+        plt.axhline(entry, linestyle="--")
+    if exit_ is not None:
+        plt.axhline(exit_, linestyle=":")
     plt.title(title)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight")
@@ -59,7 +62,7 @@ def explain_signal_short(rsi: float, adx: float, macd_hist: float, ema_fast_abov
     parts.append("MACD+" if macd_hist > 0 else "MACD-")
     return " / ".join(parts)
 
-# -------------------- команды --------------------
+# -------------------- Команды --------------------
 def cmd_start():
     send_message(
         "🤖 Crypto AI Bot\n"
@@ -100,6 +103,12 @@ def cmd_status(state_manager, get_price_fn):
         send_message("🟢 Позиции нет")
 
 def cmd_profit(closed_csv_path="closed_trades.csv", open_log_path="trades.log"):
+    """
+    PnL по закрытым сделкам:
+      - если есть qty_usd: pnl = (close - entry) * qty_usd / entry
+      - иначе используем TRADE_AMOUNT из .env (по умолчанию 50)
+    Плюс показываем последние ордера из trades.log.
+    """
     TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "50"))
     total_pnl = 0.0
     winrate = 0.0
@@ -108,17 +117,22 @@ def cmd_profit(closed_csv_path="closed_trades.csv", open_log_path="trades.log"):
     if os.path.exists(closed_csv_path):
         try:
             df = pd.read_csv(closed_csv_path)
-            if not df.empty and {"entry_price", "close_price"}.issubset(df.columns):
-                if "qty_usd" in df.columns:
-                    pnl_series = (df["close_price"] - df["entry_price"]) * (df["qty_usd"] / df["entry_price"].replace(0, pd.NA))
+            if not df.empty:
+                if {"entry_price", "close_price"}.issubset(df.columns):
+                    if "qty_usd" in df.columns:
+                        pnl_series = (df["close_price"] - df["entry_price"]) * (df["qty_usd"] / df["entry_price"].replace(0, pd.NA))
+                    else:
+                        pnl_series = (df["close_price"] - df["entry_price"]) * (TRADE_AMOUNT / df["entry_price"].replace(0, pd.NA))
+                    pnl_series = pnl_series.fillna(0)
+                    total_pnl = float(pnl_series.sum())
+                    winrate = float((pnl_series > 0).mean() * 100) if len(pnl_series) else 0.0
+                elif "pnl_abs" in df.columns:
+                    total_pnl = float(df["pnl_abs"].sum())
+                    winrate = float((df["pnl_abs"] > 0).mean() * 100)
                 else:
-                    pnl_series = (df["close_price"] - df["entry_price"]) * (TRADE_AMOUNT / df["entry_price"].replace(0, pd.NA))
-                pnl_series = pnl_series.fillna(0)
-                total_pnl = float(pnl_series.sum())
-                winrate = float((pnl_series > 0).mean() * 100) if len(pnl_series) else 0.0
-            elif "pnl_abs" in df.columns:
-                total_pnl = float(df["pnl_abs"].sum())
-                winrate = float((df["pnl_abs"] > 0).mean() * 100)
+                    lines.append("⚠️ Формат closed_trades.csv неизвестен")
+            else:
+                lines.append("📭 Закрытых сделок нет")
         except Exception as e:
             logging.error(f"cmd_profit read csv error: {e}")
             lines.append("⚠️ Не удалось прочитать closed_trades.csv")
@@ -131,10 +145,15 @@ def cmd_profit(closed_csv_path="closed_trades.csv", open_log_path="trades.log"):
                 raw = [ln.strip() for ln in f.readlines() if ln.strip()]
             if raw:
                 lines.append("\n📜 Последние ордера:")
-                lines.extend(raw[-5:])
+                for row in raw[-5:]:
+                    lines.append(row)
+            else:
+                lines.append("📜 Журнал ордеров пуст")
         except Exception as e:
             logging.error(f"cmd_profit read log error: {e}")
             lines.append("⚠️ Не удалось прочитать trades.log")
+    else:
+        lines.append("📂 trades.log ещё не создан")
 
     msg = f"💰 PnL: {total_pnl:.2f}\n📊 Winrate: {winrate:.1f}%"
     if lines:
@@ -151,12 +170,17 @@ def cmd_errors(csv_path="sinyal_fiyat_analizi.csv"):
         send_message("⚠️ Не удалось прочитать лог ошибок"); return
     if "result" not in df.columns:
         send_message("ℹ️ Лог ещё не размечен (нет колонки result)"); return
+
     bad = df[df["result"] == 0].tail(5)
     if bad.empty:
         send_message("✅ Ошибок не зафиксировано"); return
+
     lines = ["❌ Последние ошибки:"]
     for _, r in bad.iterrows():
-        lines.append(f"- {r.get('time', '')} | RSI {r.get('rsi', '')} | MACD {r.get('macd', '')}")
+        t = r.get("time", "")
+        rsi = r.get("rsi", "")
+        macd = r.get("macd", "")
+        lines.append(f"- {t} | RSI {rsi} | MACD {macd}")
     send_message("\n".join(lines))
 
 def cmd_lasttrades(closed_csv_path="closed_trades.csv"):
@@ -167,7 +191,12 @@ def cmd_lasttrades(closed_csv_path="closed_trades.csv"):
         send_message("📭 Сделок ещё нет"); return
     lines = ["🧾 Последние сделки:"]
     for _, r in df.iterrows():
-        lines.append(f"- {r.get('time', r.get('close_time', ''))} | {r.get('side', 'LONG')} {r.get('entry_price', '')}→{r.get('close_price', '')} | {r.get('reason', r.get('close_reason', ''))}")
+        t = r.get("time", r.get("close_time", ""))
+        side = r.get("side", "LONG")
+        ep = r.get("entry_price", "")
+        cp = r.get("close_price", "")
+        reason = r.get("reason", r.get("close_reason", ""))
+        lines.append(f"- {t} | {side} {ep}→{cp} | {reason}")
     send_message("\n".join(lines))
 
 def cmd_train(train_fn, count_samples: int = None):
@@ -177,13 +206,30 @@ def cmd_train(train_fn, count_samples: int = None):
         msg += f"\n📊 Обучено на: {count_samples} записях"
     send_message(msg)
 
-# ---------- новый /test ----------
+# --- /test: быстрый пинг + картинка ---
 def cmd_test(symbol="BTC/USDT"):
     send_message(f"🛠 Тест-сигнал для {symbol}")
-    # тут можно сделать генерацию случайных значений для RSI/MACD и графика
     try:
-        df = pd.DataFrame({"close": [100, 102, 101, 103, 104]}, index=pd.date_range(end=datetime.now(), periods=5, freq="T"))
-        send_chart(df, entry=102, exit_=104, title=f"Test {symbol}")
+        idx = pd.date_range(end=datetime.now(), periods=30, freq="T")
+        df = pd.DataFrame({"close": [100 + i*0.2 for i in range(len(idx))]}, index=idx)
+        send_chart(df, entry=df["close"].iloc[-10], exit_=df["close"].iloc[-1], title=f"Test {symbol}")
     except Exception as e:
         logging.error(f"cmd_test error: {e}")
         send_message("⚠️ Ошибка генерации тест-графика")
+
+# -------------------- Совместимость со старым main.py --------------------
+class TelegramBot:
+    """
+    Старый main.py делает:
+        from telegram.bot_handler import TelegramBot
+    Держим тонкую обёртку, чтобы импорт не падал.
+    """
+    def __init__(self, token: str = None, chat_id: str = None, state_manager=None):
+        if token:
+            os.environ['BOT_TOKEN'] = token
+        if chat_id:
+            os.environ['CHAT_ID'] = str(chat_id)
+        self.state = state_manager
+
+    def send_message(self, text: str, parse_mode: str = None):
+        send_message(text, parse_mode=parse_mode)
