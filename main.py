@@ -9,14 +9,13 @@ from typing import Optional, Tuple
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient
 from analysis.scoring_engine import ScoringEngine
-from telegram.bot_handler import notify_entry, notify_close
+from telegram import bot_handler as tgbot  # используем только send_message
 
 # ── базовая настройка логов ───────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-
 
 # ── утилиты преобразования OHLCV -> DataFrame ─────────────────────────────────
 def ohlcv_to_df(ohlcv) -> pd.DataFrame:
@@ -55,6 +54,53 @@ def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
     return val
 
 
+# ── Уведомления-адаптеры под текущий PositionManager ─────────────────────────
+def _notify_entry_tg(symbol: str, entry_price: float, amount_usd: float,
+                     tp_pct: float, sl_pct: float, tp1_atr: float, tp2_atr: float,
+                     buy_score: float = None, ai_score: float = None, amount_frac: float = None):
+    """
+    Адаптируем сигнатуру PositionManager.notify_entry(...) к нашему Telegram-уведомлению.
+    """
+    parts = [f"📥 Вход LONG {symbol} @ {entry_price:.4f}"]
+    parts.append(f"Сумма: ${amount_usd:.2f}")
+    parts.append(f"TP%≈{tp_pct:.4f} | SL%≈{sl_pct:.4f}")
+    parts.append(f"TP1≈{tp1_atr:.4f} | TP2≈{tp2_atr:.4f}")
+    extra = []
+    if buy_score is not None and ai_score is not None:
+        extra.append(f"Score {buy_score:.2f} / AI {ai_score:.2f}")
+    if amount_frac is not None:
+        extra.append(f"Size {int(amount_frac * 100)}%")
+    if extra:
+        parts.append(" | ".join(extra))
+    try:
+        tgbot.send_message("\n".join(parts))
+    except Exception:
+        logging.exception("notify_entry send failed")
+
+
+def _notify_close_tg(symbol: str, price: float, reason: str,
+                     pnl_pct: float, pnl_abs: float = None,
+                     buy_score: float = None, ai_score: float = None, amount_usd: float = None):
+    """
+    Адаптер под PositionManager.notify_close(...) текущей версии.
+    """
+    emoji = "✅" if (pnl_pct or 0) >= 0 else "❌"
+    parts = [f"{emoji} Закрытие {symbol} @ {price:.4f}", f"{reason} | PnL {pnl_pct:.2f}%"]
+    extra = []
+    if pnl_abs is not None:
+        extra.append(f"{pnl_abs:.2f}$")
+    if amount_usd is not None:
+        extra.append(f"Size ${amount_usd:.2f}")
+    if buy_score is not None and ai_score is not None:
+        extra.append(f"Score {buy_score:.2f} / AI {ai_score:.2f}")
+    if extra:
+        parts[-1] += f" ({' | '.join(extra)})"
+    try:
+        tgbot.send_message("\n".join(parts))
+    except Exception:
+        logging.exception("notify_close send failed")
+
+
 # ── основной торговый класс ───────────────────────────────────────────────────
 class TradingBot:
     def __init__(self):
@@ -71,9 +117,9 @@ class TradingBot:
             api_secret=os.getenv("GATE_API_SECRET"),
         )
 
-        # ⬇️ Создаем PositionManager с функциями уведомлений
+        # Подключаем PositionManager и передаём адаптеры уведомлений
         from trading.position_manager import PositionManager
-        self.pm = PositionManager(self.exchange, self.state, notify_entry, notify_close)
+        self.pm = PositionManager(self.exchange, self.state, _notify_entry_tg, _notify_close_tg)
 
         self.scorer = ScoringEngine()  # MIN_SCORE_TO_BUY подтянется из .env
 
@@ -87,15 +133,10 @@ class TradingBot:
         Если нет — возвращаем 0.55 (умеренная уверенность).
         """
         try:
-            # пример: откуда-то из твоей ml/AdaptiveMLModel
             from ml.adaptive_model import AdaptiveMLModel  # type: ignore
-
             model = AdaptiveMLModel()
-            # Ниже просто заглушка: у тебя может быть свой API.
-            # Дай мне знать — подгоню под твой интерфейс.
             prob = getattr(model, "predict_proba", None)
             if callable(prob):
-                # например, берём последние 100 свечек как фичи
                 ai = float(prob(df_15m.tail(100)) or 0.55)
                 return max(0.0, min(1.0, ai))
         except Exception:
@@ -135,25 +176,20 @@ class TradingBot:
         # Считаем Buy Score + собираем детали (RSI/MACD/и т.д.)
         buy_score, ai_score, details = self.scorer.evaluate(df_15m, ai_score=ai_score)
 
-        # (опционально) можно оценить рынок как bullish/sideways/bearish,
-        # но для краткости логируем только "sideways" с низкой уверенностью:
         market_cond = "sideways"
         confidence = 0.01
         logging.info(f"📊 Market Analysis: {market_cond}, Confidence: {confidence:.2f}")
 
-        # Для лога покажем, что именно внесло вклад
         macd_hist = details.get("macd_hist")
         rsi_val = details.get("rsi")
         macd_growing = details.get("macd_growing", False)
 
-        # Для красоты: +1 если MACD>0, +1 если растёт, +1 если RSI в зоне
         macd_pts = (1.0 if (macd_hist is not None and macd_hist > 0) else 0.0) + (1.0 if macd_growing else 0.0)
         rsi_pts = 1.0 if (rsi_val is not None and 45 <= rsi_val <= 65) else 0.0
 
         logging.info(f"✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
         logging.info(f"📊 Buy Score: {buy_score:.2f}/{self.scorer.min_score_to_buy:.2f} | MACD: {macd_pts:.1f} | AI: {ai_score:.2f}")
 
-        # Если уже в позиции — даём менеджеру сопровождать её
         if self.state.state.get("in_position"):
             try:
                 self.pm.manage(self.symbol, last_price, atr_val or 0.0)
@@ -161,14 +197,10 @@ class TradingBot:
                 logging.exception("Error in manage state")
             return
 
-        # Если позиции нет — оцениваем вход
         if buy_score >= self.scorer.min_score_to_buy:
-            # насколько торговать от TRADE_AMOUNT — по AI Score
             frac = self.scorer.position_fraction(ai_score)
             usd_amt = self.trade_amount_usd * frac
 
-            # Раньше здесь был вызов explain_signal_short(...).
-            # Сохраняем тот же формат переменной expl, но формируем сообщение прямо тут.
             rsi_note = (
                 "n/a" if rsi_val is None else
                 (f"{rsi_val:.1f} (перепродан)" if rsi_val < 30 else
@@ -178,16 +210,15 @@ class TradingBot:
             )
             macd_note = "n/a" if macd_hist is None else f"{macd_hist:.4f} ({'бычий' if macd_hist > 0 else 'медвежий'})"
             trend_note = "EMA12>EMA26" if (macd_hist and macd_hist > 0) else "EMA12<=EMA26"
-            adx_note = "20.0"  # как и было в заглушке
+            adx_note = "20.0"
             expl = f"RSI {rsi_note} | MACD hist {macd_note} | {trend_note} | ADX {adx_note}"
+            logging.debug(f"Explain: {expl}")
 
             if frac <= 0.0 or usd_amt <= 0.0:
-                # Не входим, но сообщаем в лог и (опционально) в TG
                 logging.info(f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен.")
                 return
 
             try:
-                # Открываем лонг (спот). PositionManager сам выставит tp/sl/трейлинг + сохранит state
                 self.pm.open_long(self.symbol, usd_amt, entry_price=last_price, atr=(atr_val or 0.0))
                 logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_amt:.2f}")
             except Exception:
@@ -203,5 +234,4 @@ class TradingBot:
                 self._trading_cycle()
             except Exception as e:
                 logging.error(f"Cycle error: {e}\n{traceback.format_exc()}")
-            # Период цикла
             time.sleep(self.cycle_minutes * 60)

@@ -42,6 +42,28 @@ def send_photo(image_path: str, caption: Optional[str] = None) -> None:
             data["caption"] = caption
         _tg_request("sendPhoto", data, files=files)
 
+# ==== Notifications for trades ====
+def notify_entry(symbol: str, side: str, price: float, amount: float, reason: str = "") -> None:
+    """Отправить сообщение при входе в позицию"""
+    msg = f"📈 Открыта {side.upper()} позиция\n" \
+          f"Инструмент: {symbol}\n" \
+          f"Цена входа: {price:.4f}\n" \
+          f"Объём: {amount}\n"
+    if reason:
+        msg += f"Причина: {reason}"
+    send_message(msg)
+
+def notify_close(symbol: str, side: str, entry_price: float, exit_price: float, pnl_abs: float, pnl_pct: float, reason: str = "") -> None:
+    """Отправить сообщение при закрытии позиции"""
+    emoji = "✅" if pnl_pct >= 0 else "❌"
+    msg = f"{emoji} Закрыта {side.upper()} позиция\n" \
+          f"{symbol}\n" \
+          f"Вход: {entry_price:.4f} → Выход: {exit_price:.4f}\n" \
+          f"PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)\n"
+    if reason:
+        msg += f"Причина: {reason}"
+    send_message(msg)
+
 # ==== Commands ====
 def cmd_start() -> None:
     send_message(
