@@ -3,19 +3,20 @@ import io
 import logging
 import requests
 import pandas as pd
-from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable
 
 # headless charts
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+from analysis import scoring_engine
+from trading.position_manager import PositionManager
 
-TRADES_LOG_PATH = "trades.log"
+# ========= ENV / Telegram API =========
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+CHAT_ID = os.getenv("CHAT_ID", "")
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def _post(method: str, **payload):
     try:
@@ -27,12 +28,17 @@ def _post(method: str, **payload):
         return False
 
 def send_message(text: str, parse_mode: Optional[str] = None):
+    if not BOT_TOKEN or not CHAT_ID:
+        logging.warning("Telegram not configured (BOT_TOKEN/CHAT_ID missing)")
+        return
     data = {"chat_id": CHAT_ID, "text": text}
     if parse_mode:
         data["parse_mode"] = parse_mode
     _post("sendMessage", **data)
 
 def send_photo_bytes(img: bytes, caption: str = ""):
+    if not BOT_TOKEN or not CHAT_ID:
+        return
     try:
         url = f"{API}/sendPhoto"
         files = {"photo": ("chart.png", img)}
@@ -62,31 +68,8 @@ def explain_signal_short(rsi: float, adx: float, macd_hist: float, ema_fast_abov
     parts.append("MACD+" if macd_hist > 0 else "MACD-")
     return " / ".join(parts)
 
-# ---------- НОВОЕ: уведомления вход/выход ----------
-def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: float,
-                 tp1: float = None, tp2: float = None):
-    text = (
-        f"📥 Открыт LONG {symbol}\n"
-        f"Вход: {price:.2f}\n"
-        f"Сумма: {amount_usd:.0f} USDT\n"
-        f"TP% предохран.: {tp:.2f}\n"
-        f"SL% предохран.: {sl:.2f}"
-    )
-    if tp1 is not None and tp2 is not None:
-        text += f"\nATR уровни: TP1 {tp1:.2f} | TP2 {tp2:.2f}"
-    send_message(text)
 
-def notify_close(symbol: str, price: float, reason: str, pnl_pct: float, pnl_abs: float):
-    sign = "🟢" if pnl_abs >= 0 else "🔴"
-    text = (
-        f"📤 Закрыт LONG {symbol}\n"
-        f"Выход: {price:.2f}\n"
-        f"Причина: {reason}\n"
-        f"{sign} PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)"
-    )
-    send_message(text)
-
-# -------------------- Команды --------------------
+# ========= Команды =========
 def cmd_start():
     send_message(
         "🤖 Crypto AI Bot\n"
@@ -95,10 +78,12 @@ def cmd_start():
         "/errors – последние ошибки\n"
         "/lasttrades – 5 последних сделок\n"
         "/train – переобучить модель\n"
-        "/test – тест-сигнал"
+        "/test – краткий анализ сигнала\n"
+        "/testbuy – открыть LONG (тест)\n"
+        "/testsell – закрыть позицию (тест)"
     )
 
-def cmd_status(state_manager, get_price_fn):
+def cmd_status(state_manager, get_price_fn: Callable[[], float], symbol: str = "BTC/USDT"):
     st = state_manager.state
     if st.get("in_position"):
         last = None
@@ -110,95 +95,38 @@ def cmd_status(state_manager, get_price_fn):
         if last and st.get("entry_price"):
             pnl = (last - st["entry_price"]) / st["entry_price"] * 100
         send_message(
-            f"📈 LONG открыта\n"
-            f"Вход: {st.get('entry_price')} | TP: {st.get('tp')} | SL: {st.get('sl')}\n"
+            f"📈 LONG открыта {symbol}\n"
+            f"Вход: {st.get('entry_price')} | TP: {st.get('tp_price_pct')} | SL: {st.get('sl_price_pct')}\n"
             f"Текущая: {last} | PnL: {pnl:.2f}%"
         )
     else:
-        if os.path.exists(TRADES_LOG_PATH):
-            try:
-                with open(TRADES_LOG_PATH, "r", encoding="utf-8") as f:
-                    lines = [l.strip() for l in f.readlines() if "BUY" in l.upper()]
-                if lines:
-                    send_message(f"🟢 Позиции нет\nПоследний вход: {lines[-1]}")
-                    return
-            except Exception as e:
-                logging.error(f"Error reading trades.log: {e}")
         send_message("🟢 Позиции нет")
 
-def cmd_profit(closed_csv_path="closed_trades.csv", open_log_path="trades.log"):
-    """
-    PnL по закрытым сделкам:
-      - если есть qty_usd: pnl = (close - entry) * qty_usd / entry
-      - иначе используем TRADE_AMOUNT из .env (по умолчанию 50)
-    Плюс показываем последние ордера из trades.log.
-    """
-    TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "50"))
-    total_pnl = 0.0
-    winrate = 0.0
-    lines = []
-
-    if os.path.exists(closed_csv_path):
-        try:
-            df = pd.read_csv(closed_csv_path)
-            if not df.empty:
-                if {"entry_price", "close_price"}.issubset(df.columns):
-                    if "qty_usd" in df.columns:
-                        pnl_series = (df["close_price"] - df["entry_price"]) * (df["qty_usd"] / df["entry_price"].replace(0, pd.NA))
-                    else:
-                        pnl_series = (df["close_price"] - df["entry_price"]) * (TRADE_AMOUNT / df["entry_price"].replace(0, pd.NA))
-                    pnl_series = pnl_series.fillna(0)
-                    total_pnl = float(pnl_series.sum())
-                    winrate = float((pnl_series > 0).mean() * 100) if len(pnl_series) else 0.0
-                elif "pnl_abs" in df.columns:
-                    total_pnl = float(df["pnl_abs"].sum())
-                    winrate = float((df["pnl_abs"] > 0).mean() * 100)
-                else:
-                    lines.append("⚠️ Формат closed_trades.csv неизвестен")
-            else:
-                lines.append("📭 Закрытых сделок нет")
-        except Exception as e:
-            logging.error(f"cmd_profit read csv error: {e}")
-            lines.append("⚠️ Не удалось прочитать closed_trades.csv")
+def cmd_profit(closed_csv_path="closed_trades.csv"):
+    if not os.path.exists(closed_csv_path):
+        send_message("📭 Сделок ещё нет"); return
+    df = pd.read_csv(closed_csv_path)
+    if df.empty:
+        send_message("📭 Сделок ещё нет"); return
+    if "pnl_abs" in df.columns:
+        pnl = df["pnl_abs"].sum()
+        winrate = (df["pnl_abs"] > 0).mean() * 100
     else:
-        lines.append("📭 Закрытых сделок нет")
-
-    if os.path.exists(open_log_path):
-        try:
-            with open(open_log_path, "r", encoding="utf-8") as f:
-                raw = [ln.strip() for ln in f.readlines() if ln.strip()]
-            if raw:
-                lines.append("\n📜 Последние ордера:")
-                for row in raw[-5:]:
-                    lines.append(row)
-            else:
-                lines.append("📜 Журнал ордеров пуст")
-        except Exception as e:
-            logging.error(f"cmd_profit read log error: {e}")
-            lines.append("⚠️ Не удалось прочитать trades.log")
-    else:
-        lines.append("📂 trades.log ещё не создан")
-
-    msg = f"💰 PnL: {total_pnl:.2f}\n📊 Winrate: {winrate:.1f}%"
-    if lines:
-        msg += "\n" + "\n".join(lines)
-    send_message(msg)
+        # fallback без qty: просто разница цен
+        df["pnl_abs"] = (df["close_price"] - df["entry_price"])
+        pnl = df["pnl_abs"].sum()
+        winrate = (df["pnl_abs"] > 0).mean() * 100
+    send_message(f"💰 PnL: {pnl:.2f}\nWinrate: {winrate:.1f}%")
 
 def cmd_errors(csv_path="sinyal_fiyat_analizi.csv"):
     if not os.path.exists(csv_path):
-        send_message("📂 Лог ошибок ещё не сформирован"); return
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        logging.error(f"cmd_errors read error: {e}")
-        send_message("⚠️ Не удалось прочитать лог ошибок"); return
+        send_message("❌ Нет данных ошибок"); return
+    df = pd.read_csv(csv_path)
     if "result" not in df.columns:
-        send_message("ℹ️ Лог ещё не размечен (нет колонки result)"); return
-
+        send_message("ℹ️ Лог сигналов ещё не размечен колонкой 'result'"); return
     bad = df[df["result"] == 0].tail(5)
     if bad.empty:
-        send_message("✅ Ошибок не зафиксировано"); return
-
+        send_message("✅ Ошибок нет"); return
     lines = ["❌ Последние ошибки:"]
     for _, r in bad.iterrows():
         t = r.get("time", "")
@@ -224,36 +152,76 @@ def cmd_lasttrades(closed_csv_path="closed_trades.csv"):
     send_message("\n".join(lines))
 
 def cmd_train(train_fn, count_samples: int = None):
-    train_fn()
-    msg = "♻ Модель переобучена"
-    if count_samples:
-        msg += f"\n📊 Обучено на: {count_samples} записях"
-    send_message(msg)
-
-# --- /test: быстрый пинг + картинка ---
-def cmd_test(symbol="BTC/USDT"):
-    send_message(f"🛠 Тест-сигнал для {symbol}")
     try:
-        idx = pd.date_range(end=datetime.now(), periods=30, freq="T")
-        df = pd.DataFrame({"close": [100 + i*0.2 for i in range(len(idx))]}, index=idx)
-        send_chart(df, entry=df["close"].iloc[-10], exit_=df["close"].iloc[-1], title=f"Test {symbol}")
+        train_fn()
+        msg = "♻ Модель переобучена"
+        if count_samples:
+            msg += f"\n📊 Обучено на: {count_samples} записях"
+        send_message(msg)
     except Exception as e:
-        logging.error(f"cmd_test error: {e}")
-        send_message("⚠️ Ошибка генерации тест-графика")
+        logging.error(f"/train error: {e}")
+        send_message("⚠️ Обучение пропущено (нужны данные X,y)")
 
-# -------------------- Совместимость со старым main.py --------------------
-class TelegramBot:
-    """
-    Старый main.py делает:
-        from telegram.bot_handler import TelegramBot
-    Держим тонкую обёртку, чтобы импорт не падал.
-    """
-    def __init__(self, token: str = None, chat_id: str = None, state_manager=None):
-        if token:
-            os.environ['BOT_TOKEN'] = token
-        if chat_id:
-            os.environ['CHAT_ID'] = str(chat_id)
-        self.state = state_manager
+# ====== уведомления вход/выход/пропуск ======
+def notify_entry(symbol: str, price: float, amount_usd: float, tp: float, sl: float, tp1: float, tp2: float,
+                 buy_score: float = None, ai_score: float = None, amount_frac: float = None):
+    expl = []
+    if buy_score is not None and ai_score is not None:
+        expl.append(f"Buy {buy_score:.2f} / AI {ai_score:.2f}")
+    if amount_frac is not None:
+        expl.append(f"Size {int(amount_frac*100)}%")
+    send_message(
+        "📥 Вход LONG {sym} @ {pr}\n{info}\nСумма: ${amt}\nTP%: {tp:.2f} | SL%: {sl:.2f}\nTP1: {tp1:.2f} | TP2: {tp2:.2f}"
+        .format(sym=symbol, pr=price, info=" | ".join(expl) if expl else "", amt=amount_usd, tp=tp, sl=sl, tp1=tp1, tp2=tp2)
+    )
 
-    def send_message(self, text: str, parse_mode: str = None):
-        send_message(text, parse_mode=parse_mode)
+def notify_close(symbol: str, price: float, reason: str, pnl_pct: float, pnl_abs: float = None):
+    base = f"📤 Закрытие {symbol} @ {price}\n{reason} | PnL {pnl_pct:.2f}%"
+    if pnl_abs is not None:
+        base += f" ({pnl_abs:.2f}$)"
+    send_message(base)
+
+def notify_skip_entry(symbol: str, reason: str, buy_score: float, ai_score: float, min_buy: float):
+    send_message(
+        "⏸ Вход пропущен\n"
+        f"{symbol}\n"
+        f"Причина: {reason}\n"
+        f"Buy {buy_score:.2f} (мин {min_buy:.2f}) | AI {ai_score:.2f}"
+    )
+
+
+# ====== Тестовые команды ======
+def cmd_testbuy(state_manager, exchange_client, symbol: str = None, amount_usd: float = None):
+    """
+    Принудительно открыть LONG (для проверки всей цепочки).
+    Если amount_usd не передан — берём TRADE_AMOUNT из .env (или 50).
+    """
+    symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
+    if amount_usd is None:
+        try:
+            amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
+        except Exception:
+            amount_usd = 50.0
+
+    pm = PositionManager(exchange_client, state_manager)
+    try:
+        last = exchange_client.get_last_price(symbol)
+        pm.open_long(symbol, amount_usd, last, atr=0.0)
+        send_message(f"✅ TESTBUY выполнен: {symbol} на ${amount_usd}")
+    except Exception as e:
+        logging.error(f"cmd_testbuy error: {e}")
+        send_message(f"❌ TESTBUY ошибка: {e}")
+
+def cmd_testsell(state_manager, exchange_client, symbol: str = None):
+    """
+    Принудительно закрыть позицию по рынку (для проверки).
+    """
+    symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
+    pm = PositionManager(exchange_client, state_manager)
+    try:
+        last = exchange_client.get_last_price(symbol)
+        pm.close_all(symbol, last, reason="manual_testsell")
+        send_message(f"✅ TESTSELL выполнен: {symbol}")
+    except Exception as e:
+        logging.error(f"cmd_testsell error: {e}")
+        send_message(f"❌ TESTSELL ошибка: {e}")

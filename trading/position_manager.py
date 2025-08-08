@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime, timedelta
 
-# уведомления в TG
+# уведомления в TG из bot_handler
 try:
     from telegram.bot_handler import notify_entry, notify_close
 except Exception:
@@ -42,8 +42,9 @@ class PositionManager:
         # Лимит времени
         self.TIMEOUT_HOURS = 2
 
-    # ========= ТВОИ МЕТОДЫ (с уведомлениями) =========
-    def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float):
+    # ========= ВХОД =========
+    def open_long(self, symbol: str, amount_usd: float, entry_price: float, atr: float,
+                  buy_score: float = None, ai_score: float = None, amount_frac: float = None):
         st = self.state.state
         if st.get('in_position'):
             logging.info("Skip open_long: already in position")
@@ -73,7 +74,7 @@ class PositionManager:
         })
         self.state.save_state()
 
-        logging.info(f"Opened LONG {symbol} @ {entry_price:.4f}")
+        logging.info(f"Opened LONG {symbol} @ {entry_price:.4f} amount=${amount_usd:.2f}")
 
         # 🔔 TG уведомление о входе
         try:
@@ -85,13 +86,17 @@ class PositionManager:
                     tp=float(st['tp_price_pct']),
                     sl=float(st['sl_price_pct']),
                     tp1=float(st['tp1_atr']),
-                    tp2=float(st['tp2_atr'])
+                    tp2=float(st['tp2_atr']),
+                    buy_score=buy_score,
+                    ai_score=ai_score,
+                    amount_frac=amount_frac
                 )
         except Exception as e:
             logging.error(f"notify_entry error: {e}")
 
         return order
 
+    # ========= ВЕДЕНИЕ =========
     def manage(self, symbol: str, last_price: float, atr: float):
         st = self.state.state
         if not st.get('in_position'):
@@ -134,11 +139,11 @@ class PositionManager:
         if last_price <= st['sl_atr']:
             self.close_all(symbol, last_price, reason='sl_atr'); return
 
+    # ========= ВЫХОД =========
     def close_all(self, symbol: str, exit_price: float, reason: str):
         st = self.state.state
         if not st.get('in_position'):
             return
-
         # рыночное закрытие лонга: продаём на сумму в USD, пересчитав в количество
         qty = st['qty_usd'] / exit_price if exit_price else 0
         try:
@@ -149,11 +154,10 @@ class PositionManager:
         # PnL
         entry = float(st.get('entry_price') or 0.0)
         pnl_pct = ((exit_price - entry) / entry * 100.0) if entry else 0.0
-        # эквивалент по USD: qty_usd / entry = фактическое количество
         qty_usd = float(st.get('qty_usd') or 0.0)
         pnl_abs = (exit_price - entry) * (qty_usd / entry) if entry else 0.0
 
-        # лог в CSV (если есть утилита)
+        # лог в CSV
         try:
             if CSVHandler:
                 CSVHandler.append_to_csv({
@@ -194,13 +198,13 @@ class PositionManager:
         except Exception as e:
             logging.error(f"notify_close error: {e}")
 
-    # ========= Совместимость с основным циклом =========
+    # ========= Совместимость / вспомогательные =========
     def open_position(self, exchange_client, symbol: str, usd_amount: float = None):
         """
-        Совместимость с вызовом из основного цикла:
-        - если usd_amount не передан (старый main), берём из .env TRADE_AMOUNT или 50
-        - берём текущую цену через exchange_client/self.ex
-        - ATR для старта 0.0 (процентные предохранители всё равно работают)
+        Совместимость со старым вызовом (без суммы):
+        - если usd_amount не передан → берём TRADE_AMOUNT или 50
+        - цена берётся из клиента
+        - ATR = 0.0 на старте
         """
         if usd_amount is None:
             try:
@@ -217,9 +221,6 @@ class PositionManager:
         return self.open_long(symbol, usd_amount, price, atr)
 
     def close_position(self, exchange_client, reason: str = "signal"):
-        """
-        Совместимость: закрыть всю позицию по текущей цене и причине.
-        """
         st = self.state.state
         if not st.get('in_position'):
             return {"status": "noop", "detail": "no position"}

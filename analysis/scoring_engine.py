@@ -1,108 +1,164 @@
-import pandas as pd
-import numpy as np
-from typing import Tuple
-from config.settings import MarketCondition, TradingConfig
-import logging
+import os
+import math
+from typing import Dict, Any, Tuple
 
-class ScoringEngine:
-    """MACD балльная система принятия решений"""
-    
-    def __init__(self):
-        self.market_modifiers = {
-            MarketCondition.STRONG_BULL: 0.8,
-            MarketCondition.WEAK_BULL: 0.9,
-            MarketCondition.SIDEWAYS: 1.0,
-            MarketCondition.WEAK_BEAR: 1.4,
-            MarketCondition.STRONG_BEAR: 1.5
-        }
-    
-    def calculate_buy_score(self, df: pd.DataFrame, market_condition: MarketCondition, ai_confidence: float = 0.5) -> Tuple[float, dict]:
-        """Расчет балла для покупки"""
-        try:
-            # Базовые MACD баллы
-            macd_score = self._calculate_macd_score(df)
-            
-            # AI модификатор
-            ai_modifier = self._calculate_ai_modifier(ai_confidence)
-            
-            # Рыночный модификатор
-            market_modifier = self.market_modifiers.get(market_condition, 1.0)
-            
-            # Итоговый балл
-            base_score = macd_score + ai_modifier
-            final_score = base_score
-            threshold = TradingConfig.MIN_SCORE_TO_BUY * market_modifier
-            
-            details = {
-                "macd_score": macd_score,
-                "ai_modifier": ai_modifier,
-                "market_modifier": market_modifier,
-                "threshold": threshold,
-                "market_condition": market_condition.value
-            }
-            
-            logging.info(f"📊 Buy Score: {final_score:.2f}/{threshold:.2f} | MACD: {macd_score} | AI: {ai_modifier:.2f}")
-            
-            return final_score, details
-            
-        except Exception as e:
-            logging.error(f"Scoring calculation failed: {e}")
-            return 0.0, {}
-    
-    def _calculate_macd_score(self, df: pd.DataFrame) -> float:
-        """Расчет MACD баллов (0-3)"""
-        if len(df) < 5:
-            return 0.0
-        
-        score = 0.0
-        latest = df.iloc[-1]
-        previous = df.iloc[-2]
-        
-        # 1. Пересечение MACD > Signal = 1 балл
-        if (latest['macd'] > latest['macd_signal'] and 
-            previous['macd'] <= previous['macd_signal']):
-            score += 1.0
-            logging.info("✅ MACD Crossover detected (+1 point)")
-        
-        # 2. Растущая гистограмма = +1 балл
-        if (latest['macd_histogram'] > previous['macd_histogram'] and
-            latest['macd_histogram'] > 0):
-            score += 1.0
-            logging.info("✅ MACD Histogram growing (+1 point)")
-        
-        # 3. RSI поддержка = +1 балл
-        if 30 <= latest['rsi'] <= 70:
-            score += 1.0
-            logging.info("✅ RSI in healthy range (+1 point)")
-        
-        return score
-    
-    def _calculate_ai_modifier(self, ai_confidence: float) -> float:
-        """Расчет AI модификатора"""
-        if ai_confidence > 0.8:
-            return 1.0
-        elif ai_confidence > 0.6:
+# Опционально подключаем твою ML-модель; если её нет — работаем с заглушкой
+try:
+    from ml.adaptive_model import AdaptiveMLModel
+except Exception:
+    AdaptiveMLModel = None
+
+
+# ====== Настройки порога ======
+def get_min_buy_score() -> float:
+    # можно переопределить через .env (MIN_SCORE_TO_BUY), но по умолчанию 1.4 как мы решили
+    try:
+        return float(os.getenv("MIN_SCORE_TO_BUY", "1.4"))
+    except Exception:
+        return 1.4
+
+
+# ====== BUY SCORE (правила TA) ======
+def compute_buy_score(features: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
+    """
+    features = {
+        "rsi": float,
+        "macd_hist": float,
+        "ema_fast_above": bool,
+        "adx": float
+    }
+    Возвращает (score, breakdown) где breakdown по компонентам.
+    Суммарный максимум условно ~2.0, чтобы соответствовать прежним логам.
+    """
+    rsi = float(features.get("rsi", 50))
+    macd_hist = float(features.get("macd_hist", 0))
+    ema_fast_above = bool(features.get("ema_fast_above", False))
+    adx = float(features.get("adx", 20))
+
+    breakdown = {
+        "rsi": 0.0,
+        "macd": 0.0,
+        "ema": 0.0,
+        "trend": 0.0,
+    }
+
+    # RSI: «здоровая зона» ~ 40..65
+    if 40 <= rsi <= 65:
+        breakdown["rsi"] = 1.0
+
+    # MACD: растущий гистограммный столбик — сильнее
+    if macd_hist > 0:
+        breakdown["macd"] = 1.0
+    # (если хочешь тоньше: положительный, но уменьшается → 0.5)
+
+    # EMA-фильтр: если short EMA выше long EMA — небольшой бонус
+    if ema_fast_above:
+        breakdown["ema"] = 0.4
+
+    # ADX как фильтр слабого тренда — бонус при тренде
+    if adx >= 18:
+        breakdown["trend"] = 0.2
+
+    score = sum(breakdown.values())
+    # мягкое ограничение до 2.0, чтобы сохранять привычные шкалы логов
+    score = min(score, 2.0)
+    return score, breakdown
+
+
+# ====== AI SCORE (вероятностная модель) ======
+def compute_ai_score(features: Dict[str, Any]) -> float:
+    """
+    Возвращает вероятность (0..1) успеха сделки.
+    Если модели нет — возвращаем 0.5 (нейтрально).
+    """
+    try:
+        if AdaptiveMLModel is None:
             return 0.5
-        elif ai_confidence < 0.4:
-            return -0.5
-        else:
-            return 0.0
-    
-    def should_sell(self, df: pd.DataFrame, position_profit_pct: float, candles_rsi_over_70: int) -> Tuple[bool, str]:
-        """Определение необходимости продажи"""
-        latest = df.iloc[-1]
-        
-        # Обязательные условия продажи
-        if position_profit_pct >= TradingConfig.TAKE_PROFIT_PCT:
-            return True, f"Take Profit reached: {position_profit_pct:.2f}%"
-        
-        if position_profit_pct <= -TradingConfig.STOP_LOSS_PCT:
-            return True, f"Stop Loss triggered: {position_profit_pct:.2f}%"
-        
-        if latest['rsi'] >= TradingConfig.RSI_CRITICAL:
-            return True, f"Critical RSI level: {latest['rsi']:.1f}"
-        
-        if candles_rsi_over_70 >= TradingConfig.RSI_CLOSE_CANDLES:
-            return True, f"RSI >70 for {candles_rsi_over_70} candles"
-        
-        return False, "No sell signal"
+        model = AdaptiveMLModel()
+        # ожидается метод safe/predict_proba, подстраиваемся:
+        if hasattr(model, "predict_proba_safely"):
+            return float(model.predict_proba_safely(features))
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(features)
+            return float(proba) if isinstance(proba, (int, float)) else float(proba[0])
+        if hasattr(model, "predict"):
+            # если только predict → маппим {True:0.7, False:0.3} как эвристика
+            pred = model.predict(features)
+            return 0.7 if bool(pred) else 0.3
+    except Exception:
+        pass
+    return 0.5
+
+
+# ====== Маппинг AI→доля объёма (твоя сетка) ======
+def decide_trade_amount(ai_score: float, base_amount_usd: float) -> Tuple[float, float]:
+    """
+    Возвращает (amount_usd, fraction).
+      AI ≥ 0.70  -> 100%
+      0.60–0.70  -> 90%
+      0.50–0.60  -> 60%
+      < 0.50     -> 0% (не торгуем)
+    """
+    if ai_score >= 0.70:
+        frac = 1.00
+    elif 0.60 <= ai_score < 0.70:
+        frac = 0.90
+    elif 0.50 <= ai_score < 0.60:
+        frac = 0.60
+    else:
+        frac = 0.0
+
+    return round(base_amount_usd * frac, 2), frac
+
+
+# ====== Итоговое решение ======
+def decide(features: Dict[str, Any], base_amount_usd: float) -> Dict[str, Any]:
+    """
+    Вычисляет buy_score, ai_score и принимает решение о входе.
+    Возвращает dict:
+    {
+        "buy_score": float,
+        "ai_score": float,
+        "min_buy_score": float,
+        "amount_usd": float,  # 0 если не входить
+        "amount_fraction": float,
+        "reason": str,
+        "breakdown": Dict[str, float]
+    }
+    """
+    min_buy = get_min_buy_score()
+    buy_score, breakdown = compute_buy_score(features)
+    ai_score = compute_ai_score(features)
+    amount_usd, frac = decide_trade_amount(ai_score, base_amount_usd)
+
+    if buy_score < min_buy:
+        return {
+            "buy_score": buy_score,
+            "ai_score": ai_score,
+            "min_buy_score": min_buy,
+            "amount_usd": 0.0,
+            "amount_fraction": 0.0,
+            "reason": f"Buy Score {buy_score:.2f} ниже порога {min_buy:.2f}",
+            "breakdown": breakdown
+        }
+
+    if frac <= 0.0:
+        return {
+            "buy_score": buy_score,
+            "ai_score": ai_score,
+            "min_buy_score": min_buy,
+            "amount_usd": 0.0,
+            "amount_fraction": 0.0,
+            "reason": f"AI {ai_score:.2f} ниже 0.50 — вход пропущен",
+            "breakdown": breakdown
+        }
+
+    return {
+        "buy_score": buy_score,
+        "ai_score": ai_score,
+        "min_buy_score": min_buy,
+        "amount_usd": amount_usd,
+        "amount_fraction": frac,
+        "reason": "OK",
+        "breakdown": breakdown
+    }
