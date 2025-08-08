@@ -8,12 +8,12 @@ from typing import Optional, Tuple
 # ── наши модули из проекта ────────────────────────────────────────────────────
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient
-# ⛔️ ЦИКЛ! Было: from trading.position_manager import PositionManager
+#⛔️ ЦИКЛ! Было: from trading.position_manager import PositionManager
 from analysis.scoring_engine import ScoringEngine
 from telegram.bot_handler import (
     notify_entry,
-    notify_close,
-    explain_signal_short,
+    notify_close,  # может не использоваться, но оставляю как в твоём файле
+    # explain_signal_short  ← УДАЛЕНО: этой функции нет в bot_handler.py
 )
 
 # ── базовая настройка логов ───────────────────────────────────────────────────
@@ -172,12 +172,19 @@ class TradingBot:
             frac = self.scorer.position_fraction(ai_score)
             usd_amt = self.trade_amount_usd * frac
 
-            expl = explain_signal_short(
-                rsi=float(rsi_val) if rsi_val is not None else 50.0,
-                adx=20.0,  # ADX не считаем сейчас; можно внедрить позже
-                macd_hist=float(macd_hist) if macd_hist is not None else 0.0,
-                ema_fast_above=True if macd_hist and macd_hist > 0 else False,
+            # Раньше здесь был вызов explain_signal_short(...).
+            # Сохраняем тот же формат переменной expl, но формируем сообщение прямо тут.
+            rsi_note = (
+                "n/a" if rsi_val is None else
+                (f"{rsi_val:.1f} (перепродан)" if rsi_val < 30 else
+                 f"{rsi_val:.1f} (перекуплен)" if rsi_val > 70 else
+                 f"{rsi_val:.1f} (здоровая зона)" if 45 <= rsi_val <= 65 else
+                 f"{rsi_val:.1f}")
             )
+            macd_note = "n/a" if macd_hist is None else f"{macd_hist:.4f} ({'бычий' if macd_hist > 0 else 'медвежий'})"
+            trend_note = "EMA12>EMA26" if (macd_hist and macd_hist > 0) else "EMA12<=EMA26"
+            adx_note = "20.0"  # как и было в заглушке
+            expl = f"RSI {rsi_note} | MACD hist {macd_note} | {trend_note} | ADX {adx_note}"
 
             if frac <= 0.0 or usd_amt <= 0.0:
                 # Не входим, но сообщаем в лог и (опционально) в TG
@@ -187,7 +194,8 @@ class TradingBot:
             try:
                 # Открываем лонг (спот). PositionManager сам выставит tp/sl/трейлинг + сохранит state
                 self.pm.open_long(self.symbol, usd_amt, entry_price=last_price, atr=(atr_val or 0.0))
-                notify_entry(self.symbol, last_price, buy_score, expl, usd_amt)  # оставил как у тебя
+                # Оставляю вызов notify_entry в твоём исходном формате аргументов
+                notify_entry(self.symbol, last_price, buy_score, expl, usd_amt)
             except Exception:
                 logging.exception("Error while opening long")
         else:
