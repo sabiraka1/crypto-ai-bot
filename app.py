@@ -3,55 +3,91 @@ import logging
 import threading
 from flask import Flask, request, jsonify
 
-# важно: у тебя в main.py класс называется TradingBot (не CryptoBot)
 from main import TradingBot
+from core.state_manager import StateManager
+from trading.exchange_client import ExchangeClient
+from telegram.bot_handler import (
+    cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train
+)
+
+# опциональная интеграция обучения
+def _train_model_safe():
+    try:
+        from ml.adaptive_model import AdaptiveMLModel
+        m = AdaptiveMLModel()
+        try:
+            m.train()
+        except AttributeError:
+            # если метод называется иначе
+            if hasattr(m, "fit"):
+                m.fit()
+    except Exception as e:
+        logging.error(f"Train model error: {e}")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot_activity.log", encoding="utf-8")
-    ],
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot_activity.log", encoding="utf-8")],
 )
 
 app = Flask(__name__)
 
-# --- запустим бота в фоновом потоке ---
+# --- запустим торгового бота в фоновом потоке ---
 _bot_instance = TradingBot()
-
 def _run_bot():
     try:
         logging.info("🚀 Trading bot starting...")
         _bot_instance.run()
     except Exception:
         logging.exception("Trading bot crashed")
-
 threading.Thread(target=_run_bot, daemon=True).start()
 
-# --- healthcheck для Render ---
 @app.route("/alive", methods=["GET"])
 def alive():
     return jsonify({"ok": True, "status": "running"}), 200
 
-# --- Telegram webhook (опционально, если захочешь команды на вебхуке) ---
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True, silent=True) or {}
-        msg = (data.get("message") or data.get("edited_message") or {})
+        msg = (data.get("message") or data.get("edited_message") or {}) or {}
         text = (msg.get("text") or "").strip()
-        # Пример простого роутинга команд (если нужно):
-        # from telegram.bot_handler import cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train
-        # from core.state_manager import StateManager
-        # from trading.exchange_client import ExchangeClient
-        # if text == "/status":
-        #     state = StateManager()
-        #     ex = ExchangeClient(api_key=os.getenv("GATE_API_KEY"), api_secret=os.getenv("GATE_API_SECRET"))
-        #     cmd_status(state, lambda: ex.ticker(os.getenv("SYMBOL", "BTC/USDT")).get("last"))
-        # elif text == "/profit":
-        #     cmd_profit()
-        # ...
+
+        if not text:
+            return jsonify({"ok": True}), 200
+
+        # подготовим зависимости для команд
+        state = StateManager()
+        ex = ExchangeClient(api_key=os.getenv("GATE_API_KEY"), api_secret=os.getenv("GATE_API_SECRET"))
+        symbol = os.getenv("SYMBOL", "BTC/USDT")
+
+        # простой роутинг
+        if text in ("/start", "start"):
+            cmd_start()
+
+        elif text in ("/status", "status"):
+            cmd_status(state, lambda: ex.ticker(symbol).get("last"))
+
+        elif text in ("/profit", "profit"):
+            cmd_profit()
+
+        elif text in ("/errors", "errors"):
+            cmd_errors()
+
+        elif text in ("/lasttrades", "lasttrades"):
+            cmd_lasttrades()
+
+        elif text in ("/train", "train"):
+            cmd_train(_train_model_safe)
+
+        else:
+            # необязательный эхо / help
+            if text == "/help":
+                cmd_start()
+            else:
+                # игнор прочего текста
+                pass
+
         return jsonify({"ok": True}), 200
     except Exception as e:
         logging.exception("webhook error")
