@@ -6,7 +6,6 @@ import pandas as pd
 from datetime import datetime
 from typing import Optional
 
-# headless charts
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -44,8 +43,8 @@ def send_photo_bytes(img: bytes, caption: str = ""):
 def send_chart(df: pd.DataFrame, entry: float = None, exit_: float = None, title: str = "Chart"):
     fig = plt.figure()
     plt.plot(df.index, df["close"])
-    if entry: plt.axhline(entry, linestyle="--")
-    if exit_: plt.axhline(exit_, linestyle=":")
+    if entry: plt.axhline(entry, linestyle="--", color="green")
+    if exit_: plt.axhline(exit_, linestyle=":", color="red")
     plt.title(title)
     buf = io.BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight")
@@ -89,7 +88,6 @@ def cmd_status(state_manager, get_price_fn):
             f"Текущая: {last} | PnL: {pnl:.2f}%"
         )
     else:
-        # Если позиции нет — покажем последний BUY из trades.log
         if os.path.exists(TRADES_LOG_PATH):
             try:
                 with open(TRADES_LOG_PATH, "r", encoding="utf-8") as f:
@@ -102,59 +100,41 @@ def cmd_status(state_manager, get_price_fn):
         send_message("🟢 Позиции нет")
 
 def cmd_profit(closed_csv_path="closed_trades.csv", open_log_path="trades.log"):
-    """
-    PnL по закрытым сделкам:
-    - если есть qty_usd: pnl = (close - entry) * qty_usd / entry
-    - иначе используем TRADE_AMOUNT из .env
-    Плюс вывод последних ордеров из trades.log.
-    """
     TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "50"))
     total_pnl = 0.0
     winrate = 0.0
     lines = []
 
-    # --- Закрытые сделки ---
     if os.path.exists(closed_csv_path):
         try:
             df = pd.read_csv(closed_csv_path)
-            if not df.empty:
-                if {"entry_price", "close_price"}.issubset(df.columns):
-                    if "qty_usd" in df.columns:
-                        pnl_series = (df["close_price"] - df["entry_price"]) * (df["qty_usd"] / df["entry_price"].replace(0, pd.NA))
-                    else:
-                        pnl_series = (df["close_price"] - df["entry_price"]) * (TRADE_AMOUNT / df["entry_price"].replace(0, pd.NA))
-                    pnl_series = pnl_series.fillna(0)
-                    total_pnl = float(pnl_series.sum())
-                    winrate = float((pnl_series > 0).mean() * 100) if len(pnl_series) else 0.0
-                elif "pnl_abs" in df.columns:
-                    total_pnl = float(df["pnl_abs"].sum())
-                    winrate = float((df["pnl_abs"] > 0).mean() * 100)
+            if not df.empty and {"entry_price", "close_price"}.issubset(df.columns):
+                if "qty_usd" in df.columns:
+                    pnl_series = (df["close_price"] - df["entry_price"]) * (df["qty_usd"] / df["entry_price"].replace(0, pd.NA))
                 else:
-                    lines.append("⚠️ Формат closed_trades.csv неизвестен")
-            else:
-                lines.append("📭 Закрытых сделок нет")
+                    pnl_series = (df["close_price"] - df["entry_price"]) * (TRADE_AMOUNT / df["entry_price"].replace(0, pd.NA))
+                pnl_series = pnl_series.fillna(0)
+                total_pnl = float(pnl_series.sum())
+                winrate = float((pnl_series > 0).mean() * 100) if len(pnl_series) else 0.0
+            elif "pnl_abs" in df.columns:
+                total_pnl = float(df["pnl_abs"].sum())
+                winrate = float((df["pnl_abs"] > 0).mean() * 100)
         except Exception as e:
             logging.error(f"cmd_profit read csv error: {e}")
             lines.append("⚠️ Не удалось прочитать closed_trades.csv")
     else:
         lines.append("📭 Закрытых сделок нет")
 
-    # --- Последние ордера из trades.log ---
     if os.path.exists(open_log_path):
         try:
             with open(open_log_path, "r", encoding="utf-8") as f:
                 raw = [ln.strip() for ln in f.readlines() if ln.strip()]
             if raw:
                 lines.append("\n📜 Последние ордера:")
-                for row in raw[-5:]:
-                    lines.append(row)
-            else:
-                lines.append("📜 Журнал ордеров пуст")
+                lines.extend(raw[-5:])
         except Exception as e:
             logging.error(f"cmd_profit read log error: {e}")
             lines.append("⚠️ Не удалось прочитать trades.log")
-    else:
-        lines.append("📂 trades.log ещё не создан")
 
     msg = f"💰 PnL: {total_pnl:.2f}\n📊 Winrate: {winrate:.1f}%"
     if lines:
@@ -169,20 +149,14 @@ def cmd_errors(csv_path="sinyal_fiyat_analizi.csv"):
     except Exception as e:
         logging.error(f"cmd_errors read error: {e}")
         send_message("⚠️ Не удалось прочитать лог ошибок"); return
-
     if "result" not in df.columns:
         send_message("ℹ️ Лог ещё не размечен (нет колонки result)"); return
-
     bad = df[df["result"] == 0].tail(5)
     if bad.empty:
         send_message("✅ Ошибок не зафиксировано"); return
-
     lines = ["❌ Последние ошибки:"]
     for _, r in bad.iterrows():
-        t = r.get("time", "")
-        rsi = r.get("rsi", "")
-        macd = r.get("macd", "")
-        lines.append(f"- {t} | RSI {rsi} | MACD {macd}")
+        lines.append(f"- {r.get('time', '')} | RSI {r.get('rsi', '')} | MACD {r.get('macd', '')}")
     send_message("\n".join(lines))
 
 def cmd_lasttrades(closed_csv_path="closed_trades.csv"):
@@ -193,12 +167,7 @@ def cmd_lasttrades(closed_csv_path="closed_trades.csv"):
         send_message("📭 Сделок ещё нет"); return
     lines = ["🧾 Последние сделки:"]
     for _, r in df.iterrows():
-        t = r.get("time", r.get("close_time", ""))
-        side = r.get("side", "LONG")
-        ep = r.get("entry_price", "")
-        cp = r.get("close_price", "")
-        reason = r.get("reason", r.get("close_reason", ""))
-        lines.append(f"- {t} | {side} {ep}→{cp} | {reason}")
+        lines.append(f"- {r.get('time', r.get('close_time', ''))} | {r.get('side', 'LONG')} {r.get('entry_price', '')}→{r.get('close_price', '')} | {r.get('reason', r.get('close_reason', ''))}")
     send_message("\n".join(lines))
 
 def cmd_train(train_fn, count_samples: int = None):
@@ -208,43 +177,13 @@ def cmd_train(train_fn, count_samples: int = None):
         msg += f"\n📊 Обучено на: {count_samples} записях"
     send_message(msg)
 
-# -------------------- уведомления вход/выход --------------------
-def notify_entry(symbol: str, price: float, score: float, expl: str, amount_usd: float):
-    send_message(
-        f"📥 Вход LONG {symbol} @ {price}\n"
-        f"AI: {score:.2f} | {expl}\n"
-        f"Сумма: {amount_usd:.0f}$"
-    )
+# ---------- новый /test ----------
+def cmd_test(symbol="BTC/USDT"):
+    send_message(f"🛠 Тест-сигнал для {symbol}")
+    # тут можно сделать генерацию случайных значений для RSI/MACD и графика
     try:
-        with open(TRADES_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now()} BUY {symbol} @ {price} | score={score:.2f}\n")
+        df = pd.DataFrame({"close": [100, 102, 101, 103, 104]}, index=pd.date_range(end=datetime.now(), periods=5, freq="T"))
+        send_chart(df, entry=102, exit_=104, title=f"Test {symbol}")
     except Exception as e:
-        logging.error(f"Error writing trades.log: {e}")
-
-def notify_close(symbol: str, price: float, reason: str, pnl_pct: float):
-    send_message(
-        f"📤 Закрытие {symbol} @ {price}\n"
-        f"{reason} | PnL {pnl_pct:.2f}%"
-    )
-    try:
-        with open(TRADES_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now()} SELL {symbol} @ {price} | pnl={pnl_pct:.2f}% | {reason}\n")
-    except Exception as e:
-        logging.error(f"Error writing trades.log: {e}")
-
-# -------------------- КЛАСС-ОБЁРТКА --------------------
-class TelegramBot:
-    """Тонкая обёртка над текущими функциями, чтобы main.py мог вызывать как класс."""
-    def __init__(self, token: str, chat_id: str, state_manager=None):
-        os.environ['BOT_TOKEN'] = token or os.environ.get('BOT_TOKEN', '')
-        os.environ['CHAT_ID'] = str(chat_id or os.environ.get('CHAT_ID', ''))
-        self.state = state_manager
-
-    def send_message(self, text: str, parse_mode: str = None):
-        send_message(text, parse_mode=parse_mode)
-
-    def send_chart(self, df, entry: float = None, exit_: float = None, title: str = "Chart"):
-        send_chart(df, entry, exit_, title)
-
-    def explain_signal(self, rsi: float, adx: float, macd_hist: float, ema_fast_above: bool) -> str:
-        return explain_signal_short(rsi, adx, macd_hist, ema_fast_above)
+        logging.error(f"cmd_test error: {e}")
+        send_message("⚠️ Ошибка генерации тест-графика")

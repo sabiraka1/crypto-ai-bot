@@ -7,15 +7,12 @@ from main import TradingBot
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient
 from telegram.bot_handler import (
-    cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train
+    cmd_start, cmd_status, cmd_profit, cmd_errors, cmd_lasttrades, cmd_train, cmd_test
 )
 
 # -------------------- тихий /train --------------------
 def _train_model_safe():
-    """
-    Не падаем, если модели нужны X/y/market_conditions.
-    Пытаемся вызвать .train()/.fit() без аргументов, иначе пишем в лог.
-    """
+    """Пробуем переобучить модель, не падаем при отсутствии данных."""
     try:
         from ml.adaptive_model import AdaptiveMLModel
         m = AdaptiveMLModel()
@@ -41,13 +38,12 @@ logging.basicConfig(
 app = Flask(__name__)
 
 # -------------------- единый ExchangeClient --------------------
-# Создаётся один раз при старте приложения
 _GLOBAL_EX = ExchangeClient(
     api_key=os.getenv("GATE_API_KEY"),
     api_secret=os.getenv("GATE_API_SECRET")
 )
 
-# -------------------- запуск торгового бота в отдельном потоке --------------------
+# -------------------- запуск торгового бота --------------------
 _bot_instance = TradingBot()
 
 def _run_bot():
@@ -80,7 +76,6 @@ def webhook():
 
         logging.info(f"📩 Received command: {text}")
 
-        # Обработка команд
         if text in ("/start", "start", "/help", "help"):
             cmd_start()
 
@@ -98,6 +93,9 @@ def webhook():
 
         elif text in ("/train", "train"):
             cmd_train(_train_model_safe)
+
+        elif text in ("/test", "test"):
+            cmd_test(symbol)
 
         else:
             logging.info(f"⚠️ Unknown command ignored: {text}")
