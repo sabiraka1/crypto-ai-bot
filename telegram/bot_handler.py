@@ -398,14 +398,14 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
 
         # Получаем данные позиции
         entry_price = float(st.get("entry_price", 0.0))
-        qty_usd = float(st.get("qty_usd", 0.0))
+        qty_base_stored = float(st.get("qty_base", 0.0))  # количество базовой валюты из покупки
         
-        if qty_usd <= 0:
+        if qty_base_stored <= 0:
             send_message("❌ Размер позиции равен нулю")
             return
 
-        # Рассчитываем количество базовой валюты для продажи по ТЕКУЩЕЙ цене
-        qty_base_to_sell = qty_usd / last
+        # Используем ФАКТИЧЕСКОЕ количество базовой валюты из покупки
+        qty_base_to_sell = qty_base_stored
         
         # Округляем согласно точности биржи
         qty_base_to_sell = exchange_client.round_amount(symbol, qty_base_to_sell)
@@ -413,13 +413,23 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
         # Проверяем минимальный размер
         min_amount = exchange_client.market_min_amount(symbol) or 0.0
         if qty_base_to_sell < min_amount:
-            # Если меньше минимума, продаем минимум (если в безопасном режиме)
             if exchange_client.safe_mode:
+                # В безопасном режиме устанавливаем минимум
                 qty_base_to_sell = min_amount
                 send_message(f"⚠️ Размер позиции меньше минимума. Продаем минимум: {min_amount:.8f}")
             else:
-                send_message(f"❌ Размер для продажи {qty_base_to_sell:.8f} меньше минимума {min_amount:.8f}")
-                return
+                # В реальном режиме пытаемся продать весь доступный баланс
+                try:
+                    free_base = exchange_client.get_free_base(symbol)
+                    if free_base >= min_amount:
+                        qty_base_to_sell = exchange_client.round_amount(symbol, free_base)
+                        send_message(f"🔄 Продаем весь доступный баланс: {qty_base_to_sell:.8f}")
+                    else:
+                        send_message(f"❌ Недостаточно средств для продажи. Имеется: {free_base:.8f}, минимум: {min_amount:.8f}")
+                        return
+                except Exception as e:
+                    send_message(f"❌ Ошибка получения баланса: {e}")
+                    return
 
         # Создаем PositionManager для продажи
         def test_notify_close(*args, **kwargs):
@@ -437,7 +447,7 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
         else:
             # Рассчитываем PnL
             pnl_pct = (last - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
-            pnl_abs = (last - entry_price) * (qty_usd / entry_price) if entry_price > 0 else 0.0
+            pnl_abs = (last - entry_price) * qty_base_stored if entry_price > 0 else 0.0
             
             send_message(
                 f"✅ TEST SELL {symbol}\n"
