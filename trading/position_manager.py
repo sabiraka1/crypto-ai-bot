@@ -18,8 +18,7 @@ class PositionManager:
     """Управление открытой позицией с защитой от двойного входа (RLock + флаг)."""
 
     TP_PERCENT = CFG.TAKE_PROFIT_PCT / 100
-    # Читаем STOP_LOSS_PCT с fallback на опечатку и значение по умолчанию
-    SL_PERCENT = -float(getattr(CFG, "STOP_LOSS_PCT", getattr(CFG, "STOP_LOСС_PCT", 2.0))) / 100
+    SL_PERCENT = -float(getattr(CFG, "STOP_LOSS_PCT", getattr(CFG, "STOP_LOSS_PCT", 2.0))) / 100
     TP1_ATR = 1.5
     TP2_ATR = 3.0
     SL_ATR = 1.0
@@ -30,7 +29,6 @@ class PositionManager:
         self.state = state_manager
         self.notify_entry = notify_entry_func
         self.notify_close = notify_close_func
-
         self._lock = threading.RLock()
 
     # ---------- helpers ----------
@@ -62,17 +60,11 @@ class PositionManager:
         market_condition: Optional[str] = None,
         pattern: Optional[str] = None,
     ):
-        """
-        Открывает лонг и сохраняет расширенные данные в state для CSV.
-        """
+        """Открывает лонг и сохраняет расширенные данные в state для CSV."""
         with self._lock:
             st = self.state.state
-
-            if st.get("opening"):
-                logging.info("⏩ Пропуск: вход уже выполняется")
-                return None
-            if st.get("in_position"):
-                logging.info("⏩ Пропуск: уже есть открытая позиция")
+            if st.get("opening") or st.get("in_position"):
+                logging.info("⏩ Пропуск: уже есть процесс входа или открытая позиция")
                 return None
 
             st["opening"] = True
@@ -90,7 +82,16 @@ class PositionManager:
                     return None
 
                 qty_base = final_usd / entry_price if entry_price else 0.0
-                entry_ts = datetime.utcnow().isoformat() + "Z"  # UTC метка с Z
+                entry_ts = datetime.utcnow().isoformat() + "Z"
+
+                # Доп. данные при входе
+                try:
+                    rsi_entry = self.ex.get_rsi(symbol)
+                except Exception:
+                    rsi_entry = ""
+
+                atr_entry = atr
+                pattern_entry = pattern or ""
 
                 st.update({
                     "in_position": True,
@@ -105,7 +106,9 @@ class PositionManager:
                     "amount_frac": amount_frac,
                     "entry_ts": entry_ts,
                     "market_condition": market_condition or "",
-                    "pattern": pattern or "",
+                    "pattern": pattern_entry,
+                    "rsi_entry": rsi_entry,
+                    "atr_entry": atr_entry,
                     # статические цели
                     "tp_price_pct": entry_price * (1 + self.TP_PERCENT),
                     "sl_price_pct": entry_price * (1 + self.SL_PERCENT),
@@ -120,16 +123,10 @@ class PositionManager:
                 self.state.save_state()
 
                 self._notify_entry_safe(
-                    symbol,
-                    entry_price,
-                    final_usd,
-                    st["tp_price_pct"],
-                    st["sl_price_pct"],
-                    st["tp1_atr"],
-                    st["tp2_atr"],
-                    buy_score=buy_score,
-                    ai_score=ai_score,
-                    amount_frac=amount_frac,
+                    symbol, entry_price, final_usd,
+                    st["tp_price_pct"], st["sl_price_pct"],
+                    st["tp1_atr"], st["tp2_atr"],
+                    buy_score=buy_score, ai_score=ai_score, amount_frac=amount_frac
                 )
                 return order
 
@@ -162,16 +159,41 @@ class PositionManager:
             exit_ts = datetime.utcnow().isoformat() + "Z"
             entry_ts = st.get("entry_ts", exit_ts)
             try:
-                duration_min = round((datetime.fromisoformat(exit_ts.replace("Z", "")) - datetime.fromisoformat(entry_ts.replace("Z", ""))).total_seconds() / 60, 2)
+                duration_min = round((datetime.fromisoformat(exit_ts.replace("Z", "")) -
+                                      datetime.fromisoformat(entry_ts.replace("Z", ""))).total_seconds() / 60, 2)
             except Exception:
                 duration_min = ""
 
+            # RSI на выходе
+            try:
+                rsi_exit = self.ex.get_rsi(symbol)
+            except Exception:
+                rsi_exit = ""
+
+            rsi_entry = st.get("rsi_entry", "")
+            atr_entry = st.get("atr_entry", "")
+            pattern_entry = st.get("pattern", "")
+
+            # MFE / MAE
+            mfe_pct, mae_pct = "", ""
+            try:
+                ohlcv = self.ex.fetch_ohlcv(symbol, timeframe="15m", since=self.ex.parse8601(entry_ts))
+                prices = [c[4] for c in ohlcv]
+                if prices:
+                    max_price = max(prices)
+                    min_price = min(prices)
+                    mfe_pct = (max_price - entry_price) / entry_price * 100.0
+                    mae_pct = (min_price - entry_price) / entry_price * 100.0
+            except Exception as e:
+                logging.error(f"MFE/MAE calc error: {e}")
+
+            # Запись в closed_trades.csv
             if CSVHandler:
                 try:
                     CSVHandler.log_closed_trade({
                         "timestamp": exit_ts,
                         "symbol": symbol,
-                        "side": "EXIT",  # исправлено
+                        "side": "EXIT",
                         "entry_price": entry_price,
                         "exit_price": float(exit_price),
                         "qty_usd": qty_usd,
@@ -185,20 +207,20 @@ class PositionManager:
                         "exit_ts": exit_ts,
                         "duration_min": duration_min,
                         "market_condition": st.get("market_condition", ""),
-                        "pattern": st.get("pattern", ""),
+                        "pattern": pattern_entry,
+                        "rsi_entry": rsi_entry,
+                        "rsi_exit": rsi_exit,
+                        "atr_entry": atr_entry,
+                        "mfe_pct": mfe_pct,
+                        "mae_pct": mae_pct
                     })
                 except Exception as e:
                     logging.error(f"CSV log closed trade error: {e}")
 
             self._notify_close_safe(
-                symbol=symbol,
-                price=float(exit_price),
-                reason=reason,
-                pnl_pct=float(pnl_pct),
-                pnl_abs=float(pnl_abs),
-                buy_score=st.get("buy_score"),
-                ai_score=st.get("ai_score"),
-                amount_usd=qty_usd,
+                symbol=symbol, price=float(exit_price), reason=reason,
+                pnl_pct=float(pnl_pct), pnl_abs=float(pnl_abs),
+                buy_score=st.get("buy_score"), ai_score=st.get("ai_score"), amount_usd=qty_usd
             )
 
             st.update({
@@ -245,7 +267,7 @@ class PositionManager:
                 except Exception as e:
                     logging.error(f"❌ Partial close failed: {e}")
                 else:
-                    st["qty_usd"] = float(st.get("qty_usd", 0.0)) / 2.0
+                    st["qty_usd"] /= 2.0
                     st["partial_taken"] = True
                     st["trailing_on"] = True
                     st["sl_atr"] = max(entry, last_price - self.SL_ATR * atr)
@@ -257,7 +279,8 @@ class PositionManager:
                 new_sl_atr = last_price - self.SL_ATR * atr
                 if new_sl_atr > sl_atr:
                     st["sl_atr"] = new_sl_atr
-                    st["sl_price_pct"] = max(st.get("sl_price_pct", entry), last_price * (1 + self.SL_PERCENT))
+                    st["sl_price_pct"] = max(st.get("sl_price_pct", entry),
+                                             last_price * (1 + self.SL_PERCENT))
                     self.state.save_state()
 
     def close_position(self, symbol: str, exit_price: float, reason: str):
