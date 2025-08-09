@@ -1,7 +1,6 @@
 # utils/csv_handler.py
 
 import os
-import io
 import time
 import logging
 from datetime import datetime, timezone
@@ -16,8 +15,9 @@ from core.exceptions import DataValidationException
 DEFAULT_CSV_PATH = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
 LOCK_SUFFIX = ".lock"
 
+# Расширенная целевая схема (новые поля в конце)
 SCHEMA: List[str] = [
-    "timestamp",    # ISO UTC
+    "timestamp",    # ISO UTC (время фиксации закрытия)
     "symbol",
     "side",         # LONG/SHORT/EXIT
     "entry_price",
@@ -29,6 +29,12 @@ SCHEMA: List[str] = [
     "buy_score",
     "ai_score",
     "final_score",
+    # ---- новые, опциональные ----
+    "entry_ts",         # ISO UTC (время входа)
+    "exit_ts",          # ISO UTC (время закрытия, дубль timestamp)
+    "duration_min",     # длительность сделки в минутах
+    "market_condition", # strong_bull / weak_bull / sideways / weak_bear / strong_bear
+    "pattern",          # паттерн/сетап, если передавался
 ]
 
 # значения по умолчанию для отсутствующих ключей
@@ -45,6 +51,11 @@ DEFAULTS: Dict[str, Any] = {
     "buy_score": "",
     "ai_score": "",
     "final_score": "",
+    "entry_ts": "",
+    "exit_ts": "",
+    "duration_min": "",
+    "market_condition": "",
+    "pattern": "",
 }
 
 
@@ -57,63 +68,128 @@ def _round_num(v: Any, ndigits: int) -> Any:
         return v
 
 
-def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    # заполняем отсутствующие поля дефолтами
-    normalized = {k: row.get(k, DEFAULTS[k]) for k in SCHEMA}
+def _iso_utc_now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-    # timestamp
-    ts = normalized.get("timestamp")
-    if not ts:
-        normalized["timestamp"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    else:
-        # пробуем привести к ISO
-        try:
-            if isinstance(ts, (int, float)):
-                dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-                normalized["timestamp"] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
-            else:
-                dt = pd.to_datetime(ts, utc=True, errors="coerce")
-                if pd.isna(dt):
-                    normalized["timestamp"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-                else:
+
+def _normalize_row(row: Dict[str, Any], schema_to_use: List[str]) -> Dict[str, Any]:
+    """
+    Нормализует одну запись под конкретную схему (может быть старой или новой).
+    """
+    # заполняем отсутствующие поля дефолтами (только те, что есть в целевой схеме записи)
+    normalized = {k: row.get(k, DEFAULTS.get(k, "")) for k in schema_to_use}
+
+    # timestamp → ISO
+    if "timestamp" in schema_to_use:
+        ts = normalized.get("timestamp")
+        if not ts:
+            normalized["timestamp"] = _iso_utc_now()
+        else:
+            try:
+                if isinstance(ts, (int, float)):
+                    dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
                     normalized["timestamp"] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
-        except Exception:
-            normalized["timestamp"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+                else:
+                    dt = pd.to_datetime(ts, utc=True, errors="coerce")
+                    if pd.isna(dt):
+                        normalized["timestamp"] = _iso_utc_now()
+                    else:
+                        normalized["timestamp"] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+            except Exception:
+                normalized["timestamp"] = _iso_utc_now()
+
+    # зеркалим exit_ts, если колонка есть, но не задана
+    if "exit_ts" in schema_to_use:
+        if not normalized.get("exit_ts"):
+            normalized["exit_ts"] = normalized.get("timestamp", _iso_utc_now())
 
     # округления
-    normalized["entry_price"] = _round_num(normalized.get("entry_price"), 6)
-    normalized["exit_price"]  = _round_num(normalized.get("exit_price"), 6)
-    normalized["qty_usd"]     = _round_num(normalized.get("qty_usd"), 2)
-    normalized["pnl_pct"]     = _round_num(normalized.get("pnl_pct"), 4)
-    normalized["pnl_abs"]     = _round_num(normalized.get("pnl_abs"), 2)
+    if "entry_price" in schema_to_use:
+        normalized["entry_price"] = _round_num(normalized.get("entry_price"), 6)
+    if "exit_price" in schema_to_use:
+        normalized["exit_price"] = _round_num(normalized.get("exit_price"), 6)
+    if "qty_usd" in schema_to_use:
+        normalized["qty_usd"] = _round_num(normalized.get("qty_usd"), 2)
+    if "pnl_pct" in schema_to_use:
+        normalized["pnl_pct"] = _round_num(normalized.get("pnl_pct"), 4)
+    if "pnl_abs" in schema_to_use:
+        normalized["pnl_abs"] = _round_num(normalized.get("pnl_abs"), 2)
 
     # side/strings
-    for key in ("symbol", "side", "reason"):
-        val = normalized.get(key)
-        if val is None:
-            normalized[key] = ""
-        else:
-            normalized[key] = str(val).strip()
+    for key in ("symbol", "side", "reason", "market_condition", "pattern"):
+        if key in schema_to_use:
+            val = normalized.get(key)
+            normalized[key] = "" if val is None else str(val).strip()
 
     # score-поля можно оставить пустыми строками или числами
     for key in ("buy_score", "ai_score", "final_score"):
-        v = normalized.get(key)
-        if v == "" or v is None:
-            normalized[key] = ""
-        else:
-            try:
-                normalized[key] = _round_num(float(v), 4)
-            except Exception:
-                normalized[key] = str(v)
+        if key in schema_to_use:
+            v = normalized.get(key)
+            if v == "" or v is None:
+                normalized[key] = ""
+            else:
+                try:
+                    normalized[key] = _round_num(float(v), 4)
+                except Exception:
+                    normalized[key] = str(v)
+
+    # duration_min — число (но не обязательно)
+    if "duration_min" in schema_to_use:
+        v = normalized.get("duration_min")
+        try:
+            if v == "" or v is None:
+                normalized["duration_min"] = ""
+            else:
+                normalized["duration_min"] = _round_num(float(v), 2)
+        except Exception:
+            normalized["duration_min"] = ""
+
+    # entry_ts / exit_ts → строки (если есть в схеме)
+    for key in ("entry_ts", "exit_ts"):
+        if key in schema_to_use:
+            val = normalized.get(key)
+            if not val:
+                normalized[key] = ""
+            else:
+                try:
+                    dt = pd.to_datetime(val, utc=True, errors="coerce")
+                    if pd.isna(dt):
+                        normalized[key] = ""
+                    else:
+                        normalized[key] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+                except Exception:
+                    normalized[key] = ""
 
     return normalized
 
 
-def _ensure_header(path: str) -> None:
+def _ensure_header(path: str, header: List[str]) -> None:
+    """
+    Создаёт файл с указанным заголовком, если файла нет или он пуст.
+    """
     if not os.path.exists(path) or os.path.getsize(path) == 0:
-        # создаём пустой CSV с заголовком
         with open(path, "w", encoding="utf-8", newline="") as f:
-            f.write(",".join(SCHEMA) + "\n")
+            f.write(",".join(header) + "\n")
+
+
+def _read_file_schema(path: str) -> Optional[List[str]]:
+    """
+    Возвращает текущую схему (список колонок) из существующего CSV.
+    Если файл отсутствует/пуст — None.
+    """
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            if not first_line:
+                return None
+            cols = [c.strip() for c in first_line.split(",")]
+            # фильтруем пустые хвосты
+            cols = [c for c in cols if c != ""]
+            return cols if cols else None
+    except Exception:
+        return None
 
 
 def _acquire_lock(path: str, timeout: float = 5.0, poll: float = 0.05) -> str:
@@ -124,7 +200,6 @@ def _acquire_lock(path: str, timeout: float = 5.0, poll: float = 0.05) -> str:
     start = time.time()
     while True:
         try:
-            # атомарное создание lock-файла
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             with os.fdopen(fd, "w") as f:
                 f.write(str(os.getpid()))
@@ -150,17 +225,32 @@ class CSVHandler:
     @staticmethod
     def log_closed_trade(row: Dict[str, Any], filepath: str = DEFAULT_CSV_PATH) -> bool:
         """
-        Атомарная дозапись строки закрытой сделки в closed_trades.csv
+        Атомарная дозапись строки закрытой сделки в closed_trades.csv.
+        ВАЖНО:
+          - если файл уже существует со старой схемой — пишем только эти колонки (без миграции);
+          - если файла нет/пуст — создаём с НОВОЙ расширенной схемой SCHEMA.
         """
         try:
-            normalized = _normalize_row(row)
-            os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
-            _ensure_header(filepath)
+            # выясняем активную схему файла
+            file_schema = _read_file_schema(filepath)
+            schema_to_use = file_schema if file_schema else SCHEMA
+
+            # если файла нет/пуст — создаём с текущей (возможно расширенной) схемой
+            _ensure_header(filepath, schema_to_use)
+
+            normalized = _normalize_row(row, schema_to_use)
 
             lock_path = _acquire_lock(filepath)
             try:
-                # пишем строку в конец файла
-                line = ",".join([str(normalized.get(col, "")) for col in SCHEMA]) + "\n"
+                # гарантируем, что схема не изменилась с момента чтения
+                current_schema = _read_file_schema(filepath) or schema_to_use
+                if current_schema != schema_to_use:
+                    # если внезапно поменялась (другой процесс создал по-другому) — подстроимся
+                    schema_to_use = current_schema
+                    normalized = _normalize_row(row, schema_to_use)
+
+                # пишем строку в конец файла (строго по schema_to_use)
+                line = ",".join([str(normalized.get(col, "")) for col in schema_to_use]) + "\n"
                 with open(filepath, "a", encoding="utf-8", newline="") as f:
                     f.write(line)
             finally:
@@ -176,17 +266,18 @@ class CSVHandler:
     def read_last_trades(limit: int = 10, filepath: str = DEFAULT_CSV_PATH) -> List[Dict[str, Any]]:
         """
         Возвращает последние N строк как список словарей (самые свежие сверху).
+        Поддерживает как старую, так и новую схему.
         """
         if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
             return []
 
         try:
-            # быстро читаем в pandas, с явной схемой колонок
+            # читаем без жёсткой схемы
             df = pd.read_csv(filepath, dtype=str)
             if df.empty:
                 return []
 
-            # гарантируем наличие колонок (если файл старого формата)
+            # добавим недостающие новые колонки (если файл старый)
             for col in SCHEMA:
                 if col not in df.columns:
                     df[col] = ""
@@ -198,9 +289,9 @@ class CSVHandler:
             except Exception:
                 df = df.iloc[::-1]  # fallback: просто перевернуть
 
-            df = df[SCHEMA].head(int(limit)).copy()
+            # отрезаем до лимита
+            df = df[[c for c in df.columns if c in SCHEMA]].head(int(limit)).copy()
 
-            # приведение типов/округление на выходе
             def _fmt(v, nd=None):
                 try:
                     if v == "" or v is None or (isinstance(v, float) and np.isnan(v)):
@@ -213,7 +304,7 @@ class CSVHandler:
 
             out: List[Dict[str, Any]] = []
             for _, r in df.iterrows():
-                out.append({
+                item = {
                     "timestamp": r.get("timestamp"),
                     "symbol": str(r.get("symbol", "")),
                     "side": str(r.get("side", "")),
@@ -226,7 +317,14 @@ class CSVHandler:
                     "buy_score": _fmt(r.get("buy_score"), 4) if str(r.get("buy_score", "")) != "" else "",
                     "ai_score": _fmt(r.get("ai_score"), 4) if str(r.get("ai_score", "")) != "" else "",
                     "final_score": _fmt(r.get("final_score"), 4) if str(r.get("final_score", "")) != "" else "",
-                })
+                    # новые поля, если они вдруг есть
+                    "entry_ts": r.get("entry_ts", ""),
+                    "exit_ts": r.get("exit_ts", ""),
+                    "duration_min": _fmt(r.get("duration_min"), 2) if str(r.get("duration_min", "")) != "" else "",
+                    "market_condition": str(r.get("market_condition", "")),
+                    "pattern": str(r.get("pattern", "")),
+                }
+                out.append(item)
             return out
         except Exception as e:
             logging.error(f"Failed to read last trades: {e}")
@@ -315,22 +413,23 @@ class CSVHandler:
 
     @staticmethod
     def append_to_csv(new_data: dict, filepath: str) -> bool:
-        """Добавление новой строки в CSV (совместимость). Рекомендуется log_closed_trade()."""
+        """
+        Добавление новой строки в CSV (совместимость).
+        Лучше использовать log_closed_trade().
+        """
         try:
-            normalized = {**DEFAULTS, **new_data}
-            os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
-            _ensure_header(filepath)
+            # схема файла может быть старой — под неё и пишем
+            file_schema = _read_file_schema(filepath)
+            schema_to_use = file_schema if file_schema else SCHEMA
+            _ensure_header(filepath, schema_to_use)
+
+            normalized = _normalize_row(new_data, schema_to_use)
 
             lock_path = _acquire_lock(filepath)
             try:
-                df = pd.read_csv(filepath) if os.path.exists(filepath) else pd.DataFrame(columns=SCHEMA)
-                # приводим к схеме
-                for col in SCHEMA:
-                    if col not in df.columns:
-                        df[col] = ""
-                new_row = {k: normalized.get(k, "") for k in SCHEMA}
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                df.to_csv(filepath, index=False, encoding="utf-8")
+                with open(filepath, "a", encoding="utf-8", newline="") as f:
+                    line = ",".join([str(normalized.get(col, "")) for col in schema_to_use]) + "\n"
+                    f.write(line)
             finally:
                 _release_lock(lock_path)
 
