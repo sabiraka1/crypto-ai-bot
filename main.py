@@ -12,6 +12,7 @@ from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient, APIException
 from analysis.scoring_engine import ScoringEngine
 from telegram import bot_handler as tgbot  # используем только send_message
+from utils.csv_handler import CSVHandler  # <-- добавлено
 
 # ── базовая настройка логов ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -185,7 +186,8 @@ class TradingBot:
         if self.ai_enabled:
             try:
                 from ml.adaptive_model import AdaptiveMLModel  # type: ignore
-                self.ml_model = AdaptiveMLModel(model_dir="models")
+                # NB: у модели параметр называется models_dir
+                self.ml_model = AdaptiveMLModel(models_dir="models")
                 # если есть метод загрузки — вызовем
                 if hasattr(self.ml_model, "load_models"):
                     try:
@@ -375,20 +377,50 @@ class TradingBot:
         # ── Информационный лог каждые INFO_LOG_INTERVAL_SEC (не влияет на торговлю) ──
         now = time.time()
         if now - self._last_info_log_ts >= INFO_LOG_INTERVAL_SEC:
-            market_cond = "sideways"  # сюда можно подставить self._market_condition_guess(...)
+            market_cond_info = "sideways"
             confidence = 0.01
             try:
-                market_cond = details.get("market_condition", market_cond)
+                market_cond_info = details.get("market_condition", market_cond_info)
                 confidence = float(details.get("market_confidence", confidence))
             except Exception:
                 pass
-            logging.info(f"📊 Market Analysis: {market_cond}, Confidence: {confidence:.2f}")
+            logging.info(f"📊 Market Analysis: {market_cond_info}, Confidence: {confidence:.2f}")
             logging.info("✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
             logging.info(
                 f"📊 Buy Score: {buy_score:.2f}/{getattr(self.scorer, 'min_score_to_buy', ENV_MIN_SCORE):.2f} "
                 f"| MACD: {macd_pts:.1f} | AI: {ai_score:.2f}"
             )
             self._last_info_log_ts = now
+
+        # ── Лог снимка сигнала (до принятия решения) ──
+        try:
+            CSVHandler.log_signal_snapshot({
+                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                "symbol": self.symbol,
+                "timeframe": self.timeframe_15m,
+                "close": float(df_15m["close"].iloc[-1]),
+                "rsi": details.get("rsi"),
+                "macd": details.get("macd"),
+                "macd_signal": details.get("macd_signal"),
+                "macd_hist": details.get("macd_hist"),
+                "ema_20": details.get("ema_20"),
+                "ema_50": details.get("ema_50"),
+                "sma_20": details.get("sma_20"),
+                "sma_50": details.get("sma_50"),
+                "atr_14": details.get("atr"),
+                "price_change_1": details.get("price_change_1"),
+                "price_change_3": details.get("price_change_3"),
+                "price_change_5": details.get("price_change_5"),
+                "vol_change": details.get("vol_change"),
+                "buy_score": float(buy_score),
+                "ai_score": float(ai_score),
+                "market_condition": details.get("market_condition", "sideways"),
+                "decision": "precheck",
+                "reason": "periodic_snapshot"
+            })
+        except Exception:
+            # не мешаем торговле, если лог не записался
+            pass
 
         # ── Управление открытой позицией делаем на каждом цикле ──
         if self.state.state.get("in_position"):
@@ -408,6 +440,20 @@ class TradingBot:
             min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
             if buy_score < float(min_thr):
                 logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
+                try:
+                    CSVHandler.log_signal_snapshot({
+                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "symbol": self.symbol,
+                        "timeframe": self.timeframe_15m,
+                        "close": float(df_15m['close'].iloc[-1]),
+                        "buy_score": float(buy_score),
+                        "ai_score": float(ai_score),
+                        "market_condition": details.get("market_condition", "sideways"),
+                        "decision": "reject",
+                        "reason": f"buy_score<{float(min_thr):.2f}",
+                    })
+                except Exception:
+                    pass
                 return
 
             # 2) AI gate (если включён)
@@ -417,6 +463,20 @@ class TradingBot:
                     tgbot.send_message(
                         f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}"
                     )
+                except Exception:
+                    pass
+                try:
+                    CSVHandler.log_signal_snapshot({
+                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "symbol": self.symbol,
+                        "timeframe": self.timeframe_15m,
+                        "close": float(df_15m['close'].iloc[-1]),
+                        "buy_score": float(buy_score),
+                        "ai_score": float(ai_score),
+                        "market_condition": details.get("market_condition", "sideways"),
+                        "decision": "reject",
+                        "reason": f"ai<{ENV_AI_MIN_TO_TRADE:.2f}",
+                    })
                 except Exception:
                     pass
                 return
@@ -437,7 +497,37 @@ class TradingBot:
                     tgbot.send_message(msg)
                 except Exception:
                     pass
+                try:
+                    CSVHandler.log_signal_snapshot({
+                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "symbol": self.symbol,
+                        "timeframe": self.timeframe_15m,
+                        "close": float(df_15m['close'].iloc[-1]),
+                        "buy_score": float(buy_score),
+                        "ai_score": float(ai_score),
+                        "market_condition": details.get("market_condition", "sideways"),
+                        "decision": "reject",
+                        "reason": "position_fraction=0",
+                    })
+                except Exception:
+                    pass
                 return
+
+            # ── market_condition / pattern из деталей или быстрый фолбэк ──
+            try:
+                market_condition = details.get("market_condition")
+            except Exception:
+                market_condition = None
+            try:
+                pattern = details.get("pattern") or details.get("setup") or ""
+            except Exception:
+                pattern = ""
+
+            if not market_condition:
+                try:
+                    market_condition = self._market_condition_guess(df_15m["close"].iloc[:-1])
+                except Exception:
+                    market_condition = "sideways"
 
             # 4) попытка входа (PM сам поднимет до min_notional и не даст двойной вход)
             try:
@@ -449,18 +539,67 @@ class TradingBot:
                     buy_score=buy_score,
                     ai_score=ai_score,
                     amount_frac=frac,
+                    market_condition=market_condition,  # <-- добавлено
+                    pattern=pattern,                      # <-- добавлено
                 )
                 logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
+
+                # лог входа в CSV
+                try:
+                    CSVHandler.log_open_trade({
+                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "symbol": self.symbol,
+                        "side": "LONG",
+                        "entry_price": float(last_price),
+                        "qty_usd": float(usd_planned),
+                        "reason": "strategy_enter",
+                        "buy_score": float(buy_score),
+                        "ai_score": float(ai_score),
+                        "entry_ts": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "market_condition": market_condition,
+                        "pattern": pattern,
+                    })
+                except Exception:
+                    pass
+
             except APIException as e:
                 logging.warning(f"💤 Биржа отклонила вход: {e}")
                 try:
                     tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
                 except Exception:
                     pass
+                try:
+                    CSVHandler.log_signal_snapshot({
+                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "symbol": self.symbol,
+                        "timeframe": self.timeframe_15m,
+                        "close": float(df_15m['close'].iloc[-1]),
+                        "buy_score": float(buy_score),
+                        "ai_score": float(ai_score),
+                        "market_condition": market_condition,
+                        "decision": "reject",
+                        "reason": f"exchange_reject:{e}",
+                    })
+                except Exception:
+                    pass
             except Exception:
                 logging.exception("Error while opening long")
                 try:
                     tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
+                except Exception:
+                    pass
+                try:
+                    CSVHandler.log_signal_snapshot({
+                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                        "symbol": self.symbol,
+                        "timeframe": self.timeframe_15m,
+                        "close": float(df_15m['close'].iloc[-1]),
+                        "buy_score": float(buy_score),
+                        "ai_score": float(ai_score),
+                        "market_condition": market_condition,
+                        "decision": "reject",
+                        "reason": "exception_on_enter",
+                    })
                 except Exception:
                     pass
         finally:

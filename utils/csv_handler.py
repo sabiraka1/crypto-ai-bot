@@ -11,15 +11,16 @@ import numpy as np
 
 from core.exceptions import DataValidationException
 
-# ── настройки и схема CSV ─────────────────────────────────────────────────────
-DEFAULT_CSV_PATH = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
+# ── пути по умолчанию ─────────────────────────────────────────────────────────
+DEFAULT_CLOSED_TRADES_CSV = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
+DEFAULT_SIGNALS_CSV       = os.getenv("SIGNALS_CSV",       "signals_snapshots.csv")
 LOCK_SUFFIX = ".lock"
 
-# Расширенная целевая схема (новые поля в конце)
-SCHEMA: List[str] = [
-    "timestamp",    # ISO UTC (время фиксации закрытия)
+# ── схема закрытых сделок (расширенная; при существующем файле ничего не мигрируем) ──
+TRADES_SCHEMA: List[str] = [
+    "timestamp",        # ISO UTC (момент фиксации закрытия)
     "symbol",
-    "side",         # LONG/SHORT/EXIT
+    "side",             # LONG/SHORT/EXIT
     "entry_price",
     "exit_price",
     "qty_usd",
@@ -29,16 +30,15 @@ SCHEMA: List[str] = [
     "buy_score",
     "ai_score",
     "final_score",
-    # ---- новые, опциональные ----
-    "entry_ts",         # ISO UTC (время входа)
-    "exit_ts",          # ISO UTC (время закрытия, дубль timestamp)
-    "duration_min",     # длительность сделки в минутах
-    "market_condition", # strong_bull / weak_bull / sideways / weak_bear / strong_bear
-    "pattern",          # паттерн/сетап, если передавался
+    # новые (опц.)
+    "entry_ts",
+    "exit_ts",
+    "duration_min",
+    "market_condition",
+    "pattern",
 ]
 
-# значения по умолчанию для отсутствующих ключей
-DEFAULTS: Dict[str, Any] = {
+TRADES_DEFAULTS: Dict[str, Any] = {
     "timestamp": None,
     "symbol": "",
     "side": "",
@@ -58,6 +58,43 @@ DEFAULTS: Dict[str, Any] = {
     "pattern": "",
 }
 
+# ── схема снапшотов сигналов/рынка ────────────────────────────────────────────
+SIGNALS_SCHEMA: List[str] = [
+    "timestamp",        # ISO UTC времени свечи/цикла
+    "symbol",
+    "timeframe",
+    "close",
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "ema_20",
+    "ema_50",
+    "sma_20",
+    "sma_50",
+    "atr_14",
+    "price_change_1",
+    "price_change_3",
+    "price_change_5",
+    "vol_change",
+    "buy_score",
+    "ai_score",
+    "market_condition",
+    "decision",         # hold|enter|exit
+    "reason",           # краткое пояснение
+]
+
+SIGNALS_DEFAULTS: Dict[str, Any] = {k: "" for k in SIGNALS_SCHEMA}
+SIGNALS_DEFAULTS.update({
+    "close": 0.0, "rsi": "", "macd": "", "macd_signal": "", "macd_hist": "",
+    "ema_20": "", "ema_50": "", "sma_20": "", "sma_50": "",
+    "atr_14": "", "price_change_1": "", "price_change_3": "", "price_change_5": "",
+    "vol_change": "", "buy_score": "", "ai_score": "",
+})
+
+# ── утилиты ───────────────────────────────────────────────────────────────────
+def _iso_utc_now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 def _round_num(v: Any, ndigits: int) -> Any:
     try:
@@ -67,116 +104,12 @@ def _round_num(v: Any, ndigits: int) -> Any:
     except Exception:
         return v
 
-
-def _iso_utc_now() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _normalize_row(row: Dict[str, Any], schema_to_use: List[str]) -> Dict[str, Any]:
-    """
-    Нормализует одну запись под конкретную схему (может быть старой или новой).
-    """
-    # заполняем отсутствующие поля дефолтами (только те, что есть в целевой схеме записи)
-    normalized = {k: row.get(k, DEFAULTS.get(k, "")) for k in schema_to_use}
-
-    # timestamp → ISO
-    if "timestamp" in schema_to_use:
-        ts = normalized.get("timestamp")
-        if not ts:
-            normalized["timestamp"] = _iso_utc_now()
-        else:
-            try:
-                if isinstance(ts, (int, float)):
-                    dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-                    normalized["timestamp"] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
-                else:
-                    dt = pd.to_datetime(ts, utc=True, errors="coerce")
-                    if pd.isna(dt):
-                        normalized["timestamp"] = _iso_utc_now()
-                    else:
-                        normalized["timestamp"] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
-            except Exception:
-                normalized["timestamp"] = _iso_utc_now()
-
-    # зеркалим exit_ts, если колонка есть, но не задана
-    if "exit_ts" in schema_to_use:
-        if not normalized.get("exit_ts"):
-            normalized["exit_ts"] = normalized.get("timestamp", _iso_utc_now())
-
-    # округления
-    if "entry_price" in schema_to_use:
-        normalized["entry_price"] = _round_num(normalized.get("entry_price"), 6)
-    if "exit_price" in schema_to_use:
-        normalized["exit_price"] = _round_num(normalized.get("exit_price"), 6)
-    if "qty_usd" in schema_to_use:
-        normalized["qty_usd"] = _round_num(normalized.get("qty_usd"), 2)
-    if "pnl_pct" in schema_to_use:
-        normalized["pnl_pct"] = _round_num(normalized.get("pnl_pct"), 4)
-    if "pnl_abs" in schema_to_use:
-        normalized["pnl_abs"] = _round_num(normalized.get("pnl_abs"), 2)
-
-    # side/strings
-    for key in ("symbol", "side", "reason", "market_condition", "pattern"):
-        if key in schema_to_use:
-            val = normalized.get(key)
-            normalized[key] = "" if val is None else str(val).strip()
-
-    # score-поля можно оставить пустыми строками или числами
-    for key in ("buy_score", "ai_score", "final_score"):
-        if key in schema_to_use:
-            v = normalized.get(key)
-            if v == "" or v is None:
-                normalized[key] = ""
-            else:
-                try:
-                    normalized[key] = _round_num(float(v), 4)
-                except Exception:
-                    normalized[key] = str(v)
-
-    # duration_min — число (но не обязательно)
-    if "duration_min" in schema_to_use:
-        v = normalized.get("duration_min")
-        try:
-            if v == "" or v is None:
-                normalized["duration_min"] = ""
-            else:
-                normalized["duration_min"] = _round_num(float(v), 2)
-        except Exception:
-            normalized["duration_min"] = ""
-
-    # entry_ts / exit_ts → строки (если есть в схеме)
-    for key in ("entry_ts", "exit_ts"):
-        if key in schema_to_use:
-            val = normalized.get(key)
-            if not val:
-                normalized[key] = ""
-            else:
-                try:
-                    dt = pd.to_datetime(val, utc=True, errors="coerce")
-                    if pd.isna(dt):
-                        normalized[key] = ""
-                    else:
-                        normalized[key] = dt.isoformat(timespec="seconds").replace("+00:00", "Z")
-                except Exception:
-                    normalized[key] = ""
-
-    return normalized
-
-
 def _ensure_header(path: str, header: List[str]) -> None:
-    """
-    Создаёт файл с указанным заголовком, если файла нет или он пуст.
-    """
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(",".join(header) + "\n")
 
-
 def _read_file_schema(path: str) -> Optional[List[str]]:
-    """
-    Возвращает текущую схему (список колонок) из существующего CSV.
-    Если файл отсутствует/пуст — None.
-    """
     try:
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             return None
@@ -185,17 +118,12 @@ def _read_file_schema(path: str) -> Optional[List[str]]:
             if not first_line:
                 return None
             cols = [c.strip() for c in first_line.split(",")]
-            # фильтруем пустые хвосты
             cols = [c for c in cols if c != ""]
             return cols if cols else None
     except Exception:
         return None
 
-
 def _acquire_lock(path: str, timeout: float = 5.0, poll: float = 0.05) -> str:
-    """
-    Примитивный межпроцессный лок на основе lock-файла с O_EXCL.
-    """
     lock_path = f"{path}{LOCK_SUFFIX}"
     start = time.time()
     while True:
@@ -209,7 +137,6 @@ def _acquire_lock(path: str, timeout: float = 5.0, poll: float = 0.05) -> str:
                 raise TimeoutError(f"Timeout acquiring lock for {path}")
             time.sleep(poll)
 
-
 def _release_lock(lock_path: str) -> None:
     try:
         if os.path.exists(lock_path):
@@ -217,40 +144,119 @@ def _release_lock(lock_path: str) -> None:
     except Exception:
         pass
 
+def _normalize_timestamp_like(val: Any) -> str:
+    try:
+        if not val:
+            return _iso_utc_now()
+        if isinstance(val, (int, float)):
+            dt = datetime.fromtimestamp(float(val), tz=timezone.utc)
+            return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+        dt = pd.to_datetime(val, utc=True, errors="coerce")
+        if pd.isna(dt):
+            return _iso_utc_now()
+        return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+    except Exception:
+        return _iso_utc_now()
 
+# ── нормализация строк под схему ──────────────────────────────────────────────
+def _normalize_trade_row(row: Dict[str, Any], schema_to_use: List[str]) -> Dict[str, Any]:
+    n = {k: row.get(k, TRADES_DEFAULTS.get(k, "")) for k in schema_to_use}
+    if "timestamp" in schema_to_use:
+        n["timestamp"] = _normalize_timestamp_like(n.get("timestamp"))
+    if "exit_ts" in schema_to_use and not n.get("exit_ts"):
+        n["exit_ts"] = n.get("timestamp", _iso_utc_now())
+
+    # округления
+    for key, nd in (("entry_price", 6), ("exit_price", 6), ("qty_usd", 2), ("pnl_pct", 4), ("pnl_abs", 2)):
+        if key in schema_to_use:
+            n[key] = _round_num(n.get(key), nd)
+
+    # строки
+    for key in ("symbol", "side", "reason", "market_condition", "pattern"):
+        if key in schema_to_use:
+            val = n.get(key)
+            n[key] = "" if val is None else str(val).strip()
+
+    # score-поля
+    for key in ("buy_score", "ai_score", "final_score"):
+        if key in schema_to_use:
+            v = n.get(key)
+            if v == "" or v is None:
+                n[key] = ""
+            else:
+                try:
+                    n[key] = _round_num(float(v), 4)
+                except Exception:
+                    n[key] = str(v)
+
+    # duration
+    if "duration_min" in schema_to_use:
+        v = n.get("duration_min")
+        try:
+            n["duration_min"] = "" if v in ("", None) else _round_num(float(v), 2)
+        except Exception:
+            n["duration_min"] = ""
+
+    # entry/exit ts
+    for key in ("entry_ts", "exit_ts"):
+        if key in schema_to_use:
+            val = n.get(key)
+            if not val:
+                n[key] = ""
+            else:
+                n[key] = _normalize_timestamp_like(val)
+    return n
+
+def _normalize_signal_row(row: Dict[str, Any], schema_to_use: List[str]) -> Dict[str, Any]:
+    n = {k: row.get(k, SIGNALS_DEFAULTS.get(k, "")) for k in schema_to_use}
+    if "timestamp" in schema_to_use:
+        n["timestamp"] = _normalize_timestamp_like(n.get("timestamp"))
+    # числа с округлением
+    round_map = {
+        "close": 6, "rsi": 4, "macd": 6, "macd_signal": 6, "macd_hist": 6,
+        "ema_20": 6, "ema_50": 6, "sma_20": 6, "sma_50": 6,
+        "atr_14": 6, "price_change_1": 6, "price_change_3": 6, "price_change_5": 6,
+        "vol_change": 6, "buy_score": 4, "ai_score": 4,
+    }
+    for k, nd in round_map.items():
+        if k in schema_to_use:
+            n[k] = _round_num(n.get(k), nd)
+
+    # строки
+    for key in ("symbol", "timeframe", "market_condition", "decision", "reason"):
+        if key in schema_to_use:
+            val = n.get(key)
+            n[key] = "" if val is None else str(val).strip()
+    return n
+
+# ── основной класс ────────────────────────────────────────────────────────────
 class CSVHandler:
-    """Безопасная работа с CSV файлами + прикладные методы сделок"""
+    """Безопасная работа с CSV: закрытые сделки, снапшоты сигналов, плюс базовые методы."""
 
-    # ── прикладные методы для сделок ──────────────────────────────────────────
+    # ============= Закрытые сделки ============================================
     @staticmethod
-    def log_closed_trade(row: Dict[str, Any], filepath: str = DEFAULT_CSV_PATH) -> bool:
+    def log_closed_trade(row: Dict[str, Any], filepath: str = DEFAULT_CLOSED_TRADES_CSV) -> bool:
         """
-        Атомарная дозапись строки закрытой сделки в closed_trades.csv.
-        ВАЖНО:
-          - если файл уже существует со старой схемой — пишем только эти колонки (без миграции);
-          - если файла нет/пуст — создаём с НОВОЙ расширенной схемой SCHEMA.
+        Атомарная дозапись закрытой сделки.
+        Если файл уже есть со старой схемой — пишем только существующие колонки.
+        Если файла нет — создаём с расширенной TRADES_SCHEMA.
         """
         try:
-            # выясняем активную схему файла
             file_schema = _read_file_schema(filepath)
-            schema_to_use = file_schema if file_schema else SCHEMA
-
-            # если файла нет/пуст — создаём с текущей (возможно расширенной) схемой
+            schema_to_use = file_schema if file_schema else TRADES_SCHEMA
             _ensure_header(filepath, schema_to_use)
 
-            normalized = _normalize_row(row, schema_to_use)
+            norm = _normalize_trade_row(row, schema_to_use)
 
             lock_path = _acquire_lock(filepath)
             try:
-                # гарантируем, что схема не изменилась с момента чтения
+                # защита от гонок схемы
                 current_schema = _read_file_schema(filepath) or schema_to_use
                 if current_schema != schema_to_use:
-                    # если внезапно поменялась (другой процесс создал по-другому) — подстроимся
                     schema_to_use = current_schema
-                    normalized = _normalize_row(row, schema_to_use)
+                    norm = _normalize_trade_row(row, schema_to_use)
 
-                # пишем строку в конец файла (строго по schema_to_use)
-                line = ",".join([str(normalized.get(col, "")) for col in schema_to_use]) + "\n"
+                line = ",".join([str(norm.get(col, "")) for col in schema_to_use]) + "\n"
                 with open(filepath, "a", encoding="utf-8", newline="") as f:
                     f.write(line)
             finally:
@@ -263,48 +269,71 @@ class CSVHandler:
             return False
 
     @staticmethod
-    def read_last_trades(limit: int = 10, filepath: str = DEFAULT_CSV_PATH) -> List[Dict[str, Any]]:
+    def log_open_trade(row: Dict[str, Any], filepath: str = DEFAULT_CLOSED_TRADES_CSV) -> bool:
         """
-        Возвращает последние N строк как список словарей (самые свежие сверху).
-        Поддерживает как старую, так и новую схему.
+        (Опционально) фиксируем момент входа в тот же CSV.
+        side здесь будет 'LONG' (у вас только лонги).
+        При закрытии будет отдельная строка с side='EXIT'.
         """
+        try:
+            file_schema = _read_file_schema(filepath)
+            schema_to_use = file_schema if file_schema else TRADES_SCHEMA
+            _ensure_header(filepath, schema_to_use)
+
+            # переиспользуем нормализацию — exit поля могут быть пустыми
+            norm = _normalize_trade_row(row, schema_to_use)
+
+            lock_path = _acquire_lock(filepath)
+            try:
+                current_schema = _read_file_schema(filepath) or schema_to_use
+                if current_schema != schema_to_use:
+                    schema_to_use = current_schema
+                    norm = _normalize_trade_row(row, schema_to_use)
+
+                line = ",".join([str(norm.get(col, "")) for col in schema_to_use]) + "\n"
+                with open(filepath, "a", encoding="utf-8", newline="") as f:
+                    f.write(line)
+            finally:
+                _release_lock(lock_path)
+
+            logging.info("✅ Open trade logged")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to log open trade: {e}")
+            return False
+
+    @staticmethod
+    def read_last_trades(limit: int = 10, filepath: str = DEFAULT_CLOSED_TRADES_CSV) -> List[Dict[str, Any]]:
+        """Возвращает последние N сделок (поддерживает старую/новую схему)."""
         if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
             return []
-
         try:
-            # читаем без жёсткой схемы
             df = pd.read_csv(filepath, dtype=str)
             if df.empty:
                 return []
-
-            # добавим недостающие новые колонки (если файл старый)
-            for col in SCHEMA:
+            for col in TRADES_SCHEMA:
                 if col not in df.columns:
                     df[col] = ""
 
-            # сортировка по timestamp (если возможно)
             try:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
                 df = df.sort_values("timestamp", ascending=False)
             except Exception:
-                df = df.iloc[::-1]  # fallback: просто перевернуть
+                df = df.iloc[::-1]
 
-            # отрезаем до лимита
-            df = df[[c for c in df.columns if c in SCHEMA]].head(int(limit)).copy()
+            df = df[[c for c in df.columns if c in TRADES_SCHEMA]].head(int(limit)).copy()
 
             def _fmt(v, nd=None):
                 try:
                     if v == "" or v is None or (isinstance(v, float) and np.isnan(v)):
                         return ""
-                    if nd is None:
-                        return v
-                    return round(float(v), nd)
+                    return round(float(v), nd) if nd is not None else v
                 except Exception:
                     return v
 
             out: List[Dict[str, Any]] = []
             for _, r in df.iterrows():
-                item = {
+                out.append({
                     "timestamp": r.get("timestamp"),
                     "symbol": str(r.get("symbol", "")),
                     "side": str(r.get("side", "")),
@@ -317,23 +346,52 @@ class CSVHandler:
                     "buy_score": _fmt(r.get("buy_score"), 4) if str(r.get("buy_score", "")) != "" else "",
                     "ai_score": _fmt(r.get("ai_score"), 4) if str(r.get("ai_score", "")) != "" else "",
                     "final_score": _fmt(r.get("final_score"), 4) if str(r.get("final_score", "")) != "" else "",
-                    # новые поля, если они вдруг есть
                     "entry_ts": r.get("entry_ts", ""),
                     "exit_ts": r.get("exit_ts", ""),
                     "duration_min": _fmt(r.get("duration_min"), 2) if str(r.get("duration_min", "")) != "" else "",
                     "market_condition": str(r.get("market_condition", "")),
                     "pattern": str(r.get("pattern", "")),
-                }
-                out.append(item)
+                })
             return out
         except Exception as e:
             logging.error(f"Failed to read last trades: {e}")
             return []
 
-    # ── базовые безопасные операции с CSV (оставлены для обратной совместимости)
+    # ============= Снапшоты сигналов ==========================================
+    @staticmethod
+    def log_signal_snapshot(row: Dict[str, Any], filepath: str = DEFAULT_SIGNALS_CSV) -> bool:
+        """
+        Сохранение «снимка» цикла анализа/сигнала.
+        Если CSV отсутствует — создаём с полной схемой SIGNALS_SCHEMA.
+        """
+        try:
+            file_schema = _read_file_schema(filepath)
+            schema_to_use = file_schema if file_schema else SIGNALS_SCHEMA
+            _ensure_header(filepath, schema_to_use)
+
+            norm = _normalize_signal_row(row, schema_to_use)
+
+            lock_path = _acquire_lock(filepath)
+            try:
+                current_schema = _read_file_schema(filepath) or schema_to_use
+                if current_schema != schema_to_use:
+                    schema_to_use = current_schema
+                    norm = _normalize_signal_row(row, schema_to_use)
+
+                line = ",".join([str(norm.get(col, "")) for col in schema_to_use]) + "\n"
+                with open(filepath, "a", encoding="utf-8", newline="") as f:
+                    f.write(line)
+            finally:
+                _release_lock(lock_path)
+
+            return True
+        except Exception as e:
+            logging.error(f"Failed to log signal snapshot: {e}")
+            return False
+
+    # ============= Базовые совместимые операции ===============================
     @staticmethod
     def read_csv_safe(filepath: str, expected_columns: list = None) -> Optional[pd.DataFrame]:
-        """Безопасное чтение CSV с валидацией"""
         try:
             read_params = [
                 {"sep": ",", "encoding": "utf-8"},
@@ -351,21 +409,18 @@ class CSVHandler:
                         break
                 except Exception:
                     continue
-
             if df is None or df.empty:
                 raise DataValidationException("Could not read CSV file")
 
             df = CSVHandler._validate_and_clean(df, expected_columns)
             logging.info(f"✅ CSV loaded: {len(df)} rows, {len(df.columns)} columns")
             return df
-
         except Exception as e:
             logging.error(f"Failed to read CSV {filepath}: {e}")
             return None
 
     @staticmethod
     def _validate_and_clean(df: pd.DataFrame, expected_columns: list = None) -> pd.DataFrame:
-        """Валидация и очистка данных"""
         try:
             df = df.dropna(how="all").drop_duplicates()
 
@@ -389,19 +444,16 @@ class CSVHandler:
                 elif col == "main_reason":
                     df[col] = df[col].astype(str).replace({"?": "", "nan": "Unknown"}, regex=True)
 
-            critical_cols = ["open", "high", "low", "close"] if "close" in df.columns else []
-            if critical_cols:
-                df = df.dropna(subset=critical_cols)
-
+            critical = ["open", "high", "low", "close"] if "close" in df.columns else []
+            if critical:
+                df = df.dropna(subset=critical)
             return df.reset_index(drop=True)
-
         except Exception as e:
             logging.error(f"Data validation failed: {e}")
             raise DataValidationException(f"Data validation failed: {e}")
 
     @staticmethod
     def save_csv_safe(df: pd.DataFrame, filepath: str) -> bool:
-        """Безопасное сохранение CSV"""
         try:
             os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
             df.to_csv(filepath, index=False, encoding="utf-8")
@@ -413,26 +465,24 @@ class CSVHandler:
 
     @staticmethod
     def append_to_csv(new_data: dict, filepath: str) -> bool:
-        """
-        Добавление новой строки в CSV (совместимость).
-        Лучше использовать log_closed_trade().
-        """
+        """Совместимость: добавление строки в произвольный CSV без жёсткой схемы."""
         try:
-            # схема файла может быть старой — под неё и пишем
             file_schema = _read_file_schema(filepath)
-            schema_to_use = file_schema if file_schema else SCHEMA
-            _ensure_header(filepath, schema_to_use)
+            if not file_schema:
+                # без заголовка — создадим из ключей словаря
+                schema_to_use = list(new_data.keys())
+                _ensure_header(filepath, schema_to_use)
+            else:
+                schema_to_use = file_schema
 
-            normalized = _normalize_row(new_data, schema_to_use)
-
+            # простая запись без нормализации
             lock_path = _acquire_lock(filepath)
             try:
+                line = ",".join([str(new_data.get(col, "")) for col in schema_to_use]) + "\n"
                 with open(filepath, "a", encoding="utf-8", newline="") as f:
-                    line = ",".join([str(normalized.get(col, "")) for col in schema_to_use]) + "\n"
                     f.write(line)
             finally:
                 _release_lock(lock_path)
-
             return True
         except Exception as e:
             logging.error(f"Failed to append to CSV {filepath}: {e}")

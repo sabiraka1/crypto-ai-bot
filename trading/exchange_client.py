@@ -3,7 +3,7 @@ import ccxt
 import time
 import math
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Any, List, Tuple
 
 
@@ -16,7 +16,7 @@ class ExchangeClient:
     Gate.io spot client via ccxt with:
       - SAFE_MODE (paper) support
       - min_notional (min cost) check & auto-adjust
-      - balance checks
+      - balance checks (skipped in SAFE_MODE)
       - precision-aware rounding for sell amounts
       - retry policy
       - buy by QUOTE amount (USDT) using params={'cost': ...}
@@ -188,22 +188,46 @@ class ExchangeClient:
         except Exception:
             return 0.0
 
+    def get_free_base(self, symbol: str) -> float:
+        base, _quote = self._split_symbol(symbol)
+        try:
+            return self.get_balance(base)
+        except Exception:
+            return 0.0
+
     # --------------------- trading ---------------------
     def create_market_buy_order(self, symbol: str, amount_usd: float):
         """
         Create MARKET BUY by quote amount (USDT) via params={'cost': ...}
-        - checks free quote balance
+        - SAFE_MODE: no balance checks, paper trade
+        - non-SAFE: checks free quote balance
         - auto-bumps to min_notional
-        - SAFE_MODE supported (paper trade)
         """
         requested = float(amount_usd)
         min_cost = self.market_min_cost(symbol) or 0.0
-        free_quote = self.get_free_quote(symbol)
 
+        if self.safe_mode:
+            # бумажная сделка, без проверок баланса
+            final_cost = max(requested, min_cost)
+            order = {
+                "id": f"paper-{int(time.time()*1000)}",
+                "symbol": symbol,
+                "side": "buy",
+                "type": "market",
+                "status": "filled",
+                "cost": final_cost,
+                "filled": final_cost / max(self.get_last_price(symbol), 1e-12),
+                "avg": self.get_last_price(symbol),
+                "paper": True,
+            }
+            self._log_trade("BUY[PAPER]", symbol, final_cost, self.get_last_price(symbol))
+            return order
+
+        # реальный режим — проверяем баланс котируемой валюты
+        free_quote = self.get_free_quote(symbol)
         if free_quote <= 0:
             raise APIException("No free quote balance to buy")
 
-        # clamp to available balance
         planned = min(requested, free_quote)
         final_cost = max(planned, min_cost)
 
@@ -215,19 +239,6 @@ class ExchangeClient:
                 f"🧩 amount bumped to min_notional: requested={requested:.2f}, "
                 f"min={min_cost:.2f}, final={final_cost:.2f}"
             )
-
-        if self.safe_mode:
-            order = {
-                "id": f"paper-{int(time.time()*1000)}",
-                "symbol": symbol,
-                "side": "buy",
-                "type": "market",
-                "status": "filled",
-                "cost_usd": final_cost,
-                "paper": True,
-            }
-            self._log_trade("BUY[PAPER]", symbol, final_cost, self.get_last_price(symbol))
-            return order
 
         order = self._safe(
             self.exchange.create_order,
@@ -245,6 +256,7 @@ class ExchangeClient:
         """
         MARKET SELL by base amount with precision rounding.
         - SAFE_MODE supported (paper)
+        - non-SAFE: checks free base balance
         - Enforces min amount where applicable
         """
         amt = float(amount_base)
@@ -252,10 +264,9 @@ class ExchangeClient:
 
         min_amt = self.market_min_amount(symbol) or 0.0
         if min_amt > 0 and amt < min_amt:
-            # try to bump to min amount if we are close
             if amt > 0:
                 logging.info(f"🧩 sell amount bumped to min_amount: from {amt:.8f} to {min_amt:.8f}")
-            amt = min_amt
+            amt = float(min_amt)
 
         if amt <= 0:
             raise APIException("Sell amount after rounding is zero")
@@ -268,10 +279,16 @@ class ExchangeClient:
                 "type": "market",
                 "status": "filled",
                 "amount": float(amt),
+                "avg": self.get_last_price(symbol),
                 "paper": True,
             }
             self._log_trade("SELL[PAPER]", symbol, float(amt), self.get_last_price(symbol))
             return order
+
+        # реальный режим — проверяем свободный базовый баланс
+        free_base = self.get_free_base(symbol)
+        if free_base < amt - 1e-12:
+            raise APIException(f"Insufficient base balance: need {amt:.8f}, have {free_base:.8f}")
 
         order = self._safe(self.exchange.create_order, symbol, "market", "sell", float(amt))
         self._log_trade("SELL", symbol, float(amt), self.get_last_price(symbol))
@@ -286,10 +303,8 @@ class ExchangeClient:
 
     # --------------------- trade logging ---------------------
     def _log_trade(self, action: str, symbol: str, amount: float, price: float):
-        msg = (
-            f"[TRADE] {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC | "
-            f"{action} {symbol} amount={amount:.8f} @ {price:.6f}"
-        )
+        ts = datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        msg = f"[TRADE] {ts} | {action} {symbol} amount={amount:.8f} @ {price:.6f}"
         logging.info(msg)
         try:
             with open("trades.log", "a", encoding="utf-8") as f:
