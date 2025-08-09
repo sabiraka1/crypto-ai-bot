@@ -71,6 +71,7 @@ class PositionManager:
             self.state.save_state()
 
             try:
+                # Проверка на минимальный размер сделки
                 min_cost = self.ex.market_min_cost(symbol) or 0.0
                 final_usd = max(float(amount_usd), float(min_cost))
                 if final_usd > amount_usd:
@@ -147,6 +148,12 @@ class PositionManager:
             qty_usd = float(st.get("qty_usd", 0.0))
             qty_base = qty_usd / exit_price if exit_price else 0.0
 
+            # Проверка на минимальный размер при закрытии
+            min_amount = self.ex.market_min_amount(symbol) or 0.0
+            if qty_base < min_amount:
+                logging.error(f"❌ Sell order too small: {qty_base:.8f} < min {min_amount}")
+                return None
+
             try:
                 self.ex.create_market_sell_order(symbol, qty_base)
             except Exception as e:
@@ -174,10 +181,10 @@ class PositionManager:
             atr_entry = st.get("atr_entry", "")
             pattern_entry = st.get("pattern", "")
 
-            # MFE / MAE
+            # MFE / MAE с исправленным parse8601
             mfe_pct, mae_pct = "", ""
             try:
-                ohlcv = self.ex.fetch_ohlcv(symbol, timeframe="15m", since=self.ex.parse8601(entry_ts))
+                ohlcv = self.ex.fetch_ohlcv(symbol, timeframe="15m", since=self.ex.exchange.parse8601(entry_ts))
                 prices = [c[4] for c in ohlcv]
                 if prices:
                     max_price = max(prices)
@@ -262,6 +269,12 @@ class PositionManager:
             if (not partial_taken) and tp1_atr and last_price >= tp1_atr:
                 qty_total = float(st.get("qty_usd", 0.0)) / last_price if last_price else 0.0
                 qty_sell = qty_total / 2.0
+
+                min_amount = self.ex.market_min_amount(symbol) or 0.0
+                if qty_sell < min_amount:
+                    logging.error(f"❌ Partial close too small: {qty_sell:.8f} < min {min_amount}")
+                    return
+
                 try:
                     self.ex.create_market_sell_order(symbol, qty_sell)
                 except Exception as e:

@@ -209,6 +209,8 @@ class ExchangeClient:
         if self.safe_mode:
             # бумажная сделка, без проверок баланса
             final_cost = max(requested, min_cost)
+            if final_cost > requested:
+                logging.info(f'🧩 amount bumped to min_notional (SAFE_MODE): requested={requested:.2f}, min={min_cost:.2f}, final={final_cost:.2f}')
             order = {
                 "id": f"paper-{int(time.time()*1000)}",
                 "symbol": symbol,
