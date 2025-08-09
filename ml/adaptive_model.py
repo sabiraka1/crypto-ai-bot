@@ -18,7 +18,12 @@ from core.exceptions import MLModelException
 
 
 _EPS = 1e-12
-DEFAULT_MODELS_DIR = os.getenv("MODELS_DIR", "models")
+# Приоритет: MODEL_DIR > MODELS_DIR > "models"
+DEFAULT_MODELS_DIR = (
+    os.getenv("MODEL_DIR")
+    or os.getenv("MODELS_DIR")
+    or "models"
+)
 
 
 def _clip01(x: float) -> float:
@@ -39,11 +44,17 @@ class AdaptiveMLModel:
       - predict_proba(df_tail) → [0..1]
     """
 
-    def __init__(self, models_dir: str = DEFAULT_MODELS_DIR):
-        self.models_dir = models_dir
+    def __init__(self, models_dir: Optional[str] = None, *, model_dir: Optional[str] = None):
+        """
+        Принимает оба параметра для совместимости:
+        - models_dir (основной)
+        - model_dir (алиас)
+        Если не задано — берём из env (MODEL_DIR / MODELS_DIR) или "models".
+        """
+        self.models_dir = models_dir or model_dir or DEFAULT_MODELS_DIR
         self.models: Dict[str, RandomForestClassifier] = {}
         self.scalers: Dict[str, StandardScaler] = {}
-        self.feature_importance: Dict[str, np.ndarray] = {}
+        self.feature_importance: Dict[str, Optional[np.ndarray]] = {}
         self.is_trained: bool = False
 
         # имена условий (строки для ключей)
@@ -64,9 +75,6 @@ class AdaptiveMLModel:
 
     # -------------------------------------------------------------------------
     # TRAIN
-    # X: np.ndarray [n_samples, n_features]
-    # y: np.ndarray [n_samples] (0/1)
-    # market_conditions: список строк тех же значений, что и MarketCondition.value
     # -------------------------------------------------------------------------
     def train(self, X: np.ndarray, y: np.ndarray, market_conditions: List[str]) -> bool:
         try:
@@ -104,7 +112,6 @@ class AdaptiveMLModel:
     def _fit_one(self, key: str, X: np.ndarray, y: np.ndarray) -> bool:
         """Обучение одной модели с масштабированием и class_weight."""
         try:
-            # class weights (balanced) — лучше на несбалансированных данных
             classes = np.array([0, 1], dtype=np.int32)
             try:
                 weights = compute_class_weight(class_weight="balanced", classes=classes, y=y)
@@ -142,27 +149,19 @@ class AdaptiveMLModel:
     # PREDICT
     # -------------------------------------------------------------------------
     def predict(self, x_vec: np.ndarray, market_condition: Optional[str]) -> Tuple[float, float]:
-        """
-        Предсказание бинарного класса (0/1) и вероятность для *конкретного* условия.
-        Возвращает (prediction, prob_of_1). Если модели нет — fallback к GLOBAL,
-        а затем к эвристике.
-        """
         try:
             x = np.asarray(x_vec, dtype=np.float64).reshape(1, -1)
 
-            # сначала условная модель, если есть
             if market_condition and market_condition in self.models:
                 prob = self._predict_proba_with("cond", market_condition, x)
                 if prob is not None:
                     return (1.0 if prob >= 0.5 else 0.0), float(prob)
 
-            # затем GLOBAL
             if "GLOBAL" in self.models:
                 prob = self._predict_proba_with("global", "GLOBAL", x)
                 if prob is not None:
                     return (1.0 if prob >= 0.5 else 0.0), float(prob)
 
-            # финальный fallback — эвристика
             pred, conf = self._fallback_prediction(x_vec)
             return pred, conf
 
@@ -183,19 +182,14 @@ class AdaptiveMLModel:
             logging.error(f"predict_proba[{tag}:{key}] failed: {e}")
             return None
 
-    # High-level API для main.py
+    # High-level API
     def predict_proba(self, df_tail_15m: pd.DataFrame, fallback_when_short=True) -> float:
-        """
-        Принимает df последних 50-200 баров 15m (желательно с колонками open,high,low,close,volume).
-        Сам извлекает фичи и определяет рыночное состояние (приблизительно).
-        Возвращает вероятность входа (класс=1) в [0..1].
-        """
         try:
             x = self._features_from_df(df_tail_15m)
             if x is None:
                 return 0.55 if fallback_when_short else 0.50
 
-            cond = self._infer_condition_from_df(df_tail_15m)  # строка из MarketCondition.value
+            cond = self._infer_condition_from_df(df_tail_15m)
             _pred, prob = self.predict(x, cond)
             return _clip01(prob)
         except Exception:
@@ -235,36 +229,26 @@ class AdaptiveMLModel:
             return False
 
     # -------------------------------------------------------------------------
-    # FALLBACK эвристика (без модели)
-    # Фичи: [RSI, MACD, EMA_cross, BB_pos, StochK, ADX, VolRatio, PriceChg]
+    # FALLBACK эвристика
     # -------------------------------------------------------------------------
     def _fallback_prediction(self, x_vec: np.ndarray) -> Tuple[float, float]:
         try:
             x = np.asarray(x_vec, dtype=np.float64)
             score = 0.0
-
-            # RSI
             if 30 <= x[0] <= 70:
                 score += 0.2
-            # MACD
             if x[1] > 0:
                 score += 0.25
-            # EMA cross
             if x[2] > 0:
                 score += 0.2
-            # BB position (середина диапазона)
             if 0.2 <= x[3] <= 0.8:
                 score += 0.1
-            # Стохастик
             if x[4] >= 50:
                 score += 0.1
-            # ADX (умеренно-трендовый)
             if x[5] >= 18:
                 score += 0.05
-            # Volume ratio
             if x[6] > 1.0:
                 score += 0.05
-            # Price change (краткосрочный ап-тренд)
             if x[7] > 0:
                 score += 0.05
 
@@ -275,13 +259,9 @@ class AdaptiveMLModel:
             return 0.0, 0.5
 
     # -------------------------------------------------------------------------
-    # FEATURE ENGINEERING (минимум зависимостей)
+    # FEATURE ENGINEERING
     # -------------------------------------------------------------------------
     def _features_from_df(self, df: pd.DataFrame) -> Optional[np.ndarray]:
-        """
-        Возвращает 8-мерный вектор:
-        [RSI, MACD, EMA_cross, BB_pos, StochK, ADX, Volume_ratio, Price_change]
-        """
         if df is None or df.empty or not {"open", "high", "low", "close", "volume"}.issubset(df.columns):
             return None
 
@@ -299,7 +279,7 @@ class AdaptiveMLModel:
         ema21 = close.ewm(span=21, adjust=False, min_periods=5).mean()
         ema_cross = (ema9.iloc[-1] - ema21.iloc[-1]) / (abs(ema21.iloc[-1]) + _EPS) if len(ema21.dropna()) else 0.0
 
-        # MACD (12,26,9) — возьмём сам macd (не hist)
+        # MACD (12,26,9) — берём macd
         ema_fast = close.ewm(span=12, adjust=False, min_periods=5).mean()
         ema_slow = close.ewm(span=26, adjust=False, min_periods=5).mean()
         macd = float((ema_fast.iloc[-1] - ema_slow.iloc[-1])) if len(ema_slow.dropna()) else 0.0
@@ -313,14 +293,14 @@ class AdaptiveMLModel:
         bb_pos = float((close.iloc[-1] - lower.iloc[-1]) / (rng + _EPS)) if np.isfinite(rng) else 0.5
         bb_pos = float(np.clip(bb_pos, 0.0, 1.0))
 
-        # Stoch(14,3) — %K
+        # Stoch(14) K
         ll = low.rolling(window=14, min_periods=5).min()
         hh = high.rolling(window=14, min_periods=5).max()
         denom = (hh.iloc[-1] - ll.iloc[-1])
         stoch_k = float((close.iloc[-1] - ll.iloc[-1]) / (denom + _EPS) * 100.0) if np.isfinite(denom) else 50.0
         stoch_k = float(np.clip(stoch_k, 0.0, 100.0))
 
-        # ADX(14) — упрощённый
+        # ADX(14)
         adx = self._adx(high, low, close, 14)
 
         # Volume ratio(20)
@@ -336,11 +316,9 @@ class AdaptiveMLModel:
             float(stoch_k), float(adx), float(volume_ratio), float(price_change)
         ], dtype=np.float64)
 
-        # защитим от NaN/Inf
         feats[~np.isfinite(feats)] = 0.0
         return feats
 
-    # --- индикаторные помощники ---
     def _rsi(self, close: pd.Series, period: int = 14) -> float:
         if len(close) < period + 2:
             return 50.0
@@ -373,9 +351,6 @@ class AdaptiveMLModel:
         val = float(adx.iloc[-1])
         return float(val) if np.isfinite(val) else 20.0
 
-    # -------------------------------------------------------------------------
-    # Простейший дедуктор рыночного состояния из df (если внешний анализатор не передан)
-    # -------------------------------------------------------------------------
     def _infer_condition_from_df(self, df: pd.DataFrame) -> str:
         try:
             close = df["close"].astype("float64")

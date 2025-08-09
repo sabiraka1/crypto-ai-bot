@@ -62,8 +62,9 @@ _STATE = StateManager()
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
     try:
+        import numpy as np
         import pandas as pd
-        from analysis.technical_indicators import TechnicalIndicators
+        from analysis.technical_indicators import calculate_all_indicators
         from analysis.market_analyzer import MultiTimeframeAnalyzer
         from ml.adaptive_model import AdaptiveMLModel
 
@@ -80,11 +81,29 @@ def _train_model_safe() -> bool:
         df_raw["time"] = pd.to_datetime(df_raw["time"], unit="ms", utc=True)
         df_raw.set_index("time", inplace=True)
 
-        df = TechnicalIndicators.calculate_all_indicators(df_raw.copy())
+        # индикаторы
+        df = calculate_all_indicators(df_raw.copy())
+
+        # целевая переменная
         df["price_change"] = df["close"].pct_change()
         df["future_close"] = df["close"].shift(-1)
         df["y"] = (df["future_close"] > df["close"]).astype(int)
-        df.dropna(inplace=True)
+
+        # недостающие фичи
+        _EPS = 1e-12
+        if {"ema_fast", "ema_slow"}.issubset(df.columns):
+            df["ema_cross"] = (df["ema_fast"] - df["ema_slow"]) / (df["ema_slow"].abs() + _EPS)
+        else:
+            df["ema_cross"] = np.nan
+
+        if {"bb_upper", "bb_lower"}.issubset(df.columns):
+            rng = (df["bb_upper"] - df["bb_lower"]).abs().replace(0, np.nan) + _EPS
+            df["bb_position"] = (df["close"] - df["bb_lower"]) / rng
+        else:
+            df["bb_position"] = np.nan
+
+        # чистим
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
 
         feature_cols = [
             "rsi", "macd", "ema_cross", "bb_position",
@@ -97,19 +116,22 @@ def _train_model_safe() -> bool:
         X = df[feature_cols].to_numpy()
         y = df["y"].to_numpy()
 
-        analyzer = MultiTimeframeAnalyzer()
+        # рыночные условия на 1D/4H
         agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
         df_1d = df_raw.resample("1D").agg(agg)
         df_4h = df_raw.resample("4H").agg(agg)
 
+        analyzer = MultiTimeframeAnalyzer()
         market_conditions = []
         for idx in df.index:
             cond, _ = analyzer.analyze_market_condition(df_1d.loc[:idx], df_4h.loc[:idx])
             market_conditions.append(cond.value)
 
-        model = AdaptiveMLModel()
+        model = AdaptiveMLModel()  # без лишних kwargs
         ok = model.train(X, y, market_conditions)
+        # можно сразу сохранить: model.save_models()
         return bool(ok)
+
     except Exception:
         logging.exception("train error")
         return False
