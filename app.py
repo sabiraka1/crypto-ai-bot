@@ -26,14 +26,19 @@ CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
 PORT = int(os.getenv("PORT", 5000))
 
+# НОВОЕ: секретный путь вебхука, вместо использования BOT_TOKEN в URL
+WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
+WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}" if WEBHOOK_SECRET else None
+WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}" if (PUBLIC_URL and WEBHOOK_PATH and BOT_TOKEN) else None
+
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN is missing")
 if not CHAT_ID:
     logger.warning("⚠️ CHAT_ID is missing — ответы в чат работать не будут")
 if not PUBLIC_URL:
     logger.warning("⚠️ PUBLIC_URL is missing — webhook не будет установлен")
-
-WEBHOOK_URL = f"{PUBLIC_URL}/webhook/{BOT_TOKEN}" if (PUBLIC_URL and BOT_TOKEN) else None
+if not WEBHOOK_SECRET:
+    logger.warning("⚠️ WEBHOOK_SECRET is missing — установите переменную окружения для безопасного вебхука")
 
 # ================== FLASK ==================
 app = Flask(__name__)
@@ -62,7 +67,6 @@ def _train_model_safe() -> bool:
             return False
 
         cols = ["time", "open", "high", "low", "close", "volume"]
-        import pandas as pd
         df_raw = pd.DataFrame(ohlcv, columns=cols)
         df_raw["time"] = pd.to_datetime(df_raw["time"], unit="ms", utc=True)
         df_raw.set_index("time", inplace=True)
@@ -97,7 +101,7 @@ def _train_model_safe() -> bool:
         model = AdaptiveMLModel()
         ok = model.train(X, y, market_conditions)
         return bool(ok)
-    except Exception as e:
+    except Exception:
         logging.exception("train error")
         return False
 
@@ -164,31 +168,36 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
 
         # неизвестные команды просто игнорируем (только лог)
         logging.info(f"Ignored unsupported command: {text}")
-    except Exception as e:
+    except Exception:
         logging.exception("dispatch error")
         # Без автоответа пользователю, как ты просил
 
 
 # ================== WEBHOOK ==================
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def telegram_webhook():
-    try:
-        update = request.get_json(silent=True) or {}
-        msg = update.get("message") or update.get("edited_message") or {}
-        text = msg.get("text", "")
-        chat_id = (msg.get("chat") or {}).get("id")
-        _dispatch(text, chat_id)
-    except Exception:
-        logging.exception("Webhook handling error")
-    return jsonify({"ok": True})
-
+# БЫЛО: @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+# СТАЛО: секретный путь без токена
+if WEBHOOK_PATH:
+    @app.route(WEBHOOK_PATH, methods=["POST"])
+    def telegram_webhook():
+        try:
+            update = request.get_json(silent=True) or {}
+            msg = update.get("message") or update.get("edited_message") or {}
+            text = msg.get("text", "")
+            chat_id = (msg.get("chat") or {}).get("id")
+            _dispatch(text, chat_id)
+        except Exception:
+            logging.exception("Webhook handling error")
+        return jsonify({"ok": True})
+else:
+    logger.warning("⚠️ WEBHOOK route not registered: WEBHOOK_SECRET is missing")
 
 def set_webhook():
-    if not (BOT_TOKEN and PUBLIC_URL):
-        logging.warning("Webhook not set: BOT_TOKEN or PUBLIC_URL is missing")
+    if not (BOT_TOKEN and PUBLIC_URL and WEBHOOK_URL):
+        logging.warning("Webhook not set: missing BOT_TOKEN or PUBLIC_URL or WEBHOOK_SECRET")
         return
     logging.info(f"🔗 PUBLIC_URL: {PUBLIC_URL}")
-    logging.info(f"📡 Webhook URL: {WEBHOOK_URL}")
+    # НЕ печатаем токен и полный URL
+    logging.info(f"📡 Webhook path set to {WEBHOOK_PATH}")
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
