@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 
 # ── наши модули из проекта ────────────────────────────────────────────────────
 from core.state_manager import StateManager
-from trading.exchange_client import ExchangeClient
+from trading.exchange_client import ExchangeClient, APIException
 from analysis.scoring_engine import ScoringEngine
 from telegram import bot_handler as tgbot  # используем только send_message
 
@@ -16,6 +16,15 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+
+# ── ENV-пороги и настроечки ───────────────────────────────────────────────────
+ENV_MIN_SCORE = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))  # если scorer не перехватит — валидируем вручную
+ENV_ENFORCE_AI_GATE = str(os.getenv("ENFORCE_AI_GATE", "1")).strip().lower() in ("1", "true", "yes", "on")
+ENV_AI_MIN_TO_TRADE = float(os.getenv("AI_MIN_TO_TRADE", "0.70"))
+
+SYMBOL_DEFAULT = os.getenv("SYMBOL", "BTC/USDT")
+TIMEFRAME_DEFAULT = os.getenv("TIMEFRAME", "15m")
+
 
 # ── утилиты преобразования OHLCV -> DataFrame ─────────────────────────────────
 def ohlcv_to_df(ohlcv) -> pd.DataFrame:
@@ -58,9 +67,7 @@ def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
 def _notify_entry_tg(symbol: str, entry_price: float, amount_usd: float,
                      tp_pct: float, sl_pct: float, tp1_atr: float, tp2_atr: float,
                      buy_score: float = None, ai_score: float = None, amount_frac: float = None):
-    """
-    Адаптируем сигнатуру PositionManager.notify_entry(...) к нашему Telegram-уведомлению.
-    """
+    """Адаптер под сигнатуру notify_entry(...) из PositionManager."""
     parts = [f"📥 Вход LONG {symbol} @ {entry_price:.4f}"]
     parts.append(f"Сумма: ${amount_usd:.2f}")
     parts.append(f"TP%≈{tp_pct:.4f} | SL%≈{sl_pct:.4f}")
@@ -81,9 +88,7 @@ def _notify_entry_tg(symbol: str, entry_price: float, amount_usd: float,
 def _notify_close_tg(symbol: str, price: float, reason: str,
                      pnl_pct: float, pnl_abs: float = None,
                      buy_score: float = None, ai_score: float = None, amount_usd: float = None):
-    """
-    Адаптер под PositionManager.notify_close(...) текущей версии.
-    """
+    """Адаптер под notify_close(...) текущей версии."""
     emoji = "✅" if (pnl_pct or 0) >= 0 else "❌"
     parts = [f"{emoji} Закрытие {symbol} @ {price:.4f}", f"{reason} | PnL {pnl_pct:.2f}%"]
     extra = []
@@ -105,8 +110,8 @@ def _notify_close_tg(symbol: str, price: float, reason: str,
 class TradingBot:
     def __init__(self):
         # конфиги из .env
-        self.symbol = os.getenv("SYMBOL", "BTC/USDT")
-        self.timeframe_15m = os.getenv("TIMEFRAME", "15m")  # базовый ТФ
+        self.symbol = SYMBOL_DEFAULT
+        self.timeframe_15m = TIMEFRAME_DEFAULT
         self.trade_amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
         self.cycle_minutes = int(os.getenv("ANALYSIS_INTERVAL", "15"))
 
@@ -117,11 +122,18 @@ class TradingBot:
             api_secret=os.getenv("GATE_API_SECRET"),
         )
 
-        # Подключаем PositionManager и передаём адаптеры уведомлений
+        # PositionManager (+ TG уведомления)
         from trading.position_manager import PositionManager
         self.pm = PositionManager(self.exchange, self.state, _notify_entry_tg, _notify_close_tg)
 
-        self.scorer = ScoringEngine()  # MIN_SCORE_TO_BUY подтянется из .env
+        # Скоуринг
+        self.scorer = ScoringEngine()
+        # если ScoringEngine поддерживает min_score, подменим на ENV
+        try:
+            if hasattr(self.scorer, "min_score_to_buy"):
+                self.scorer.min_score_to_buy = ENV_MIN_SCORE
+        except Exception:
+            pass
 
         logging.info("✅ Loaded 0 models")
         logging.info("🚀 Trading bot initialized")
@@ -171,10 +183,12 @@ class TradingBot:
             return
 
         # AI score (0..1)
-        ai_score = self._predict_ai_score(df_15m)
+        ai_score_raw = self._predict_ai_score(df_15m)
 
-        # Считаем Buy Score + собираем детали (RSI/MACD/и т.д.)
-        buy_score, ai_score, details = self.scorer.evaluate(df_15m, ai_score=ai_score)
+        # Считаем Buy Score + детали
+        buy_score, ai_score_eval, details = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
+        # на всякий случай приводим ai_score к [0..1]
+        ai_score = max(0.0, min(1.0, float(ai_score_eval if ai_score_eval is not None else ai_score_raw)))
 
         market_cond = "sideways"
         confidence = 0.01
@@ -187,9 +201,14 @@ class TradingBot:
         macd_pts = (1.0 if (macd_hist is not None and macd_hist > 0) else 0.0) + (1.0 if macd_growing else 0.0)
         rsi_pts = 1.0 if (rsi_val is not None and 45 <= rsi_val <= 65) else 0.0
 
-        logging.info(f"✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
-        logging.info(f"📊 Buy Score: {buy_score:.2f}/{self.scorer.min_score_to_buy:.2f} | MACD: {macd_pts:.1f} | AI: {ai_score:.2f}")
+        logging.info(
+            f"✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range"
+        )
+        logging.info(
+            f"📊 Buy Score: {buy_score:.2f}/{self.scorer.min_score_to_buy:.2f} | MACD: {macd_pts:.1f} | AI: {ai_score:.2f}"
+        )
 
+        # Если уже в позиции — управляем
         if self.state.state.get("in_position"):
             try:
                 self.pm.manage(self.symbol, last_price, atr_val or 0.0)
@@ -197,34 +216,68 @@ class TradingBot:
                 logging.exception("Error in manage state")
             return
 
-        if buy_score >= self.scorer.min_score_to_buy:
-            frac = self.scorer.position_fraction(ai_score)
-            usd_amt = self.trade_amount_usd * frac
+        # --- Гейт по порогу и по AI ---
+        # 1) по порогу (если внезапно ScoringEngine не подхватил ENV)
+        min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
+        if buy_score < float(min_thr):
+            logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
+            return
 
-            rsi_note = (
-                "n/a" if rsi_val is None else
-                (f"{rsi_val:.1f} (перепродан)" if rsi_val < 30 else
-                 f"{rsi_val:.1f} (перекуплен)" if rsi_val > 70 else
-                 f"{rsi_val:.1f} (здоровая зона)" if 45 <= rsi_val <= 65 else
-                 f"{rsi_val:.1f}")
-            )
-            macd_note = "n/a" if macd_hist is None else f"{macd_hist:.4f} ({'бычий' if macd_hist > 0 else 'медвежий'})"
-            trend_note = "EMA12>EMA26" if (macd_hist and macd_hist > 0) else "EMA12<=EMA26"
-            adx_note = "20.0"
-            expl = f"RSI {rsi_note} | MACD hist {macd_note} | {trend_note} | ADX {adx_note}"
-            logging.debug(f"Explain: {expl}")
-
-            if frac <= 0.0 or usd_amt <= 0.0:
-                logging.info(f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен.")
-                return
-
+        # 2) AI gate
+        if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
+            logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
             try:
-                self.pm.open_long(self.symbol, usd_amt, entry_price=last_price, atr=(atr_val or 0.0))
-                logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_amt:.2f}")
+                tgbot.send_message(f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}")
             except Exception:
-                logging.exception("Error while opening long")
-        else:
-            logging.info("❎ Filtered by Buy Score")
+                pass
+            return
+
+        # --- Размер позиции (через ScoringEngine.position_fraction) ---
+        frac = self.scorer.position_fraction(ai_score)  # 0..1
+        usd_planned = float(self.trade_amount_usd) * float(frac)
+
+        # лог сайзера и min_notional
+        min_cost = self.exchange.market_min_cost(self.symbol) or 0.0
+        logging.info(
+            f"SIZER: base={self.trade_amount_usd:.2f} ai={ai_score:.2f} "
+            f"-> planned={usd_planned:.2f}, min_cost={min_cost:.2f}"
+        )
+
+        if frac <= 0.0 or usd_planned <= 0.0:
+            msg = f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен."
+            logging.info(msg)
+            try:
+                tgbot.send_message(msg)
+            except Exception:
+                pass
+            return
+
+        # --- Попытка входа ---
+        try:
+            # PositionManager сам поднимет сумму до min_notional и поставит защиту от двойного входа
+            self.pm.open_long(
+                self.symbol,
+                usd_planned,
+                entry_price=last_price,
+                atr=(atr_val or 0.0),
+                buy_score=buy_score,
+                ai_score=ai_score,
+                amount_frac=frac,
+            )
+            logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
+        except APIException as e:
+            # Мягкая биржевая ошибка (например, min_notional/insufficient) — просто лог и (по желанию) алерт
+            logging.warning(f"💤 Биржа отклонила вход: {e}")
+            try:
+                tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
+            except Exception:
+                pass
+        except Exception:
+            logging.exception("Error while opening long")
+            try:
+                tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
+            except Exception:
+                pass
 
     # ── внешний запуск ─────────────────────────────────────────────────────────
     def run(self):

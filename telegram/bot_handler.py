@@ -9,22 +9,32 @@ from typing import Optional, Callable, List
 
 from analysis import scoring_engine
 from trading.exchange_client import ExchangeClient
+from trading.position_manager import PositionManager  # для testbuy/testsell
+from core.state_manager import StateManager
 
 # ==== ENV ====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
+SYMBOL_ENV = os.getenv("SYMBOL", "BTC/USDT")
+TIMEFRAME_ENV = os.getenv("TIMEFRAME", "15m")
+TEST_TRADE_AMOUNT = float(os.getenv("TEST_TRADE_AMOUNT", os.getenv("TRADE_AMOUNT", "3")))
+# Примечание: min_notional по символу учитывается на уровне ExchangeClient/PositionManager
+
+
 # ==== Telegram helpers ====
 def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
     if not TELEGRAM_API or not CHAT_ID:
-        logging.warning("Telegram not configured")
+        logging.warning("Telegram not configured (BOT_TOKEN/CHAT_ID missing)")
         return
     url = f"{TELEGRAM_API}/{method}"
     try:
         resp = requests.post(url, data=data, files=files, timeout=15)
         if resp.status_code != 200:
             logging.error("Telegram API error: %s %s", resp.status_code, resp.text[:200])
+        else:
+            logging.info("[TG] %s ok: %s", method, resp.text[:120])
     except Exception as e:
         logging.exception("Telegram request failed: %s", e)
 
@@ -42,25 +52,32 @@ def send_photo(image_path: str, caption: Optional[str] = None) -> None:
             data["caption"] = caption
         _tg_request("sendPhoto", data, files=files)
 
-# ==== Notifications for trades ====
+
+# ==== Notifications for trades (совместимо с PositionManager.notify_*) ====
 def notify_entry(symbol: str, side: str, price: float, amount: float, reason: str = "") -> None:
-    msg = f"📈 Открыта {side.upper()} позиция\n" \
-          f"Инструмент: {symbol}\n" \
-          f"Цена входа: {price:.4f}\n" \
-          f"Объём: {amount}\n"
+    msg = (
+        f"📈 Открыта {side.upper()} позиция\n"
+        f"Инструмент: {symbol}\n"
+        f"Цена входа: {price:.4f}\n"
+        f"Объём: {amount}\n"
+    )
     if reason:
         msg += f"Причина: {reason}"
     send_message(msg)
 
-def notify_close(symbol: str, side: str, entry_price: float, exit_price: float, pnl_abs: float, pnl_pct: float, reason: str = "") -> None:
+def notify_close(symbol: str, side: str, entry_price: float, exit_price: float,
+                 pnl_abs: float, pnl_pct: float, reason: str = "") -> None:
     emoji = "✅" if pnl_pct >= 0 else "❌"
-    msg = f"{emoji} Закрыта {side.upper()} позиция\n" \
-          f"{symbol}\n" \
-          f"Вход: {entry_price:.4f} → Выход: {exit_price:.4f}\n" \
-          f"PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)\n"
+    msg = (
+        f"{emoji} Закрыта {side.upper()} позиция\n"
+        f"{symbol}\n"
+        f"Вход: {entry_price:.4f} → Выход: {exit_price:.4f}\n"
+        f"PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)\n"
+    )
     if reason:
         msg += f"Причина: {reason}"
     send_message(msg)
+
 
 # ==== Commands ====
 def cmd_start() -> None:
@@ -72,16 +89,16 @@ def cmd_start() -> None:
         "/lasttrades – Последние сделки\n"
         "/train – Обучить модель\n"
         "/test – Тест сигнала\n"
-        "/testbuy – Тестовая покупка\n"
-        "/testsell – Тестовая продажа"
+        "/testbuy – Тестовая покупка (через PositionManager)\n"
+        "/testsell – Тестовая продажа (закрыть позицию через PositionManager)"
     )
 
-def cmd_status(state_manager, price_getter: Callable[[], Optional[float]]) -> None:
+def cmd_status(state_manager: StateManager, price_getter: Callable[[], Optional[float]]) -> None:
     st = getattr(state_manager, "state", {}) or {}
     if not st.get("in_position"):
         send_message("🟢 Позиции нет")
         return
-    sym = st.get("symbol", "BTC/USDT")
+    sym = st.get("symbol", SYMBOL_ENV)
     entry = float(st.get("entry_price") or 0.0)
     last = None
     try:
@@ -90,14 +107,33 @@ def cmd_status(state_manager, price_getter: Callable[[], Optional[float]]) -> No
             last = float(last)
     except Exception:
         pass
+
     txt = [f"📌 Позиция LONG {sym} @ {entry:.4f}"]
     if last:
         pnl_pct = (last - entry) / entry * 100.0 if entry else 0.0
         txt.append(f"Текущая цена: {last:.4f} | PnL {pnl_pct:.2f}%")
+
     tp = st.get("tp_price_pct")
     sl = st.get("sl_price_pct")
+    tp1_atr = st.get("tp1_atr")
+    tp2_atr = st.get("tp2_atr")
+    sl_atr = st.get("sl_atr")
+    flags = []
     if tp and sl:
         txt.append(f"TP≈{tp:.4f} | SL≈{sl:.4f}")
+    if tp1_atr:
+        flags.append(f"TP1≈{float(tp1_atr):.4f}")
+    if tp2_atr:
+        flags.append(f"TP2≈{float(tp2_atr):.4f}")
+    if sl_atr:
+        flags.append(f"SL_ATR≈{float(sl_atr):.4f}")
+    if st.get("trailing_on"):
+        flags.append("trailing ON")
+    if st.get("partial_taken"):
+        flags.append("partial taken")
+    if flags:
+        txt.append(" | ".join(flags))
+
     send_message("\n".join(txt))
 
 def cmd_profit() -> None:
@@ -158,24 +194,43 @@ def cmd_train(train_func) -> None:
         logging.error(f"cmd_train error: {e}")
         send_message(f"❌ Ошибка обучения: {e}")
 
-# ==== Test commands ====
+# ==== Helpers ====
+def _ohlcv_to_df(ohlcv) -> pd.DataFrame:
+    if not ohlcv:
+        return pd.DataFrame()
+    cols = ["time", "open", "high", "low", "close", "volume"]
+    df = pd.DataFrame(ohlcv, columns=cols)
+    df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+    df.set_index("time", inplace=True)
+    return df
+
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    if df.empty or len(df) < period + 2:
+        return 0.0
+    high = df["high"]; low = df["low"]; close = df["close"]; prev_close = close.shift(1)
+    tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    return float(tr.ewm(alpha=1/period, adjust=False).mean().iloc[-1])
+
+# ==== Test commands (через PositionManager) ====
 def cmd_test(symbol: str = None, timeframe: str = None):
-    symbol = symbol or os.getenv("SYMBOL", "BTC/USDT")
-    timeframe = timeframe or os.getenv("TIMEFRAME", "15m")
+    symbol = symbol or SYMBOL_ENV
+    timeframe = timeframe or TIMEFRAME_ENV
     try:
         ex = ExchangeClient()
         ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=200)
         if not ohlcv:
             send_message(f"⚠️ Нет данных OHLCV для {symbol}")
             return
-        df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
-        df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-        df.set_index("time", inplace=True)
+        df = _ohlcv_to_df(ohlcv)
 
-        # Исправлено: используем метод из scoring_engine, который реально существует
         engine = scoring_engine.ScoringEngine()
-        scores = engine.calculate_scores(df) if hasattr(engine, "calculate_scores") else (0.0, 0.0, None)
-        buy_score, ai_score, _ = scores
+        scores = engine.calculate_scores(df) if hasattr(engine, "calculate_scores") \
+                 else engine.evaluate(df, ai_score=0.55)
+        # поддержим обе сигнатуры:
+        if isinstance(scores, tuple) and len(scores) >= 2:
+            buy_score, ai_score = float(scores[0]), float(scores[1])
+        else:
+            buy_score, ai_score = 0.0, 0.55
 
         last = ex.get_last_price(symbol)
         send_message(f"🧪 TEST {symbol}\nЦена: {last:.2f}\nBuy {buy_score:.2f} | AI {ai_score:.2f}")
@@ -191,13 +246,60 @@ def cmd_test(symbol: str = None, timeframe: str = None):
         logging.exception("cmd_test error")
         send_message(f"❌ TEST ошибка: {e}")
 
+def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, amount_usd: float = None):
+    symbol = SYMBOL_ENV
+    try:
+        amount = float(amount_usd if amount_usd is not None else TEST_TRADE_AMOUNT)
+    except Exception:
+        amount = TEST_TRADE_AMOUNT
+
+    try:
+        # получим цену и ATR для корректного PM
+        ohlcv = exchange_client.fetch_ohlcv(symbol, timeframe=TIMEFRAME_ENV, limit=200)
+        df = _ohlcv_to_df(ohlcv)
+        last = float(df["close"].iloc[-1]) if not df.empty else exchange_client.get_last_price(symbol)
+        atr_val = _atr(df)
+
+        pm = PositionManager(exchange_client, state_manager, notify_entry_func=None, notify_close_func=None)
+        res = pm.open_long(symbol, amount, entry_price=last, atr=atr_val or 0.0,
+                           buy_score=None, ai_score=None, amount_frac=None)
+        if res is None:
+            send_message("⏭️ Покупка пропущена (возможно, уже есть позиция или ошибка). См. логи.")
+        else:
+            min_cost = exchange_client.market_min_cost(symbol) or 0.0
+            send_message(f"🧪 TEST BUY {symbol}: запрошено ${amount:.2f} (min_cost {min_cost:.2f}). "
+                         f"Статус: {'paper' if res.get('paper') else 'real'} | id={res.get('id','-')}")
+    except Exception as e:
+        logging.exception("cmd_testbuy error")
+        send_message(f"❌ TEST BUY ошибка: {e}")
+
+def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
+    symbol = SYMBOL_ENV
+    try:
+        # текущая цена для расчёта PnL в уведомлении PM
+        last = None
+        try:
+            last = float(exchange_client.get_last_price(symbol))
+        except Exception:
+            last = 0.0
+        pm = PositionManager(exchange_client, state_manager, notify_entry_func=None, notify_close_func=None)
+        res = pm.close_all(symbol, exit_price=(last or 0.0), reason="manual_test")
+        if res is None:
+            send_message("⏭️ Продажа пропущена (возможно, позиции нет).")
+        else:
+            send_message(f"🧪 TEST SELL {symbol}: попытка закрыть позицию. См. логи.")
+    except Exception as e:
+        logging.exception("cmd_testsell error")
+        send_message(f"❌ TEST SELL ошибка: {e}")
+
+
 # ==== Router ====
 def process_command(text: str, state_manager, exchange_client: ExchangeClient, train_func: Optional[Callable] = None):
     text = (text or "").strip()
     if not text.startswith("/"):
         return
     try:
-        sym = os.getenv("SYMBOL", "BTC/USDT")
+        sym = SYMBOL_ENV
         if text.startswith("/start"):
             return cmd_start()
         if text.startswith("/status"):
@@ -210,8 +312,22 @@ def process_command(text: str, state_manager, exchange_client: ExchangeClient, t
             return cmd_lasttrades()
         if text.startswith("/train"):
             return cmd_train(train_func if train_func else (lambda: False))
-        if text.startswith("/test"):
+        if text.startswith("/test "):
+            # /test BTC/USDT 5m  — поддержим простую форму
+            parts = text.split()
+            s = parts[1] if len(parts) > 1 else None
+            tf = parts[2] if len(parts) > 2 else None
+            return cmd_test(s, tf)
+        if text.strip() == "/test":
             return cmd_test()
+        if text.startswith("/testbuy"):
+            # /testbuy 5  — сумма опционально
+            parts = text.split()
+            amt = float(parts[1]) if len(parts) > 1 else None
+            return cmd_testbuy(state_manager, exchange_client, amt)
+        if text.startswith("/testsell"):
+            return cmd_testsell(state_manager, exchange_client)
+
         logging.info(f"Unknown or unsupported command: {text}")
         send_message(f"❓ Неизвестная команда: {text}")
     except Exception as e:
