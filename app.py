@@ -231,12 +231,11 @@ def start_trading_loop():
     logging.info("Trading loop thread started")
 
 
-# ================== BOOTSTRAP ПОД GUNICORN ==================
+# ================== BOOTSTRAP (без декораторов) ==================
 _bootstrapped = False
 
-@app.before_serving
 def _bootstrap_once():
-    """Запускаем вещи, которые обычно жили в __main__ (для Gunicorn/Flask>=3)."""
+    """Запускаем вещи, которые обычно жили в __main__."""
     global _bootstrapped
     if _bootstrapped:
         return
@@ -251,8 +250,12 @@ def _bootstrap_once():
     _bootstrapped = True
 
 
-# ================== ENTRYPOINT (локальная отладка) ==================
+# ================== ENTRYPOINT ==================
+# Если запущено под Gunicorn/WSGI:
+if __name__ != "__main__":
+    _bootstrap_once()
+
+# Локальная отладка:
 if __name__ == "__main__":
-    set_webhook()
-    start_trading_loop()
+    _bootstrap_once()
     app.run(host="0.0.0.0", port=PORT)
