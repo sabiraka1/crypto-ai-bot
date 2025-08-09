@@ -343,6 +343,24 @@ def _bootstrap_once():
 import psutil
 import time
 
+import os
+
+LOCK_FILE = ".trading.lock"
+
+# Remove old lock file at startup
+if os.path.exists(LOCK_FILE):
+    os.remove(LOCK_FILE)
+    print("⚠️ Removed stale lock file at startup")
+
+# Create new lock file and check before starting trading loop
+if os.path.exists(LOCK_FILE):
+    print("⏸ Trading loop already running — skipping duplicate start")
+else:
+    with open(LOCK_FILE, "w") as lf:
+        lf.write("running")
+    print("✅ Trading lock acquired — starting main loop...")
+
+
 def send_telegram_alert(message):
     try:
         if BOT_TOKEN and CHAT_ID:
