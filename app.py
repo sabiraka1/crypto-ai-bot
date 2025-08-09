@@ -19,6 +19,41 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), logging.FileHandler("bot_activity.log", encoding="utf-8")]
 )
 logger = logging.getLogger(__name__)
+# ================== ФИЛЬТР ЛОГОВ ==================
+class SensitiveDataFilter(logging.Filter):
+    SENSITIVE_PATTERN = re.compile(r'(?i)(key|token|secret|password)\s*[:=]\s*["\']?[\w\-:]+["\']?')
+    REPLACEMENT = r'\1=***'
+    def filter(self, record):
+        if record.args and isinstance(record.args, dict):
+            record.args = {k: ("***" if any(x in k.lower() for x in ["key", "token", "secret", "password"]) else v)
+                           for k, v in record.args.items()}
+        if record.msg and isinstance(record.msg, str):
+            record.msg = self.SENSITIVE_PATTERN.sub(self.REPLACEMENT, record.msg)
+        return True
+
+# Настройка логов с фильтром
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+for handler in logging.getLogger().handlers:
+    handler.addFilter(SensitiveDataFilter())
+
+def safe_log(data):
+    if isinstance(data, dict):
+        redacted = {k: ("***" if any(x in k.lower() for x in ["key", "token", "secret", "password"]) else v)
+                    for k, v in data.items()}
+        logger.info(redacted)
+    else:
+        logger.info(str(data))
+
+def verify_request():
+    if WEBHOOK_SECRET and not request.path.endswith(WEBHOOK_SECRET):
+        return jsonify({"ok": False, "error": "unauthorized"}), 403
+    if TELEGRAM_SECRET_TOKEN:
+        hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if hdr != TELEGRAM_SECRET_TOKEN:
+            logger.warning("Webhook: secret token mismatch")
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+
 
 # ================== ENV ==================
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -211,7 +246,10 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
 if ENABLE_WEBHOOK and WEBHOOK_PATH:
     @app.route(WEBHOOK_PATH, methods=["POST"])
     def telegram_webhook():
-        try:
+    try:
+        vr = verify_request()
+        if vr: return vr
+        safe_log({'update': 'received'})
             if TELEGRAM_SECRET_TOKEN:
                 hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
                 if hdr != TELEGRAM_SECRET_TOKEN:
