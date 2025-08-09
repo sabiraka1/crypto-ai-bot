@@ -1,10 +1,10 @@
 import matplotlib
 matplotlib.use('Agg')
 import os
+import re
 import logging
 import threading
 from typing import Optional
-
 import requests
 from flask import Flask, request, jsonify
 
@@ -21,10 +21,12 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), logging.FileHandler("bot_activity.log", encoding="utf-8")]
 )
 logger = logging.getLogger(__name__)
+
 # ================== ФИЛЬТР ЛОГОВ ==================
 class SensitiveDataFilter(logging.Filter):
     SENSITIVE_PATTERN = re.compile(r'(?i)(key|token|secret|password)\s*[:=]\s*["\']?[\w\-:]+["\']?')
     REPLACEMENT = r'\1=***'
+
     def filter(self, record):
         if record.args and isinstance(record.args, dict):
             record.args = {k: ("***" if any(x in k.lower() for x in ["key", "token", "secret", "password"]) else v)
@@ -33,7 +35,6 @@ class SensitiveDataFilter(logging.Filter):
             record.msg = self.SENSITIVE_PATTERN.sub(self.REPLACEMENT, record.msg)
         return True
 
-# Настройка логов с фильтром
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 for handler in logging.getLogger().handlers:
@@ -55,7 +56,6 @@ def verify_request():
         if hdr != TELEGRAM_SECRET_TOKEN:
             logger.warning("Webhook: secret token mismatch")
             return jsonify({"ok": False, "error": "unauthorized"}), 403
-
 
 # ================== ENV ==================
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -118,15 +118,11 @@ def _train_model_safe() -> bool:
         df_raw["time"] = pd.to_datetime(df_raw["time"], unit="ms", utc=True)
         df_raw.set_index("time", inplace=True)
 
-        # индикаторы
         df = calculate_all_indicators(df_raw.copy())
-
-        # целевая переменная
         df["price_change"] = df["close"].pct_change()
         df["future_close"] = df["close"].shift(-1)
         df["y"] = (df["future_close"] > df["close"]).astype(int)
 
-        # недостающие фичи
         _EPS = 1e-12
         if {"ema_fast", "ema_slow"}.issubset(df.columns):
             df["ema_cross"] = (df["ema_fast"] - df["ema_slow"]) / (df["ema_slow"].abs() + _EPS)
@@ -139,7 +135,6 @@ def _train_model_safe() -> bool:
         else:
             df["bb_position"] = np.nan
 
-        # чистим
         df = df.replace([np.inf, -np.inf], np.nan).dropna()
 
         feature_cols = [
@@ -153,7 +148,6 @@ def _train_model_safe() -> bool:
         X = df[feature_cols].to_numpy()
         y = df["y"].to_numpy()
 
-        # рыночные условия на 1D/4H
         agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
         df_1d = df_raw.resample("1D").agg(agg)
         df_4h = df_raw.resample("4H").agg(agg)
@@ -164,15 +158,13 @@ def _train_model_safe() -> bool:
             cond, _ = analyzer.analyze_market_condition(df_1d.loc[:idx], df_4h.loc[:idx])
             market_conditions.append(cond.value)
 
-        model = AdaptiveMLModel()  # без лишних kwargs
+        model = AdaptiveMLModel()
         ok = model.train(X, y, market_conditions)
-        # можно сразу сохранить: model.save_models()
         return bool(ok)
 
     except Exception:
         logging.exception("train error")
         return False
-
 
 def _send_message(text: str) -> None:
     if not BOT_TOKEN or not CHAT_ID:
@@ -186,7 +178,6 @@ def _send_message(text: str) -> None:
     except Exception:
         logging.exception("sendMessage failed")
 
-
 def _acquire_file_lock(lock_path: str) -> bool:
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -199,13 +190,11 @@ def _acquire_file_lock(lock_path: str) -> bool:
         logging.exception("lock create failed")
         return False
 
-
 # ================== HEALTH ==================
 @app.route("/health", methods=["GET"])
 @app.route("/healthz", methods=["GET"])
 def health():
     return jsonify({"ok": True, "status": "running"}), 200
-
 
 # ================== DISPATCH ==================
 def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
@@ -243,20 +232,15 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
     except Exception:
         logging.exception("dispatch error")
 
-
 # ================== WEBHOOK ==================
 if ENABLE_WEBHOOK and WEBHOOK_PATH:
     @app.route(WEBHOOK_PATH, methods=["POST"])
     def telegram_webhook():
-    try:
-        vr = verify_request()
-        if vr: return vr
-        safe_log({'update': 'received'})
-            if TELEGRAM_SECRET_TOKEN:
-                hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-                if hdr != TELEGRAM_SECRET_TOKEN:
-                    logging.warning("Webhook: secret token mismatch")
-                    return jsonify({"ok": False, "error": "unauthorized"}), 401
+        try:
+            vr = verify_request()
+            if vr:
+                return vr
+            safe_log({'update': 'received'})
 
             update = request.get_json(silent=True) or {}
             msg = update.get("message") or update.get("edited_message") or {}
@@ -266,10 +250,9 @@ if ENABLE_WEBHOOK and WEBHOOK_PATH:
             text = msg.get("text", "")
             chat_id = (msg.get("chat") or {}).get("id")
 
-            if ADMIN_CHAT_IDS:
-                if not chat_id or int(chat_id) not in ADMIN_CHAT_IDS:
-                    logging.warning("Unauthorized access denied for chat_id=%s", chat_id)
-                    return jsonify({"ok": True})
+            if ADMIN_CHAT_IDS and (not chat_id or int(chat_id) not in ADMIN_CHAT_IDS):
+                logging.warning("Unauthorized access denied for chat_id=%s", chat_id)
+                return jsonify({"ok": True})
 
             _dispatch(text, chat_id)
         except Exception:
@@ -278,7 +261,6 @@ if ENABLE_WEBHOOK and WEBHOOK_PATH:
 else:
     logger.warning("⚠️ WEBHOOK route not registered: disabled or WEBHOOK_SECRET missing")
 
-
 def set_webhook():
     if not ENABLE_WEBHOOK:
         logging.info("Webhook disabled by ENABLE_WEBHOOK=0")
@@ -286,7 +268,6 @@ def set_webhook():
     if not (BOT_TOKEN and PUBLIC_URL and WEBHOOK_URL):
         logging.warning("Webhook not set: missing BOT_TOKEN or PUBLIC_URL or WEBHOOK_SECRET")
         return
-    # файлок для защиты от двойного вызова при нескольких воркерах
     if not _acquire_file_lock(".webhook.lock"):
         logging.info("Webhook already initialized by another process")
         return
@@ -306,25 +287,21 @@ def set_webhook():
     except Exception:
         logging.exception("setWebhook error")
 
-
 # ================== TRADING LOOP ==================
 def start_trading_loop():
     if not ENABLE_TRADING:
         logging.info("Trading loop disabled by ENABLE_TRADING=0")
         return
-    # файлок для защиты от множественных запусков под несколькими воркерами gunicorn
     if not _acquire_file_lock(".trading.lock"):
         logging.info("Trading loop already started in another process")
         return
     bot = TradingBot()
-    t = threading.Thread(target=bot.run, name="trading-loop", daemon=True)
+    t = threading.Thread(target=bot.run, name="TradingLoop", daemon=True)
     t.start()
     logging.info("Trading loop thread started")
 
-
 # ================== BOOTSTRAP ==================
 _bootstrapped = False
-
 def _bootstrap_once():
     global _bootstrapped
     if _bootstrapped:
@@ -339,55 +316,9 @@ def _bootstrap_once():
         logging.exception("start_trading_loop failed")
     _bootstrapped = True
 
-
-# ================== ENTRYPOINT ==================
-
-# ==== Watchdog for Trading Loop ====
-import psutil, time
-
-def monitor_resources():
-    process = psutil.Process(os.getpid())
-    mem = process.memory_info().rss / (1024 * 1024)
-    cpu = process.cpu_percent(interval=1)
-    logging.info(f"[Resources] CPU: {cpu}%, RAM: {mem:.2f} MB")
-
-def watchdog():
-    while True:
-        try:
-            monitor_resources()
-            # Здесь можно проверять, работает ли твой планировщик или поток
-            # и перезапускать при сбое
-        except Exception as e:
-            logging.error(f"[Watchdog] Error: {e}")
-        time.sleep(300)  # каждые 5 минут
-
-# Запуск watchdog в отдельном потоке
-threading.Thread(target=watchdog, daemon=True).start()
-
-
-# ==== Keep-Alive Ping ===
-import threading, requests
-
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
-
-def keep_alive_ping():
-    try:
-        if PUBLIC_URL:
-            requests.get(PUBLIC_URL, timeout=5)
-            logging.info(f"[KeepAlive] Pinged {PUBLIC_URL}")
-    except Exception as e:
-        logging.warning(f"[KeepAlive] Ping failed: {e}")
-    threading.Timer(600, keep_alive_ping).start()  # каждые 10 минут
-
-# Запускаем keep-alive при старте
-keep_alive_ping()
-
-
 # ==== Watchdog with Auto-Restart and Telegram Alerts ====
-import psutil, time, threading, os, requests
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+import psutil
+import time
 
 def send_telegram_alert(message):
     try:
@@ -411,7 +342,6 @@ def watchdog():
     while True:
         try:
             monitor_resources()
-            # Проверяем наличие торгового потока
             trading_thread_alive = any(t.name == "TradingLoop" and t.is_alive() for t in threading.enumerate())
             if not trading_thread_alive:
                 send_telegram_alert("♻️ Trading loop stopped! Restarting...")
@@ -421,10 +351,21 @@ def watchdog():
                     send_telegram_alert(f"❌ Failed to restart trading loop: {e}")
         except Exception as e:
             logging.error(f"[Watchdog] Error: {e}")
-        time.sleep(300)  # каждые 5 минут
+        time.sleep(300)
 
-# Запуск watchdog в отдельном потоке
 threading.Thread(target=watchdog, daemon=True).start()
+
+# ==== Keep-Alive Ping ====
+def keep_alive_ping():
+    try:
+        if PUBLIC_URL:
+            requests.get(PUBLIC_URL, timeout=5)
+            logging.info(f"[KeepAlive] Pinged {PUBLIC_URL}")
+    except Exception as e:
+        logging.warning(f"[KeepAlive] Ping failed: {e}")
+    threading.Timer(600, keep_alive_ping).start()
+
+keep_alive_ping()
 
 if __name__ != "__main__":
     _bootstrap_once()
