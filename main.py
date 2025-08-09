@@ -25,6 +25,10 @@ ENV_AI_MIN_TO_TRADE = float(os.getenv("AI_MIN_TO_TRADE", "0.70"))
 SYMBOL_DEFAULT = os.getenv("SYMBOL", "BTC/USDT")
 TIMEFRAME_DEFAULT = os.getenv("TIMEFRAME", "15m")
 
+# Интервал циклов и отдельный интервал для инфо-логов
+ANALYSIS_INTERVAL_MIN = int(os.getenv("ANALYSIS_INTERVAL", "15"))         # как и раньше
+INFO_LOG_INTERVAL_SEC = int(os.getenv("INFO_LOG_INTERVAL_SEC", "600"))    # каждые 10 минут по умолчанию
+
 
 # ── утилиты преобразования OHLCV -> DataFrame ─────────────────────────────────
 def ohlcv_to_df(ohlcv) -> pd.DataFrame:
@@ -113,7 +117,7 @@ class TradingBot:
         self.symbol = SYMBOL_DEFAULT
         self.timeframe_15m = TIMEFRAME_DEFAULT
         self.trade_amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
-        self.cycle_minutes = int(os.getenv("ANALYSIS_INTERVAL", "15"))
+        self.cycle_minutes = ANALYSIS_INTERVAL_MIN
 
         # инфраструктура
         self.state = StateManager()
@@ -134,6 +138,9 @@ class TradingBot:
                 self.scorer.min_score_to_buy = ENV_MIN_SCORE
         except Exception:
             pass
+
+        # Тикающий лог каждые INFO_LOG_INTERVAL_SEC
+        self._last_info_log_ts = 0.0
 
         logging.info("✅ Loaded 0 models")
         logging.info("🚀 Trading bot initialized")
@@ -175,24 +182,19 @@ class TradingBot:
 
     # ── торговый цикл ─────────────────────────────────────────────────────────
     def _trading_cycle(self):
-        logging.info("🔄 Starting trading cycle...")
-
         df_15m, last_price, atr_val = self._fetch_market()
         if df_15m.empty or last_price is None:
             logging.error("Failed to fetch market data")
             return
 
-        # AI score (0..1)
+        # Временная метка текущей (последней) свечи
+        candle_ts = int(df_15m.index[-1].timestamp())
+        last_seen = self.state.state.get("last_candle_ts")
+
+        # Считаем все метрики (для логов и для решений)
         ai_score_raw = self._predict_ai_score(df_15m)
-
-        # Считаем Buy Score + детали
         buy_score, ai_score_eval, details = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
-        # на всякий случай приводим ai_score к [0..1]
         ai_score = max(0.0, min(1.0, float(ai_score_eval if ai_score_eval is not None else ai_score_raw)))
-
-        market_cond = "sideways"
-        confidence = 0.01
-        logging.info(f"📊 Market Analysis: {market_cond}, Confidence: {confidence:.2f}")
 
         macd_hist = details.get("macd_hist")
         rsi_val = details.get("rsi")
@@ -201,81 +203,97 @@ class TradingBot:
         macd_pts = (1.0 if (macd_hist is not None and macd_hist > 0) else 0.0) + (1.0 if macd_growing else 0.0)
         rsi_pts = 1.0 if (rsi_val is not None and 45 <= rsi_val <= 65) else 0.0
 
-        logging.info(
-            f"✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range"
-        )
-        logging.info(
-            f"📊 Buy Score: {buy_score:.2f}/{self.scorer.min_score_to_buy:.2f} | MACD: {macd_pts:.1f} | AI: {ai_score:.2f}"
-        )
+        # ── Информационный лог каждые INFO_LOG_INTERVAL_SEC (не влияет на торговлю) ──
+        now = time.time()
+        if now - self._last_info_log_ts >= INFO_LOG_INTERVAL_SEC:
+            market_cond = "sideways"  # тут можно подключить свою логику определения рынка
+            confidence = 0.01
+            logging.info(f"📊 Market Analysis: {market_cond}, Confidence: {confidence:.2f}")
+            logging.info("✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
+            logging.info(
+                f"📊 Buy Score: {buy_score:.2f}/{getattr(self.scorer, 'min_score_to_buy', ENV_MIN_SCORE):.2f} "
+                f"| MACD: {macd_pts:.1f} | AI: {ai_score:.2f}"
+            )
+            self._last_info_log_ts = now
 
-        # Если уже в позиции — управляем
+        # ── Управление открытой позицией делаем на каждом цикле ──
         if self.state.state.get("in_position"):
             try:
                 self.pm.manage(self.symbol, last_price, atr_val or 0.0)
             except Exception:
                 logging.exception("Error in manage state")
+
+        # ── Решение «войти/нет» ТОЛЬКО по закрытию новой свечи ──
+        # если это та же свеча, что уже обрабатывали — решения не принимаем
+        if last_seen is not None and candle_ts == int(last_seen):
             return
 
-        # --- Гейт по порогу и по AI ---
-        # 1) по порогу (если внезапно ScoringEngine не подхватил ENV)
-        min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
-        if buy_score < float(min_thr):
-            logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
-            return
-
-        # 2) AI gate
-        if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
-            logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
-            try:
-                tgbot.send_message(f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}")
-            except Exception:
-                pass
-            return
-
-        # --- Размер позиции (через ScoringEngine.position_fraction) ---
-        frac = self.scorer.position_fraction(ai_score)  # 0..1
-        usd_planned = float(self.trade_amount_usd) * float(frac)
-
-        # лог сайзера и min_notional
-        min_cost = self.exchange.market_min_cost(self.symbol) or 0.0
-        logging.info(
-            f"SIZER: base={self.trade_amount_usd:.2f} ai={ai_score:.2f} "
-            f"-> planned={usd_planned:.2f}, min_cost={min_cost:.2f}"
-        )
-
-        if frac <= 0.0 or usd_planned <= 0.0:
-            msg = f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен."
-            logging.info(msg)
-            try:
-                tgbot.send_message(msg)
-            except Exception:
-                pass
-            return
-
-        # --- Попытка входа ---
+        # Новая свеча: принимаем решение, а потом запоминаем её ts
         try:
-            # PositionManager сам поднимет сумму до min_notional и поставит защиту от двойного входа
-            self.pm.open_long(
-                self.symbol,
-                usd_planned,
-                entry_price=last_price,
-                atr=(atr_val or 0.0),
-                buy_score=buy_score,
-                ai_score=ai_score,
-                amount_frac=frac,
+            # 1) порог по buy_score
+            min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
+            if buy_score < float(min_thr):
+                logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
+                return
+
+            # 2) AI gate (если включён)
+            if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
+                logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
+                try:
+                    tgbot.send_message(
+                        f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}"
+                    )
+                except Exception:
+                    pass
+                return
+
+            # 3) размер позиции
+            frac = self.scorer.position_fraction(ai_score)  # 0..1
+            usd_planned = float(self.trade_amount_usd) * float(frac)
+            min_cost = self.exchange.market_min_cost(self.symbol) or 0.0
+            logging.info(
+                f"SIZER: base={self.trade_amount_usd:.2f} ai={ai_score:.2f} "
+                f"-> planned={usd_planned:.2f}, min_cost={min_cost:.2f}"
             )
-            logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
-        except APIException as e:
-            # Мягкая биржевая ошибка (например, min_notional/insufficient) — просто лог и (по желанию) алерт
-            logging.warning(f"💤 Биржа отклонила вход: {e}")
+
+            if frac <= 0.0 or usd_planned <= 0.0:
+                msg = f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен."
+                logging.info(msg)
+                try:
+                    tgbot.send_message(msg)
+                except Exception:
+                    pass
+                return
+
+            # 4) попытка входа (PM сам поднимет до min_notional и не даст двойной вход)
             try:
-                tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
+                self.pm.open_long(
+                    self.symbol,
+                    usd_planned,
+                    entry_price=last_price,
+                    atr=(atr_val or 0.0),
+                    buy_score=buy_score,
+                    ai_score=ai_score,
+                    amount_frac=frac,
+                )
+                logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
+            except APIException as e:
+                logging.warning(f"💤 Биржа отклонила вход: {e}")
+                try:
+                    tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
+                except Exception:
+                    pass
             except Exception:
-                pass
-        except Exception:
-            logging.exception("Error while opening long")
+                logging.exception("Error while opening long")
+                try:
+                    tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
+                except Exception:
+                    pass
+        finally:
+            # Запоминаем обработанную свечу в любом случае, чтобы не принимать решение повторно
             try:
-                tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
+                self.state.state["last_candle_ts"] = candle_ts
+                self.state.save_state()
             except Exception:
                 pass
 
