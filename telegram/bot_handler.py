@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import time
 from typing import Optional, Callable, List
 
 from analysis import scoring_engine
@@ -22,7 +23,6 @@ SYMBOL_ENV = os.getenv("SYMBOL", "BTC/USDT")
 TIMEFRAME_ENV = os.getenv("TIMEFRAME", "15m")
 TEST_TRADE_AMOUNT = float(os.getenv("TEST_TRADE_AMOUNT", os.getenv("TRADE_AMOUNT", "3")))
 # Примечание: min_notional по символу учитывается на уровне ExchangeClient/PositionManager
-
 
 
 # ==== Anti-spam settings ====
@@ -47,13 +47,13 @@ def safe_command(func):
             elif update and hasattr(update, "effective_chat"):
                 chat_id = update.effective_chat.id
             if chat_id and not anti_spam(chat_id):
-                send_message(chat_id, "⏳ Подожди пару секунд перед следующей командой.")
+                send_message("⏳ Подожди пару секунд перед следующей командой.")
                 return
             return func(*args, **kwargs)
         except Exception as e:
             logging.exception(f"Ошибка в команде {func.__name__}: {e}")
             if chat_id:
-                send_message(chat_id, "⚠️ Произошла ошибка при выполнении команды.")
+                send_message("⚠️ Произошла ошибка при выполнении команды.")
     return wrapper
 
 # ==== Telegram helpers ====
@@ -71,8 +71,10 @@ def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
     except Exception as e:
         logging.exception("Telegram request failed: %s", e)
 
-def send_message(text: str) -> None:
-    _tg_request("sendMessage", {"chat_id": CHAT_ID, "text": text})
+def send_message(text: str, chat_id: str = None) -> None:
+    target_chat = chat_id or CHAT_ID
+    if target_chat:
+        _tg_request("sendMessage", {"chat_id": target_chat, "text": text})
 
 def send_photo(image_path: str, caption: Optional[str] = None) -> None:
     if not os.path.exists(image_path):
@@ -281,7 +283,7 @@ def _atr(df: pd.DataFrame, period: int = 14) -> float:
     tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return float(tr.ewm(alpha=1/period, adjust=False).mean().iloc[-1])
 
-# ==== Test commands (через PositionManager) ====
+# ==== Test commands (через PositionManager) с исправлениями ====
 def cmd_test(symbol: str = None, timeframe: str = None):
     symbol = symbol or SYMBOL_ENV
     timeframe = timeframe or TIMEFRAME_ENV
@@ -316,6 +318,7 @@ def cmd_test(symbol: str = None, timeframe: str = None):
         send_message(f"❌ TEST ошибка: {e}")
 
 def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, amount_usd: float = None):
+    """Тестовая покупка БЕЗ проверок AI, MACD и других фильтров"""
     symbol = SYMBOL_ENV
     try:
         amount = float(amount_usd if amount_usd is not None else TEST_TRADE_AMOUNT)
@@ -323,38 +326,127 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, am
         amount = TEST_TRADE_AMOUNT
 
     try:
+        # Проверяем, что нет открытой позиции
+        st = state_manager.state
+        if st.get("in_position") or st.get("opening"):
+            send_message("⏭️ Уже есть открытая позиция или процесс открытия")
+            return
+
+        # Получаем данные рынка
         ohlcv = exchange_client.fetch_ohlcv(symbol, timeframe=TIMEFRAME_ENV, limit=200)
         df = _ohlcv_to_df(ohlcv)
         last = float(df["close"].iloc[-1]) if not df.empty else exchange_client.get_last_price(symbol)
         atr_val = _atr(df)
 
-        pm = PositionManager(exchange_client, state_manager, notify_entry_func=None, notify_close_func=None)
-        res = pm.open_long(symbol, amount, entry_price=last, atr=atr_val or 0.0,
-                           buy_score=None, ai_score=None, amount_frac=None)
+        # Создаем временный PositionManager для тестовой покупки
+        def test_notify_entry(*args, **kwargs):
+            send_message(f"🧪 TEST BUY выполнен: {args}")
+        
+        def test_notify_close(*args, **kwargs):
+            send_message(f"🧪 TEST позиция закрыта: {args}")
+
+        pm = PositionManager(exchange_client, state_manager, 
+                           notify_entry_func=test_notify_entry, 
+                           notify_close_func=test_notify_close)
+        
+        # Принудительно открываем позицию (обходим все проверки)
+        res = pm.open_long(
+            symbol=symbol, 
+            amount_usd=amount, 
+            entry_price=last, 
+            atr=atr_val or 0.0,
+            buy_score=1.0,  # фиксированные значения для теста
+            ai_score=1.0, 
+            amount_frac=1.0,
+            market_condition="test",
+            pattern="test_pattern"
+        )
+        
         if res is None:
-            send_message("⏭️ Покупка пропущена (возможно, уже есть позиция или ошибка). См. логи.")
+            send_message("⏭️ Тестовая покупка не выполнена. См. логи.")
         else:
             min_cost = exchange_client.market_min_cost(symbol) or 0.0
-            send_message(f"🧪 TEST BUY {symbol}: запрошено ${amount:.2f} (min_cost {min_cost:.2f}). "
-                         f"Статус: {'paper' if res.get('paper') else 'real'} | id={res.get('id','-')}")
+            actual_amount = max(amount, min_cost)
+            send_message(
+                f"✅ TEST BUY {symbol}\n"
+                f"Запрошено: ${amount:.2f}\n"
+                f"Выполнено: ${actual_amount:.2f}\n"
+                f"Цена: {last:.4f}\n"
+                f"Режим: {'paper' if res.get('paper') else 'real'}\n"
+                f"ID: {res.get('id', '-')}"
+            )
+            
     except Exception as e:
         logging.exception("cmd_testbuy error")
         send_message(f"❌ TEST BUY ошибка: {e}")
 
 def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
+    """Тестовая продажа - продает ВСЕ что есть в позиции по текущей цене"""
     symbol = SYMBOL_ENV
     try:
-        last = None
-        try:
-            last = float(exchange_client.get_last_price(symbol))
-        except Exception:
-            last = 0.0
-        pm = PositionManager(exchange_client, state_manager, notify_entry_func=None, notify_close_func=None)
-        res = pm.close_all(symbol, exit_price=(last or 0.0), reason="manual_test")
+        # Проверяем есть ли позиция
+        st = state_manager.state
+        if not st.get("in_position"):
+            send_message("⏭️ Нет открытой позиции для продажи")
+            return
+
+        # Получаем текущую цену
+        last = exchange_client.get_last_price(symbol)
+        if not last or last <= 0:
+            send_message("❌ Не удалось получить текущую цену")
+            return
+
+        # Получаем данные позиции
+        entry_price = float(st.get("entry_price", 0.0))
+        qty_usd = float(st.get("qty_usd", 0.0))
+        
+        if qty_usd <= 0:
+            send_message("❌ Размер позиции равен нулю")
+            return
+
+        # Рассчитываем количество базовой валюты для продажи по ТЕКУЩЕЙ цене
+        qty_base_to_sell = qty_usd / last
+        
+        # Округляем согласно точности биржи
+        qty_base_to_sell = exchange_client.round_amount(symbol, qty_base_to_sell)
+        
+        # Проверяем минимальный размер
+        min_amount = exchange_client.market_min_amount(symbol) or 0.0
+        if qty_base_to_sell < min_amount:
+            # Если меньше минимума, продаем минимум (если в безопасном режиме)
+            if exchange_client.safe_mode:
+                qty_base_to_sell = min_amount
+                send_message(f"⚠️ Размер позиции меньше минимума. Продаем минимум: {min_amount:.8f}")
+            else:
+                send_message(f"❌ Размер для продажи {qty_base_to_sell:.8f} меньше минимума {min_amount:.8f}")
+                return
+
+        # Создаем PositionManager для продажи
+        def test_notify_close(*args, **kwargs):
+            send_message(f"🧪 TEST SELL завершен")
+
+        pm = PositionManager(exchange_client, state_manager, 
+                           notify_entry_func=None, 
+                           notify_close_func=test_notify_close)
+        
+        # Принудительно закрываем позицию
+        res = pm.close_all(symbol, exit_price=last, reason="manual_test_sell")
+        
         if res is None:
-            send_message("⏭️ Продажа пропущена (возможно, позиции нет).")
+            send_message("⏭️ Тестовая продажа не выполнена")
         else:
-            send_message(f"🧪 TEST SELL {symbol}: попытка закрыть позицию. См. логи.")
+            # Рассчитываем PnL
+            pnl_pct = (last - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+            pnl_abs = (last - entry_price) * (qty_usd / entry_price) if entry_price > 0 else 0.0
+            
+            send_message(
+                f"✅ TEST SELL {symbol}\n"
+                f"Продано: {qty_base_to_sell:.8f}\n"
+                f"Цена: {last:.4f}\n"
+                f"Вход: {entry_price:.4f} → Выход: {last:.4f}\n"
+                f"PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)"
+            )
+            
     except Exception as e:
         logging.exception("cmd_testsell error")
         send_message(f"❌ TEST SELL ошибка: {e}")
@@ -377,7 +469,7 @@ def cmd_help(message):
         "/testsell — Тестовая продажа\n"
         "/help — Показать эту справку\n"
     )
-    send_message(message["chat"]["id"], help_text)
+    send_message(help_text)
 
 def process_command(text: str, state_manager, exchange_client: ExchangeClient, train_func: Optional[Callable] = None):
     text = (text or "").strip()

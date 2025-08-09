@@ -208,7 +208,7 @@ def _acquire_file_lock(lock_path: str) -> bool:
 def health():
     return jsonify({"ok": True, "status": "running"}), 200
 
-# ================== DISPATCH ==================
+# ================== DISPATCH (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
 def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
     if ADMIN_CHAT_IDS and chat_id and int(chat_id) not in ADMIN_CHAT_IDS:
         logging.warning("Unauthorized access denied in dispatch for chat_id=%s", chat_id)
@@ -233,10 +233,22 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
             return tgbot.cmd_lasttrades()
         if text.startswith("/train") and hasattr(tgbot, "cmd_train"):
             return tgbot.cmd_train(_train_model_safe)
-        if text.startswith("/testbuy") and hasattr(tgbot, "cmd_testbuy"):
-            return tgbot.cmd_testbuy(_STATE, _GLOBAL_EX)
+        
+        # Исправленные тестовые команды с поддержкой суммы
+        if text.startswith("/testbuy"):
+            parts = text.split()
+            amount = None
+            if len(parts) > 1:
+                try:
+                    amount = float(parts[1])
+                except ValueError:
+                    tgbot.send_message("❌ Неверный формат суммы. Используйте: /testbuy [сумма]")
+                    return
+            return tgbot.cmd_testbuy(_STATE, _GLOBAL_EX, amount)
+            
         if text.startswith("/testsell") and hasattr(tgbot, "cmd_testsell"):
             return tgbot.cmd_testsell(_STATE, _GLOBAL_EX)
+            
         if text.startswith("/test") and hasattr(tgbot, "cmd_test"):
             return tgbot.cmd_test()
 

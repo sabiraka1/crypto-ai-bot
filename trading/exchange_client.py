@@ -21,6 +21,7 @@ class ExchangeClient:
       - retry policy
       - buy by QUOTE amount (USDT) using params={'cost': ...}
       - structured logging
+      - Улучшенная обработка продажи с текущей ценой
     """
     def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         self.safe_mode = str(os.getenv("SAFE_MODE", "0")).strip().lower() in ("1", "true", "yes", "on")
@@ -178,6 +179,9 @@ class ExchangeClient:
 
     # --------------------- balance ---------------------
     def get_balance(self, asset: str) -> float:
+        if self.safe_mode:
+            # В режиме paper trading возвращаем большой баланс
+            return 100000.0
         balance = self._safe(self.exchange.fetch_balance)
         return float((balance.get("free") or {}).get(asset, 0))
 
@@ -195,6 +199,31 @@ class ExchangeClient:
         except Exception:
             return 0.0
 
+    def calculate_base_amount_from_usd(self, symbol: str, usd_amount: float, current_price: float = None) -> float:
+        """
+        Рассчитывает количество базовой валюты исходя из USD суммы и текущей цены
+        Учитывает точность и минимальные требования биржи
+        """
+        if current_price is None:
+            current_price = self.get_last_price(symbol)
+        
+        if current_price <= 0:
+            raise APIException("Invalid current price for calculation")
+        
+        # Базовое количество
+        base_amount = float(usd_amount) / float(current_price)
+        
+        # Округляем согласно точности биржи
+        base_amount = self.round_amount(symbol, base_amount)
+        
+        # Проверяем минимальное количество
+        min_amount = self.market_min_amount(symbol) or 0.0
+        if base_amount < min_amount and min_amount > 0:
+            logging.info(f"🧩 base amount bumped to min_amount: from {base_amount:.8f} to {min_amount:.8f}")
+            base_amount = min_amount
+        
+        return base_amount
+
     # --------------------- trading ---------------------
     def create_market_buy_order(self, symbol: str, amount_usd: float):
         """
@@ -211,6 +240,10 @@ class ExchangeClient:
             final_cost = max(requested, min_cost)
             if final_cost > requested:
                 logging.info(f'🧩 amount bumped to min_notional (SAFE_MODE): requested={requested:.2f}, min={min_cost:.2f}, final={final_cost:.2f}')
+            
+            current_price = self.get_last_price(symbol)
+            base_amount = self.calculate_base_amount_from_usd(symbol, final_cost, current_price)
+            
             order = {
                 "id": f"paper-{int(time.time()*1000)}",
                 "symbol": symbol,
@@ -218,11 +251,12 @@ class ExchangeClient:
                 "type": "market",
                 "status": "filled",
                 "cost": final_cost,
-                "filled": final_cost / max(self.get_last_price(symbol), 1e-12),
-                "avg": self.get_last_price(symbol),
+                "filled": base_amount,
+                "amount": base_amount,
+                "avg": current_price,
                 "paper": True,
             }
-            self._log_trade("BUY[PAPER]", symbol, final_cost, self.get_last_price(symbol))
+            self._log_trade("BUY[PAPER]", symbol, final_cost, current_price)
             return order
 
         # реальный режим — проверяем баланс котируемой валюты
@@ -260,20 +294,34 @@ class ExchangeClient:
         - SAFE_MODE supported (paper)
         - non-SAFE: checks free base balance
         - Enforces min amount where applicable
+        - Улучшенная логика для полной продажи позиции
         """
         amt = float(amount_base)
+        
+        # Сначала округляем
         amt = self.round_amount(symbol, amt)
-
+        
+        # Проверяем минимум
         min_amt = self.market_min_amount(symbol) or 0.0
         if min_amt > 0 and amt < min_amt:
-            if amt > 0:
-                logging.info(f"🧩 sell amount bumped to min_amount: from {amt:.8f} to {min_amt:.8f}")
-            amt = float(min_amt)
+            if self.safe_mode:
+                # В бумажном режиме продаем минимум если размер меньше
+                logging.info(f"🧩 SAFE_MODE: sell amount bumped to min_amount: from {amt:.8f} to {min_amt:.8f}")
+                amt = float(min_amt)
+            else:
+                # В реальном режиме пытаемся продать все доступное
+                free_base = self.get_free_base(symbol)
+                if free_base >= min_amt:
+                    logging.info(f"🧩 sell amount too small, using available balance: from {amt:.8f} to {free_base:.8f}")
+                    amt = self.round_amount(symbol, free_base)
+                else:
+                    raise APIException(f"Sell amount {amt:.8f} is below minimum {min_amt:.8f} and insufficient balance {free_base:.8f}")
 
         if amt <= 0:
             raise APIException("Sell amount after rounding is zero")
 
         if self.safe_mode:
+            current_price = self.get_last_price(symbol)
             order = {
                 "id": f"paper-{int(time.time()*1000)}",
                 "symbol": symbol,
@@ -281,20 +329,52 @@ class ExchangeClient:
                 "type": "market",
                 "status": "filled",
                 "amount": float(amt),
-                "avg": self.get_last_price(symbol),
+                "filled": float(amt),
+                "avg": current_price,
+                "cost": float(amt) * current_price,
                 "paper": True,
             }
-            self._log_trade("SELL[PAPER]", symbol, float(amt), self.get_last_price(symbol))
+            self._log_trade("SELL[PAPER]", symbol, float(amt), current_price)
             return order
 
         # реальный режим — проверяем свободный базовый баланс
         free_base = self.get_free_base(symbol)
-        if free_base < amt - 1e-12:
-            raise APIException(f"Insufficient base balance: need {amt:.8f}, have {free_base:.8f}")
+        
+        # Если пытаемся продать больше чем есть, продаем все что есть
+        if amt > free_base:
+            if free_base >= min_amt:
+                logging.info(f"🧩 adjusting sell amount to available balance: from {amt:.8f} to {free_base:.8f}")
+                amt = self.round_amount(symbol, free_base)
+            else:
+                raise APIException(f"Insufficient base balance: need {amt:.8f}, have {free_base:.8f}")
 
         order = self._safe(self.exchange.create_order, symbol, "market", "sell", float(amt))
         self._log_trade("SELL", symbol, float(amt), self.get_last_price(symbol))
         return order
+
+    def sell_all_base(self, symbol: str) -> dict:
+        """
+        Продает ВСЕ доступные базовые активы по символу
+        Полезно для полного закрытия позиции
+        """
+        try:
+            free_base = self.get_free_base(symbol)
+            if free_base <= 0:
+                raise APIException("No base balance to sell")
+            
+            # Округляем доступный баланс
+            amt_to_sell = self.round_amount(symbol, free_base)
+            
+            # Проверяем минимум
+            min_amt = self.market_min_amount(symbol) or 0.0
+            if amt_to_sell < min_amt:
+                raise APIException(f"Available balance {amt_to_sell:.8f} is below minimum {min_amt:.8f}")
+            
+            return self.create_market_sell_order(symbol, amt_to_sell)
+            
+        except Exception as e:
+            logging.error(f"sell_all_base failed: {e}")
+            raise
 
     # --------------------- aliases ---------------------
     def buy(self, symbol: str, amount_usd: float):
