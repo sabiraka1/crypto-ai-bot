@@ -340,6 +340,18 @@ class PositionManager:
                         st["sl_atr"] = max(entry, last_price - self.SL_ATR * atr)
                         st["sl_price_pct"] = max(entry, last_price * (1 + self.SL_PERCENT))
                         self.state.save_state()
+                        return
+
+                    # Выполняем частичное закрытие
+                    self.ex.create_market_sell_order(symbol, qty_sell)
+                    
+                    # Обновляем состояние позиции
+                    st["qty_usd"] /= 2.0
+                    st["partial_taken"] = True
+                    st["trailing_on"] = True
+                    st["sl_atr"] = max(entry, last_price - self.SL_ATR * atr)
+                    st["sl_price_pct"] = max(entry, last_price * (1 + self.SL_PERCENT))
+                    self.state.save_state()
                     logging.info(f"✅ Partial close executed at TP1: {qty_sell:.8f} @ {last_price:.4f}")
                     
                 except Exception as e:
@@ -366,14 +378,3 @@ class PositionManager:
     def close_position(self, symbol: str, exit_price: float, reason: str):
         """Алиас для совместимости"""
         return self.close_all(symbol, exit_price, reason)
-
-                    # Выполняем частичное закрытие
-                    self.ex.create_market_sell_order(symbol, qty_sell)
-                    
-                    # Обновляем состояние позиции
-                    st["qty_usd"] /= 2.0
-                    st["partial_taken"] = True
-                    st["trailing_on"] = True
-                    st["sl_atr"] = max(entry, last_price - self.SL_ATR * atr)
-                    st["sl_price_pct"] = max(entry, last_price * (1 + self.SL_PERCENT))
-                    self.state.save_state()
