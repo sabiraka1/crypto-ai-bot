@@ -26,10 +26,21 @@ CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
 PORT = int(os.getenv("PORT", 5000))
 
-# НОВОЕ: секретный путь вебхука, вместо использования BOT_TOKEN в URL
+# секретный путь вебхука (не используем BOT_TOKEN в URL)
 WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}" if WEBHOOK_SECRET else None
 WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}" if (PUBLIC_URL and WEBHOOK_PATH and BOT_TOKEN) else None
+
+# НОВОЕ: секрет Telegram для заголовка и список разрешённых Telegram ID
+TELEGRAM_SECRET_TOKEN = (os.getenv("TELEGRAM_SECRET_TOKEN") or "").strip()
+ADMIN_CHAT_IDS = []
+_raw_admins = os.getenv("ADMIN_CHAT_IDS", "")
+if _raw_admins:
+    for x in _raw_admins.replace(",", " ").split():
+        try:
+            ADMIN_CHAT_IDS.append(int(x))
+        except ValueError:
+            pass
 
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN is missing")
@@ -44,13 +55,13 @@ if not WEBHOOK_SECRET:
 app = Flask(__name__)
 
 # ================== ГЛОБАЛКИ ==================
-_GLOBAL_EX = ExchangeClient()          # ccxt клиент (в main.py он тоже создаётся внутри TradingBot)
+_GLOBAL_EX = ExchangeClient()          # ccxt клиент
 _STATE = StateManager()                # доступ к bot_state.json и т.п.
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
     """
-    Запуск твоего обучения (по твоей же логике из проекта).
+    Запуск обучения (по логике проекта).
     """
     try:
         import pandas as pd
@@ -131,6 +142,11 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
     Локальный роутер команд. Вызывает только известные команды
     из telegram/bot_handler.py и НЕ отправляет автоответы на неизвестные.
     """
+    # второй слой защиты: на всякий случай
+    if ADMIN_CHAT_IDS and chat_id and int(chat_id) not in ADMIN_CHAT_IDS:
+        logging.warning("Unauthorized access denied in dispatch for chat_id=%s", chat_id)
+        return
+
     text = (text or "").strip()
     if not text.startswith("/"):
         return
@@ -142,7 +158,6 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
             return tgbot.cmd_start()
 
         if text.startswith("/status") and hasattr(tgbot, "cmd_status"):
-            # отдаём функцию получения последней цены из нашего клиента
             return tgbot.cmd_status(_STATE, lambda: _GLOBAL_EX.get_last_price(sym))
 
         if text.startswith("/profit") and hasattr(tgbot, "cmd_profit"):
@@ -166,24 +181,41 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
         if text.startswith("/test") and hasattr(tgbot, "cmd_test"):
             return tgbot.cmd_test()
 
-        # неизвестные команды просто игнорируем (только лог)
         logging.info(f"Ignored unsupported command: {text}")
     except Exception:
         logging.exception("dispatch error")
-        # Без автоответа пользователю, как ты просил
+        # Без автоответа пользователю, как просил
 
 
 # ================== WEBHOOK ==================
-# БЫЛО: @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-# СТАЛО: секретный путь без токена
+# Секретный путь без токена
 if WEBHOOK_PATH:
     @app.route(WEBHOOK_PATH, methods=["POST"])
     def telegram_webhook():
         try:
+            # 1) Проверка секретного токена Telegram
+            if TELEGRAM_SECRET_TOKEN:
+                hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+                if hdr != TELEGRAM_SECRET_TOKEN:
+                    logging.warning("Webhook: secret token mismatch")
+                    return jsonify({"ok": False, "error": "unauthorized"}), 401
+
             update = request.get_json(silent=True) or {}
+
+            # поддержка message / edited_message / callback_query
             msg = update.get("message") or update.get("edited_message") or {}
+            if not msg and update.get("callback_query"):
+                msg = update["callback_query"].get("message") or {}
+
             text = msg.get("text", "")
             chat_id = (msg.get("chat") or {}).get("id")
+
+            # 2) Ограничение по списку админов (если список задан)
+            if ADMIN_CHAT_IDS:
+                if not chat_id or int(chat_id) not in ADMIN_CHAT_IDS:
+                    logging.warning("Unauthorized access denied for chat_id=%s", chat_id)
+                    return jsonify({"ok": True})
+
             _dispatch(text, chat_id)
         except Exception:
             logging.exception("Webhook handling error")
@@ -191,17 +223,22 @@ if WEBHOOK_PATH:
 else:
     logger.warning("⚠️ WEBHOOK route not registered: WEBHOOK_SECRET is missing")
 
+
 def set_webhook():
     if not (BOT_TOKEN and PUBLIC_URL and WEBHOOK_URL):
         logging.warning("Webhook not set: missing BOT_TOKEN or PUBLIC_URL or WEBHOOK_SECRET")
         return
     logging.info(f"🔗 PUBLIC_URL: {PUBLIC_URL}")
-    # НЕ печатаем токен и полный URL
     logging.info(f"📡 Webhook path set to {WEBHOOK_PATH}")
     try:
+        params = {"url": WEBHOOK_URL}
+        # добавляем секрет Telegram для заголовка
+        if TELEGRAM_SECRET_TOKEN:
+            params["secret_token"] = TELEGRAM_SECRET_TOKEN
+
         r = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            params={"url": WEBHOOK_URL},
+            params=params,
             timeout=10
         )
         logging.info(f"setWebhook → {r.status_code} {r.text}")
@@ -211,13 +248,33 @@ def set_webhook():
 
 # ================== TRADING LOOP ==================
 def start_trading_loop():
-    bot = TradingBot()  # твой реальный торговый бот из main.py
+    bot = TradingBot()  # торговый бот из main.py
     t = threading.Thread(target=bot.run, name="trading-loop", daemon=True)
     t.start()
     logging.info("Trading loop thread started")
 
 
-# ================== ENTRYPOINT ==================
+# ================== BOOTSTRAP ПОД GUNICORN ==================
+_bootstrapped = False
+
+@app.before_first_request
+def _bootstrap_once():
+    """Запускаем вещи, которые обычно жили в __main__ (для Gunicorn)."""
+    global _bootstrapped
+    if _bootstrapped:
+        return
+    try:
+        set_webhook()
+    except Exception:
+        logging.exception("set_webhook at bootstrap failed")
+    try:
+        start_trading_loop()
+    except Exception:
+        logging.exception("start_trading_loop failed")
+    _bootstrapped = True
+
+
+# ================== ENTRYPOINT (локальная отладка) ==================
 if __name__ == "__main__":
     set_webhook()
     start_trading_loop()
