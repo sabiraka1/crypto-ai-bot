@@ -24,6 +24,38 @@ TEST_TRADE_AMOUNT = float(os.getenv("TEST_TRADE_AMOUNT", os.getenv("TRADE_AMOUNT
 # Примечание: min_notional по символу учитывается на уровне ExchangeClient/PositionManager
 
 
+
+# ==== Anti-spam settings ====
+_last_command_time = {}
+COMMAND_COOLDOWN = int(os.getenv("COMMAND_COOLDOWN", "3"))  # секунды
+
+def anti_spam(user_id):
+    now = time.time()
+    if user_id in _last_command_time and now - _last_command_time[user_id] < COMMAND_COOLDOWN:
+        return False
+    _last_command_time[user_id] = now
+    return True
+
+def safe_command(func):
+    """Декоратор: защита команд от ошибок и антиспам"""
+    def wrapper(*args, **kwargs):
+        update = args[0] if args else None
+        chat_id = None
+        try:
+            if update and isinstance(update, dict):
+                chat_id = update.get("message", {}).get("chat", {}).get("id")
+            elif update and hasattr(update, "effective_chat"):
+                chat_id = update.effective_chat.id
+            if chat_id and not anti_spam(chat_id):
+                send_message(chat_id, "⏳ Подожди пару секунд перед следующей командой.")
+                return
+            return func(*args, **kwargs)
+        except Exception as e:
+            logging.exception(f"Ошибка в команде {func.__name__}: {e}")
+            if chat_id:
+                send_message(chat_id, "⚠️ Произошла ошибка при выполнении команды.")
+    return wrapper
+
 # ==== Telegram helpers ====
 def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
     if not TELEGRAM_API or not CHAT_ID:
@@ -329,6 +361,24 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
 
 
 # ==== Router ====
+
+@safe_command
+def cmd_help(message):
+    help_text = (
+        "📜 Доступные команды:\n"
+        "/start — Запуск бота\n"
+        "/status — Показать текущую позицию\n"
+        "/profit — Показать общую прибыль\n"
+        "/errors — Показать ошибки сигналов\n"
+        "/lasttrades — Показать последние сделки\n"
+        "/train — Запустить переобучение модели\n"
+        "/test — Запустить тестовый анализ сигнала\n"
+        "/testbuy — Тестовая покупка\n"
+        "/testsell — Тестовая продажа\n"
+        "/help — Показать эту справку\n"
+    )
+    send_message(message["chat"]["id"], help_text)
+
 def process_command(text: str, state_manager, exchange_client: ExchangeClient, train_func: Optional[Callable] = None):
     text = (text or "").strip()
     if not text.startswith("/"):

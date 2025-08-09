@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg')
 import os
 import logging
 import threading
@@ -339,6 +341,91 @@ def _bootstrap_once():
 
 
 # ================== ENTRYPOINT ==================
+
+# ==== Watchdog for Trading Loop ====
+import psutil, time
+
+def monitor_resources():
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / (1024 * 1024)
+    cpu = process.cpu_percent(interval=1)
+    logging.info(f"[Resources] CPU: {cpu}%, RAM: {mem:.2f} MB")
+
+def watchdog():
+    while True:
+        try:
+            monitor_resources()
+            # Здесь можно проверять, работает ли твой планировщик или поток
+            # и перезапускать при сбое
+        except Exception as e:
+            logging.error(f"[Watchdog] Error: {e}")
+        time.sleep(300)  # каждые 5 минут
+
+# Запуск watchdog в отдельном потоке
+threading.Thread(target=watchdog, daemon=True).start()
+
+
+# ==== Keep-Alive Ping ===
+import threading, requests
+
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip()
+
+def keep_alive_ping():
+    try:
+        if PUBLIC_URL:
+            requests.get(PUBLIC_URL, timeout=5)
+            logging.info(f"[KeepAlive] Pinged {PUBLIC_URL}")
+    except Exception as e:
+        logging.warning(f"[KeepAlive] Ping failed: {e}")
+    threading.Timer(600, keep_alive_ping).start()  # каждые 10 минут
+
+# Запускаем keep-alive при старте
+keep_alive_ping()
+
+
+# ==== Watchdog with Auto-Restart and Telegram Alerts ====
+import psutil, time, threading, os, requests
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+def send_telegram_alert(message):
+    try:
+        if BOT_TOKEN and CHAT_ID:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            payload = {"chat_id": CHAT_ID, "text": message}
+            requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        logging.error(f"[Telegram Alert Error] {e}")
+
+def monitor_resources():
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / (1024 * 1024)
+    cpu = process.cpu_percent(interval=1)
+    logging.info(f"[Resources] CPU: {cpu}%, RAM: {mem:.2f} MB")
+    if cpu > 80 or mem > (psutil.virtual_memory().total / (1024 * 1024) * 0.8):
+        send_telegram_alert(f"⚠️ High usage detected! CPU: {cpu}%, RAM: {mem:.2f} MB")
+    return cpu, mem
+
+def watchdog():
+    while True:
+        try:
+            monitor_resources()
+            # Проверяем наличие торгового потока
+            trading_thread_alive = any(t.name == "TradingLoop" and t.is_alive() for t in threading.enumerate())
+            if not trading_thread_alive:
+                send_telegram_alert("♻️ Trading loop stopped! Restarting...")
+                try:
+                    threading.Thread(target=start_trading_loop, name="TradingLoop", daemon=True).start()
+                except Exception as e:
+                    send_telegram_alert(f"❌ Failed to restart trading loop: {e}")
+        except Exception as e:
+            logging.error(f"[Watchdog] Error: {e}")
+        time.sleep(300)  # каждые 5 минут
+
+# Запуск watchdog в отдельном потоке
+threading.Thread(target=watchdog, daemon=True).start()
+
 if __name__ != "__main__":
     _bootstrap_once()
 
