@@ -292,9 +292,20 @@ def start_trading_loop():
     if not ENABLE_TRADING:
         logging.info("Trading loop disabled by ENABLE_TRADING=0")
         return
-    if not _acquire_file_lock(".trading.lock"):
-        logging.info("Trading loop already started in another process")
-        return
+
+    lock_path = ".trading.lock"
+    # Если лок-файл существует — удаляем, чтобы позволить перезапуск
+    try:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+            logging.warning(f"⚠️ Removed stale lock file: {lock_path}")
+    except Exception as e:
+        logging.error(f"Failed to remove lock file {lock_path}: {e}")
+
+    # Создаём новый лок-файл
+    if not _acquire_file_lock(lock_path):
+        logging.warning("⚠️ Could not create lock file, but starting trading loop anyway")
+    
     bot = TradingBot()
     t = threading.Thread(target=bot.run, name="TradingLoop", daemon=True)
     t.start()
