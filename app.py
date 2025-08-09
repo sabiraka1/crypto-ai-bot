@@ -22,6 +22,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ================== ЗАЩИТА ОТ ДУБЛЕЙ ==================
+LOCK_FILE = ".trading.lock"
+
+# Удаляем старый lock при старте контейнера
+if os.path.exists(LOCK_FILE):
+    try:
+        os.remove(LOCK_FILE)
+        logger.warning("⚠️ Removed stale lock file: %s", LOCK_FILE)
+    except Exception as e:
+        logger.error("Ошибка при удалении lock-файла: %s", e)
+
+
 # ================== ФИЛЬТР ЛОГОВ ==================
 class SensitiveDataFilter(logging.Filter):
     SENSITIVE_PATTERN = re.compile(r'(?i)(key|token|secret|password)\s*[:=]\s*["\']?[\w\-:]+["\']?')
