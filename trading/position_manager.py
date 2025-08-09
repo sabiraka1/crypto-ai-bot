@@ -365,7 +365,7 @@ class PositionManager:
 
     def close_position(self, symbol: str, exit_price: float, reason: str):
         """Алиас для совместимости"""
-        return self.close_all(symbol, exit_price, reason)    return
+        return self.close_all(symbol, exit_price, reason)
 
                     # Выполняем частичное закрытие
                     self.ex.create_market_sell_order(symbol, qty_sell)
