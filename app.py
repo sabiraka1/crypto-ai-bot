@@ -26,12 +26,10 @@ CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
 PORT = int(os.getenv("PORT", 5000))
 
-# секретный путь вебхука (не используем BOT_TOKEN в URL)
 WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
 WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}" if WEBHOOK_SECRET else None
 WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}" if (PUBLIC_URL and WEBHOOK_PATH and BOT_TOKEN) else None
 
-# НОВОЕ: секрет Telegram для заголовка и список разрешённых Telegram ID
 TELEGRAM_SECRET_TOKEN = (os.getenv("TELEGRAM_SECRET_TOKEN") or "").strip()
 ADMIN_CHAT_IDS = []
 _raw_admins = os.getenv("ADMIN_CHAT_IDS", "")
@@ -51,12 +49,15 @@ if not PUBLIC_URL:
 if not WEBHOOK_SECRET:
     logger.warning("⚠️ WEBHOOK_SECRET is missing — установите переменную окружения для безопасного вебхука")
 
+ENABLE_WEBHOOK = (os.getenv("ENABLE_WEBHOOK", "1").strip().lower() in ("1", "true", "yes", "on"))
+ENABLE_TRADING = (os.getenv("ENABLE_TRADING", "1").strip().lower() in ("1", "true", "yes", "on"))
+
 # ================== FLASK ==================
 app = Flask(__name__)
 
 # ================== ГЛОБАЛКИ ==================
-_GLOBAL_EX = ExchangeClient()          # ccxt клиент
-_STATE = StateManager()                # доступ к bot_state.json и т.п.
+_GLOBAL_EX = ExchangeClient()
+_STATE = StateManager()
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
@@ -127,8 +128,22 @@ def _send_message(text: str) -> None:
         logging.exception("sendMessage failed")
 
 
+def _acquire_file_lock(lock_path: str) -> bool:
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        logging.exception("lock create failed")
+        return False
+
+
 # ================== HEALTH ==================
 @app.route("/health", methods=["GET"])
+@app.route("/healthz", methods=["GET"])
 def health():
     return jsonify({"ok": True, "status": "running"}), 200
 
@@ -171,7 +186,7 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
 
 
 # ================== WEBHOOK ==================
-if WEBHOOK_PATH:
+if ENABLE_WEBHOOK and WEBHOOK_PATH:
     @app.route(WEBHOOK_PATH, methods=["POST"])
     def telegram_webhook():
         try:
@@ -199,12 +214,19 @@ if WEBHOOK_PATH:
             logging.exception("Webhook handling error")
         return jsonify({"ok": True})
 else:
-    logger.warning("⚠️ WEBHOOK route not registered: WEBHOOK_SECRET is missing")
+    logger.warning("⚠️ WEBHOOK route not registered: disabled or WEBHOOK_SECRET missing")
 
 
 def set_webhook():
+    if not ENABLE_WEBHOOK:
+        logging.info("Webhook disabled by ENABLE_WEBHOOK=0")
+        return
     if not (BOT_TOKEN and PUBLIC_URL and WEBHOOK_URL):
         logging.warning("Webhook not set: missing BOT_TOKEN or PUBLIC_URL or WEBHOOK_SECRET")
+        return
+    # файлок для защиты от двойного вызова при нескольких воркерах
+    if not _acquire_file_lock(".webhook.lock"):
+        logging.info("Webhook already initialized by another process")
         return
     logging.info(f"🔗 PUBLIC_URL: {PUBLIC_URL}")
     logging.info(f"📡 Webhook path set to {WEBHOOK_PATH}")
@@ -225,17 +247,23 @@ def set_webhook():
 
 # ================== TRADING LOOP ==================
 def start_trading_loop():
+    if not ENABLE_TRADING:
+        logging.info("Trading loop disabled by ENABLE_TRADING=0")
+        return
+    # файлок для защиты от множественных запусков под несколькими воркерами gunicorn
+    if not _acquire_file_lock(".trading.lock"):
+        logging.info("Trading loop already started in another process")
+        return
     bot = TradingBot()
     t = threading.Thread(target=bot.run, name="trading-loop", daemon=True)
     t.start()
     logging.info("Trading loop thread started")
 
 
-# ================== BOOTSTRAP (без декораторов) ==================
+# ================== BOOTSTRAP ==================
 _bootstrapped = False
 
 def _bootstrap_once():
-    """Запускаем вещи, которые обычно жили в __main__."""
     global _bootstrapped
     if _bootstrapped:
         return
@@ -251,11 +279,9 @@ def _bootstrap_once():
 
 
 # ================== ENTRYPOINT ==================
-# Если запущено под Gunicorn/WSGI:
 if __name__ != "__main__":
     _bootstrap_once()
 
-# Локальная отладка:
 if __name__ == "__main__":
     _bootstrap_once()
     app.run(host="0.0.0.0", port=PORT)

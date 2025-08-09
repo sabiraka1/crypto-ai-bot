@@ -2,8 +2,10 @@ import os
 import time
 import logging
 import traceback
+from typing import Optional, Tuple, Dict, Any
+
 import pandas as pd
-from typing import Optional, Tuple
+import numpy as np
 
 # ── наши модули из проекта ────────────────────────────────────────────────────
 from core.state_manager import StateManager
@@ -17,10 +19,13 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-# ── ENV-пороги и настроечки ───────────────────────────────────────────────────
-ENV_MIN_SCORE = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))  # если scorer не перехватит — валидируем вручную
+# ── ENV-пороги и настройка AI ─────────────────────────────────────────────────
+ENV_MIN_SCORE = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))
 ENV_ENFORCE_AI_GATE = str(os.getenv("ENFORCE_AI_GATE", "1")).strip().lower() in ("1", "true", "yes", "on")
 ENV_AI_MIN_TO_TRADE = float(os.getenv("AI_MIN_TO_TRADE", "0.70"))
+
+AI_ENABLE = str(os.getenv("AI_ENABLE", "1")).strip().lower() in ("1", "true", "yes", "on")
+AI_FAILOVER_SCORE = float(os.getenv("AI_FAILOVER_SCORE", "0.55"))
 
 SYMBOL_DEFAULT = os.getenv("SYMBOL", "BTC/USDT")
 TIMEFRAME_DEFAULT = os.getenv("TIMEFRAME", "15m")
@@ -42,6 +47,10 @@ def ohlcv_to_df(ohlcv) -> pd.DataFrame:
     df = pd.DataFrame(ohlcv, columns=cols)
     df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
     df.set_index("time", inplace=True)
+    # приводим к float
+    for c in ("open", "high", "low", "close", "volume"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna()
     return df
 
 
@@ -65,6 +74,32 @@ def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
     atr_series = tr.ewm(alpha=1 / period, adjust=False).mean()
     val = float(atr_series.iloc[-1])
     return val
+
+
+# ── простые индикаторы для фич ────────────────────────────────────────────────
+def ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def sma(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window=window, min_periods=window).mean()
+
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = np.where(delta > 0, delta, 0.0)
+    down = np.where(delta < 0, -delta, 0.0)
+    roll_up = pd.Series(up, index=series.index).rolling(period, min_periods=period).mean()
+    roll_down = pd.Series(down, index=series.index).rolling(period, min_periods=period).mean()
+    rs = roll_up / (roll_down + 1e-12)
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    macd_line = ema(series, fast) - ema(series, slow)
+    signal_line = ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
 
 
 # ── Уведомления-адаптеры под текущий PositionManager ─────────────────────────
@@ -142,25 +177,159 @@ class TradingBot:
         # Тикающий лог каждые INFO_LOG_INTERVAL_SEC
         self._last_info_log_ts = 0.0
 
-        logging.info("✅ Loaded 0 models")
+        # ── AI модель (опциональная) ──────────────────────────────────────────
+        self.ai_enabled = AI_ENABLE
+        self.ai_failover = AI_FAILOVER_SCORE
+        self.ml_model = None
+        self.ml_ready = False
+        if self.ai_enabled:
+            try:
+                from ml.adaptive_model import AdaptiveMLModel  # type: ignore
+                self.ml_model = AdaptiveMLModel(model_dir="models")
+                # если есть метод загрузки — вызовем
+                if hasattr(self.ml_model, "load_models"):
+                    try:
+                        self.ml_model.load_models()
+                    except Exception:
+                        # если моделей нет — не критично, будем работать фолбэком
+                        pass
+                self.ml_ready = True
+                logging.info("✅ AI model initialized")
+            except Exception as e:
+                self.ml_model = None
+                self.ml_ready = False
+                logging.warning(f"AI model not available: {e}")
+
         logging.info("🚀 Trading bot initialized")
 
-    # ── AI-модель (опционально) ───────────────────────────────────────────────
+    # ── построение фич для AI ─────────────────────────────────────────────────
+    def _build_features(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Фичи строятся по ЗАКРЫТОЙ свече (t-1), чтобы избежать утечек будущего.
+        Если данных мало — вернём пусто.
+        """
+        feats: Dict[str, Any] = {}
+        try:
+            if df is None or df.empty or len(df) < 60:
+                return feats
+            # работаем на копии
+            x = df.copy()
+            close = x["close"]
+
+            # индикаторы
+            rsi_14 = rsi(close, 14)
+            macd_line, macd_sig, macd_hist = macd(close, 12, 26, 9)
+            ema_20 = ema(close, 20)
+            ema_50 = ema(close, 50)
+            sma_20 = sma(close, 20)
+            sma_50 = sma(close, 50)
+
+            # изменения
+            price_change_1 = close.pct_change(1)
+            price_change_3 = close.pct_change(3)
+            price_change_5 = close.pct_change(5)
+            vol_change = x["volume"].pct_change(5)
+
+            # ATR 14
+            atr_val_series = self._series_atr(x, 14)
+
+            # берем t-1
+            feats = {
+                "rsi": float(rsi_14.iloc[-2]) if not np.isnan(rsi_14.iloc[-2]) else None,
+                "macd": float(macd_line.iloc[-2]),
+                "macd_signal": float(macd_sig.iloc[-2]),
+                "macd_hist": float(macd_hist.iloc[-2]),
+                "ema_20": float(ema_20.iloc[-2]),
+                "ema_50": float(ema_50.iloc[-2]),
+                "sma_20": float(sma_20.iloc[-2]) if not np.isnan(sma_20.iloc[-2]) else None,
+                "sma_50": float(sma_50.iloc[-2]) if not np.isnan(sma_50.iloc[-2]) else None,
+                "atr_14": float(atr_val_series.iloc[-2]) if not np.isnan(atr_val_series.iloc[-2]) else None,
+                "price_change_1": float(price_change_1.iloc[-2]) if not np.isnan(price_change_1.iloc[-2]) else None,
+                "price_change_3": float(price_change_3.iloc[-2]) if not np.isnan(price_change_3.iloc[-2]) else None,
+                "price_change_5": float(price_change_5.iloc[-2]) if not np.isnan(price_change_5.iloc[-2]) else None,
+                "vol_change": float(vol_change.iloc[-2]) if not np.isnan(vol_change.iloc[-2]) else None,
+                # простой маркер рыночного состояния (опционально)
+                "market_condition": self._market_condition_guess(close.iloc[:-1]),
+            }
+        except Exception as e:
+            logging.exception(f"Feature build failed: {e}")
+        return feats
+
+    def _series_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr1 = (high - low).abs()
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+    def _market_condition_guess(self, close_series: pd.Series) -> str:
+        # очень простой фильтр тренда: EMA20 vs EMA50
+        try:
+            e20 = ema(close_series, 20).iloc[-1]
+            e50 = ema(close_series, 50).iloc[-1]
+            if np.isnan(e20) or np.isnan(e50):
+                return "sideways"
+            if e20 > e50 * 1.002:
+                return "bull"
+            if e20 < e50 * 0.998:
+                return "bear"
+            return "sideways"
+        except Exception:
+            return "sideways"
+
+    # ── AI-модель (оценка) ────────────────────────────────────────────────────
     def _predict_ai_score(self, df_15m: pd.DataFrame) -> float:
         """
-        Пытаемся взять оценку AI из твоей модели, если она вообще существует.
-        Если нет — возвращаем 0.55 (умеренная уверенность).
+        Стараемся получить уверенность модели в [0..1].
+        Поддерживаем разные варианты API:
+        - model.predict(features, market_condition) -> (pred, conf) | dict | float
+        - model.predict_proba(features|df) -> float
+        Фолбэк: AI_FAILOVER_SCORE.
         """
         try:
-            from ml.adaptive_model import AdaptiveMLModel  # type: ignore
-            model = AdaptiveMLModel()
-            prob = getattr(model, "predict_proba", None)
-            if callable(prob):
-                ai = float(prob(df_15m.tail(100)) or 0.55)
-                return max(0.0, min(1.0, ai))
-        except Exception:
-            pass
-        return 0.55
+            if not self.ai_enabled or not self.ml_ready or self.ml_model is None:
+                return self.ai_failover
+
+            feats = self._build_features(df_15m)
+            # если фич нет — фолбэк
+            if not feats:
+                return self.ai_failover
+
+            # сначала пробуем современный predict(features, market_condition)
+            if hasattr(self.ml_model, "predict"):
+                try:
+                    res = self.ml_model.predict(feats, feats.get("market_condition"))
+                    # варианты результата:
+                    if isinstance(res, tuple) and len(res) >= 2:
+                        _, conf = res[0], res[1]
+                        ai = float(conf)
+                    elif isinstance(res, dict):
+                        ai = float(res.get("confidence", self.ai_failover))
+                    else:
+                        ai = float(res)  # если вернули просто число
+                    return max(0.0, min(1.0, ai))
+                except Exception:
+                    # падать не будем — попробуем predict_proba ниже
+                    logging.debug("predict(...) failed, trying predict_proba(...)")
+
+            # старый интерфейс: predict_proba(df | features)
+            if hasattr(self.ml_model, "predict_proba"):
+                try:
+                    # некоторые реализации ожидают df/матрицу; дадим последние ~100 свечей
+                    ai = self.ml_model.predict_proba(df_15m.tail(100))
+                    ai = float(ai or self.ai_failover)
+                    return max(0.0, min(1.0, ai))
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logging.exception(f"AI predict failed: {e}")
+
+        return self.ai_failover
 
     # ── получение рынка ────────────────────────────────────────────────────────
     def _fetch_market(self) -> Tuple[pd.DataFrame, Optional[float], Optional[float]]:
@@ -206,8 +375,13 @@ class TradingBot:
         # ── Информационный лог каждые INFO_LOG_INTERVAL_SEC (не влияет на торговлю) ──
         now = time.time()
         if now - self._last_info_log_ts >= INFO_LOG_INTERVAL_SEC:
-            market_cond = "sideways"  # тут можно подключить свою логику определения рынка
+            market_cond = "sideways"  # сюда можно подставить self._market_condition_guess(...)
             confidence = 0.01
+            try:
+                market_cond = details.get("market_condition", market_cond)
+                confidence = float(details.get("market_confidence", confidence))
+            except Exception:
+                pass
             logging.info(f"📊 Market Analysis: {market_cond}, Confidence: {confidence:.2f}")
             logging.info("✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
             logging.info(
@@ -248,7 +422,7 @@ class TradingBot:
                 return
 
             # 3) размер позиции
-            frac = self.scorer.position_fraction(ai_score)  # 0..1
+            frac = self.scorer.position_fraction(ai_score)  # ожидается 0..1
             usd_planned = float(self.trade_amount_usd) * float(frac)
             min_cost = self.exchange.market_min_cost(self.symbol) or 0.0
             logging.info(

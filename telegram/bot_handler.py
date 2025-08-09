@@ -11,6 +11,7 @@ from analysis import scoring_engine
 from trading.exchange_client import ExchangeClient
 from trading.position_manager import PositionManager  # для testbuy/testsell
 from core.state_manager import StateManager
+from utils.csv_handler import CSVHandler  # <-- новый импорт
 
 # ==== ENV ====
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -137,14 +138,27 @@ def cmd_status(state_manager: StateManager, price_getter: Callable[[], Optional[
     send_message("\n".join(txt))
 
 def cmd_profit() -> None:
-    path = "closed_trades.csv"
+    path = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
     if not os.path.exists(path):
-        send_message("📊 PnL: 0.00\nWinrate: 0.0%")
+        send_message("📊 PnL: 0.00\nWinrate: 0.0%\nТрейдов: 0")
         return
     try:
-        df = pd.read_csv(path)
-        pnl = float(df.get("pnl_abs", pd.Series([0.0])).sum())
-        wins = int((df.get("pnl_pct", pd.Series([])) > 0).sum())
+        df = CSVHandler.read_csv_safe(path)
+        if df is None or df.empty:
+            send_message("📊 PnL: 0.00\nWinrate: 0.0%\nТрейдов: 0")
+            return
+        # приведение типов
+        if "pnl_abs" in df.columns:
+            df["pnl_abs"] = pd.to_numeric(df["pnl_abs"], errors="coerce").fillna(0.0)
+        else:
+            df["pnl_abs"] = 0.0
+        if "pnl_pct" in df.columns:
+            df["pnl_pct"] = pd.to_numeric(df["pnl_pct"], errors="coerce")
+        else:
+            df["pnl_pct"] = pd.Series(dtype=float)
+
+        pnl = float(df["pnl_abs"].sum())
+        wins = int((df["pnl_pct"] > 0).sum())
         total = int(len(df))
         wr = (wins / total * 100.0) if total else 0.0
         send_message(f"📊 PnL: {pnl:.2f}\nWinrate: {wr:.1f}%\nТрейдов: {total}")
@@ -165,21 +179,45 @@ def cmd_errors() -> None:
         send_message(f"⚠️ Ошибка чтения лога: {e}")
 
 def cmd_lasttrades() -> None:
-    path = "closed_trades.csv"
-    if not os.path.exists(path):
-        send_message("Сделок ещё нет")
-        return
     try:
-        df = pd.read_csv(path).tail(5)
-        rows: List[str] = []
-        for _, r in df.iterrows():
-            side = str(r.get("side", "BUY"))
-            e = float(r.get("entry_price", 0.0))
-            x = float(r.get("exit_price", 0.0))
-            reason = str(r.get("reason", ""))
-            rows.append(f"- {side} {e:.1f}->{x:.1f} | {reason}")
-        send_message("📋 Последние сделки:\n" + "\n".join(rows))
+        rows = CSVHandler.read_last_trades(limit=5)
+        if not rows:
+            send_message("Сделок ещё нет")
+            return
+        lines: List[str] = []
+        for r in rows:
+            side = str(r.get("side") or "BUY")
+            e = r.get("entry_price")
+            x = r.get("exit_price")
+            pnl_pct = r.get("pnl_pct")
+            reason = str(r.get("reason") or "")
+            ai = r.get("ai_score")
+            bs = r.get("buy_score")
+            fs = r.get("final_score")
+            base = f"- {side} {e if e=='' else f'{float(e):.4f}'} → {x if x=='' else f'{float(x):.4f}'}"
+            extras = []
+            if pnl_pct not in ("", None):
+                try:
+                    extras.append(f"{float(pnl_pct):.2f}%")
+                except Exception:
+                    pass
+            if reason:
+                extras.append(reason)
+            if bs not in ("", None) or ai not in ("", None):
+                pair = []
+                if bs not in ("", None):
+                    pair.append(f"B:{float(bs):.2f}" if bs != "" else "")
+                if ai not in ("", None):
+                    pair.append(f"AI:{float(ai):.2f}" if ai != "" else "")
+                extras.append(" ".join([p for p in pair if p]))
+            if fs not in ("", None):
+                extras.append(f"F:{float(fs):.2f}")
+            if extras:
+                base += " | " + " | ".join(extras)
+            lines.append(base)
+        send_message("📋 Последние сделки:\n" + "\n".join(lines))
     except Exception as e:
+        logging.exception("cmd_lasttrades error")
         send_message(f"⚠️ Ошибка чтения сделок: {e}")
 
 def cmd_train(train_func) -> None:
@@ -226,7 +264,6 @@ def cmd_test(symbol: str = None, timeframe: str = None):
         engine = scoring_engine.ScoringEngine()
         scores = engine.calculate_scores(df) if hasattr(engine, "calculate_scores") \
                  else engine.evaluate(df, ai_score=0.55)
-        # поддержим обе сигнатуры:
         if isinstance(scores, tuple) and len(scores) >= 2:
             buy_score, ai_score = float(scores[0]), float(scores[1])
         else:
@@ -254,7 +291,6 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, am
         amount = TEST_TRADE_AMOUNT
 
     try:
-        # получим цену и ATR для корректного PM
         ohlcv = exchange_client.fetch_ohlcv(symbol, timeframe=TIMEFRAME_ENV, limit=200)
         df = _ohlcv_to_df(ohlcv)
         last = float(df["close"].iloc[-1]) if not df.empty else exchange_client.get_last_price(symbol)
@@ -276,7 +312,6 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, am
 def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
     symbol = SYMBOL_ENV
     try:
-        # текущая цена для расчёта PnL в уведомлении PM
         last = None
         try:
             last = float(exchange_client.get_last_price(symbol))
@@ -313,7 +348,6 @@ def process_command(text: str, state_manager, exchange_client: ExchangeClient, t
         if text.startswith("/train"):
             return cmd_train(train_func if train_func else (lambda: False))
         if text.startswith("/test "):
-            # /test BTC/USDT 5m  — поддержим простую форму
             parts = text.split()
             s = parts[1] if len(parts) > 1 else None
             tf = parts[2] if len(parts) > 2 else None
@@ -321,7 +355,6 @@ def process_command(text: str, state_manager, exchange_client: ExchangeClient, t
         if text.strip() == "/test":
             return cmd_test()
         if text.startswith("/testbuy"):
-            # /testbuy 5  — сумма опционально
             parts = text.split()
             amt = float(parts[1]) if len(parts) > 1 else None
             return cmd_testbuy(state_manager, exchange_client, amt)

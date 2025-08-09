@@ -18,7 +18,7 @@ class PositionManager:
     """Управление открытой позицией с защитой от двойного входа (RLock + флаг)."""
 
     TP_PERCENT = CFG.TAKE_PROFIT_PCT / 100
-    SL_PERCENT = -CFG.STOP_LOSS_PCT / 100
+    SL_PERCENT = -CFG.STOP_LOСС_PCT / 100 if hasattr(CFG, "STOP_LOСС_PCT") else -CFG.STOP_LOSS_PCT / 100  # совместимость
     TP1_ATR = 1.5
     TP2_ATR = 3.0
     SL_ATR = 1.0
@@ -60,6 +60,7 @@ class PositionManager:
         buy_score: Optional[float] = None,
         ai_score: Optional[float] = None,
         amount_frac: Optional[float] = None,
+        final_score: Optional[float] = None,
     ):
         """
         Открывает лонг с учётом блокировки и анти-реентри.
@@ -106,6 +107,7 @@ class PositionManager:
                     "qty_base": float(qty_base),
                     "buy_score": buy_score,
                     "ai_score": ai_score,
+                    "final_score": final_score,
                     "amount_frac": amount_frac,
                     # статические цели в процентах
                     "tp_price_pct": entry_price * (1 + self.TP_PERCENT),
@@ -163,16 +165,20 @@ class PositionManager:
 
             if CSVHandler:
                 try:
-                    CSVHandler.log_closed_trade(
-                        datetime.utcnow(),
-                        symbol,
-                        entry_price,
-                        exit_price,
-                        qty_usd,
-                        pnl_pct,
-                        pnl_abs,
-                        reason,
-                    )
+                    CSVHandler.log_closed_trade({
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "symbol": symbol,
+                        "side": "LONG",
+                        "entry_price": entry_price,
+                        "exit_price": float(exit_price),
+                        "qty_usd": qty_usd,
+                        "pnl_pct": pnl_pct,
+                        "pnl_abs": pnl_abs,
+                        "reason": reason,
+                        "buy_score": st.get("buy_score"),
+                        "ai_score": st.get("ai_score"),
+                        "final_score": st.get("final_score", ""),
+                    })
                 except Exception as e:
                     logging.error(f"CSV log closed trade error: {e}")
 
@@ -228,7 +234,7 @@ class PositionManager:
 
             # Partial at TP1 (ATR1)
             if (not partial_taken) and tp1_atr and last_price >= tp1_atr:
-                qty_total = float(st.get("qty_usd", 0.0)) / last_price
+                qty_total = float(st.get("qty_usd", 0.0)) / last_price if last_price else 0.0
                 qty_sell = qty_total / 2.0
                 try:
                     self.ex.create_market_sell_order(symbol, qty_sell)
@@ -249,7 +255,7 @@ class PositionManager:
                 new_sl_atr = last_price - self.SL_ATR * atr
                 if new_sl_atr > sl_atr:
                     st["sl_atr"] = new_sl_atr
-                    st["sl_price_pct"] = max(st["sl_price_pct"], last_price * (1 + self.SL_PERCENT))
+                    st["sl_price_pct"] = max(st.get("sl_price_pct", entry), last_price * (1 + self.SL_PERCENT))
                     self.state.save_state()
 
     # совместимость со старым вызовом
