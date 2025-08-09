@@ -60,9 +60,6 @@ _STATE = StateManager()                # доступ к bot_state.json и т.п
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
-    """
-    Запуск обучения (по логике проекта).
-    """
     try:
         import pandas as pd
         from analysis.technical_indicators import TechnicalIndicators
@@ -138,11 +135,6 @@ def health():
 
 # ================== DISPATCH ==================
 def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
-    """
-    Локальный роутер команд. Вызывает только известные команды
-    из telegram/bot_handler.py и НЕ отправляет автоответы на неизвестные.
-    """
-    # второй слой защиты: на всякий случай
     if ADMIN_CHAT_IDS and chat_id and int(chat_id) not in ADMIN_CHAT_IDS:
         logging.warning("Unauthorized access denied in dispatch for chat_id=%s", chat_id)
         return
@@ -156,44 +148,33 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
 
         if text.startswith("/start") and hasattr(tgbot, "cmd_start"):
             return tgbot.cmd_start()
-
         if text.startswith("/status") and hasattr(tgbot, "cmd_status"):
             return tgbot.cmd_status(_STATE, lambda: _GLOBAL_EX.get_last_price(sym))
-
         if text.startswith("/profit") and hasattr(tgbot, "cmd_profit"):
             return tgbot.cmd_profit()
-
         if text.startswith("/errors") and hasattr(tgbot, "cmd_errors"):
             return tgbot.cmd_errors()
-
         if text.startswith("/lasttrades") and hasattr(tgbot, "cmd_lasttrades"):
             return tgbot.cmd_lasttrades()
-
         if text.startswith("/train") and hasattr(tgbot, "cmd_train"):
             return tgbot.cmd_train(_train_model_safe)
-
         if text.startswith("/testbuy") and hasattr(tgbot, "cmd_testbuy"):
             return tgbot.cmd_testbuy(_STATE, _GLOBAL_EX)
-
         if text.startswith("/testsell") and hasattr(tgbot, "cmd_testsell"):
             return tgbot.cmd_testsell(_STATE, _GLOBAL_EX)
-
         if text.startswith("/test") and hasattr(tgbot, "cmd_test"):
             return tgbot.cmd_test()
 
         logging.info(f"Ignored unsupported command: {text}")
     except Exception:
         logging.exception("dispatch error")
-        # Без автоответа пользователю, как просил
 
 
 # ================== WEBHOOK ==================
-# Секретный путь без токена
 if WEBHOOK_PATH:
     @app.route(WEBHOOK_PATH, methods=["POST"])
     def telegram_webhook():
         try:
-            # 1) Проверка секретного токена Telegram
             if TELEGRAM_SECRET_TOKEN:
                 hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
                 if hdr != TELEGRAM_SECRET_TOKEN:
@@ -201,8 +182,6 @@ if WEBHOOK_PATH:
                     return jsonify({"ok": False, "error": "unauthorized"}), 401
 
             update = request.get_json(silent=True) or {}
-
-            # поддержка message / edited_message / callback_query
             msg = update.get("message") or update.get("edited_message") or {}
             if not msg and update.get("callback_query"):
                 msg = update["callback_query"].get("message") or {}
@@ -210,7 +189,6 @@ if WEBHOOK_PATH:
             text = msg.get("text", "")
             chat_id = (msg.get("chat") or {}).get("id")
 
-            # 2) Ограничение по списку админов (если список задан)
             if ADMIN_CHAT_IDS:
                 if not chat_id or int(chat_id) not in ADMIN_CHAT_IDS:
                     logging.warning("Unauthorized access denied for chat_id=%s", chat_id)
@@ -232,7 +210,6 @@ def set_webhook():
     logging.info(f"📡 Webhook path set to {WEBHOOK_PATH}")
     try:
         params = {"url": WEBHOOK_URL}
-        # добавляем секрет Telegram для заголовка
         if TELEGRAM_SECRET_TOKEN:
             params["secret_token"] = TELEGRAM_SECRET_TOKEN
 
@@ -248,7 +225,7 @@ def set_webhook():
 
 # ================== TRADING LOOP ==================
 def start_trading_loop():
-    bot = TradingBot()  # торговый бот из main.py
+    bot = TradingBot()
     t = threading.Thread(target=bot.run, name="trading-loop", daemon=True)
     t.start()
     logging.info("Trading loop thread started")
@@ -257,9 +234,9 @@ def start_trading_loop():
 # ================== BOOTSTRAP ПОД GUNICORN ==================
 _bootstrapped = False
 
-@app.before_first_request
+@app.before_serving
 def _bootstrap_once():
-    """Запускаем вещи, которые обычно жили в __main__ (для Gunicorn)."""
+    """Запускаем вещи, которые обычно жили в __main__ (для Gunicorn/Flask>=3)."""
     global _bootstrapped
     if _bootstrapped:
         return
