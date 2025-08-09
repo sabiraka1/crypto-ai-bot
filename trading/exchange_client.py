@@ -14,7 +14,7 @@ class APIException(Exception):
 class ExchangeClient:
     """
     Gate.io spot client via ccxt with:
-      - SAFE_MODE (paper) support
+      - SAFE_MODE (paper) support с виртуальными балансами
       - min_notional (min cost) check & auto-adjust
       - balance checks (skipped in SAFE_MODE)
       - precision-aware rounding for sell amounts
@@ -25,6 +25,17 @@ class ExchangeClient:
     """
     def __init__(self, api_key: Optional[str] = None, api_secret: Optional[str] = None):
         self.safe_mode = str(os.getenv("SAFE_MODE", "0")).strip().lower() in ("1", "true", "yes", "on")
+        
+        # Добавляем виртуальный баланс для SAFE_MODE
+        self._virtual_balances = {}
+        if self.safe_mode:
+            # Инициализируем виртуальные балансы
+            self._virtual_balances = {
+                "USDT": 10000.0,  # 10,000 USDT
+                "BTC": 0.0,       # 0 BTC изначально
+            }
+            logging.info("💰 SAFE_MODE enabled: Virtual balances initialized")
+        
         self.exchange = ccxt.gateio({
             "apiKey": api_key or os.getenv("GATE_API_KEY"),
             "secret": api_secret or os.getenv("GATE_API_SECRET"),
@@ -39,7 +50,8 @@ class ExchangeClient:
 
         self.markets: Dict[str, Any] = {}
         try:
-            self.exchange.check_required_credentials()
+            if not self.safe_mode:
+                self.exchange.check_required_credentials()
         except Exception:
             # public calls can still work
             pass
@@ -153,6 +165,10 @@ class ExchangeClient:
 
     # --------------------- diagnostics ---------------------
     def test_connection(self) -> bool:
+        if self.safe_mode:
+            logging.info("🔐 SAFE_MODE: Connection test skipped")
+            return True
+            
         try:
             bal = self._safe(self.exchange.fetch_balance)
             total = bal.get("total", {}) or {}
@@ -177,11 +193,21 @@ class ExchangeClient:
         except Exception:
             return 0.0
 
+    # --------------------- virtual balance helpers ---------------------
+    def _update_virtual_balance(self, asset: str, delta: float):
+        """Обновляет виртуальный баланс в SAFE_MODE"""
+        if self.safe_mode:
+            current = self._virtual_balances.get(asset, 0.0)
+            self._virtual_balances[asset] = max(0.0, current + delta)
+            logging.info(f"💰 Virtual balance updated: {asset} {current:.8f} → {self._virtual_balances[asset]:.8f} (Δ{delta:+.8f})")
+
     # --------------------- balance ---------------------
     def get_balance(self, asset: str) -> float:
         if self.safe_mode:
-            # В режиме paper trading возвращаем большой баланс
-            return 100000.0
+            # Возвращаем виртуальный баланс в paper режиме
+            return float(self._virtual_balances.get(asset, 0.0))
+        
+        # Реальный режим
         balance = self._safe(self.exchange.fetch_balance)
         return float((balance.get("free") or {}).get(asset, 0))
 
@@ -228,7 +254,7 @@ class ExchangeClient:
     def create_market_buy_order(self, symbol: str, amount_usd: float):
         """
         Create MARKET BUY by quote amount (USDT) via params={'cost': ...}
-        - SAFE_MODE: no balance checks, paper trade
+        - SAFE_MODE: виртуальные балансы с проверками
         - non-SAFE: checks free quote balance
         - auto-bumps to min_notional
         """
@@ -236,13 +262,23 @@ class ExchangeClient:
         min_cost = self.market_min_cost(symbol) or 0.0
 
         if self.safe_mode:
-            # бумажная сделка, без проверок баланса
+            # Проверяем виртуальный баланс USDT
+            base, quote = self._split_symbol(symbol)
+            free_quote = self.get_free_quote(symbol)
+            
             final_cost = max(requested, min_cost)
+            if final_cost > free_quote:
+                raise APIException(f"Insufficient virtual {quote} balance: need {final_cost:.2f}, have {free_quote:.2f}")
+            
             if final_cost > requested:
                 logging.info(f'🧩 amount bumped to min_notional (SAFE_MODE): requested={requested:.2f}, min={min_cost:.2f}, final={final_cost:.2f}')
             
             current_price = self.get_last_price(symbol)
             base_amount = self.calculate_base_amount_from_usd(symbol, final_cost, current_price)
+            
+            # Обновляем виртуальные балансы
+            self._update_virtual_balance(quote, -final_cost)  # Уменьшаем USDT
+            self._update_virtual_balance(base, +base_amount)  # Увеличиваем BTC
             
             order = {
                 "id": f"paper-{int(time.time()*1000)}",
@@ -259,7 +295,7 @@ class ExchangeClient:
             self._log_trade("BUY[PAPER]", symbol, final_cost, current_price)
             return order
 
-        # реальный режим — проверяем баланс котируемой валюты
+        # Реальный режим без изменений
         free_quote = self.get_free_quote(symbol)
         if free_quote <= 0:
             raise APIException("No free quote balance to buy")
@@ -291,10 +327,9 @@ class ExchangeClient:
     def create_market_sell_order(self, symbol: str, amount_base: float):
         """
         MARKET SELL by base amount with precision rounding.
-        - SAFE_MODE supported (paper)
+        - SAFE_MODE: обновляет виртуальные балансы
         - non-SAFE: checks free base balance
         - Enforces min amount where applicable
-        - Улучшенная логика для полной продажи позиции
         """
         amt = float(amount_base)
         
@@ -321,7 +356,24 @@ class ExchangeClient:
             raise APIException("Sell amount after rounding is zero")
 
         if self.safe_mode:
+            # Проверяем виртуальный баланс базовой валюты
+            base, quote = self._split_symbol(symbol)
+            free_base = self.get_free_base(symbol)
+            
+            if amt > free_base:
+                if free_base >= min_amt:
+                    logging.info(f"🧩 SAFE_MODE: adjusting sell amount to available balance: from {amt:.8f} to {free_base:.8f}")
+                    amt = self.round_amount(symbol, free_base)
+                else:
+                    raise APIException(f"Insufficient virtual {base} balance: need {amt:.8f}, have {free_base:.8f}")
+            
             current_price = self.get_last_price(symbol)
+            cost_received = float(amt) * current_price
+            
+            # Обновляем виртуальные балансы
+            self._update_virtual_balance(base, -amt)          # Уменьшаем BTC
+            self._update_virtual_balance(quote, +cost_received) # Увеличиваем USDT
+            
             order = {
                 "id": f"paper-{int(time.time()*1000)}",
                 "symbol": symbol,
@@ -331,13 +383,13 @@ class ExchangeClient:
                 "amount": float(amt),
                 "filled": float(amt),
                 "avg": current_price,
-                "cost": float(amt) * current_price,
+                "cost": cost_received,
                 "paper": True,
             }
             self._log_trade("SELL[PAPER]", symbol, float(amt), current_price)
             return order
 
-        # реальный режим — проверяем свободный базовый баланс
+        # Реальный режим без изменений
         free_base = self.get_free_base(symbol)
         
         # Если пытаемся продать больше чем есть, продаем все что есть
@@ -368,7 +420,12 @@ class ExchangeClient:
             # Проверяем минимум
             min_amt = self.market_min_amount(symbol) or 0.0
             if amt_to_sell < min_amt:
-                raise APIException(f"Available balance {amt_to_sell:.8f} is below minimum {min_amt:.8f}")
+                if self.safe_mode:
+                    # В SAFE_MODE продаем весь доступный баланс
+                    amt_to_sell = free_base
+                    logging.info(f"🧩 SAFE_MODE: selling all available {amt_to_sell:.8f} (below min)")
+                else:
+                    raise APIException(f"Available balance {amt_to_sell:.8f} is below minimum {min_amt:.8f}")
             
             return self.create_market_sell_order(symbol, amt_to_sell)
             
