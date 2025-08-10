@@ -119,6 +119,6 @@ class CSVHandler:
         }
 
 
-# Инициализация CSV при запуске
-CSVHandler.ensure_csv_exists(CSVHandler.SIGNALS_CSV, CSVHandler.SIGNALS_FIELDS)
-CSVHandler.ensure_csv_exists(CSVHandler.CLOSED_TRADES_CSV, CSVHandler.CLOSED_TRADES_FIELDS)
+# Инициализация CSV при запуске (используем переменные из settings, а не атрибуты класса)
+CSVHandler.ensure_csv_exists(SIGNALS_CSV, CSVHandler.SIGNALS_FIELDS)
+CSVHandler.ensure_csv_exists(CLOSED_TRADES_CSV, CSVHandler.CLOSED_TRADES_FIELDS)
