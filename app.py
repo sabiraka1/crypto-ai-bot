@@ -5,6 +5,7 @@ import re
 import logging
 import threading
 import time
+import atexit
 from typing import Optional
 import requests
 from flask import Flask, request, jsonify
@@ -14,6 +15,7 @@ from main import TradingBot
 from trading.exchange_client import ExchangeClient
 from core.state_manager import StateManager
 from telegram import bot_handler as tgbot
+from config.settings import TradingConfig
 
 # ================== ЛОГИ ==================
 logging.basicConfig(
@@ -23,17 +25,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ================== КОНФИГУРАЦИЯ ==================
+CFG = TradingConfig()
+
+# Валидация при запуске
+config_errors = CFG.validate_config()
+if config_errors:
+    logger.warning("⚠️ Configuration issues found:")
+    for error in config_errors:
+        logger.warning(f"  - {error}")
+
 # ================== ЗАЩИТА ОТ ДУБЛЕЙ ==================
 LOCK_FILE = ".trading.lock"
+WEBHOOK_LOCK_FILE = ".webhook.lock"
 
-# Удаляем старый lock при старте контейнера
-if os.path.exists(LOCK_FILE):
-    try:
-        os.remove(LOCK_FILE)
-        logger.warning("⚠️ Removed stale lock file: %s", LOCK_FILE)
-    except Exception as e:
-        logger.error("Ошибка при удалении lock-файла: %s", e)
-
+# Удаляем старые lock при старте контейнера
+for lock_file in [LOCK_FILE, WEBHOOK_LOCK_FILE]:
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            logger.warning("⚠️ Removed stale lock file: %s", lock_file)
+        except Exception as e:
+            logger.error("Ошибка при удалении lock-файла: %s", e)
 
 # ================== ФИЛЬТР ЛОГОВ ==================
 class SensitiveDataFilter(logging.Filter):
@@ -48,71 +61,44 @@ class SensitiveDataFilter(logging.Filter):
             record.msg = self.SENSITIVE_PATTERN.sub(self.REPLACEMENT, record.msg)
         return True
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.getLogger().setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+# Применяем фильтр
 for handler in logging.getLogger().handlers:
     handler.addFilter(SensitiveDataFilter())
-
-def safe_log(data):
-    if isinstance(data, dict):
-        redacted = {k: ("***" if any(x in k.lower() for x in ["key", "token", "secret", "password"]) else v)
-                    for k, v in data.items()}
-        logger.info(redacted)
-    else:
-        logger.info(str(data))
-
-def verify_request():
-    if WEBHOOK_SECRET and not request.path.endswith(WEBHOOK_SECRET):
-        return jsonify({"ok": False, "error": "unauthorized"}), 403
-    if TELEGRAM_SECRET_TOKEN:
-        hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if hdr != TELEGRAM_SECRET_TOKEN:
-            logger.warning("Webhook: secret token mismatch")
-            return jsonify({"ok": False, "error": "unauthorized"}), 403
-
-# ================== ENV ==================
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
-PUBLIC_URL = (os.getenv("PUBLIC_URL") or "").rstrip("/")
-PORT = int(os.getenv("PORT", 5000))
-
-WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()
-WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}" if WEBHOOK_SECRET else None
-WEBHOOK_URL = f"{PUBLIC_URL}{WEBHOOK_PATH}" if (PUBLIC_URL and WEBHOOK_PATH and BOT_TOKEN) else None
-
-TELEGRAM_SECRET_TOKEN = (os.getenv("TELEGRAM_SECRET_TOKEN") or "").strip()
-ADMIN_CHAT_IDS = []
-_raw_admins = os.getenv("ADMIN_CHAT_IDS", "")
-if _raw_admins:
-    for x in _raw_admins.replace(",", " ").split():
-        try:
-            ADMIN_CHAT_IDS.append(int(x))
-        except ValueError:
-            pass
-
-if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN is missing")
-if not CHAT_ID:
-    logger.warning("⚠️ CHAT_ID is missing — ответы в чат работать не будут")
-if not PUBLIC_URL:
-    logger.warning("⚠️ PUBLIC_URL is missing — webhook не будет установлен")
-if not WEBHOOK_SECRET:
-    logger.warning("⚠️ WEBHOOK_SECRET is missing — установите переменную окружения для безопасного вебхука")
-
-ENABLE_WEBHOOK = (os.getenv("ENABLE_WEBHOOK", "1").strip().lower() in ("1", "true", "yes", "on"))
-ENABLE_TRADING = (os.getenv("ENABLE_TRADING", "1").strip().lower() in ("1", "true", "yes", "on"))
 
 # ================== FLASK ==================
 app = Flask(__name__)
 
 # ================== ГЛОБАЛКИ ==================
-_GLOBAL_EX = ExchangeClient()
+_GLOBAL_EX = ExchangeClient(
+    api_key=CFG.GATE_API_KEY,
+    api_secret=CFG.GATE_API_SECRET,
+    safe_mode=CFG.SAFE_MODE
+)
 _STATE = StateManager()
 _TRADING_BOT = None  # ✅ Глобальная ссылка на бота
 _TRADING_BOT_LOCK = threading.RLock()  # ✅ Блокировка для создания бота
+_WATCHDOG_THREAD = None
+_BOOTSTRAP_DONE = False
+
+# ================== WEBHOOK SECURITY ==================
+def verify_request():
+    """Проверка безопасности webhook запроса"""
+    # Проверка секрета в URL
+    if CFG.WEBHOOK_SECRET and not request.path.endswith(CFG.WEBHOOK_SECRET):
+        return jsonify({"ok": False, "error": "unauthorized"}), 403
+        
+    # Проверка Telegram secret token
+    if CFG.TELEGRAM_SECRET_TOKEN:
+        hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if hdr != CFG.TELEGRAM_SECRET_TOKEN:
+            logger.warning("Webhook: secret token mismatch")
+            return jsonify({"ok": False, "error": "unauthorized"}), 403
+    
+    return None
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
+    """Безопасное обучение модели"""
     try:
         import numpy as np
         import pandas as pd
@@ -120,8 +106,8 @@ def _train_model_safe() -> bool:
         from analysis.market_analyzer import MultiTimeframeAnalyzer
         from ml.adaptive_model import AdaptiveMLModel
 
-        symbol = os.getenv("SYMBOL", "BTC/USDT")
-        timeframe = os.getenv("TIMEFRAME", "15m")
+        symbol = CFG.SYMBOL
+        timeframe = CFG.TIMEFRAME
 
         ohlcv = _GLOBAL_EX.fetch_ohlcv(symbol, timeframe=timeframe, limit=500)
         if not ohlcv:
@@ -133,11 +119,13 @@ def _train_model_safe() -> bool:
         df_raw["time"] = pd.to_datetime(df_raw["time"], unit="ms", utc=True)
         df_raw.set_index("time", inplace=True)
 
+        # Расчет индикаторов
         df = calculate_all_indicators(df_raw.copy())
         df["price_change"] = df["close"].pct_change()
         df["future_close"] = df["close"].shift(-1)
         df["y"] = (df["future_close"] > df["close"]).astype(int)
 
+        # Дополнительные фичи
         _EPS = 1e-12
         if {"ema_fast", "ema_slow"}.issubset(df.columns):
             df["ema_cross"] = (df["ema_fast"] - df["ema_slow"]) / (df["ema_slow"].abs() + _EPS)
@@ -156,6 +144,7 @@ def _train_model_safe() -> bool:
             "rsi", "macd", "ema_cross", "bb_position",
             "stoch_k", "adx", "volume_ratio", "price_change",
         ]
+        
         if any(c not in df.columns for c in feature_cols) or df.empty:
             logging.error("Not enough features for training")
             return False
@@ -163,6 +152,7 @@ def _train_model_safe() -> bool:
         X = df[feature_cols].to_numpy()
         y = df["y"].to_numpy()
 
+        # Подготовка рыночных условий
         agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
         df_1d = df_raw.resample("1D").agg(agg)
         df_4h = df_raw.resample("4H").agg(agg)
@@ -173,27 +163,24 @@ def _train_model_safe() -> bool:
             cond, _ = analyzer.analyze_market_condition(df_1d.loc[:idx], df_4h.loc[:idx])
             market_conditions.append(cond.value)
 
-        model = AdaptiveMLModel()
+        # Обучение модели
+        model = AdaptiveMLModel(models_dir=CFG.MODEL_DIR)
         ok = model.train(X, y, market_conditions)
         return bool(ok)
 
     except Exception:
-        logging.exception("train error")
+        logging.exception("Training error")
         return False
 
 def _send_message(text: str) -> None:
-    if not BOT_TOKEN or not CHAT_ID:
-        return
+    """Отправка сообщения в Telegram"""
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text},
-            timeout=15
-        )
+        tgbot.send_message(text)
     except Exception:
-        logging.exception("sendMessage failed")
+        logging.exception("Failed to send Telegram message")
 
 def _acquire_file_lock(lock_path: str) -> bool:
+    """Создание файловой блокировки"""
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w") as f:
@@ -202,22 +189,44 @@ def _acquire_file_lock(lock_path: str) -> bool:
     except FileExistsError:
         return False
     except Exception:
-        logging.exception("lock create failed")
+        logging.exception("Lock create failed")
         return False
 
 # ================== HEALTH ==================
 @app.route("/health", methods=["GET"])
 @app.route("/healthz", methods=["GET"])
 def health():
-    return jsonify({"ok": True, "status": "running"}), 200
+    """Health check endpoint"""
+    status = {
+        "ok": True,
+        "status": "running",
+        "trading_bot_active": _TRADING_BOT is not None,
+        "safe_mode": CFG.SAFE_MODE,
+        "webhook_enabled": CFG.ENABLE_WEBHOOK,
+        "trading_enabled": CFG.ENABLE_TRADING,
+        "bootstrap_done": _BOOTSTRAP_DONE
+    }
+    
+    # Проверяем состояние торгового бота
+    if _TRADING_BOT:
+        try:
+            position_active = _TRADING_BOT._is_position_active()
+            status["position_active"] = position_active
+        except:
+            status["position_active"] = "unknown"
+    
+    return jsonify(status), 200
 
 # ================== DISPATCH (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
-def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
+def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
     """
-    ✅ ИСПРАВЛЕНИЕ: Централизованная обработка команд через bot_handler
+    ✅ ИСПРАВЛЕНИЕ: Централизованная обработка команд с правильной авторизацией
     """
-    if ADMIN_CHAT_IDS and chat_id and int(chat_id) not in ADMIN_CHAT_IDS:
-        logging.warning("Unauthorized access denied in dispatch for chat_id=%s", chat_id)
+    
+    # Проверка авторизации
+    if chat_id and not CFG.is_admin(chat_id):
+        logger.warning("Unauthorized access denied for chat_id=%s", chat_id)
+        tgbot.send_message("❌ У вас нет прав для выполнения команд.", chat_id=chat_id)
         return
 
     text = (text or "").strip()
@@ -225,13 +234,12 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
         return
 
     try:
-        # ✅ ИСПРАВЛЕНИЕ: Передаем корректные объекты, включая _TRADING_BOT для команд
+        # ✅ ИСПРАВЛЕНИЕ: Передаем корректные объекты
         exchange_client = _GLOBAL_EX
         state_manager = _STATE
         
-        # Для команд, которым нужен доступ к боту, проверяем его наличие
+        # Для команд, которым нужен доступ к боту, используем его state manager
         if text.startswith(("/testbuy", "/testsell", "/status")) and _TRADING_BOT:
-            # Используем state manager от активного бота если он есть
             state_manager = _TRADING_BOT.state
             exchange_client = _TRADING_BOT.exchange
 
@@ -240,74 +248,98 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
             text=text, 
             state_manager=state_manager, 
             exchange_client=exchange_client, 
-            train_func=_train_model_safe
+            train_func=_train_model_safe,
+            chat_id=chat_id
         )
     except Exception:
-        logging.exception("dispatch error")
+        logging.exception("Dispatch error")
 
 # ================== WEBHOOK ==================
-if ENABLE_WEBHOOK and WEBHOOK_PATH:
-    @app.route(WEBHOOK_PATH, methods=["POST"])
+if CFG.ENABLE_WEBHOOK and CFG.WEBHOOK_SECRET:
+    webhook_path = f"/webhook/{CFG.WEBHOOK_SECRET}"
+    
+    @app.route(webhook_path, methods=["POST"])
     def telegram_webhook():
+        """Webhook для получения обновлений от Telegram"""
         try:
-            vr = verify_request()
-            if vr:
-                return vr
-            safe_log({'update': 'received'})
+            # Проверка безопасности
+            verification_result = verify_request()
+            if verification_result:
+                return verification_result
+            
+            logger.debug('Webhook received')
 
+            # Парсинг обновления
             update = request.get_json(silent=True) or {}
-            msg = update.get("message") or update.get("edited_message") or {}
+            
+            # Извлечение сообщения
+            msg = update.get("message") or update.get("edited_message")
             if not msg and update.get("callback_query"):
                 msg = update["callback_query"].get("message") or {}
 
-            text = msg.get("text", "")
-            chat_id = (msg.get("chat") or {}).get("id")
-
-            if ADMIN_CHAT_IDS and (not chat_id or int(chat_id) not in ADMIN_CHAT_IDS):
-                logging.warning("Unauthorized access denied for chat_id=%s", chat_id)
+            if not msg:
                 return jsonify({"ok": True})
 
+            text = msg.get("text", "")
+            chat_info = msg.get("chat") or {}
+            chat_id = str(chat_info.get("id", ""))
+
+            if not text or not chat_id:
+                return jsonify({"ok": True})
+
+            # Обработка команды
             _dispatch(text, chat_id)
+            
         except Exception:
             logging.exception("Webhook handling error")
+            
         return jsonify({"ok": True})
 else:
-    logger.warning("⚠️ WEBHOOK route not registered: disabled or WEBHOOK_SECRET missing")
+    logger.warning("⚠️ WEBHOOK not registered: disabled or WEBHOOK_SECRET missing")
 
 def set_webhook():
-    if not ENABLE_WEBHOOK:
+    """Установка webhook в Telegram"""
+    if not CFG.ENABLE_WEBHOOK:
         logging.info("Webhook disabled by ENABLE_WEBHOOK=0")
         return
-    if not (BOT_TOKEN and PUBLIC_URL and WEBHOOK_URL):
-        logging.warning("Webhook not set: missing BOT_TOKEN or PUBLIC_URL or WEBHOOK_SECRET")
+        
+    webhook_url = CFG.get_webhook_url()
+    if not webhook_url:
+        logging.warning("Webhook not set: missing configuration")
         return
-    if not _acquire_file_lock(".webhook.lock"):
+        
+    if not _acquire_file_lock(WEBHOOK_LOCK_FILE):
         logging.info("Webhook already initialized by another process")
         return
-    logging.info(f"🔗 PUBLIC_URL: {PUBLIC_URL}")
-    logging.info(f"📡 Webhook path set to {WEBHOOK_PATH}")
+        
+    logging.info(f"🔗 Setting webhook: {CFG.PUBLIC_URL}")
+    
     try:
-        params = {"url": WEBHOOK_URL}
-        if TELEGRAM_SECRET_TOKEN:
-            params["secret_token"] = TELEGRAM_SECRET_TOKEN
+        params = {"url": webhook_url}
+        if CFG.TELEGRAM_SECRET_TOKEN:
+            params["secret_token"] = CFG.TELEGRAM_SECRET_TOKEN
 
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            params=params,
-            timeout=10
-        )
+        api_url = f"https://api.telegram.org/bot{CFG.BOT_TOKEN}/setWebhook"
+        r = requests.post(api_url, params=params, timeout=10)
+        
         logging.info(f"setWebhook → {r.status_code} {r.text}")
+        
+        if r.status_code == 200:
+            _send_message("🔗 Webhook установлен успешно")
+        else:
+            logging.error(f"Webhook setup failed: {r.text}")
+            
     except Exception:
         logging.exception("setWebhook error")
 
-# ================== TRADING LOOP (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
+# ================== TRADING LOOP (ДЛЯ GUNICORN) ==================
 def start_trading_loop():
     """
-    ✅ ИСПРАВЛЕНИЕ: Улучшенный запуск торгового цикла с правильной блокировкой
+    ✅ GUNICORN VERSION: Запуск торгового цикла для Gunicorn
     """
     global _TRADING_BOT
     
-    if not ENABLE_TRADING:
+    if not CFG.ENABLE_TRADING:
         logging.info("Trading loop disabled by ENABLE_TRADING=0")
         return
 
@@ -324,7 +356,7 @@ def start_trading_loop():
             logging.warning(f"⚠️ Trading loop thread already running: {len(existing_threads)} threads")
             return
 
-        lock_path = ".trading.lock"
+        lock_path = LOCK_FILE
         
         # Если лок-файл существует — удаляем, чтобы позволить перезапуск
         try:
@@ -342,60 +374,70 @@ def start_trading_loop():
         try:
             _TRADING_BOT = TradingBot()
             logging.info("✅ Trading bot instance created")
+            _send_message("🚀 Торговый бот запущен успешно!")
         except Exception as e:
             logging.error(f"❌ Failed to create trading bot: {e}")
+            _send_message(f"❌ Ошибка запуска торгового бота: {e}")
             return
     
     def trading_loop_wrapper():
+        """Обертка для торгового цикла с обработкой ошибок"""
         global _TRADING_BOT
         try:
             logging.info("🚀 Trading loop thread starting...")
             _TRADING_BOT.run()
         except Exception as e:
             logging.error(f"❌ Trading loop crashed: {e}")
+            _send_message(f"❌ Торговый цикл остановлен: {e}")
+            
             # ✅ ИСПРАВЛЕНИЕ: Сбрасываем глобальную переменную при крахе
             with _TRADING_BOT_LOCK:
                 _TRADING_BOT = None
+                
             # Попытка перезапуска через 60 секунд
             time.sleep(60)
             logging.info("🔄 Attempting to restart trading loop...")
             start_trading_loop()  # Рекурсивный перезапуск
     
-    # Запускаем поток
+    # ✅ GUNICORN: Запускаем поток как daemon для правильного завершения
     t = threading.Thread(target=trading_loop_wrapper, name="TradingLoop", daemon=True)
     t.start()
     logging.info("✅ Trading loop thread started")
 
-# ================== WATCHDOG & MONITORING (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
+# ================== WATCHDOG & MONITORING ==================
 import psutil
 
 def send_telegram_alert(message):
+    """Отправка критических уведомлений"""
     try:
-        if BOT_TOKEN and CHAT_ID:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            payload = {"chat_id": CHAT_ID, "text": message}
-            requests.post(url, json=payload, timeout=5)
+        _send_message(f"🚨 {message}")
     except Exception as e:
         logging.error(f"[Telegram Alert Error] {e}")
 
 def monitor_resources():
+    """Мониторинг ресурсов системы"""
     try:
         process = psutil.Process(os.getpid())
-        mem = process.memory_info().rss / (1024 * 1024)
-        cpu = process.cpu_percent(interval=1)
-        logging.info(f"[Resources] CPU: {cpu}%, RAM: {mem:.2f} MB")
+        mem_mb = process.memory_info().rss / (1024 * 1024)
+        cpu_pct = process.cpu_percent(interval=1)
+        
+        logging.debug(f"[Resources] CPU: {cpu_pct:.1f}%, RAM: {mem_mb:.1f} MB")
         
         # Проверяем критические уровни
-        if cpu > 80 or mem > (psutil.virtual_memory().total / (1024 * 1024) * 0.8):
-            send_telegram_alert(f"⚠️ High usage detected! CPU: {cpu}%, RAM: {mem:.2f} MB")
-        return cpu, mem
+        total_memory_mb = psutil.virtual_memory().total / (1024 * 1024)
+        memory_threshold = total_memory_mb * 0.8
+        
+        if cpu_pct > 85 or mem_mb > memory_threshold:
+            send_telegram_alert(f"High resource usage! CPU: {cpu_pct:.1f}%, RAM: {mem_mb:.1f} MB")
+            
+        return cpu_pct, mem_mb
     except Exception as e:
         logging.error(f"[Resource Monitor] Error: {e}")
         return 0, 0
 
 def watchdog():
     """
-    ✅ ИСПРАВЛЕНИЕ: Улучшенный watchdog с правильным мониторингом
+    ✅ GUNICORN VERSION: Улучшенный watchdog
     """
     global _TRADING_BOT
     consecutive_failures = 0
@@ -403,6 +445,7 @@ def watchdog():
     
     while True:
         try:
+            # Мониторинг ресурсов
             monitor_resources()
             
             # Проверяем состояние торгового потока
@@ -414,13 +457,13 @@ def watchdog():
             # ✅ ИСПРАВЛЕНИЕ: Проверяем что бот существует и поток жив
             bot_exists = _TRADING_BOT is not None
             
-            if ENABLE_TRADING and (not trading_thread_alive or not bot_exists):
+            if CFG.ENABLE_TRADING and (not trading_thread_alive or not bot_exists):
                 consecutive_failures += 1
                 status = f"thread_alive={trading_thread_alive}, bot_exists={bot_exists}"
                 logging.warning(f"⚠️ Trading system down ({status}), failure #{consecutive_failures}")
                 
                 if consecutive_failures >= max_failures:
-                    send_telegram_alert(f"♻️ Trading system failed {consecutive_failures} times! Attempting restart...")
+                    send_telegram_alert(f"Trading system failed {consecutive_failures} times! Attempting restart...")
                     try:
                         # Принудительно сбрасываем бота если он завис
                         with _TRADING_BOT_LOCK:
@@ -432,7 +475,7 @@ def watchdog():
                         consecutive_failures = 0  # Сбрасываем счетчик при успешном запуске
                         logging.info("✅ Trading loop restarted by watchdog")
                     except Exception as e:
-                        send_telegram_alert(f"❌ Failed to restart trading loop: {e}")
+                        send_telegram_alert(f"Failed to restart trading loop: {e}")
                         logging.error(f"❌ Watchdog restart failed: {e}")
             else:
                 consecutive_failures = 0  # Сбрасываем счетчик если все OK
@@ -452,7 +495,7 @@ def watchdog():
                             # Если позиция не управлялась более 30 минут - предупреждение
                             if minutes_since > 30:
                                 logging.warning(f"⚠️ Position not managed for {minutes_since:.1f} minutes")
-                                send_telegram_alert(f"⚠️ Позиция не управлялась {minutes_since:.1f} минут")
+                                send_telegram_alert(f"Position not managed for {minutes_since:.1f} minutes")
                                 
                 except Exception as e:
                     logging.debug(f"Position check error: {e}")
@@ -462,58 +505,156 @@ def watchdog():
         
         time.sleep(300)  # Проверка каждые 5 минут
 
-# Запускаем watchdog в отдельном потоке
-threading.Thread(target=watchdog, daemon=True).start()
-
-# ================== KEEP-ALIVE PING ==================
-def keep_alive_ping():
-    try:
-        if PUBLIC_URL:
-            requests.get(PUBLIC_URL, timeout=5)
-            logging.info(f"[KeepAlive] Pinged {PUBLIC_URL}")
-    except Exception as e:
-        logging.warning(f"[KeepAlive] Ping failed: {e}")
-    
-    # Планируем следующий пинг
-    threading.Timer(600, keep_alive_ping).start()
-
-# Запускаем keep-alive
-keep_alive_ping()
-
-# ================== BOOTSTRAP (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
-_bootstrapped = False
-_bootstrap_lock = threading.RLock()
-
+# ================== BOOTSTRAP (ДЛЯ GUNICORN) ==================
 def _bootstrap_once():
     """
-    ✅ ИСПРАВЛЕНИЕ: Безопасная инициализация с проверками
+    ✅ GUNICORN VERSION: Безопасная инициализация для Gunicorn
     """
-    global _bootstrapped
+    global _BOOTSTRAP_DONE, _WATCHDOG_THREAD
     
-    with _bootstrap_lock:
-        if _bootstrapped:
-            logging.info("⚠️ Bootstrap already completed, skipping")
-            return
-            
-        try:
-            logging.info("🚀 Starting bootstrap process...")
+    if _BOOTSTRAP_DONE:
+        logging.info("⚠️ Bootstrap already completed, skipping")
+        return
+        
+    try:
+        logging.info("🚀 Starting Gunicorn bootstrap process...")
+        
+        # Проверяем конфигурацию
+        if config_errors:
+            _send_message(f"⚠️ Configuration issues detected:\n" + "\n".join(config_errors[:3]))
+        
+        # Устанавливаем webhook
+        if CFG.ENABLE_WEBHOOK:
             set_webhook()
-        except Exception:
-            logging.exception("set_webhook at bootstrap failed")
-            
-        try:
-            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Запускаем торговый цикл только один раз
+    except Exception:
+        logging.exception("set_webhook at bootstrap failed")
+        
+    try:
+        # ✅ GUNICORN: Запускаем торговый цикл только один раз
+        if CFG.ENABLE_TRADING:
             start_trading_loop()
-        except Exception:
-            logging.exception("start_trading_loop failed")
+    except Exception:
+        logging.exception("start_trading_loop failed")
+        
+    try:
+        # ✅ GUNICORN: Запускаем watchdog как daemon thread
+        if not _WATCHDOG_THREAD or not _WATCHDOG_THREAD.is_alive():
+            _WATCHDOG_THREAD = threading.Thread(target=watchdog, daemon=True, name="Watchdog")
+            _WATCHDOG_THREAD.start()
+            logging.info("✅ Watchdog started")
+    except Exception:
+        logging.exception("watchdog start failed")
+        
+    _BOOTSTRAP_DONE = True
+    logging.info("✅ Gunicorn bootstrap completed successfully")
+    
+    # Уведомляем о запуске
+    try:
+        status_msg = [
+            "🚀 Торговый бот запущен на Gunicorn!",
+            f"📊 Символ: {CFG.SYMBOL}",
+            f"⏰ Таймфрейм: {CFG.TIMEFRAME}",
+            f"💰 Размер позиции: ${CFG.POSITION_SIZE_USD}",
+            f"🛡️ Безопасный режим: {'ON' if CFG.SAFE_MODE else 'OFF'}",
+            f"🤖 AI включен: {'YES' if CFG.AI_ENABLE else 'NO'}",
+            "",
+            "Используйте /help для списка команд"
+        ]
+        _send_message("\n".join(status_msg))
+    except Exception:
+        pass
+
+# ================== ДОПОЛНИТЕЛЬНЫЕ ENDPOINTS ==================
+@app.route("/status", methods=["GET"])
+def status_endpoint():
+    """Детальный статус системы"""
+    try:
+        status = {
+            "timestamp": time.time(),
+            "config": {
+                "symbol": CFG.SYMBOL,
+                "timeframe": CFG.TIMEFRAME,
+                "safe_mode": CFG.SAFE_MODE,
+                "ai_enabled": CFG.AI_ENABLE,
+                "webhook_enabled": CFG.ENABLE_WEBHOOK,
+                "trading_enabled": CFG.ENABLE_TRADING
+            },
+            "trading_bot": {
+                "initialized": _TRADING_BOT is not None,
+                "thread_alive": any(t.name == "TradingLoop" and t.is_alive() for t in threading.enumerate())
+            }
+        }
+        
+        # Информация о позиции
+        if _TRADING_BOT:
+            try:
+                status["position"] = _TRADING_BOT.pm.get_position_summary()
+            except:
+                status["position"] = {"error": "failed_to_get_summary"}
+        
+        # Ресурсы
+        try:
+            cpu, mem = monitor_resources()
+            status["resources"] = {"cpu_percent": cpu, "memory_mb": mem}
+        except:
+            status["resources"] = {"error": "failed_to_get_resources"}
             
-        _bootstrapped = True
-        logging.info("✅ Bootstrap completed")
+        return jsonify(status)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# ================== STARTUP ==================
-if __name__ != "__main__":
-    _bootstrap_once()
+@app.route("/force_restart", methods=["POST"])
+def force_restart():
+    """Принудительный перезапуск торгового бота"""
+    global _TRADING_BOT
+    
+    try:
+        with _TRADING_BOT_LOCK:
+            if _TRADING_BOT:
+                logging.warning("🔄 Force restart requested via API")
+                _TRADING_BOT = None
+                
+        start_trading_loop()
+        return jsonify({"ok": True, "message": "Trading bot restarted"})
+        
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
+# ================== CLEANUP FOR GUNICORN ==================
+def cleanup_on_exit():
+    """Очистка при завершении работы"""
+    global _TRADING_BOT
+    
+    logging.info("🛑 Shutting down trading bot...")
+    
+    try:
+        with _TRADING_BOT_LOCK:
+            if _TRADING_BOT:
+                # Здесь можно добавить логику корректного завершения
+                _TRADING_BOT = None
+                logging.info("✅ Trading bot shut down")
+    except Exception as e:
+        logging.error(f"Error during cleanup: {e}")
+    
+    # Удаляем lock файлы
+    for lock_file in [LOCK_FILE, WEBHOOK_LOCK_FILE]:
+        try:
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+        except:
+            pass
+
+# Регистрируем cleanup для Gunicorn
+atexit.register(cleanup_on_exit)
+
+# ================== GUNICORN STARTUP ==================
+# ✅ GUNICORN: Инициализация при импорте модуля
+_bootstrap_once()
+
+# ✅ GUNICORN: Экспортируем app для Gunicorn
+# В Procfile: gunicorn --bind 0.0.0.0:$PORT app:app
 if __name__ == "__main__":
-    _bootstrap_once()
-    app.run(host="0.0.0.0", port=PORT)
+    # Это для локального тестирования
+    logging.info("🔧 Running in development mode")
+    app.run(host="0.0.0.0", port=CFG.PORT, debug=False, threaded=True)

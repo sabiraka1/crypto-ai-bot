@@ -10,511 +10,717 @@ from typing import Optional, Callable, List
 
 from analysis import scoring_engine
 from trading.exchange_client import ExchangeClient
-from trading.position_manager import PositionManager  # для testbuy/testsell
 from core.state_manager import StateManager
-from utils.csv_handler import CSVHandler  # <-- новый импорт
+from utils.csv_handler import CSVHandler
+from config.settings import TradingConfig
 
-# ==== ENV ====
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("CHAT_ID", "").strip()
+# ── Конфигурация ──────────────────────────────────────────────────────────────
+CFG = TradingConfig()
+
+# ==== API ====
+BOT_TOKEN = CFG.BOT_TOKEN
+CHAT_ID = CFG.CHAT_ID
+ADMIN_CHAT_IDS = CFG.ADMIN_CHAT_IDS
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else None
 
-SYMBOL_ENV = os.getenv("SYMBOL", "BTC/USDT")
-TIMEFRAME_ENV = os.getenv("TIMEFRAME", "15m")
-TEST_TRADE_AMOUNT = float(os.getenv("TEST_TRADE_AMOUNT", os.getenv("TRADE_AMOUNT", "3")))
-# Примечание: min_notional по символу учитывается на уровне ExchangeClient/PositionManager
-
+SYMBOL_ENV = CFG.SYMBOL
+TIMEFRAME_ENV = CFG.TIMEFRAME
+TEST_TRADE_AMOUNT = CFG.TEST_TRADE_AMOUNT
 
 # ==== Anti-spam settings ====
 _last_command_time = {}
-COMMAND_COOLDOWN = int(os.getenv("COMMAND_COOLDOWN", "3"))  # секунды
+COMMAND_COOLDOWN = CFG.COMMAND_COOLDOWN
+
 
 def anti_spam(user_id):
+    """Проверка на спам команд"""
     now = time.time()
     if user_id in _last_command_time and now - _last_command_time[user_id] < COMMAND_COOLDOWN:
         return False
     _last_command_time[user_id] = now
     return True
 
+
+def is_authorized(chat_id: str) -> bool:
+    """Проверка авторизации пользователя"""
+    if not ADMIN_CHAT_IDS:
+        return True  # Если список админов пуст, разрешаем всем
+    return str(chat_id) in ADMIN_CHAT_IDS
+
+
 def safe_command(func):
-    """Декоратор: защита команд от ошибок и антиспам"""
+    """Декоратор: защита команд от ошибок, антиспам и авторизация"""
     def wrapper(*args, **kwargs):
-        update = args[0] if args else None
+        # Попытка извлечь chat_id из аргументов
         chat_id = None
         try:
-            if update and isinstance(update, dict):
-                chat_id = update.get("message", {}).get("chat", {}).get("id")
-            elif update and hasattr(update, "effective_chat"):
-                chat_id = update.effective_chat.id
-            if chat_id and not anti_spam(chat_id):
-                send_message("⏳ Подожди пару секунд перед следующей командой.")
-                return
+            # Предполагаем что первый аргумент может содержать chat_id
+            if args and isinstance(args[0], dict):
+                chat_id = args[0].get("message", {}).get("chat", {}).get("id")
+            elif len(args) > 1 and isinstance(args[1], (str, int)):
+                chat_id = str(args[1])
+                
+        except Exception:
+            pass
+            
+        # Проверка авторизации
+        if chat_id and not is_authorized(chat_id):
+            logging.warning(f"❌ Unauthorized access attempt from chat_id: {chat_id}")
+            send_message("❌ У вас нет прав для выполнения команд.", chat_id=str(chat_id))
+            return
+            
+        # Проверка антиспама
+        if chat_id and not anti_spam(chat_id):
+            send_message("⏳ Подожди пару секунд перед следующей командой.", chat_id=str(chat_id))
+            return
+            
+        # Выполнение команды
+        try:
             return func(*args, **kwargs)
         except Exception as e:
             logging.exception(f"Ошибка в команде {func.__name__}: {e}")
             if chat_id:
-                send_message("⚠️ Произошла ошибка при выполнении команды.")
+                send_message("⚠️ Произошла ошибка при выполнении команды.", chat_id=str(chat_id))
+                
     return wrapper
+
 
 # ==== Telegram helpers ====
 def _tg_request(method: str, data: dict, files: Optional[dict] = None) -> None:
-    if not TELEGRAM_API or not CHAT_ID:
-        logging.warning("Telegram not configured (BOT_TOKEN/CHAT_ID missing)")
+    """Базовый запрос к Telegram API"""
+    if not TELEGRAM_API:
+        logging.warning("Telegram not configured (BOT_TOKEN missing)")
         return
+        
     url = f"{TELEGRAM_API}/{method}"
     try:
         resp = requests.post(url, data=data, files=files, timeout=15)
         if resp.status_code != 200:
             logging.error("Telegram API error: %s %s", resp.status_code, resp.text[:200])
         else:
-            logging.info("[TG] %s ok: %s", method, resp.text[:120])
+            logging.debug("[TG] %s ok", method)
     except Exception as e:
         logging.exception("Telegram request failed: %s", e)
 
+
 def send_message(text: str, chat_id: str = None) -> None:
+    """Отправка сообщения в Telegram"""
     target_chat = chat_id or CHAT_ID
     if target_chat:
         _tg_request("sendMessage", {"chat_id": target_chat, "text": text})
 
-def send_photo(image_path: str, caption: Optional[str] = None) -> None:
+
+def send_photo(image_path: str, caption: Optional[str] = None, chat_id: str = None) -> None:
+    """Отправка фото в Telegram"""
+    target_chat = chat_id or CHAT_ID
+    if not target_chat:
+        return
+        
     if not os.path.exists(image_path):
         logging.warning("send_photo: file not found: %s", image_path)
         return
+        
     with open(image_path, "rb") as f:
         files = {"photo": f}
-        data = {"chat_id": CHAT_ID}
+        data = {"chat_id": target_chat}
         if caption:
             data["caption"] = caption
         _tg_request("sendPhoto", data, files=files)
 
 
-# ==== Notifications for trades (совместимо с PositionManager.notify_*) ====
-def notify_entry(symbol: str, side: str, price: float, amount: float, reason: str = "") -> None:
-    msg = (
-        f"📈 Открыта {side.upper()} позиция\n"
-        f"Инструмент: {symbol}\n"
-        f"Цена входа: {price:.4f}\n"
-        f"Объём: {amount}\n"
-    )
-    if reason:
-        msg += f"Причина: {reason}"
-    send_message(msg)
-
-def notify_close(symbol: str, side: str, entry_price: float, exit_price: float,
-                 pnl_abs: float, pnl_pct: float, reason: str = "") -> None:
-    emoji = "✅" if pnl_pct >= 0 else "❌"
-    msg = (
-        f"{emoji} Закрыта {side.upper()} позиция\n"
-        f"{symbol}\n"
-        f"Вход: {entry_price:.4f} → Выход: {exit_price:.4f}\n"
-        f"PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)\n"
-    )
-    if reason:
-        msg += f"Причина: {reason}"
-    send_message(msg)
-
-
 # ==== Commands ====
-def cmd_start() -> None:
-    send_message(
+@safe_command
+def cmd_start(chat_id: str = None) -> None:
+    """Команда /start"""
+    message = (
         "🚀 Торговый бот запущен!\n\n"
+        "📋 Доступные команды:\n"
         "/status – Показать открытую позицию\n"
         "/profit – Общий PnL и Winrate\n"
-        "/errors – Последние ошибки из лога\n"
         "/lasttrades – Последние сделки\n"
-        "/train – Обучить модель\n"
         "/test – Тест сигнала\n"
-        "/testbuy – Тестовая покупка (через PositionManager)\n"
-        "/testsell – Тестовая продажа (закрыть позицию через PositionManager)"
+        "/testbuy [сумма] – Тестовая покупка\n"
+        "/testsell – Тестовая продажа\n"
+        "/help – Справка по командам\n"
+        "/errors – Последние ошибки\n"
+        "/train – Обучить AI модель"
     )
+    send_message(message, chat_id)
 
-def cmd_status(state_manager: StateManager, price_getter: Callable[[], Optional[float]]) -> None:
-    st = getattr(state_manager, "state", {}) or {}
-    if not st.get("in_position"):
-        send_message("🟢 Позиции нет")
-        return
-    sym = st.get("symbol", SYMBOL_ENV)
-    entry = float(st.get("entry_price") or 0.0)
-    last = None
+
+@safe_command
+def cmd_status(state_manager: StateManager, exchange_client: ExchangeClient, chat_id: str = None) -> None:
+    """Команда /status - показать текущую позицию"""
     try:
-        last = price_getter()
-        if last is not None:
-            last = float(last)
-    except Exception:
-        pass
+        st = getattr(state_manager, "state", {}) or {}
+        
+        if not st.get("in_position"):
+            send_message("🟢 Позиции нет", chat_id)
+            return
+            
+        sym = st.get("symbol", SYMBOL_ENV)
+        entry = float(st.get("entry_price") or 0.0)
+        
+        # Получаем текущую цену
+        try:
+            current_price = exchange_client.get_last_price(sym)
+        except Exception as e:
+            logging.error(f"Failed to get current price: {e}")
+            current_price = None
 
-    txt = [f"📌 Позиция LONG {sym} @ {entry:.4f}"]
-    if last:
-        pnl_pct = (last - entry) / entry * 100.0 if entry else 0.0
-        txt.append(f"Текущая цена: {last:.4f} | PnL {pnl_pct:.2f}%")
+        txt = [f"📌 Позиция LONG {sym} @ {entry:.6f}"]
+        
+        if current_price:
+            pnl_pct = (current_price - entry) / entry * 100.0 if entry else 0.0
+            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+            txt.append(f"Текущая цена: {current_price:.6f}")
+            txt.append(f"{pnl_emoji} PnL: {pnl_pct:+.2f}%")
 
-    tp = st.get("tp_price_pct")
-    sl = st.get("sl_price_pct")
-    tp1_atr = st.get("tp1_atr")
-    tp2_atr = st.get("tp2_atr")
-    sl_atr = st.get("sl_atr")
-    flags = []
-    if tp and sl:
-        txt.append(f"TP≈{tp:.4f} | SL≈{sl:.4f}")
-    if tp1_atr:
-        flags.append(f"TP1≈{float(tp1_atr):.4f}")
-    if tp2_atr:
-        flags.append(f"TP2≈{float(tp2_atr):.4f}")
-    if sl_atr:
-        flags.append(f"SL_ATR≈{float(sl_atr):.4f}")
-    if st.get("trailing_on"):
-        flags.append("trailing ON")
-    if st.get("partial_taken"):
-        flags.append("partial taken")
-    if flags:
-        txt.append(" | ".join(flags))
+        # Информация о TP/SL
+        tp = st.get("tp1_atr")
+        sl = st.get("sl_atr")
+        if tp and sl:
+            txt.append(f"🎯 TP: {float(tp):.6f} | 🛡️ SL: {float(sl):.6f}")
 
-    send_message("\n".join(txt))
+        # Дополнительная информация
+        flags = []
+        if st.get("partial_taken"):
+            flags.append("Частичное TP")
+        if st.get("trailing_on"):
+            flags.append("Трейлинг ON")
+            
+        qty_usd = st.get("qty_usd")
+        if qty_usd:
+            flags.append(f"${float(qty_usd):.2f}")
+            
+        if flags:
+            txt.append("ℹ️ " + " | ".join(flags))
 
-def cmd_profit() -> None:
-    path = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
-    if not os.path.exists(path):
-        send_message("📊 PnL: 0.00\nWinrate: 0.0%\nТрейдов: 0")
-        return
+        send_message("\n".join(txt), chat_id)
+        
+    except Exception as e:
+        logging.exception("cmd_status error")
+        send_message(f"⚠️ Ошибка при получении статуса: {e}", chat_id)
+
+
+@safe_command
+def cmd_profit(chat_id: str = None) -> None:
+    """Команда /profit - показать общую статистику"""
     try:
+        path = CFG.CLOSED_TRADES_CSV
+        if not os.path.exists(path):
+            send_message("📊 PnL: 0.00 USDT\nWinrate: 0.0%\nТрейдов: 0", chat_id)
+            return
+            
         df = CSVHandler.read_csv_safe(path)
         if df is None or df.empty:
-            send_message("📊 PnL: 0.00\nWinrate: 0.0%\nТрейдов: 0")
+            send_message("📊 PnL: 0.00 USDT\nWinrate: 0.0%\nТрейдов: 0", chat_id)
             return
-        # приведение типов
+            
+        # Приведение типов
         if "pnl_abs" in df.columns:
             df["pnl_abs"] = pd.to_numeric(df["pnl_abs"], errors="coerce").fillna(0.0)
         else:
             df["pnl_abs"] = 0.0
+            
         if "pnl_pct" in df.columns:
             df["pnl_pct"] = pd.to_numeric(df["pnl_pct"], errors="coerce")
         else:
             df["pnl_pct"] = pd.Series(dtype=float)
 
-        pnl = float(df["pnl_abs"].sum())
+        # Расчеты
+        total_pnl = float(df["pnl_abs"].sum())
         wins = int((df["pnl_pct"] > 0).sum())
-        total = int(len(df))
-        wr = (wins / total * 100.0) if total else 0.0
-        send_message(f"📊 PnL: {pnl:.2f}\nWinrate: {wr:.1f}%\nТрейдов: {total}")
+        total_trades = int(len(df))
+        win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
+        
+        # Дополнительная статистика
+        if total_trades > 0:
+            avg_win = df[df["pnl_pct"] > 0]["pnl_pct"].mean() if wins > 0 else 0.0
+            avg_loss = df[df["pnl_pct"] < 0]["pnl_pct"].mean() if (total_trades - wins) > 0 else 0.0
+            
+            message = (
+                f"📊 Торговая статистика:\n"
+                f"💰 Общий PnL: {total_pnl:.2f} USDT\n"
+                f"📈 Winrate: {win_rate:.1f}% ({wins}/{total_trades})\n"
+                f"🟢 Средний профит: {avg_win:.2f}%\n"
+                f"🔴 Средний убыток: {avg_loss:.2f}%\n"
+                f"📊 Всего сделок: {total_trades}"
+            )
+        else:
+            message = "📊 Статистика недоступна - нет завершенных сделок"
+            
+        send_message(message, chat_id)
+        
     except Exception as e:
-        logging.error("cmd_profit error: %s", e)
-        send_message(f"⚠️ Ошибка: {e}")
+        logging.exception("cmd_profit error")
+        send_message(f"⚠️ Ошибка при расчете статистики: {e}", chat_id)
 
-def cmd_errors() -> None:
-    path = "bot_activity.log"
-    if not os.path.exists(path):
-        send_message("Лог-файл ещё не создан")
+
+@safe_command
+def cmd_errors(chat_id: str = None) -> None:
+    """Команда /errors - показать последние ошибки"""
+    log_path = "bot_activity.log"
+    if not os.path.exists(log_path):
+        send_message("📝 Лог-файл ещё не создан", chat_id)
         return
+        
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-15:]
-        send_message("Последние строки лога:\n" + "".join(lines))
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            
+        # Ищем последние строки с ERROR или WARNING
+        error_lines = []
+        for line in reversed(lines[-100:]):  # последние 100 строк
+            if any(level in line for level in ["ERROR", "WARNING", "EXCEPTION"]):
+                error_lines.append(line.strip())
+                if len(error_lines) >= 10:  # максимум 10 ошибок
+                    break
+                    
+        if error_lines:
+            message = "🚨 Последние ошибки:\n" + "\n".join(reversed(error_lines))
+            # Обрезаем если слишком длинное
+            if len(message) > 4000:
+                message = message[:4000] + "..."
+        else:
+            message = "✅ Ошибок в последних логах не найдено"
+            
+        send_message(message, chat_id)
+        
     except Exception as e:
-        send_message(f"⚠️ Ошибка чтения лога: {e}")
+        send_message(f"⚠️ Ошибка чтения лога: {e}", chat_id)
 
-def cmd_lasttrades() -> None:
+
+@safe_command
+def cmd_lasttrades(chat_id: str = None) -> None:
+    """Команда /lasttrades - показать последние сделки"""
     try:
-        rows = CSVHandler.read_last_trades(limit=5)
-        if not rows:
-            send_message("Сделок ещё нет")
+        trades = CSVHandler.read_last_trades(limit=5)
+        if not trades:
+            send_message("📋 Сделок ещё нет", chat_id)
             return
-        lines: List[str] = []
-        for r in rows:
-            side = str(r.get("side") or "BUY")
-            e = r.get("entry_price")
-            x = r.get("exit_price")
-            pnl_pct = r.get("pnl_pct")
-            reason = str(r.get("reason") or "")
-            ai = r.get("ai_score")
-            bs = r.get("buy_score")
-            fs = r.get("final_score")
-            base = f"- {side} {e if e=='' else f'{float(e):.4f}'} → {x if x=='' else f'{float(x):.4f}'}"
-            extras = []
-            if pnl_pct not in ("", None):
+            
+        lines: List[str] = ["📋 Последние сделки:"]
+        
+        for i, trade in enumerate(trades, 1):
+            side = str(trade.get("side", "LONG"))
+            entry = trade.get("entry_price", "")
+            exit_price = trade.get("exit_price", "")
+            pnl_pct = trade.get("pnl_pct", "")
+            reason = str(trade.get("reason", ""))
+            
+            # Форматируем строку сделки
+            trade_line = f"{i}. {side}"
+            
+            if entry and exit_price:
                 try:
-                    extras.append(f"{float(pnl_pct):.2f}%")
-                except Exception:
-                    pass
+                    trade_line += f" {float(entry):.2f}→{float(exit_price):.2f}"
+                except:
+                    trade_line += f" {entry}→{exit_price}"
+                    
+            if pnl_pct:
+                try:
+                    pnl_val = float(pnl_pct)
+                    emoji = "🟢" if pnl_val >= 0 else "🔴"
+                    trade_line += f" {emoji}{pnl_val:+.2f}%"
+                except:
+                    trade_line += f" {pnl_pct}%"
+                    
             if reason:
-                extras.append(reason)
-            if bs not in ("", None) or ai not in ("", None):
-                pair = []
-                if bs not in ("", None):
-                    pair.append(f"B:{float(bs):.2f}" if bs != "" else "")
-                if ai not in ("", None):
-                    pair.append(f"AI:{float(ai):.2f}" if ai != "" else "")
-                extras.append(" ".join([p for p in pair if p]))
-            if fs not in ("", None):
-                extras.append(f"F:{float(fs):.2f}")
-            if extras:
-                base += " | " + " | ".join(extras)
-            lines.append(base)
-        send_message("📋 Последние сделки:\n" + "\n".join(lines))
+                trade_line += f" ({reason})"
+                
+            lines.append(trade_line)
+            
+        send_message("\n".join(lines), chat_id)
+        
     except Exception as e:
         logging.exception("cmd_lasttrades error")
-        send_message(f"⚠️ Ошибка чтения сделок: {e}")
+        send_message(f"⚠️ Ошибка при получении сделок: {e}", chat_id)
 
-def cmd_train(train_func) -> None:
-    send_message("🧠 Запуск обучения модели...")
+
+@safe_command
+def cmd_train(train_func: Callable, chat_id: str = None) -> None:
+    """Команда /train - обучение AI модели"""
+    send_message("🧠 Запуск обучения AI модели...", chat_id)
+    
     try:
+        if not train_func:
+            send_message("❌ Функция обучения недоступна", chat_id)
+            return
+            
         success = train_func()
+        
         if success:
-            send_message("✅ Модель успешно обучена!")
+            send_message("✅ AI модель успешно обучена!", chat_id)
         else:
-            send_message("❌ Ошибка при обучении модели")
+            send_message("❌ Ошибка при обучении модели", chat_id)
+            
     except Exception as e:
-        logging.error(f"cmd_train error: {e}")
-        send_message(f"❌ Ошибка обучения: {e}")
+        logging.exception("cmd_train error")
+        send_message(f"❌ Ошибка обучения: {e}", chat_id)
+
 
 # ==== Helpers ====
 def _ohlcv_to_df(ohlcv) -> pd.DataFrame:
+    """Конвертация OHLCV в DataFrame"""
     if not ohlcv:
         return pd.DataFrame()
+        
     cols = ["time", "open", "high", "low", "close", "volume"]
     df = pd.DataFrame(ohlcv, columns=cols)
     df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
     df.set_index("time", inplace=True)
     return df
 
+
 def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Расчет ATR"""
     if df.empty or len(df) < period + 2:
         return 0.0
-    high = df["high"]; low = df["low"]; close = df["close"]; prev_close = close.shift(1)
-    tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    
+    tr = pd.concat([
+        (high - low).abs(),
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    
     return float(tr.ewm(alpha=1/period, adjust=False).mean().iloc[-1])
 
-# ==== Test commands (через PositionManager) с исправлениями ====
-def cmd_test(symbol: str = None, timeframe: str = None):
+
+# ==== Test commands ====
+@safe_command
+def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
+    """Команда /test - тестирование анализа рынка"""
     symbol = symbol or SYMBOL_ENV
     timeframe = timeframe or TIMEFRAME_ENV
+    
     try:
-        ex = ExchangeClient()
+        # Создаем временный exchange client
+        ex = ExchangeClient(safe_mode=True)  # Всегда безопасный режим для тестов
+        
+        # Получаем данные
         ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=200)
         if not ohlcv:
-            send_message(f"⚠️ Нет данных OHLCV для {symbol}")
+            send_message(f"⚠️ Нет данных OHLCV для {symbol}", chat_id)
             return
+            
         df = _ohlcv_to_df(ohlcv)
-
+        
+        # Анализируем сигнал
         engine = scoring_engine.ScoringEngine()
-        scores = engine.calculate_scores(df) if hasattr(engine, "calculate_scores") \
-                 else engine.evaluate(df, ai_score=0.55)
+        
+        # Используем правильный метод
+        if hasattr(engine, "evaluate"):
+            scores = engine.evaluate(df, ai_score=0.55)
+        elif hasattr(engine, "calculate_scores"):
+            scores = engine.calculate_scores(df, ai_score=0.55)
+        else:
+            scores = (0.5, 0.55, {})
+            
         if isinstance(scores, tuple) and len(scores) >= 2:
             buy_score, ai_score = float(scores[0]), float(scores[1])
+            details = scores[2] if len(scores) > 2 else {}
         else:
-            buy_score, ai_score = 0.0, 0.55
-
-        last = ex.get_last_price(symbol)
-        send_message(f"🧪 TEST {symbol}\nЦена: {last:.2f}\nBuy {buy_score:.2f} | AI {ai_score:.2f}")
-
-        plt.figure(figsize=(10, 4))
-        df["close"].plot()
-        plt.title(f"TEST {symbol} — close")
-        plt.tight_layout()
-        plt.savefig("test_chart.png", dpi=120)
-        plt.close()
-        send_photo("test_chart.png")
+            buy_score, ai_score = 0.5, 0.55
+            details = {}
+        
+        # Получаем последнюю цену
+        last_price = ex.get_last_price(symbol)
+        
+        # Формируем отчет
+        message = [
+            f"🧪 TEST анализ {symbol} ({timeframe})",
+            f"💰 Цена: {last_price:.2f}",
+            f"📊 Buy Score: {buy_score:.2f}",
+            f"🤖 AI Score: {ai_score:.2f}",
+            ""
+        ]
+        
+        # Добавляем детали если есть
+        if details:
+            rsi = details.get("rsi")
+            if rsi:
+                message.append(f"📈 RSI: {rsi:.1f}")
+                
+            macd_hist = details.get("macd_hist")
+            if macd_hist is not None:
+                message.append(f"📊 MACD Hist: {macd_hist:.4f}")
+                
+            market_condition = details.get("market_condition")
+            if market_condition:
+                message.append(f"🌊 Market: {market_condition}")
+        
+        # Создаем простой график
+        try:
+            plt.figure(figsize=(10, 6))
+            df["close"].plot(title=f"{symbol} Price Chart", color='blue')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            chart_path = "test_chart.png"
+            plt.savefig(chart_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            # Отправляем сообщение и график
+            send_message("\n".join(message), chat_id)
+            send_photo(chart_path, caption=f"График {symbol}", chat_id=chat_id)
+            
+            # Удаляем временный файл
+            try:
+                os.remove(chart_path)
+            except:
+                pass
+                
+        except Exception as e:
+            logging.error(f"Chart creation failed: {e}")
+            send_message("\n".join(message), chat_id)
+            
     except Exception as e:
         logging.exception("cmd_test error")
-        send_message(f"❌ TEST ошибка: {e}")
+        send_message(f"❌ Ошибка тестирования: {e}", chat_id)
 
-def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, amount_usd: float = None):
-    """Тестовая покупка БЕЗ проверок AI, MACD и других фильтров"""
+
+@safe_command
+def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, 
+                amount_usd: float = None, chat_id: str = None):
+    """Команда /testbuy - тестовая покупка"""
     symbol = SYMBOL_ENV
+    
     try:
         amount = float(amount_usd if amount_usd is not None else TEST_TRADE_AMOUNT)
-    except Exception:
+    except (ValueError, TypeError):
         amount = TEST_TRADE_AMOUNT
 
     try:
         # Проверяем, что нет открытой позиции
         st = state_manager.state
         if st.get("in_position") or st.get("opening"):
-            send_message("⏭️ Уже есть открытая позиция или процесс открытия")
+            send_message("⏭️ Уже есть открытая позиция или процесс открытия", chat_id)
             return
 
         # Получаем данные рынка
         ohlcv = exchange_client.fetch_ohlcv(symbol, timeframe=TIMEFRAME_ENV, limit=200)
         df = _ohlcv_to_df(ohlcv)
-        last = float(df["close"].iloc[-1]) if not df.empty else exchange_client.get_last_price(symbol)
+        last_price = float(df["close"].iloc[-1]) if not df.empty else exchange_client.get_last_price(symbol)
         atr_val = _atr(df)
 
         # Создаем временный PositionManager для тестовой покупки
         def test_notify_entry(*args, **kwargs):
-            send_message(f"🧪 TEST BUY выполнен: {args}")
+            send_message(f"🧪 TEST BUY уведомление: позиция открыта", chat_id)
         
         def test_notify_close(*args, **kwargs):
-            send_message(f"🧪 TEST позиция закрыта: {args}")
+            send_message(f"🧪 TEST позиция закрыта", chat_id)
 
-        pm = PositionManager(exchange_client, state_manager, 
-                           notify_entry_func=test_notify_entry, 
-                           notify_close_func=test_notify_close)
+        from trading.position_manager import SimplePositionManager
+        pm = SimplePositionManager(
+            exchange_client, 
+            state_manager, 
+            notify_entry_func=test_notify_entry, 
+            notify_close_func=test_notify_close
+        )
         
-        # Принудительно открываем позицию (обходим все проверки)
-        res = pm.open_long(
+        # Принудительно открываем позицию в безопасном режиме
+        result = pm.open_long(
             symbol=symbol, 
             amount_usd=amount, 
-            entry_price=last, 
+            entry_price=last_price, 
             atr=atr_val or 0.0,
-            buy_score=1.0,  # фиксированные значения для теста
+            buy_score=1.0,  # Фиксированные значения для теста
             ai_score=1.0, 
             amount_frac=1.0,
             market_condition="test",
             pattern="test_pattern"
         )
         
-        if res is None:
-            send_message("⏭️ Тестовая покупка не выполнена. См. логи.")
+        if result is None:
+            send_message("❌ Тестовая покупка не выполнена. Проверьте логи.", chat_id)
         else:
             min_cost = exchange_client.market_min_cost(symbol) or 0.0
             actual_amount = max(amount, min_cost)
-            send_message(
-                f"✅ TEST BUY {symbol}\n"
-                f"Запрошено: ${amount:.2f}\n"
-                f"Выполнено: ${actual_amount:.2f}\n"
-                f"Цена: {last:.4f}\n"
-                f"Режим: {'paper' if res.get('paper') else 'real'}\n"
-                f"ID: {res.get('id', '-')}"
-            )
+            
+            message = [
+                f"✅ TEST BUY выполнен",
+                f"💰 Символ: {symbol}",
+                f"💵 Запрошено: ${amount:.2f}",
+                f"💵 Выполнено: ${actual_amount:.2f}",
+                f"📈 Цена: {last_price:.6f}",
+                f"🔧 Режим: {'paper' if result.get('paper') else 'real'}",
+                f"🆔 ID: {result.get('id', 'N/A')}"
+            ]
+            
+            send_message("\n".join(message), chat_id)
             
     except Exception as e:
         logging.exception("cmd_testbuy error")
-        send_message(f"❌ TEST BUY ошибка: {e}")
+        send_message(f"❌ Ошибка TEST BUY: {e}", chat_id)
 
-def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient):
-    """Тестовая продажа - продает ВСЕ что есть в позиции по текущей цене"""
+
+@safe_command
+def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient, chat_id: str = None):
+    """Команда /testsell - тестовая продажа"""
     symbol = SYMBOL_ENV
+    
     try:
         # Проверяем есть ли позиция
         st = state_manager.state
         if not st.get("in_position"):
-            send_message("⏭️ Нет открытой позиции для продажи")
+            send_message("⏭️ Нет открытой позиции для продажи", chat_id)
             return
 
         # Получаем текущую цену
-        last = exchange_client.get_last_price(symbol)
-        if not last or last <= 0:
-            send_message("❌ Не удалось получить текущую цену")
+        last_price = exchange_client.get_last_price(symbol)
+        if not last_price or last_price <= 0:
+            send_message("❌ Не удалось получить текущую цену", chat_id)
             return
 
         # Получаем данные позиции
         entry_price = float(st.get("entry_price", 0.0))
-        qty_base_stored = float(st.get("qty_base", 0.0))  # количество базовой валюты из покупки
+        qty_base_stored = float(st.get("qty_base", 0.0))
+        qty_usd = float(st.get("qty_usd", 0.0))
         
         if qty_base_stored <= 0:
-            send_message("❌ Размер позиции равен нулю")
+            send_message("❌ Размер позиции равен нулю", chat_id)
             return
-
-        # Используем ФАКТИЧЕСКОЕ количество базовой валюты из покупки
-        qty_base_to_sell = qty_base_stored
-        
-        # Округляем согласно точности биржи
-        qty_base_to_sell = exchange_client.round_amount(symbol, qty_base_to_sell)
-        
-        # Проверяем минимальный размер
-        min_amount = exchange_client.market_min_amount(symbol) or 0.0
-        if qty_base_to_sell < min_amount:
-            if exchange_client.safe_mode:
-                # В безопасном режиме устанавливаем минимум
-                qty_base_to_sell = min_amount
-                send_message(f"⚠️ Размер позиции меньше минимума. Продаем минимум: {min_amount:.8f}")
-            else:
-                # В реальном режиме пытаемся продать весь доступный баланс
-                try:
-                    free_base = exchange_client.get_free_base(symbol)
-                    if free_base >= min_amount:
-                        qty_base_to_sell = exchange_client.round_amount(symbol, free_base)
-                        send_message(f"🔄 Продаем весь доступный баланс: {qty_base_to_sell:.8f}")
-                    else:
-                        send_message(f"❌ Недостаточно средств для продажи. Имеется: {free_base:.8f}, минимум: {min_amount:.8f}")
-                        return
-                except Exception as e:
-                    send_message(f"❌ Ошибка получения баланса: {e}")
-                    return
 
         # Создаем PositionManager для продажи
         def test_notify_close(*args, **kwargs):
-            send_message(f"🧪 TEST SELL завершен")
+            send_message(f"🧪 TEST SELL завершен", chat_id)
 
-        pm = PositionManager(exchange_client, state_manager, 
-                           notify_entry_func=None, 
-                           notify_close_func=test_notify_close)
+        from trading.position_manager import SimplePositionManager
+        pm = SimplePositionManager(
+            exchange_client, 
+            state_manager, 
+            notify_entry_func=None, 
+            notify_close_func=test_notify_close
+        )
         
-        # Принудительно закрываем позицию
-        res = pm.close_all(symbol, exit_price=last, reason="manual_test_sell")
+        # Закрываем позицию
+        result = pm.close_all(symbol, exit_price=last_price, reason="manual_test_sell")
         
-        if res is None:
-            send_message("⏭️ Тестовая продажа не выполнена")
+        if result is None:
+            send_message("❌ Тестовая продажа не выполнена", chat_id)
         else:
             # Рассчитываем PnL
-            pnl_pct = (last - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
-            pnl_abs = (last - entry_price) * qty_base_stored if entry_price > 0 else 0.0
+            pnl_pct = (last_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+            pnl_abs = (last_price - entry_price) * qty_base_stored if entry_price > 0 else 0.0
+            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
             
-            send_message(
-                f"✅ TEST SELL {symbol}\n"
-                f"Продано: {qty_base_to_sell:.8f}\n"
-                f"Цена: {last:.4f}\n"
-                f"Вход: {entry_price:.4f} → Выход: {last:.4f}\n"
-                f"PnL: {pnl_abs:.2f} USDT ({pnl_pct:.2f}%)"
-            )
+            message = [
+                f"✅ TEST SELL выполнен",
+                f"💰 Символ: {symbol}",
+                f"📊 Продано: {qty_base_stored:.8f}",
+                f"📈 Цена продажи: {last_price:.6f}",
+                f"📉 Цена покупки: {entry_price:.6f}",
+                f"{pnl_emoji} PnL: {pnl_pct:+.2f}% ({pnl_abs:+.2f} USDT)",
+                f"💵 Размер позиции: ${qty_usd:.2f}"
+            ]
+            
+            send_message("\n".join(message), chat_id)
             
     except Exception as e:
         logging.exception("cmd_testsell error")
-        send_message(f"❌ TEST SELL ошибка: {e}")
+        send_message(f"❌ Ошибка TEST SELL: {e}", chat_id)
 
-
-# ==== Router ====
 
 @safe_command
-def cmd_help(message):
+def cmd_help(chat_id: str = None):
+    """Команда /help - справка"""
     help_text = (
-        "📜 Доступные команды:\n"
-        "/start — Запуск бота\n"
-        "/status — Показать текущую позицию\n"
-        "/profit — Показать общую прибыль\n"
-        "/errors — Показать ошибки сигналов\n"
-        "/lasttrades — Показать последние сделки\n"
-        "/train — Запустить переобучение модели\n"
-        "/test — Запустить тестовый анализ сигнала\n"
-        "/testbuy — Тестовая покупка\n"
-        "/testsell — Тестовая продажа\n"
-        "/help — Показать эту справку\n"
+        "📜 Справка по командам:\n\n"
+        "🔧 Основные команды:\n"
+        "/start — Запуск и приветствие\n"
+        "/status — Текущая позиция\n"
+        "/profit — Статистика торговли\n"
+        "/lasttrades — Последние 5 сделок\n\n"
+        "🧪 Тестирование:\n"
+        "/test [символ] — Анализ рынка\n"
+        "/testbuy [сумма] — Тестовая покупка\n"
+        "/testsell — Тестовая продажа\n\n"
+        "🛠️ Служебные:\n"
+        "/errors — Последние ошибки\n"
+        "/train — Обучить AI модель\n"
+        "/help — Эта справка\n\n"
+        "ℹ️ Примеры:\n"
+        "• /test BTC/USDT 15m\n"
+        "• /testbuy 10\n"
+        "• /status"
     )
-    send_message(help_text)
+    send_message(help_text, chat_id)
 
-def process_command(text: str, state_manager, exchange_client: ExchangeClient, train_func: Optional[Callable] = None):
+
+# ==== Router - главная функция обработки команд ====
+def process_command(text: str, state_manager: StateManager, exchange_client: ExchangeClient, 
+                   train_func: Optional[Callable] = None, chat_id: str = None):
+    """
+    Главная функция обработки команд от пользователя.
+    
+    Args:
+        text: Текст команды
+        state_manager: Менеджер состояния
+        exchange_client: Клиент биржи
+        train_func: Функция обучения AI (опционально)
+        chat_id: ID чата для ответа
+    """
+    
     text = (text or "").strip()
     if not text.startswith("/"):
         return
+    
+    # Извлекаем команду и аргументы
+    parts = text.split()
+    command = parts[0].lower()
+    args = parts[1:] if len(parts) > 1 else []
+    
     try:
-        sym = SYMBOL_ENV
-        if text.startswith("/start"):
-            return cmd_start()
-        if text.startswith("/status"):
-            return cmd_status(state_manager, lambda: exchange_client.get_last_price(sym))
-        if text.startswith("/profit"):
-            return cmd_profit()
-        if text.startswith("/errors"):
-            return cmd_errors()
-        if text.startswith("/lasttrades"):
-            return cmd_lasttrades()
-        if text.startswith("/train"):
-            return cmd_train(train_func if train_func else (lambda: False))
-        if text.startswith("/test "):
-            parts = text.split()
-            s = parts[1] if len(parts) > 1 else None
-            tf = parts[2] if len(parts) > 2 else None
-            return cmd_test(s, tf)
-        if text.strip() == "/test":
-            return cmd_test()
-        if text.startswith("/testbuy"):
-            parts = text.split()
-            amt = float(parts[1]) if len(parts) > 1 else None
-            return cmd_testbuy(state_manager, exchange_client, amt)
-        if text.startswith("/testsell"):
-            return cmd_testsell(state_manager, exchange_client)
-
-        logging.info(f"Unknown or unsupported command: {text}")
-        send_message(f"❓ Неизвестная команда: {text}")
+        # Базовые команды
+        if command == "/start":
+            cmd_start(chat_id)
+            
+        elif command == "/status":
+            cmd_status(state_manager, exchange_client, chat_id)
+            
+        elif command == "/profit":
+            cmd_profit(chat_id)
+            
+        elif command == "/errors":
+            cmd_errors(chat_id)
+            
+        elif command == "/lasttrades":
+            cmd_lasttrades(chat_id)
+            
+        elif command == "/help":
+            cmd_help(chat_id)
+            
+        elif command == "/train":
+            cmd_train(train_func if train_func else lambda: False, chat_id)
+            
+        # Тестовые команды
+        elif command == "/test":
+            symbol = args[0] if len(args) > 0 else None
+            timeframe = args[1] if len(args) > 1 else None
+            cmd_test(symbol, timeframe, chat_id)
+            
+        elif command == "/testbuy":
+            amount = None
+            if len(args) > 0:
+                try:
+                    amount = float(args[0])
+                except ValueError:
+                    send_message("❌ Неверный формат суммы. Используйте: /testbuy 10", chat_id)
+                    return
+            cmd_testbuy(state_manager, exchange_client, amount, chat_id)
+            
+        elif command == "/testsell":
+            cmd_testsell(state_manager, exchange_client, chat_id)
+            
+        else:
+            send_message(f"❓ Неизвестная команда: {command}\nИспользуйте /help для справки", chat_id)
+            
     except Exception as e:
         logging.exception(f"process_command error: {e}")
-        send_message(f"⚠️ Ошибка обработки команды: {e}")
+        send_message(f"⚠️ Ошибка обработки команды: {e}", chat_id)
