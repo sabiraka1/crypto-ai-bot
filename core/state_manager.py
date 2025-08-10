@@ -5,8 +5,17 @@ import tempfile
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+from enum import Enum
 
-from config.settings import TradingState, TradingConfig
+
+class TradingState(Enum):
+    WAITING = "waiting"
+    ANALYZING = "analyzing"
+    ENTERING = "entering"
+    IN_POSITION = "in_position"
+    EXITING = "exiting"
+    COOLDOWN = "cooldown"
+    PAUSED = "paused"
 
 
 class StateManager:
@@ -110,6 +119,12 @@ class StateManager:
             "last_reason": None,
             # цикл/свечи
             "last_candle_ts": None,
+            # управление позицией
+            "last_manage_check": None,
+            "entry_ts": None,
+            "market_condition": None,
+            "pattern": None,
+            "order_id": None
         }
 
     def _ensure_defaults(self, write_if_changed: bool = False) -> None:
@@ -126,34 +141,51 @@ class StateManager:
 
     # -------------------- Generic API --------------------
     def get(self, key: str, default: Any = None) -> Any:
+        """Получение значения по ключу"""
         with self._lock:
             return self.state.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        """Установка значения по ключу с автосохранением"""
         with self._lock:
             self.state[key] = value
             self._atomic_write(self.state)
 
+    def update(self, data: Dict[str, Any]) -> None:
+        """Обновление нескольких значений одновременно"""
+        with self._lock:
+            self.state.update(data)
+            self._atomic_write(self.state)
+
     def get_all(self) -> Dict[str, Any]:
+        """Получение всего состояния"""
         with self._lock:
             return dict(self.state)
 
     def flush(self) -> None:
-        """Совместимость (запись уже атомарная)."""
-        pass
+        """Принудительная запись на диск (совместимость)."""
+        with self._lock:
+            self._atomic_write(self.state)
 
     # -------------------- Trading state API --------------------
     def get_trading_state(self) -> TradingState:
+        """Получение состояния торговли"""
         with self._lock:
-            return TradingState(self.state["trading_state"])
+            state_value = self.state.get("trading_state", TradingState.WAITING.value)
+            try:
+                return TradingState(state_value)
+            except ValueError:
+                return TradingState.WAITING
 
     def set_trading_state(self, state: TradingState) -> None:
+        """Установка состояния торговли"""
         with self._lock:
             self.state["trading_state"] = state.value
             self._atomic_write(self.state)
 
     # -------------------- Cooldown --------------------
     def is_in_cooldown(self) -> bool:
+        """Проверка нахождения в кулдауне"""
         with self._lock:
             ts = self.state.get("cooldown_until")
             if not ts:
@@ -166,24 +198,29 @@ class StateManager:
 
     def start_cooldown(self, seconds: Optional[int] = None) -> None:
         """
-        Установить паузу после сделки. Если seconds не задан —
-        берём TradingConfig.POST_SALE_COOLDOWN (в минутах).
+        Установить паузу после сделки. 
+        Если seconds не задан — используем 60 минут по умолчанию.
         """
         with self._lock:
             if seconds is None:
-                minutes = getattr(TradingConfig, "POST_SALE_COOLDOWN", 0) or 0
-                delta = timedelta(minutes=int(minutes))
+                delta = timedelta(minutes=60)  # Стандартный кулдаун
             else:
                 delta = timedelta(seconds=int(seconds))
             cooldown_time = datetime.now() + delta
             self.state["cooldown_until"] = cooldown_time.isoformat()
             self._atomic_write(self.state)
 
+    def clear_cooldown(self) -> None:
+        """Очистка кулдауна"""
+        with self._lock:
+            self.state["cooldown_until"] = None
+            self._atomic_write(self.state)
+
     # -------------------- Position helpers --------------------
     def reset_position(self) -> None:
         """Сброс всех полей открытой позиции."""
         with self._lock:
-            self.state.update({
+            position_fields = {
                 "in_position": False,
                 "opening": False,
                 "symbol": None,
@@ -203,5 +240,93 @@ class StateManager:
                 "partial_taken": False,
                 "close_price": None,
                 "last_reason": None,
-            })
+                "last_manage_check": None,
+                "entry_ts": None,
+                "market_condition": None,
+                "pattern": None,
+                "order_id": None
+            }
+            self.state.update(position_fields)
             self._atomic_write(self.state)
+
+    def is_position_active(self) -> bool:
+        """Проверка активности позиции"""
+        with self._lock:
+            return bool(self.state.get("in_position") or self.state.get("opening"))
+
+    def get_position_info(self) -> Dict[str, Any]:
+        """Получение информации о позиции"""
+        with self._lock:
+            if not self.is_position_active():
+                return {"active": False}
+            
+            return {
+                "active": True,
+                "symbol": self.state.get("symbol"),
+                "entry_price": self.state.get("entry_price"),
+                "qty_usd": self.state.get("qty_usd"),
+                "qty_base": self.state.get("qty_base"),
+                "sl_price": self.state.get("sl_atr"),
+                "tp1_price": self.state.get("tp1_atr"),
+                "tp2_price": self.state.get("tp2_atr"),
+                "partial_taken": self.state.get("partial_taken", False),
+                "trailing_on": self.state.get("trailing_on", False),
+                "entry_time": self.state.get("entry_ts"),
+                "buy_score": self.state.get("buy_score"),
+                "ai_score": self.state.get("ai_score"),
+                "market_condition": self.state.get("market_condition"),
+                "pattern": self.state.get("pattern")
+            }
+
+    # -------------------- Statistics --------------------
+    def increment_trade_count(self) -> None:
+        """Увеличение счетчика сделок"""
+        with self._lock:
+            self.state["total_trades"] = self.state.get("total_trades", 0) + 1
+            self._atomic_write(self.state)
+
+    def add_profit(self, profit: float) -> None:
+        """Добавление прибыли к общей статистике"""
+        with self._lock:
+            self.state["total_profit"] = self.state.get("total_profit", 0.0) + float(profit)
+            if profit > 0:
+                self.state["win_trades"] = self.state.get("win_trades", 0) + 1
+            self._atomic_write(self.state)
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Получение торговой статистики"""
+        with self._lock:
+            total_trades = self.state.get("total_trades", 0)
+            win_trades = self.state.get("win_trades", 0)
+            total_profit = self.state.get("total_profit", 0.0)
+            
+            win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0.0
+            
+            return {
+                "total_trades": total_trades,
+                "win_trades": win_trades,
+                "lose_trades": total_trades - win_trades,
+                "win_rate": round(win_rate, 2),
+                "total_profit": round(total_profit, 2)
+            }
+
+    # -------------------- Utilities --------------------
+    def clear_all(self) -> None:
+        """Полная очистка состояния"""
+        with self._lock:
+            self.state = self._default_state()
+            self._atomic_write(self.state)
+
+    def export_state(self) -> Dict[str, Any]:
+        """Экспорт состояния для отладки"""
+        with self._lock:
+            return dict(self.state)
+
+    def import_state(self, new_state: Dict[str, Any]) -> None:
+        """Импорт состояния (осторожно!)"""
+        with self._lock:
+            # Проверяем что это валидный словарь
+            if isinstance(new_state, dict):
+                self.state = dict(new_state)
+                self._ensure_defaults()
+                self._atomic_write(self.state)
