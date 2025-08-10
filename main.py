@@ -6,10 +6,10 @@ import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from exchange_client import ExchangeClient
-from position_manager import PositionManager
-from performance_tracker import PerformanceTracker
-from csv_handler import CSVHandler
+from trading.exchange_client import ExchangeClient
+from trading.position_manager import PositionManager
+from trading.performance_tracker import PerformanceTracker
+from trading.utils.csv_handler import CSVHandler
 from settings import (
     TRADING_PAIR, TP1, TP2, TP3, TP4,
     SL_PERCENT, TRAILING_STOP_PERCENT,
