@@ -492,4 +492,67 @@ class PositionManager:
                     st["partial_taken"] = True
                     st["trailing_on"] = True
                     
-                    # Обновляем трейлинг
+                   # Обновляем трейлинг
+                    if atr > 0:
+                        new_sl_atr = max(entry, last_price - self.SL_ATR * atr)
+                        new_sl_pct = max(entry, last_price * (1 + self.SL_PERCENT))
+                        st["sl_atr"] = float(new_sl_atr)
+                        st["sl_price_pct"] = float(new_sl_pct)
+                    
+                    self.state.save_state()
+                    
+                    pnl_partial = (last_price - entry) / entry * 100.0
+                    logging.info(f"✅ Partial close executed: sold {actual_sold:.8f} @ {last_price:.4f}, PnL {pnl_partial:.2f}%")
+                    
+                    # Уведомление о частичном закрытии
+                    try:
+                        from telegram import bot_handler as tgbot
+                        tgbot.send_message(
+                            f"📊 Частичное закрытие {symbol}\n"
+                            f"Продано: {actual_sold:.8f} @ {last_price:.4f}\n"
+                            f"PnL: {pnl_partial:.2f}%\n"
+                            f"Остаток: {remaining_qty_base:.8f}\n"
+                            f"Трейлинг активирован"
+                        )
+                    except Exception:
+                        pass
+                    
+                except Exception as e:
+                    logging.error(f"❌ Partial close failed: {e}")
+                    # В случае ошибки все равно включаем трейлинг
+                    st["trailing_on"] = True
+                    st["partial_taken"] = True
+                    if atr > 0:
+                        new_sl_atr = max(entry, last_price - self.SL_ATR * atr)
+                        new_sl_pct = max(entry, last_price * (1 + self.SL_PERCENT))
+                        st["sl_atr"] = float(new_sl_atr)
+                        st["sl_price_pct"] = float(new_sl_pct)
+                    self.state.save_state()
+                return
+
+            # ✅ ИСПРАВЛЕНИЕ: Трейлинг стоп (только если включен)
+            if trailing_on and atr > 0:
+                current_sl_atr = float(st.get("sl_atr", 0.0))
+                current_sl_pct = float(st.get("sl_price_pct", 0.0))
+                
+                # Рассчитываем новые уровни трейлинга
+                new_sl_atr = last_price - self.SL_ATR * atr
+                new_sl_pct = last_price * (1 + self.SL_PERCENT)
+                
+                # Обновляем только если новый стоп выше текущего (защита прибыли)
+                sl_updated = False
+                if new_sl_atr > current_sl_atr:
+                    st["sl_atr"] = float(new_sl_atr)
+                    sl_updated = True
+                    
+                if new_sl_pct > current_sl_pct:
+                    st["sl_price_pct"] = float(max(entry, new_sl_pct))  # Не ниже точки входа
+                    sl_updated = True
+                
+                if sl_updated:
+                    self.state.save_state()
+                    logging.debug(f"🔄 Trailing stop updated: SL_ATR={st['sl_atr']:.4f}, SL_PCT={st['sl_price_pct']:.4f}")
+
+    def close_position(self, symbol: str, exit_price: float, reason: str):
+        """Алиас для совместимости"""
+        return self.close_all(symbol, exit_price, reason)
