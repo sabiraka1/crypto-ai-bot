@@ -155,8 +155,10 @@ class TradingConfig:
 
 # Создаём директории при старте, чтобы избежать FileNotFoundError
 cfg = TradingConfig()
-os.makedirs(os.path.dirname(cfg.CLOSED_TRADES_CSV), exist_ok=True)
-os.makedirs(os.path.dirname(cfg.SIGNALS_CSV), exist_ok=True)
+
+# Безопасное создание директорий
+os.makedirs(os.path.dirname(cfg.CLOSED_TRADES_CSV) or ".", exist_ok=True)
+os.makedirs(os.path.dirname(cfg.SIGNALS_CSV) or ".", exist_ok=True)
 os.makedirs(cfg.LOGS_DIR, exist_ok=True)
 os.makedirs(cfg.MODEL_DIR, exist_ok=True)
 
