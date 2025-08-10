@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import traceback
+import threading
 from typing import Optional, Tuple, Dict, Any
 
 import pandas as pd
@@ -154,6 +155,10 @@ class TradingBot:
         self.timeframe_15m = TIMEFRAME_DEFAULT
         self.trade_amount_usd = float(os.getenv("TRADE_AMOUNT", "50"))
         self.cycle_minutes = ANALYSIS_INTERVAL_MIN
+
+        # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Глобальная блокировка для торгового цикла
+        self._trading_lock = threading.RLock()
+        self._last_decision_candle = None  # Отслеживание последней обработанной свечи
 
         # инфраструктура
         self.state = StateManager()
@@ -351,283 +356,324 @@ class TradingBot:
             logging.error(f"Failed to fetch market data: {e}")
             return pd.DataFrame(), None, None
 
+    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверка состояния позиции
+    def _is_position_active(self) -> bool:
+        """Безопасная проверка активности позиции"""
+        try:
+            with self._trading_lock:
+                st = self.state.state
+                return bool(st.get("in_position") or st.get("opening"))
+        except Exception as e:
+            logging.error(f"Error checking position state: {e}")
+            return True  # В случае ошибки считаем что позиция активна для безопасности
+
+    def _get_candle_id(self, df: pd.DataFrame) -> str:
+        """Получает уникальный ID текущей свечи"""
+        try:
+            if df.empty:
+                return ""
+            return df.index[-1].strftime("%Y%m%d_%H%M")
+        except Exception:
+            return ""
+
     # ── торговый цикл ─────────────────────────────────────────────────────────
     def _trading_cycle(self):
-        df_15m, last_price, atr_val = self._fetch_market()
-        if df_15m.empty or last_price is None:
-            logging.error("Failed to fetch market data")
-            return
-
-        # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем состояние позиции ДО всех решений
-        is_in_position = self.state.state.get("in_position", False)
-        is_opening = self.state.state.get("opening", False)
-        
-        # ✅ Если позиция открыта или открывается - НЕ входим в новые позиции
-        if is_in_position or is_opening:
-            logging.info(f"💼 Position status: in_position={is_in_position}, opening={is_opening}")
-            # Только управляем существующей позицией
+        # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Глобальная блокировка торгового цикла
+        with self._trading_lock:
             try:
-                self.pm.manage(self.symbol, last_price, atr_val or 0.0)
-            except Exception:
-                logging.exception("Error in manage state")
-            return  # ✅ ПРЕРЫВАЕМ цикл - не ищем новые входы
+                df_15m, last_price, atr_val = self._fetch_market()
+                if df_15m.empty or last_price is None:
+                    logging.error("Failed to fetch market data")
+                    return
 
-        # Временная метка текущей (последней) свечи
-        candle_ts = int(df_15m.index[-1].timestamp())
-        last_seen = self.state.state.get("last_candle_ts")
+                # ✅ ПЕРВАЯ ПРОВЕРКА: Проверяем состояние позиции в самом начале
+                if self._is_position_active():
+                    logging.debug(f"💼 Position active, managing existing position")
+                    # Только управляем существующей позицией
+                    try:
+                        self.pm.manage(self.symbol, last_price, atr_val or 0.0)
+                    except Exception:
+                        logging.exception("Error in manage state")
+                    return  # ✅ ПРЕРЫВАЕМ цикл - не ищем новые входы
 
-        # Считаем все метрики (для логов и для решений)
-        ai_score_raw = self._predict_ai_score(df_15m)
-        buy_score, ai_score_eval, details = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
-        ai_score = max(0.0, min(1.0, float(ai_score_eval if ai_score_eval is not None else ai_score_raw)))
+                # ✅ ПРОВЕРКА НОВОЙ СВЕЧИ: обрабатываем решения только по новым свечам
+                current_candle_id = self._get_candle_id(df_15m)
+                if current_candle_id == self._last_decision_candle:
+                    logging.debug(f"⏩ Same candle {current_candle_id}, skipping decision logic")
+                    return
 
-        macd_hist = details.get("macd_hist")
-        rsi_val = details.get("rsi")
-        macd_growing = details.get("macd_growing", False)
+                # Считаем все метрики (для логов и для решений)
+                ai_score_raw = self._predict_ai_score(df_15m)
+                buy_score, ai_score_eval, details = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
+                ai_score = max(0.0, min(1.0, float(ai_score_eval if ai_score_eval is not None else ai_score_raw)))
 
-        macd_pts = (1.0 if (macd_hist is not None and macd_hist > 0) else 0.0) + (1.0 if macd_growing else 0.0)
-        rsi_pts = 1.0 if (rsi_val is not None and 45 <= rsi_val <= 65) else 0.0
+                macd_hist = details.get("macd_hist")
+                rsi_val = details.get("rsi")
+                macd_growing = details.get("macd_growing", False)
 
-        # ── Информационный лог каждые INFO_LOG_INTERVAL_SEC (не влияет на торговлю) ──
-        now = time.time()
-        if now - self._last_info_log_ts >= INFO_LOG_INTERVAL_SEC:
-            market_cond_info = "sideways"
-            confidence = 0.01
-            try:
-                market_cond_info = details.get("market_condition", market_cond_info)
-                confidence = float(details.get("market_confidence", confidence))
-            except Exception:
-                pass
-            logging.info(f"📊 Market Analysis: {market_cond_info}, Confidence: {confidence:.2f}")
-            logging.info("✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
-            logging.info(
-                f"📊 Buy Score: {buy_score:.2f}/{getattr(self.scorer, 'min_score_to_buy', ENV_MIN_SCORE):.2f} "
-                f"| MACD: {macd_pts:.1f} | AI: {ai_score:.2f}"
-            )
-            self._last_info_log_ts = now
+                macd_pts = (1.0 if (macd_hist is not None and macd_hist > 0) else 0.0) + (1.0 if macd_growing else 0.0)
+                rsi_pts = 1.0 if (rsi_val is not None and 45 <= rsi_val <= 65) else 0.0
 
-        # ── Лог снимка сигнала (до принятия решения) ──
-        try:
-            CSVHandler.log_signal_snapshot({
-                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                "symbol": self.symbol,
-                "timeframe": self.timeframe_15m,
-                "close": float(df_15m["close"].iloc[-1]),
-                "rsi": details.get("rsi"),
-                "macd": details.get("macd"),
-                "macd_signal": details.get("macd_signal"),
-                "macd_hist": details.get("macd_hist"),
-                "ema_20": details.get("ema_20"),
-                "ema_50": details.get("ema_50"),
-                "sma_20": details.get("sma_20"),
-                "sma_50": details.get("sma_50"),
-                "atr_14": details.get("atr"),
-                "price_change_1": details.get("price_change_1"),
-                "price_change_3": details.get("price_change_3"),
-                "price_change_5": details.get("price_change_5"),
-                "vol_change": details.get("vol_change"),
-                "buy_score": float(buy_score),
-                "ai_score": float(ai_score),
-                "market_condition": details.get("market_condition", "sideways"),
-                "decision": "precheck",
-                "reason": "periodic_snapshot"
-            })
-        except Exception:
-            # не мешаем торговле, если лог не записался
-            pass
-
-        # ── Решение «войти/нет» ТОЛЬКО по закрытию новой свечи ──
-        # если это та же свеча, что уже обрабатывали — решения не принимаем
-        if last_seen is not None and candle_ts == int(last_seen):
-            return
-
-        # Новая свеча: принимаем решение, а потом запоминаем её ts
-        try:
-            # 1) порог по buy_score
-            min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
-            if buy_score < float(min_thr):
-                logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
-                try:
-                    CSVHandler.log_signal_snapshot({
-                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                        "symbol": self.symbol,
-                        "timeframe": self.timeframe_15m,
-                        "close": float(df_15m['close'].iloc[-1]),
-                        "buy_score": float(buy_score),
-                        "ai_score": float(ai_score),
-                        "market_condition": details.get("market_condition", "sideways"),
-                        "decision": "reject",
-                        "reason": f"buy_score<{float(min_thr):.2f}",
-                    })
-                except Exception:
-                    pass
-                return
-
-            # ✅ ИСПРАВЛЕНИЕ: Проверяем AI gate корректно
-            if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
-                logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
-                try:
-                    tgbot.send_message(
-                        f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}"
+                # ── Информационный лог каждые INFO_LOG_INTERVAL_SEC ──
+                now = time.time()
+                if now - self._last_info_log_ts >= INFO_LOG_INTERVAL_SEC:
+                    market_cond_info = "sideways"
+                    confidence = 0.01
+                    try:
+                        market_cond_info = details.get("market_condition", market_cond_info)
+                        confidence = float(details.get("market_confidence", confidence))
+                    except Exception:
+                        pass
+                    logging.info(f"📊 Market Analysis: {market_cond_info}, Confidence: {confidence:.2f}")
+                    logging.info("✅ RSI in healthy range (+1 point)" if rsi_pts > 0 else "ℹ️ RSI outside healthy range")
+                    logging.info(
+                        f"📊 Buy Score: {buy_score:.2f}/{getattr(self.scorer, 'min_score_to_buy', ENV_MIN_SCORE):.2f} "
+                        f"| MACD: {macd_pts:.1f} | AI: {ai_score:.2f}"
                     )
-                except Exception:
-                    pass
+                    self._last_info_log_ts = now
+
+                # ── Лог снимка сигнала (до принятия решения) ──
                 try:
                     CSVHandler.log_signal_snapshot({
                         "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
                         "symbol": self.symbol,
                         "timeframe": self.timeframe_15m,
-                        "close": float(df_15m['close'].iloc[-1]),
+                        "close": float(df_15m["close"].iloc[-1]),
+                        "rsi": details.get("rsi"),
+                        "macd": details.get("macd"),
+                        "macd_signal": details.get("macd_signal"),
+                        "macd_hist": details.get("macd_hist"),
+                        "ema_20": details.get("ema_20"),
+                        "ema_50": details.get("ema_50"),
+                        "sma_20": details.get("sma_20"),
+                        "sma_50": details.get("sma_50"),
+                        "atr_14": details.get("atr"),
+                        "price_change_1": details.get("price_change_1"),
+                        "price_change_3": details.get("price_change_3"),
+                        "price_change_5": details.get("price_change_5"),
+                        "vol_change": details.get("vol_change"),
                         "buy_score": float(buy_score),
                         "ai_score": float(ai_score),
                         "market_condition": details.get("market_condition", "sideways"),
-                        "decision": "reject",
-                        "reason": f"ai<{ENV_AI_MIN_TO_TRADE:.2f}",
+                        "decision": "precheck",
+                        "reason": "periodic_snapshot"
                     })
                 except Exception:
-                    pass
-                return
-
-            # ✅ ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Убеждаемся что позиция НЕ открыта перед входом
-            current_state = self.state.state
-            if current_state.get("in_position") or current_state.get("opening"):
-                logging.info("⏩ Вход отклонён: позиция уже открыта или в процессе открытия")
-                return
-
-            # 3) размер позиции
-            frac = self.scorer.position_fraction(ai_score)  # ожидается 0..1
-            usd_planned = float(self.trade_amount_usd) * float(frac)
-            min_cost = self.exchange.market_min_cost(self.symbol) or 0.0
-            logging.info(
-                f"SIZER: base={self.trade_amount_usd:.2f} ai={ai_score:.2f} "
-                f"-> planned={usd_planned:.2f}, min_cost={min_cost:.2f}"
-            )
-
-            if frac <= 0.0 or usd_planned <= 0.0:
-                msg = f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен."
-                logging.info(msg)
-                try:
-                    tgbot.send_message(msg)
-                except Exception:
-                    pass
-                try:
-                    CSVHandler.log_signal_snapshot({
-                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                        "symbol": self.symbol,
-                        "timeframe": self.timeframe_15m,
-                        "close": float(df_15m['close'].iloc[-1]),
-                        "buy_score": float(buy_score),
-                        "ai_score": float(ai_score),
-                        "market_condition": details.get("market_condition", "sideways"),
-                        "decision": "reject",
-                        "reason": "position_fraction=0",
-                    })
-                except Exception:
-                    pass
-                return
-
-            # ── market_condition / pattern из деталей или быстрый фолбэк ──
-            try:
-                market_condition = details.get("market_condition")
-            except Exception:
-                market_condition = None
-            try:
-                pattern = details.get("pattern") or details.get("setup") or ""
-            except Exception:
-                pattern = ""
-
-            if not market_condition:
-                try:
-                    market_condition = self._market_condition_guess(df_15m["close"].iloc[:-1])
-                except Exception:
-                    market_condition = "sideways"
-
-            # ✅ ФИНАЛЬНАЯ ПРОВЕРКА перед входом
-            final_state = self.state.state
-            if final_state.get("in_position") or final_state.get("opening"):
-                logging.info("⏩ Последняя проверка: позиция уже открыта, отменяем вход")
-                return
-
-            # 4) попытка входа (PM сам поднимет до min_notional и не даст двойной вход)
-            try:
-                self.pm.open_long(
-                    self.symbol,
-                    usd_planned,
-                    entry_price=last_price,
-                    atr=(atr_val or 0.0),
-                    buy_score=buy_score,
-                    ai_score=ai_score,
-                    amount_frac=frac,
-                    market_condition=market_condition,  # <-- добавлено
-                    pattern=pattern,                      # <-- добавлено
-                )
-                logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
-
-                # лог входа в CSV
-                try:
-                    CSVHandler.log_open_trade({
-                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                        "symbol": self.symbol,
-                        "side": "LONG",
-                        "entry_price": float(last_price),
-                        "qty_usd": float(usd_planned),
-                        "reason": "strategy_enter",
-                        "buy_score": float(buy_score),
-                        "ai_score": float(ai_score),
-                        "entry_ts": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                        "market_condition": market_condition,
-                        "pattern": pattern,
-                    })
-                except Exception:
+                    # не мешаем торговле, если лог не записался
                     pass
 
-            except APIException as e:
-                logging.warning(f"💤 Биржа отклонила вход: {e}")
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принятие решения только по новой свече
                 try:
-                    tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
+                    # ✅ ПЕРЕД КАЖДОЙ ПРОВЕРКОЙ: Убеждаемся что позиция НЕ активна
+                    if self._is_position_active():
+                        logging.info("⏩ Position became active during cycle, aborting entry logic")
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # 1) порог по buy_score
+                    min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
+                    if buy_score < float(min_thr):
+                        logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
+                        try:
+                            CSVHandler.log_signal_snapshot({
+                                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                "symbol": self.symbol,
+                                "timeframe": self.timeframe_15m,
+                                "close": float(df_15m['close'].iloc[-1]),
+                                "buy_score": float(buy_score),
+                                "ai_score": float(ai_score),
+                                "market_condition": details.get("market_condition", "sideways"),
+                                "decision": "reject",
+                                "reason": f"buy_score<{float(min_thr):.2f}",
+                            })
+                        except Exception:
+                            pass
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # ✅ ПОВТОРНАЯ ПРОВЕРКА перед AI gate
+                    if self._is_position_active():
+                        logging.info("⏩ Position detected before AI gate, aborting")
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # 2) AI gate
+                    if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
+                        logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
+                        try:
+                            tgbot.send_message(
+                                f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            CSVHandler.log_signal_snapshot({
+                                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                "symbol": self.symbol,
+                                "timeframe": self.timeframe_15m,
+                                "close": float(df_15m['close'].iloc[-1]),
+                                "buy_score": float(buy_score),
+                                "ai_score": float(ai_score),
+                                "market_condition": details.get("market_condition", "sideways"),
+                                "decision": "reject",
+                                "reason": f"ai<{ENV_AI_MIN_TO_TRADE:.2f}",
+                            })
+                        except Exception:
+                            pass
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # ✅ ПОВТОРНАЯ ПРОВЕРКА перед расчетом размера
+                    if self._is_position_active():
+                        logging.info("⏩ Position detected before position sizing, aborting")
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # 3) размер позиции
+                    frac = self.scorer.position_fraction(ai_score)  # ожидается 0..1
+                    usd_planned = float(self.trade_amount_usd) * float(frac)
+                    min_cost = self.exchange.market_min_cost(self.symbol) or 0.0
+                    logging.info(
+                        f"SIZER: base={self.trade_amount_usd:.2f} ai={ai_score:.2f} "
+                        f"-> planned={usd_planned:.2f}, min_cost={min_cost:.2f}"
+                    )
+
+                    if frac <= 0.0 or usd_planned <= 0.0:
+                        msg = f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен."
+                        logging.info(msg)
+                        try:
+                            tgbot.send_message(msg)
+                        except Exception:
+                            pass
+                        try:
+                            CSVHandler.log_signal_snapshot({
+                                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                "symbol": self.symbol,
+                                "timeframe": self.timeframe_15m,
+                                "close": float(df_15m['close'].iloc[-1]),
+                                "buy_score": float(buy_score),
+                                "ai_score": float(ai_score),
+                                "market_condition": details.get("market_condition", "sideways"),
+                                "decision": "reject",
+                                "reason": "position_fraction=0",
+                            })
+                        except Exception:
+                            pass
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # ── market_condition / pattern из деталей или быстрый фолбэк ──
+                    try:
+                        market_condition = details.get("market_condition")
+                    except Exception:
+                        market_condition = None
+                    try:
+                        pattern = details.get("pattern") or details.get("setup") or ""
+                    except Exception:
+                        pattern = ""
+
+                    if not market_condition:
+                        try:
+                            market_condition = self._market_condition_guess(df_15m["close"].iloc[:-1])
+                        except Exception:
+                            market_condition = "sideways"
+
+                    # ✅ ФИНАЛЬНАЯ ПРОВЕРКА перед входом
+                    if self._is_position_active():
+                        logging.info("⏩ Final check: position active, canceling entry")
+                        self._last_decision_candle = current_candle_id
+                        return
+
+                    # 4) попытка входа (PM сам поднимет до min_notional и не даст двойной вход)
+                    try:
+                        logging.info(f"🔒 Attempting to open position: {self.symbol} ${usd_planned:.2f}")
+                        
+                        result = self.pm.open_long(
+                            self.symbol,
+                            usd_planned,
+                            entry_price=last_price,
+                            atr=(atr_val or 0.0),
+                            buy_score=buy_score,
+                            ai_score=ai_score,
+                            amount_frac=frac,
+                            market_condition=market_condition,
+                            pattern=pattern,
+                        )
+                        
+                        if result is not None:
+                            logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
+                            # лог входа в CSV
+                            try:
+                                CSVHandler.log_open_trade({
+                                    "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                    "symbol": self.symbol,
+                                    "side": "LONG",
+                                    "entry_price": float(last_price),
+                                    "qty_usd": float(usd_planned),
+                                    "reason": "strategy_enter",
+                                    "buy_score": float(buy_score),
+                                    "ai_score": float(ai_score),
+                                    "entry_ts": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                    "market_condition": market_condition,
+                                    "pattern": pattern,
+                                })
+                            except Exception:
+                                pass
+                        else:
+                            logging.warning("⚠️ Position opening returned None")
+
+                    except APIException as e:
+                        logging.warning(f"💤 Биржа отклонила вход: {e}")
+                        try:
+                            tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
+                        except Exception:
+                            pass
+                        try:
+                            CSVHandler.log_signal_snapshot({
+                                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                "symbol": self.symbol,
+                                "timeframe": self.timeframe_15m,
+                                "close": float(df_15m['close'].iloc[-1]),
+                                "buy_score": float(buy_score),
+                                "ai_score": float(ai_score),
+                                "market_condition": market_condition,
+                                "decision": "reject",
+                                "reason": f"exchange_reject:{e}",
+                            })
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        logging.exception("Error while opening long")
+                        try:
+                            tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
+                        except Exception:
+                            pass
+                        try:
+                            CSVHandler.log_signal_snapshot({
+                                "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
+                                "symbol": self.symbol,
+                                "timeframe": self.timeframe_15m,
+                                "close": float(df_15m['close'].iloc[-1]),
+                                "buy_score": float(buy_score),
+                                "ai_score": float(ai_score),
+                                "market_condition": market_condition,
+                                "decision": "reject",
+                                "reason": "exception_on_enter",
+                            })
+                        except Exception:
+                            pass
+                finally:
+                    # ✅ КРИТИЧЕСКИ ВАЖНО: Запоминаем обработанную свечу в любом случае
+                    self._last_decision_candle = current_candle_id
+
+            except Exception as e:
+                logging.error(f"Trading cycle error: {e}")
+                # В случае критической ошибки тоже запоминаем свечу
+                try:
+                    if df_15m is not None and not df_15m.empty:
+                        self._last_decision_candle = self._get_candle_id(df_15m)
                 except Exception:
                     pass
-                try:
-                    CSVHandler.log_signal_snapshot({
-                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                        "symbol": self.symbol,
-                        "timeframe": self.timeframe_15m,
-                        "close": float(df_15m['close'].iloc[-1]),
-                        "buy_score": float(buy_score),
-                        "ai_score": float(ai_score),
-                        "market_condition": market_condition,
-                        "decision": "reject",
-                        "reason": f"exchange_reject:{e}",
-                    })
-                except Exception:
-                    pass
-            except Exception:
-                logging.exception("Error while opening long")
-                try:
-                    tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
-                except Exception:
-                    pass
-                try:
-                    CSVHandler.log_signal_snapshot({
-                        "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                        "symbol": self.symbol,
-                        "timeframe": self.timeframe_15m,
-                        "close": float(df_15m['close'].iloc[-1]),
-                        "buy_score": float(buy_score),
-                        "ai_score": float(ai_score),
-                        "market_condition": market_condition,
-                        "decision": "reject",
-                        "reason": "exception_on_enter",
-                    })
-                except Exception:
-                    pass
-        finally:
-            # Запоминаем обработанную свечу в любом случае, чтобы не принимать решение повторно
-            try:
-                self.state.state["last_candle_ts"] = candle_ts
-                self.state.save_state()
-            except Exception:
-                pass
 
     # ── внешний запуск ─────────────────────────────────────────────────────────
     def run(self):

@@ -4,6 +4,7 @@ import os
 import re
 import logging
 import threading
+import time
 from typing import Optional
 import requests
 from flask import Flask, request, jsonify
@@ -107,7 +108,8 @@ app = Flask(__name__)
 # ================== ГЛОБАЛКИ ==================
 _GLOBAL_EX = ExchangeClient()
 _STATE = StateManager()
-_TRADING_BOT = None  # ✅ Добавляем глобальную ссылку на бота
+_TRADING_BOT = None  # ✅ Глобальная ссылка на бота
+_TRADING_BOT_LOCK = threading.RLock()  # ✅ Блокировка для создания бота
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
@@ -223,11 +225,21 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
         return
 
     try:
+        # ✅ ИСПРАВЛЕНИЕ: Передаем корректные объекты, включая _TRADING_BOT для команд
+        exchange_client = _GLOBAL_EX
+        state_manager = _STATE
+        
+        # Для команд, которым нужен доступ к боту, проверяем его наличие
+        if text.startswith(("/testbuy", "/testsell", "/status")) and _TRADING_BOT:
+            # Используем state manager от активного бота если он есть
+            state_manager = _TRADING_BOT.state
+            exchange_client = _TRADING_BOT.exchange
+
         # ✅ Используем централизованную обработку команд из bot_handler
         tgbot.process_command(
             text=text, 
-            state_manager=_STATE, 
-            exchange_client=_GLOBAL_EX, 
+            state_manager=state_manager, 
+            exchange_client=exchange_client, 
             train_func=_train_model_safe
         )
     except Exception:
@@ -288,7 +300,7 @@ def set_webhook():
     except Exception:
         logging.exception("setWebhook error")
 
-# ================== TRADING LOOP ==================
+# ================== TRADING LOOP (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
 def start_trading_loop():
     """
     ✅ ИСПРАВЛЕНИЕ: Улучшенный запуск торгового цикла с правильной блокировкой
@@ -299,22 +311,40 @@ def start_trading_loop():
         logging.info("Trading loop disabled by ENABLE_TRADING=0")
         return
 
-    lock_path = ".trading.lock"
-    
-    # Если лок-файл существует — удаляем, чтобы позволить перезапуск
-    try:
-        if os.path.exists(lock_path):
-            os.remove(lock_path)
-            logging.warning(f"⚠️ Removed stale lock file: {lock_path}")
-    except Exception as e:
-        logging.error(f"Failed to remove lock file {lock_path}: {e}")
+    # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Блокируем создание множественных ботов
+    with _TRADING_BOT_LOCK:
+        # Проверяем что нет запущенного бота
+        if _TRADING_BOT is not None:
+            logging.warning("⚠️ Trading bot already initialized, skipping duplicate start")
+            return
+        
+        # Проверяем что нет запущенного потока
+        existing_threads = [t for t in threading.enumerate() if t.name == "TradingLoop" and t.is_alive()]
+        if existing_threads:
+            logging.warning(f"⚠️ Trading loop thread already running: {len(existing_threads)} threads")
+            return
 
-    # Создаём новый лок-файл
-    if not _acquire_file_lock(lock_path):
-        logging.warning("⚠️ Could not create lock file, but starting trading loop anyway")
-    
-    # ✅ Создаем глобальный экземпляр бота
-    _TRADING_BOT = TradingBot()
+        lock_path = ".trading.lock"
+        
+        # Если лок-файл существует — удаляем, чтобы позволить перезапуск
+        try:
+            if os.path.exists(lock_path):
+                os.remove(lock_path)
+                logging.warning(f"⚠️ Removed stale lock file: {lock_path}")
+        except Exception as e:
+            logging.error(f"Failed to remove lock file {lock_path}: {e}")
+
+        # Создаём новый лок-файл
+        if not _acquire_file_lock(lock_path):
+            logging.warning("⚠️ Could not create lock file, but starting trading loop anyway")
+        
+        # ✅ Создаем глобальный экземпляр бота ТОЛЬКО ОДИН РАЗ
+        try:
+            _TRADING_BOT = TradingBot()
+            logging.info("✅ Trading bot instance created")
+        except Exception as e:
+            logging.error(f"❌ Failed to create trading bot: {e}")
+            return
     
     def trading_loop_wrapper():
         try:
@@ -322,35 +352,22 @@ def start_trading_loop():
             _TRADING_BOT.run()
         except Exception as e:
             logging.error(f"❌ Trading loop crashed: {e}")
+            # ✅ ИСПРАВЛЕНИЕ: Сбрасываем глобальную переменную при крахе
+            with _TRADING_BOT_LOCK:
+                global _TRADING_BOT
+                _TRADING_BOT = None
             # Попытка перезапуска через 60 секунд
-            import time
             time.sleep(60)
             logging.info("🔄 Attempting to restart trading loop...")
-            trading_loop_wrapper()
+            start_trading_loop()  # Рекурсивный перезапуск
     
+    # Запускаем поток
     t = threading.Thread(target=trading_loop_wrapper, name="TradingLoop", daemon=True)
     t.start()
-    logging.info("Trading loop thread started")
+    logging.info("✅ Trading loop thread started")
 
-# ================== BOOTSTRAP ==================
-_bootstrapped = False
-def _bootstrap_once():
-    global _bootstrapped
-    if _bootstrapped:
-        return
-    try:
-        set_webhook()
-    except Exception:
-        logging.exception("set_webhook at bootstrap failed")
-    try:
-        start_trading_loop()
-    except Exception:
-        logging.exception("start_trading_loop failed")
-    _bootstrapped = True
-
-# ================== WATCHDOG & MONITORING ==================
+# ================== WATCHDOG & MONITORING (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
 import psutil
-import time
 
 def send_telegram_alert(message):
     try:
@@ -380,6 +397,9 @@ def watchdog():
     """
     ✅ ИСПРАВЛЕНИЕ: Улучшенный watchdog с правильным мониторингом
     """
+    consecutive_failures = 0
+    max_failures = 3
+    
     while True:
         try:
             monitor_resources()
@@ -390,14 +410,32 @@ def watchdog():
                 for t in threading.enumerate()
             )
             
-            if not trading_thread_alive and ENABLE_TRADING:
-                send_telegram_alert("♻️ Trading loop stopped! Restarting...")
-                try:
-                    start_trading_loop()
-                    logging.info("✅ Trading loop restarted by watchdog")
-                except Exception as e:
-                    send_telegram_alert(f"❌ Failed to restart trading loop: {e}")
-                    logging.error(f"❌ Watchdog restart failed: {e}")
+            # ✅ ИСПРАВЛЕНИЕ: Проверяем что бот существует и поток жив
+            bot_exists = _TRADING_BOT is not None
+            
+            if ENABLE_TRADING and (not trading_thread_alive or not bot_exists):
+                consecutive_failures += 1
+                status = f"thread_alive={trading_thread_alive}, bot_exists={bot_exists}"
+                logging.warning(f"⚠️ Trading system down ({status}), failure #{consecutive_failures}")
+                
+                if consecutive_failures >= max_failures:
+                    send_telegram_alert(f"♻️ Trading system failed {consecutive_failures} times! Attempting restart...")
+                    try:
+                        # Принудительно сбрасываем бота если он завис
+                        with _TRADING_BOT_LOCK:
+                            global _TRADING_BOT
+                            if _TRADING_BOT is not None:
+                                logging.warning("🔄 Force resetting hung trading bot")
+                                _TRADING_BOT = None
+                        
+                        start_trading_loop()
+                        consecutive_failures = 0  # Сбрасываем счетчик при успешном запуске
+                        logging.info("✅ Trading loop restarted by watchdog")
+                    except Exception as e:
+                        send_telegram_alert(f"❌ Failed to restart trading loop: {e}")
+                        logging.error(f"❌ Watchdog restart failed: {e}")
+            else:
+                consecutive_failures = 0  # Сбрасываем счетчик если все OK
             
             # Проверяем состояние позиций (если бот доступен)
             if _TRADING_BOT and hasattr(_TRADING_BOT, 'state'):
@@ -414,6 +452,7 @@ def watchdog():
                             # Если позиция не управлялась более 30 минут - предупреждение
                             if minutes_since > 30:
                                 logging.warning(f"⚠️ Position not managed for {minutes_since:.1f} minutes")
+                                send_telegram_alert(f"⚠️ Позиция не управлялась {minutes_since:.1f} минут")
                                 
                 except Exception as e:
                     logging.debug(f"Position check error: {e}")
@@ -440,6 +479,36 @@ def keep_alive_ping():
 
 # Запускаем keep-alive
 keep_alive_ping()
+
+# ================== BOOTSTRAP (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
+_bootstrapped = False
+_bootstrap_lock = threading.RLock()
+
+def _bootstrap_once():
+    """
+    ✅ ИСПРАВЛЕНИЕ: Безопасная инициализация с проверками
+    """
+    global _bootstrapped
+    
+    with _bootstrap_lock:
+        if _bootstrapped:
+            logging.info("⚠️ Bootstrap already completed, skipping")
+            return
+            
+        try:
+            logging.info("🚀 Starting bootstrap process...")
+            set_webhook()
+        except Exception:
+            logging.exception("set_webhook at bootstrap failed")
+            
+        try:
+            # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Запускаем торговый цикл только один раз
+            start_trading_loop()
+        except Exception:
+            logging.exception("start_trading_loop failed")
+            
+        _bootstrapped = True
+        logging.info("✅ Bootstrap completed")
 
 # ================== STARTUP ==================
 if __name__ != "__main__":
