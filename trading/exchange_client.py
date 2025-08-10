@@ -1,16 +1,3 @@
-
-import csv, os
-from datetime import datetime
-
-def log_trade_to_csv(file_path, trade_data):
-    file_exists = os.path.isfile(file_path)
-    with open(file_path, mode='a', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=["timestamp", "symbol", "side", "amount", "price", "mode", "profit"])
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(trade_data)
-
-
 import ccxt
 import logging
 import threading
@@ -442,3 +429,165 @@ def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
         except Exception as e:
             logging.error(f"Failed to get server time: {e}")
             return int(time.time() * 1000)
+
+# ===== ДОРАБОТКИ SAFE/LIVE И CSV ЛОГИРОВАНИЯ =====
+import csv
+import os
+import ccxt
+import logging
+import threading
+import time
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from decimal import Decimal, ROUND_DOWN
+
+class APIException(Exception):
+    """Исключение для ошибок API биржи"""
+    pass
+
+class ExchangeClient:
+    """Клиент для работы с Gate.io API с поддержкой SAFE/LIVE режима и логированием сделок"""
+    
+    def __init__(self, api_key: str = None, api_secret: str = None, safe_mode: bool = True, csv_file: str = "trades.csv"):
+        self.safe_mode = safe_mode
+        self.api_key = api_key or os.getenv("GATE_API_KEY", "")
+        self.api_secret = api_secret or os.getenv("GATE_API_SECRET", "")
+        self.csv_file = csv_file
+        self._lock = threading.RLock()
+        self._markets_cache = {}
+        self._cache_timestamp = 0
+        self._cache_ttl = 3600
+
+        self._init_csv()
+        
+        self.exchange = None
+        try:
+            self.exchange = ccxt.gateio({
+                'apiKey': self.api_key,
+                'secret': self.api_secret,
+                'sandbox': False,
+                'enableRateLimit': True,
+                'timeout': 30000,
+            })
+            self.exchange.load_markets()
+            logging.info("✅ Gate.io API connected successfully")
+        except Exception as e:
+            logging.error(f"❌ Failed to initialize Gate.io API: {e}")
+            self.safe_mode = True
+            self.exchange = None
+
+        if self.safe_mode:
+            logging.info("📄 Running in SAFE MODE (paper trading)")
+
+    def _init_csv(self):
+        if not os.path.exists(self.csv_file):
+            with open(self.csv_file, mode="w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["timestamp", "symbol", "side", "amount", "price", "mode", "profit"])
+                writer.writeheader()
+
+    def _log_trade(self, symbol, side, amount, price, profit=None):
+        trade_data = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "symbol": symbol,
+            "side": side,
+            "amount": amount,
+            "price": price,
+            "mode": "SAFE" if self.safe_mode else "LIVE",
+            "profit": profit if profit is not None else ""
+        }
+        file_exists = os.path.isfile(self.csv_file)
+        with open(self.csv_file, mode="a", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=["timestamp", "symbol", "side", "amount", "price", "mode", "profit"])
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(trade_data)
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200) -> List[List]:
+        """Получение OHLCV данных с реального рынка"""
+        try:
+            if not self.exchange:
+                self.exchange = ccxt.gateio({'enableRateLimit': True, 'timeout': 30000})
+                self.exchange.load_markets()
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            if not ohlcv:
+                raise APIException(f"No OHLCV data for {symbol}")
+            return ohlcv
+        except Exception as e:
+            logging.error(f"Failed to fetch OHLCV for {symbol}: {e}")
+            raise APIException(str(e))
+
+    def get_last_price(self, symbol: str) -> float:
+        """Последняя цена с реального рынка"""
+        try:
+            if not self.exchange:
+                self.exchange = ccxt.gateio({'enableRateLimit': True, 'timeout': 30000})
+                self.exchange.load_markets()
+            ticker = self.exchange.fetch_ticker(symbol)
+            price = float(ticker.get('last', 0))
+            if price <= 0:
+                raise APIException(f"Invalid price {price}")
+            return price
+        except Exception as e:
+            logging.error(f"Failed to get last price for {symbol}: {e}")
+            raise APIException(str(e))
+
+    def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
+        with self._lock:
+            try:
+                price = self.get_last_price(symbol)
+                if self.safe_mode:
+                    order_id = f"sim_buy_{int(time.time()*1000)}"
+                    self._log_trade(symbol, "buy", amount, price)
+                    return {"id": order_id, "symbol": symbol, "amount": amount, "price": price, "side": "buy", "status": "closed", "paper": True}
+                if not self.exchange:
+                    raise APIException("Exchange not initialized")
+                amount = self.round_amount(symbol, amount)
+                order = self.exchange.create_market_buy_order(symbol, amount)
+                self._log_trade(symbol, "buy", amount, order.get("price", price))
+                return order
+            except Exception as e:
+                logging.error(f"Failed to create buy order: {e}")
+                raise APIException(str(e))
+
+    def create_market_sell_order(self, symbol: str, amount: float, entry_price: Optional[float] = None) -> Dict[str, Any]:
+        with self._lock:
+            try:
+                price = self.get_last_price(symbol)
+                profit = None
+                if entry_price:
+                    profit = round((price - entry_price) / entry_price * 100, 2)
+                if self.safe_mode:
+                    order_id = f"sim_sell_{int(time.time()*1000)}"
+                    self._log_trade(symbol, "sell", amount, price, profit)
+                    return {"id": order_id, "symbol": symbol, "amount": amount, "price": price, "side": "sell", "status": "closed", "paper": True}
+                if not self.exchange:
+                    raise APIException("Exchange not initialized")
+                amount = self.round_amount(symbol, amount)
+                order = self.exchange.create_market_sell_order(symbol, amount)
+                self._log_trade(symbol, "sell", amount, order.get("price", price), profit)
+                return order
+            except Exception as e:
+                logging.error(f"Failed to create sell order: {e}")
+                raise APIException(str(e))
+
+    def round_amount(self, symbol: str, amount: float) -> float:
+        try:
+            market_info = self._get_market_info(symbol)
+            precision = market_info.get('precision', {}).get('amount', 8)
+            decimal_amount = Decimal(str(amount))
+            rounded = decimal_amount.quantize(Decimal('0.1') ** precision, rounding=ROUND_DOWN)
+            return float(rounded)
+        except Exception:
+            return round(amount, 8)
+
+    def _get_market_info(self, symbol: str) -> Dict[str, Any]:
+        current_time = time.time()
+        if symbol in self._markets_cache and current_time - self._cache_timestamp < self._cache_ttl:
+            return self._markets_cache[symbol]
+        if not self.exchange:
+            return {'precision': {'amount': 8, 'price': 6}}
+        markets = self.exchange.load_markets()
+        market_info = markets.get(symbol, {})
+        self._markets_cache[symbol] = market_info
+        self._cache_timestamp = current_time
+        return market_info
