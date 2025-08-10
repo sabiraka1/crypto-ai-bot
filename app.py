@@ -98,7 +98,7 @@ def verify_request():
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
-    """Безопасное обучение модели"""
+    """🔧 ИСПРАВЛЕНО: Безопасное обучение модели с современным синтаксисом pandas"""
     try:
         import numpy as np
         import pandas as pd
@@ -109,9 +109,15 @@ def _train_model_safe() -> bool:
         symbol = CFG.SYMBOL
         timeframe = CFG.TIMEFRAME
 
-        ohlcv = _GLOBAL_EX.fetch_ohlcv(symbol, timeframe=timeframe, limit=500)
+        # ✅ ИСПРАВЛЕНИЕ: Увеличиваем лимит данных для лучшего обучения
+        ohlcv = _GLOBAL_EX.fetch_ohlcv(symbol, timeframe=timeframe, limit=1000)  # было 500
         if not ohlcv:
             logging.error("No OHLCV data for training")
+            return False
+
+        # Минимальная проверка данных
+        if len(ohlcv) < 200:
+            logging.error(f"Insufficient data for training: {len(ohlcv)} candles (minimum: 200)")
             return False
 
         cols = ["time", "open", "high", "low", "close", "volume"]
@@ -125,19 +131,35 @@ def _train_model_safe() -> bool:
         df["future_close"] = df["close"].shift(-1)
         df["y"] = (df["future_close"] > df["close"]).astype(int)
 
-        # Дополнительные фичи
+        # Дополнительные фичи с проверкой на существование колонок
         _EPS = 1e-12
         if {"ema_fast", "ema_slow"}.issubset(df.columns):
             df["ema_cross"] = (df["ema_fast"] - df["ema_slow"]) / (df["ema_slow"].abs() + _EPS)
         else:
-            df["ema_cross"] = np.nan
+            df["ema_cross"] = 0.0
+            logging.warning("Missing EMA columns, using default ema_cross=0.0")
 
         if {"bb_upper", "bb_lower"}.issubset(df.columns):
             rng = (df["bb_upper"] - df["bb_lower"]).abs().replace(0, np.nan) + _EPS
             df["bb_position"] = (df["close"] - df["bb_lower"]) / rng
         else:
-            df["bb_position"] = np.nan
+            df["bb_position"] = 0.5
+            logging.warning("Missing Bollinger Bands columns, using default bb_position=0.5")
 
+        # ✅ ИСПРАВЛЕНИЕ: Современный синтаксис pandas resample
+        # Подготовка рыночных условий с современным синтаксисом
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        try:
+            df_1d = df_raw.resample("1D").agg(agg)
+            df_4h = df_raw.resample("4h").agg(agg)  # ✅ ИСПРАВЛЕНО: "4H" -> "4h"
+            logging.info("✅ Market timeframes prepared successfully")
+        except Exception as e:
+            logging.warning(f"Resample error, using fallback approach: {e}")
+            # Fallback: используем исходные данные с группировкой
+            df_1d = df_raw.groupby(df_raw.index.date).agg(agg)
+            df_4h = df_raw.copy()  # Простой fallback
+
+        # Удаляем NaN и проверяем качество данных
         df = df.replace([np.inf, -np.inf], np.nan).dropna()
 
         feature_cols = [
@@ -145,31 +167,66 @@ def _train_model_safe() -> bool:
             "stoch_k", "adx", "volume_ratio", "price_change",
         ]
         
-        if any(c not in df.columns for c in feature_cols) or df.empty:
-            logging.error("Not enough features for training")
+        # ✅ ИСПРАВЛЕНИЕ: Проверяем наличие всех необходимых колонок
+        missing_cols = [col for col in feature_cols if col not in df.columns]
+        if missing_cols:
+            logging.error(f"Missing feature columns for training: {missing_cols}")
+            return False
+            
+        if df.empty or len(df) < 100:  # ✅ ИСПРАВЛЕНИЕ: Увеличили минимум
+            logging.error(f"Not enough data for training: {len(df)} samples (minimum: 100)")
             return False
 
         X = df[feature_cols].to_numpy()
         y = df["y"].to_numpy()
 
-        # Подготовка рыночных условий
-        agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-        df_1d = df_raw.resample("1D").agg(agg)
-        df_4h = df_raw.resample("4H").agg(agg)
-
+        # ✅ ИСПРАВЛЕНИЕ: Безопасное определение рыночных условий
         analyzer = MultiTimeframeAnalyzer()
         market_conditions = []
+        
         for idx in df.index:
-            cond, _ = analyzer.analyze_market_condition(df_1d.loc[:idx], df_4h.loc[:idx])
-            market_conditions.append(cond.value)
+            try:
+                # Ограничиваем данные до текущего индекса
+                df_1d_slice = df_1d.loc[:idx] if hasattr(df_1d.index, 'date') else df_1d.iloc[:len(df_1d)//2]
+                df_4h_slice = df_4h.loc[:idx] if hasattr(df_4h.index, 'date') else df_4h.iloc[:len(df_4h)//2]
+                
+                # Проверяем достаточность данных
+                if len(df_1d_slice) >= 10 and len(df_4h_slice) >= 10:
+                    cond, _ = analyzer.analyze_market_condition(df_1d_slice, df_4h_slice)
+                    market_conditions.append(cond.value)
+                else:
+                    market_conditions.append("sideways")  # дефолт для недостаточных данных
+            except Exception as e:
+                logging.debug(f"Market condition analysis failed for {idx}: {e}")
+                market_conditions.append("sideways")
+
+        # ✅ ИСПРАВЛЕНИЕ: Проверяем качество данных перед обучением
+        if len(set(y)) < 2:
+            logging.error("Insufficient class diversity for training (need both 0 and 1 labels)")
+            return False
+            
+        unique_conditions = set(market_conditions)
+        logging.info(f"Training with {len(X)} samples, {len(unique_conditions)} market conditions: {unique_conditions}")
+        
+        if len(unique_conditions) < 2:
+            logging.warning("Limited market condition diversity, training may be less effective")
 
         # Обучение модели
         model = AdaptiveMLModel(models_dir=CFG.MODEL_DIR)
-        ok = model.train(X, y, market_conditions)
-        return bool(ok)
+        success = model.train(X, y, market_conditions)
+        
+        if success:
+            logging.info("✅ AI модель успешно обучена")
+        else:
+            logging.error("❌ Ошибка обучения AI модели")
+            
+        return success
 
-    except Exception:
-        logging.exception("Training error")
+    except ImportError as e:
+        logging.error(f"Missing required modules for training: {e}")
+        return False
+    except Exception as e:
+        logging.exception(f"Training error: {e}")
         return False
 
 def _send_message(text: str) -> None:
@@ -212,8 +269,8 @@ def health():
         try:
             position_active = _TRADING_BOT._is_position_active()
             status["position_active"] = position_active
-        except:
-            status["position_active"] = "unknown"
+        except Exception as e:
+            status["position_active"] = f"error: {e}"
     
     return jsonify(status), 200
 
@@ -251,8 +308,11 @@ def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
             train_func=_train_model_safe,
             chat_id=chat_id
         )
-    except Exception:
+    except Exception as e:
         logging.exception("Dispatch error")
+        # Уведомляем пользователя об ошибке
+        if chat_id:
+            tgbot.send_message(f"⚠️ Ошибка обработки команды: {text}", chat_id=chat_id)
 
 # ================== WEBHOOK ==================
 if CFG.ENABLE_WEBHOOK and CFG.WEBHOOK_SECRET:
@@ -394,10 +454,18 @@ def start_trading_loop():
             with _TRADING_BOT_LOCK:
                 _TRADING_BOT = None
                 
-            # Попытка перезапуска через 60 секунд
-            time.sleep(60)
-            logging.info("🔄 Attempting to restart trading loop...")
-            start_trading_loop()  # Рекурсивный перезапуск
+            # ✅ ИСПРАВЛЕНИЕ: Лимитируем рекурсивные перезапуски
+            if not hasattr(trading_loop_wrapper, '_restart_count'):
+                trading_loop_wrapper._restart_count = 0
+                
+            if trading_loop_wrapper._restart_count < 3:  # Максимум 3 перезапуска
+                trading_loop_wrapper._restart_count += 1
+                logging.info(f"🔄 Attempting restart #{trading_loop_wrapper._restart_count}/3...")
+                time.sleep(60)
+                start_trading_loop()
+            else:
+                logging.error("❌ Too many restart attempts, stopping auto-restart")
+                _send_message("❌ Слишком много попыток перезапуска. Автозапуск отключен.")
     
     # ✅ GUNICORN: Запускаем поток как daemon для правильного завершения
     t = threading.Thread(target=trading_loop_wrapper, name="TradingLoop", daemon=True)
@@ -521,7 +589,10 @@ def _bootstrap_once():
         
         # Проверяем конфигурацию
         if config_errors:
-            _send_message(f"⚠️ Configuration issues detected:\n" + "\n".join(config_errors[:3]))
+            error_summary = "\n".join(config_errors[:3])
+            if len(config_errors) > 3:
+                error_summary += f"\n... и еще {len(config_errors) - 3} ошибок"
+            _send_message(f"⚠️ Проблемы конфигурации:\n{error_summary}")
         
         # Устанавливаем webhook
         if CFG.ENABLE_WEBHOOK:
@@ -589,15 +660,15 @@ def status_endpoint():
         if _TRADING_BOT:
             try:
                 status["position"] = _TRADING_BOT.pm.get_position_summary()
-            except:
-                status["position"] = {"error": "failed_to_get_summary"}
+            except Exception as e:
+                status["position"] = {"error": f"failed_to_get_summary: {e}"}
         
         # Ресурсы
         try:
             cpu, mem = monitor_resources()
             status["resources"] = {"cpu_percent": cpu, "memory_mb": mem}
-        except:
-            status["resources"] = {"error": "failed_to_get_resources"}
+        except Exception as e:
+            status["resources"] = {"error": f"failed_to_get_resources: {e}"}
             
         return jsonify(status)
         
@@ -621,6 +692,63 @@ def force_restart():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+# ✅ НОВЫЙ ENDPOINT: Информация о CSV файлах
+@app.route("/csv_info", methods=["GET"])
+def csv_info():
+    """Информация о CSV файлах для диагностики"""
+    try:
+        from utils.csv_handler import CSVHandler
+        
+        info = {
+            "trades": CSVHandler.get_csv_info(CFG.CLOSED_TRADES_CSV),
+            "signals": CSVHandler.get_csv_info(CFG.SIGNALS_CSV),
+            "trade_stats": CSVHandler.get_trade_stats()
+        }
+        
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ✅ НОВЫЙ ENDPOINT: Тренировка модели через API
+@app.route("/train_model", methods=["POST"])
+def train_model_endpoint():
+    """Запуск тренировки ML модели через API"""
+    try:
+        logging.info("🧠 Training model via API request...")
+        success = _train_model_safe()
+        
+        if success:
+            return jsonify({"ok": True, "message": "Model trained successfully"})
+        else:
+            return jsonify({"ok": False, "message": "Model training failed"}), 500
+            
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ✅ НОВЫЙ ENDPOINT: Последние логи
+@app.route("/logs", methods=["GET"])
+def get_logs():
+    """Получение последних логов"""
+    try:
+        lines = int(request.args.get('lines', 50))
+        log_file = "bot_activity.log"
+        
+        if not os.path.exists(log_file):
+            return jsonify({"logs": [], "message": "Log file not found"})
+        
+        with open(log_file, 'r', encoding='utf-8') as f:
+            all_lines = f.readlines()
+            recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        
+        return jsonify({
+            "logs": [line.strip() for line in recent_lines],
+            "total_lines": len(all_lines),
+            "showing": len(recent_lines)
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ================== CLEANUP FOR GUNICORN ==================
 def cleanup_on_exit():
     """Очистка при завершении работы"""
@@ -631,7 +759,23 @@ def cleanup_on_exit():
     try:
         with _TRADING_BOT_LOCK:
             if _TRADING_BOT:
-                # Здесь можно добавить логику корректного завершения
+                # ✅ ИСПРАВЛЕНИЕ: Попытка корректно закрыть открытые позиции
+                try:
+                    if _TRADING_BOT._is_position_active():
+                        logging.warning("🔄 Attempting to close open position during shutdown...")
+                        current_price = _TRADING_BOT.exchange.get_last_price(_TRADING_BOT.symbol)
+                        _TRADING_BOT.pm.close_all(_TRADING_BOT.symbol, current_price, "system_shutdown")
+                        _send_message("⚠️ Система завершается. Открытая позиция закрыта принудительно.")
+                except Exception as e:
+                    logging.error(f"Failed to close position during shutdown: {e}")
+                
+                # Сохраняем состояние
+                try:
+                    _TRADING_BOT.state.save_state()
+                    logging.info("✅ Bot state saved")
+                except Exception as e:
+                    logging.error(f"Failed to save state: {e}")
+                
                 _TRADING_BOT = None
                 logging.info("✅ Trading bot shut down")
     except Exception as e:
@@ -642,19 +786,56 @@ def cleanup_on_exit():
         try:
             if os.path.exists(lock_file):
                 os.remove(lock_file)
-        except:
-            pass
+                logging.debug(f"Removed lock file: {lock_file}")
+        except Exception as e:
+            logging.error(f"Failed to remove lock file {lock_file}: {e}")
+    
+    logging.info("🏁 Cleanup completed")
 
 # Регистрируем cleanup для Gunicorn
 atexit.register(cleanup_on_exit)
 
+# ✅ ИСПРАВЛЕНИЕ: Обработка сигналов для graceful shutdown
+import signal
+
+def signal_handler(signum, frame):
+    """Обработчик сигналов для корректного завершения"""
+    logging.info(f"📡 Received signal {signum}, initiating graceful shutdown...")
+    
+    # Уведомляем в Telegram
+    try:
+        _send_message(f"⚠️ Получен сигнал завершения {signum}. Бот завершает работу...")
+    except:
+        pass
+    
+    # Вызываем cleanup
+    cleanup_on_exit()
+    
+    # Завершаем процесс
+    os._exit(0)
+
+# Регистрируем обработчики сигналов
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 # ================== GUNICORN STARTUP ==================
 # ✅ GUNICORN: Инициализация при импорте модуля
-_bootstrap_once()
+try:
+    _bootstrap_once()
+except Exception as e:
+    logging.error(f"❌ Bootstrap failed: {e}")
+    # Не падаем, пытаемся продолжить работу
 
 # ✅ GUNICORN: Экспортируем app для Gunicorn
 # В Procfile: gunicorn --bind 0.0.0.0:$PORT app:app
 if __name__ == "__main__":
     # Это для локального тестирования
     logging.info("🔧 Running in development mode")
-    app.run(host="0.0.0.0", port=CFG.PORT, debug=False, threaded=True)
+    try:
+        app.run(host="0.0.0.0", port=CFG.PORT, debug=False, threaded=True)
+    except KeyboardInterrupt:
+        logging.info("🛑 Development server stopped by user")
+        cleanup_on_exit()
+    except Exception as e:
+        logging.error(f"❌ Development server error: {e}")
+        cleanup_on_exit()
