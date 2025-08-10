@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 from enum import Enum
 
@@ -57,7 +57,7 @@ class TradingConfig:
     # ==== Telegram ====
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
     CHAT_ID: str = os.getenv("CHAT_ID", "")
-    ADMIN_CHAT_IDS: List[str] = getenv_list("ADMIN_CHAT_IDS", [])
+    ADMIN_CHAT_IDS: List[str] = field(default_factory=lambda: getenv_list("ADMIN_CHAT_IDS", []))
     TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "")
     
     # ==== Gate.io API ====
