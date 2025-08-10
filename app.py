@@ -347,6 +347,7 @@ def start_trading_loop():
             return
     
     def trading_loop_wrapper():
+        global _TRADING_BOT
         try:
             logging.info("🚀 Trading loop thread starting...")
             _TRADING_BOT.run()
@@ -354,7 +355,6 @@ def start_trading_loop():
             logging.error(f"❌ Trading loop crashed: {e}")
             # ✅ ИСПРАВЛЕНИЕ: Сбрасываем глобальную переменную при крахе
             with _TRADING_BOT_LOCK:
-                global _TRADING_BOT
                 _TRADING_BOT = None
             # Попытка перезапуска через 60 секунд
             time.sleep(60)
@@ -397,6 +397,7 @@ def watchdog():
     """
     ✅ ИСПРАВЛЕНИЕ: Улучшенный watchdog с правильным мониторингом
     """
+    global _TRADING_BOT
     consecutive_failures = 0
     max_failures = 3
     
@@ -423,7 +424,6 @@ def watchdog():
                     try:
                         # Принудительно сбрасываем бота если он завис
                         with _TRADING_BOT_LOCK:
-                            global _TRADING_BOT
                             if _TRADING_BOT is not None:
                                 logging.warning("🔄 Force resetting hung trading bot")
                                 _TRADING_BOT = None
