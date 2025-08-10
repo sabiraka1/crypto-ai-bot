@@ -1,4 +1,16 @@
 import ccxt
+
+import csv
+from datetime import datetime
+
+def log_trade_to_csv(symbol, side, amount, price, profit=None, mode="real", csv_file="closed_trades.csv"):
+    file_exists = Path(csv_file).is_file()
+    with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "symbol", "side", "amount", "price", "profit", "mode"])
+        writer.writerow([datetime.utcnow().isoformat(), symbol, side, amount, price, profit if profit is not None else "", mode])
+
 import logging
 import threading
 import time
