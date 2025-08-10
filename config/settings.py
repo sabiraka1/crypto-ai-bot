@@ -165,3 +165,11 @@ class TradingConfig:
             {"level": 1, "pct": self.TP1_PCT, "size": self.TP1_SIZE},
             {"level": 2, "pct": self.TP2_PCT, "size": self.TP2_SIZE}
         ]
+# Экземпляр
+settings = TradingConfig()
+
+# Старые переменные для обратной совместимости
+CLOSED_TRADES_CSV = settings.CLOSED_TRADES_CSV
+SIGNALS_CSV = settings.SIGNALS_CSV
+MODEL_DIR = settings.MODEL_DIR
+LOGS_DIR = settings.LOGS_DIR
