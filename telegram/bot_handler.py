@@ -203,6 +203,8 @@ def cmd_status(state_manager: StateManager, exchange_client: ExchangeClient, cha
         send_message(f"⚠️ Ошибка при получении статуса: {e}", chat_id)
 
 
+# telegram/bot_handler.py - исправленные функции
+
 @safe_command
 def cmd_profit(chat_id: str = None) -> None:
     """Команда /profit - показать общую статистику"""
@@ -212,23 +214,30 @@ def cmd_profit(chat_id: str = None) -> None:
             send_message("📊 PnL: 0.00 USDT\nWinrate: 0.0%\nТрейдов: 0", chat_id)
             return
             
-        df = CSVHandler.read_csv_safe(path)
-        if df is None or df.empty:
+        # ИСПРАВЛЕНИЕ: CSVHandler.read_csv_safe возвращает list, не DataFrame
+        trades_list = CSVHandler.read_csv_safe(path)
+        if not trades_list:  # проверяем пустой list
             send_message("📊 PnL: 0.00 USDT\nWinrate: 0.0%\nТрейдов: 0", chat_id)
             return
             
-        # Приведение типов
+        # Конвертируем list в DataFrame
+        df = pd.DataFrame(trades_list)
+        if df.empty:
+            send_message("📊 PnL: 0.00 USDT\nWinrate: 0.0%\nТрейдов: 0", chat_id)
+            return
+            
+        # Приведение типов с обработкой ошибок
         if "pnl_abs" in df.columns:
             df["pnl_abs"] = pd.to_numeric(df["pnl_abs"], errors="coerce").fillna(0.0)
         else:
             df["pnl_abs"] = 0.0
             
         if "pnl_pct" in df.columns:
-            df["pnl_pct"] = pd.to_numeric(df["pnl_pct"], errors="coerce")
+            df["pnl_pct"] = pd.to_numeric(df["pnl_pct"], errors="coerce").fillna(0.0)
         else:
-            df["pnl_pct"] = pd.Series(dtype=float)
+            df["pnl_pct"] = 0.0
 
-        # Расчеты
+        # Расчеты с безопасными значениями
         total_pnl = float(df["pnl_abs"].sum())
         wins = int((df["pnl_pct"] > 0).sum())
         total_trades = int(len(df))
@@ -238,6 +247,10 @@ def cmd_profit(chat_id: str = None) -> None:
         if total_trades > 0:
             avg_win = df[df["pnl_pct"] > 0]["pnl_pct"].mean() if wins > 0 else 0.0
             avg_loss = df[df["pnl_pct"] < 0]["pnl_pct"].mean() if (total_trades - wins) > 0 else 0.0
+            
+            # Обработка NaN значений
+            avg_win = avg_win if pd.notna(avg_win) else 0.0
+            avg_loss = avg_loss if pd.notna(avg_loss) else 0.0
             
             message = (
                 f"📊 Торговая статистика:\n"
@@ -255,6 +268,54 @@ def cmd_profit(chat_id: str = None) -> None:
     except Exception as e:
         logging.exception("cmd_profit error")
         send_message(f"⚠️ Ошибка при расчете статистики: {e}", chat_id)
+
+
+@safe_command
+def cmd_lasttrades(chat_id: str = None) -> None:
+    """Команда /lasttrades - показать последние сделки"""
+    try:
+        # Используем правильный метод из CSVHandler
+        trades = CSVHandler.read_last_trades(limit=5)
+        if not trades:
+            send_message("📋 Сделок ещё нет", chat_id)
+            return
+            
+        lines: List[str] = ["📋 Последние сделки:"]
+        
+        for i, trade in enumerate(trades, 1):
+            side = str(trade.get("side", "LONG"))
+            entry = trade.get("entry_price", "")
+            exit_price = trade.get("exit_price", "")
+            pnl_pct = trade.get("pnl_pct", "")
+            reason = str(trade.get("reason", ""))
+            
+            # Форматируем строку сделки
+            trade_line = f"{i}. {side}"
+            
+            if entry and exit_price:
+                try:
+                    trade_line += f" {float(entry):.2f}→{float(exit_price):.2f}"
+                except (ValueError, TypeError):
+                    trade_line += f" {entry}→{exit_price}"
+                    
+            if pnl_pct:
+                try:
+                    pnl_val = float(pnl_pct)
+                    emoji = "🟢" if pnl_val >= 0 else "🔴"
+                    trade_line += f" {emoji}{pnl_val:+.2f}%"
+                except (ValueError, TypeError):
+                    trade_line += f" {pnl_pct}%"
+                    
+            if reason:
+                trade_line += f" ({reason})"
+                
+            lines.append(trade_line)
+            
+        send_message("\n".join(lines), chat_id)
+        
+    except Exception as e:
+        logging.exception("cmd_lasttrades error")
+        send_message(f"⚠️ Ошибка при получении сделок: {e}", chat_id)
 
 
 @safe_command
