@@ -2,7 +2,7 @@ import csv
 import os
 import logging
 from datetime import datetime
-from settings import (
+from config.settings import (
     CLOSED_TRADES_CSV,
     SIGNALS_CSV,
     LOGS_DIR

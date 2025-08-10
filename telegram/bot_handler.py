@@ -11,7 +11,7 @@ from typing import Optional, Callable, List
 from analysis import scoring_engine
 from trading.exchange_client import ExchangeClient
 from core.state_manager import StateManager
-from utils.csv_handler import CSVHandler
+from trading.utils.csv_handler import CSVHandler
 from config.settings import TradingConfig
 
 # ── Конфигурация ──────────────────────────────────────────────────────────────
