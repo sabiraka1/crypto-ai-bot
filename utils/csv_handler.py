@@ -96,10 +96,25 @@ class CSVHandler:
             return list(reader)
 
     @staticmethod
+    def read_csv_safe(file_path: str) -> list:
+        """Безопасное чтение CSV с обработкой ошибок."""
+        try:
+            return CSVHandler.read_csv(file_path)
+        except Exception as e:
+            logging.error(f"Ошибка при чтении CSV {file_path}: {e}")
+            return []
+
+    @staticmethod
     def get_last_n_trades(n: int) -> list:
         """Возвращает последние N сделок."""
         trades = CSVHandler.read_csv(CLOSED_TRADES_CSV)
         return trades[-n:] if trades else []
+
+    @staticmethod
+    def read_last_trades(limit: int = 5) -> list:
+        """Возвращает последние N сделок из закрытых."""
+        trades = CSVHandler.read_csv_safe(CLOSED_TRADES_CSV)
+        return trades[-limit:] if trades else []
 
     @staticmethod
     def get_trade_stats():
@@ -119,6 +134,6 @@ class CSVHandler:
         }
 
 
-# Инициализация CSV при запуске (используем переменные из settings, а не атрибуты класса)
+# Инициализация CSV при запуске
 CSVHandler.ensure_csv_exists(SIGNALS_CSV, CSVHandler.SIGNALS_FIELDS)
 CSVHandler.ensure_csv_exists(CLOSED_TRADES_CSV, CSVHandler.CLOSED_TRADES_FIELDS)
