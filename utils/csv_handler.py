@@ -59,7 +59,7 @@ CLOSED_TRADES_FIELDS = [
 
 def ensure_csv_exists(file_path: str, fieldnames: list):
     """Создаёт CSV с заголовками, если его нет."""
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
     if not os.path.exists(file_path):
         with open(file_path, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
