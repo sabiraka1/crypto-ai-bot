@@ -1,3 +1,16 @@
+
+import csv, os
+from datetime import datetime
+
+def log_trade_to_csv(file_path, trade_data):
+    file_exists = os.path.isfile(file_path)
+    with open(file_path, mode='a', newline='', encoding='utf-8') as file:
+        writer = csv.DictWriter(file, fieldnames=["timestamp", "symbol", "side", "amount", "price", "mode", "profit"])
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(trade_data)
+
+
 import ccxt
 import logging
 import threading
