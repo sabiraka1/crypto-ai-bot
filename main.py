@@ -358,6 +358,20 @@ class TradingBot:
             logging.error("Failed to fetch market data")
             return
 
+        # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем состояние позиции ДО всех решений
+        is_in_position = self.state.state.get("in_position", False)
+        is_opening = self.state.state.get("opening", False)
+        
+        # ✅ Если позиция открыта или открывается - НЕ входим в новые позиции
+        if is_in_position or is_opening:
+            logging.info(f"💼 Position status: in_position={is_in_position}, opening={is_opening}")
+            # Только управляем существующей позицией
+            try:
+                self.pm.manage(self.symbol, last_price, atr_val or 0.0)
+            except Exception:
+                logging.exception("Error in manage state")
+            return  # ✅ ПРЕРЫВАЕМ цикл - не ищем новые входы
+
         # Временная метка текущей (последней) свечи
         candle_ts = int(df_15m.index[-1].timestamp())
         last_seen = self.state.state.get("last_candle_ts")
@@ -422,13 +436,6 @@ class TradingBot:
             # не мешаем торговле, если лог не записался
             pass
 
-        # ── Управление открытой позицией делаем на каждом цикле ──
-        if self.state.state.get("in_position"):
-            try:
-                self.pm.manage(self.symbol, last_price, atr_val or 0.0)
-            except Exception:
-                logging.exception("Error in manage state")
-
         # ── Решение «войти/нет» ТОЛЬКО по закрытию новой свечи ──
         # если это та же свеча, что уже обрабатывали — решения не принимаем
         if last_seen is not None and candle_ts == int(last_seen):
@@ -456,7 +463,7 @@ class TradingBot:
                     pass
                 return
 
-            # 2) AI gate (если включён)
+            # ✅ ИСПРАВЛЕНИЕ: Проверяем AI gate корректно
             if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
                 logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
                 try:
@@ -479,6 +486,12 @@ class TradingBot:
                     })
                 except Exception:
                     pass
+                return
+
+            # ✅ ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Убеждаемся что позиция НЕ открыта перед входом
+            current_state = self.state.state
+            if current_state.get("in_position") or current_state.get("opening"):
+                logging.info("⏩ Вход отклонён: позиция уже открыта или в процессе открытия")
                 return
 
             # 3) размер позиции
@@ -528,6 +541,12 @@ class TradingBot:
                     market_condition = self._market_condition_guess(df_15m["close"].iloc[:-1])
                 except Exception:
                     market_condition = "sideways"
+
+            # ✅ ФИНАЛЬНАЯ ПРОВЕРКА перед входом
+            final_state = self.state.state
+            if final_state.get("in_position") or final_state.get("opening"):
+                logging.info("⏩ Последняя проверка: позиция уже открыта, отменяем вход")
+                return
 
             # 4) попытка входа (PM сам поднимет до min_notional и не даст двойной вход)
             try:

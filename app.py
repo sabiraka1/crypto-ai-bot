@@ -107,6 +107,7 @@ app = Flask(__name__)
 # ================== ГЛОБАЛКИ ==================
 _GLOBAL_EX = ExchangeClient()
 _STATE = StateManager()
+_TRADING_BOT = None  # ✅ Добавляем глобальную ссылку на бота
 
 # ================== УТИЛИТЫ ==================
 def _train_model_safe() -> bool:
@@ -210,6 +211,9 @@ def health():
 
 # ================== DISPATCH (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
 def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
+    """
+    ✅ ИСПРАВЛЕНИЕ: Централизованная обработка команд через bot_handler
+    """
     if ADMIN_CHAT_IDS and chat_id and int(chat_id) not in ADMIN_CHAT_IDS:
         logging.warning("Unauthorized access denied in dispatch for chat_id=%s", chat_id)
         return
@@ -219,40 +223,13 @@ def _dispatch(text: str, chat_id: Optional[int] = None) -> None:
         return
 
     try:
-        sym = os.getenv("SYMBOL", "BTC/USDT")
-
-        if text.startswith("/start") and hasattr(tgbot, "cmd_start"):
-            return tgbot.cmd_start()
-        if text.startswith("/status") and hasattr(tgbot, "cmd_status"):
-            return tgbot.cmd_status(_STATE, lambda: _GLOBAL_EX.get_last_price(sym))
-        if text.startswith("/profit") and hasattr(tgbot, "cmd_profit"):
-            return tgbot.cmd_profit()
-        if text.startswith("/errors") and hasattr(tgbot, "cmd_errors"):
-            return tgbot.cmd_errors()
-        if text.startswith("/lasttrades") and hasattr(tgbot, "cmd_lasttrades"):
-            return tgbot.cmd_lasttrades()
-        if text.startswith("/train") and hasattr(tgbot, "cmd_train"):
-            return tgbot.cmd_train(_train_model_safe)
-        
-        # Исправленные тестовые команды с поддержкой суммы
-        if text.startswith("/testbuy"):
-            parts = text.split()
-            amount = None
-            if len(parts) > 1:
-                try:
-                    amount = float(parts[1])
-                except ValueError:
-                    tgbot.send_message("❌ Неверный формат суммы. Используйте: /testbuy [сумма]")
-                    return
-            return tgbot.cmd_testbuy(_STATE, _GLOBAL_EX, amount)
-            
-        if text.startswith("/testsell") and hasattr(tgbot, "cmd_testsell"):
-            return tgbot.cmd_testsell(_STATE, _GLOBAL_EX)
-            
-        if text.startswith("/test") and hasattr(tgbot, "cmd_test"):
-            return tgbot.cmd_test()
-
-        logging.info(f"Ignored unsupported command: {text}")
+        # ✅ Используем централизованную обработку команд из bot_handler
+        tgbot.process_command(
+            text=text, 
+            state_manager=_STATE, 
+            exchange_client=_GLOBAL_EX, 
+            train_func=_train_model_safe
+        )
     except Exception:
         logging.exception("dispatch error")
 
@@ -313,11 +290,17 @@ def set_webhook():
 
 # ================== TRADING LOOP ==================
 def start_trading_loop():
+    """
+    ✅ ИСПРАВЛЕНИЕ: Улучшенный запуск торгового цикла с правильной блокировкой
+    """
+    global _TRADING_BOT
+    
     if not ENABLE_TRADING:
         logging.info("Trading loop disabled by ENABLE_TRADING=0")
         return
 
     lock_path = ".trading.lock"
+    
     # Если лок-файл существует — удаляем, чтобы позволить перезапуск
     try:
         if os.path.exists(lock_path):
@@ -330,8 +313,22 @@ def start_trading_loop():
     if not _acquire_file_lock(lock_path):
         logging.warning("⚠️ Could not create lock file, but starting trading loop anyway")
     
-    bot = TradingBot()
-    t = threading.Thread(target=bot.run, name="TradingLoop", daemon=True)
+    # ✅ Создаем глобальный экземпляр бота
+    _TRADING_BOT = TradingBot()
+    
+    def trading_loop_wrapper():
+        try:
+            logging.info("🚀 Trading loop thread starting...")
+            _TRADING_BOT.run()
+        except Exception as e:
+            logging.error(f"❌ Trading loop crashed: {e}")
+            # Попытка перезапуска через 60 секунд
+            import time
+            time.sleep(60)
+            logging.info("🔄 Attempting to restart trading loop...")
+            trading_loop_wrapper()
+    
+    t = threading.Thread(target=trading_loop_wrapper, name="TradingLoop", daemon=True)
     t.start()
     logging.info("Trading loop thread started")
 
@@ -351,27 +348,9 @@ def _bootstrap_once():
         logging.exception("start_trading_loop failed")
     _bootstrapped = True
 
-# ==== Watchdog with Auto-Restart and Telegram Alerts ====
+# ================== WATCHDOG & MONITORING ==================
 import psutil
 import time
-
-import os
-
-LOCK_FILE = ".trading.lock"
-
-# Remove old lock file at startup
-if os.path.exists(LOCK_FILE):
-    os.remove(LOCK_FILE)
-    print("⚠️ Removed stale lock file at startup")
-
-# Create new lock file and check before starting trading loop
-if os.path.exists(LOCK_FILE):
-    print("⏸ Trading loop already running — skipping duplicate start")
-else:
-    with open(LOCK_FILE, "w") as lf:
-        lf.write("running")
-    print("✅ Trading lock acquired — starting main loop...")
-
 
 def send_telegram_alert(message):
     try:
@@ -383,32 +362,71 @@ def send_telegram_alert(message):
         logging.error(f"[Telegram Alert Error] {e}")
 
 def monitor_resources():
-    process = psutil.Process(os.getpid())
-    mem = process.memory_info().rss / (1024 * 1024)
-    cpu = process.cpu_percent(interval=1)
-    logging.info(f"[Resources] CPU: {cpu}%, RAM: {mem:.2f} MB")
-    if cpu > 80 or mem > (psutil.virtual_memory().total / (1024 * 1024) * 0.8):
-        send_telegram_alert(f"⚠️ High usage detected! CPU: {cpu}%, RAM: {mem:.2f} MB")
-    return cpu, mem
+    try:
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info().rss / (1024 * 1024)
+        cpu = process.cpu_percent(interval=1)
+        logging.info(f"[Resources] CPU: {cpu}%, RAM: {mem:.2f} MB")
+        
+        # Проверяем критические уровни
+        if cpu > 80 or mem > (psutil.virtual_memory().total / (1024 * 1024) * 0.8):
+            send_telegram_alert(f"⚠️ High usage detected! CPU: {cpu}%, RAM: {mem:.2f} MB")
+        return cpu, mem
+    except Exception as e:
+        logging.error(f"[Resource Monitor] Error: {e}")
+        return 0, 0
 
 def watchdog():
+    """
+    ✅ ИСПРАВЛЕНИЕ: Улучшенный watchdog с правильным мониторингом
+    """
     while True:
         try:
             monitor_resources()
-            trading_thread_alive = any(t.name == "TradingLoop" and t.is_alive() for t in threading.enumerate())
-            if not trading_thread_alive:
+            
+            # Проверяем состояние торгового потока
+            trading_thread_alive = any(
+                t.name == "TradingLoop" and t.is_alive() 
+                for t in threading.enumerate()
+            )
+            
+            if not trading_thread_alive and ENABLE_TRADING:
                 send_telegram_alert("♻️ Trading loop stopped! Restarting...")
                 try:
-                    threading.Thread(target=start_trading_loop, name="TradingLoop", daemon=True).start()
+                    start_trading_loop()
+                    logging.info("✅ Trading loop restarted by watchdog")
                 except Exception as e:
                     send_telegram_alert(f"❌ Failed to restart trading loop: {e}")
+                    logging.error(f"❌ Watchdog restart failed: {e}")
+            
+            # Проверяем состояние позиций (если бот доступен)
+            if _TRADING_BOT and hasattr(_TRADING_BOT, 'state'):
+                try:
+                    position_state = _TRADING_BOT.state.state
+                    if position_state.get("in_position"):
+                        last_check = position_state.get("last_manage_check")
+                        if last_check:
+                            from datetime import datetime, timezone
+                            last_dt = datetime.fromisoformat(last_check.replace("Z", "+00:00"))
+                            now_dt = datetime.now(timezone.utc)
+                            minutes_since = (now_dt - last_dt).total_seconds() / 60
+                            
+                            # Если позиция не управлялась более 30 минут - предупреждение
+                            if minutes_since > 30:
+                                logging.warning(f"⚠️ Position not managed for {minutes_since:.1f} minutes")
+                                
+                except Exception as e:
+                    logging.debug(f"Position check error: {e}")
+                    
         except Exception as e:
             logging.error(f"[Watchdog] Error: {e}")
-        time.sleep(300)
+        
+        time.sleep(300)  # Проверка каждые 5 минут
 
+# Запускаем watchdog в отдельном потоке
 threading.Thread(target=watchdog, daemon=True).start()
 
-# ==== Keep-Alive Ping ====
+# ================== KEEP-ALIVE PING ==================
 def keep_alive_ping():
     try:
         if PUBLIC_URL:
@@ -416,10 +434,14 @@ def keep_alive_ping():
             logging.info(f"[KeepAlive] Pinged {PUBLIC_URL}")
     except Exception as e:
         logging.warning(f"[KeepAlive] Ping failed: {e}")
+    
+    # Планируем следующий пинг
     threading.Timer(600, keep_alive_ping).start()
 
+# Запускаем keep-alive
 keep_alive_ping()
 
+# ================== STARTUP ==================
 if __name__ != "__main__":
     _bootstrap_once()
 
