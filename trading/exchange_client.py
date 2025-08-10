@@ -1,16 +1,4 @@
 import ccxt
-
-import csv
-from datetime import datetime
-
-def log_trade_to_csv(symbol, side, amount, price, profit=None, mode="real", csv_file="closed_trades.csv"):
-    file_exists = Path(csv_file).is_file()
-    with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "symbol", "side", "amount", "price", "profit", "mode"])
-        writer.writerow([datetime.utcnow().isoformat(), symbol, side, amount, price, profit if profit is not None else "", mode])
-
 import logging
 import threading
 import time
@@ -32,6 +20,7 @@ class ExchangeClient:
     """
 
     def __init__(self, api_key: str = None, api_secret: str = None, safe_mode: bool = True):
+        self.safe_mode = getattr(config, 'SAFE_MODE', True)  # Safe mode flag
         self.api_key = api_key or os.getenv("GATE_API_KEY", "")
         self.api_secret = api_secret or os.getenv("GATE_API_SECRET", "")
         self.safe_mode = safe_mode
@@ -65,7 +54,7 @@ class ExchangeClient:
             logging.info("📄 Exchange client running in SAFE MODE (paper trading)")
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200) -> List[List]:
-    """Получение OHLCV данных — всегда с реального рынка"""
+    """Получение OHLCV данных - всегда с реального рынка"""
     try:
         if not self.exchange:
             self.exchange = ccxt.gateio({
@@ -85,7 +74,7 @@ class ExchangeClient:
         raise APIException(f"OHLCV fetch failed: {e}")
 
 def get_last_price(self, symbol: str) -> float:
-    """Получение последней цены — всегда с реального рынка"""
+    """Получение последней цены - всегда с реального рынка"""
     try:
         if not self.exchange:
             try:
