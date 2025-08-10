@@ -53,58 +53,51 @@ class ExchangeClient:
             logging.info("📄 Exchange client running in SAFE MODE (paper trading)")
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200) -> List[List]:
-        """Получение OHLCV данных"""
-        
-        try:
-            if self.safe_mode:
-                # Генерируем синтетические данные для тестирования
-                return self._generate_synthetic_ohlcv(symbol, timeframe, limit)
-            
-            if not self.exchange:
-                raise APIException("Exchange not initialized")
-                
-            # Получаем реальные данные
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            if not ohlcv:
-                raise APIException(f"No OHLCV data received for {symbol}")
-                
-            return ohlcv
-            
-        except Exception as e:
-            logging.error(f"Failed to fetch OHLCV for {symbol}: {e}")
-            if self.safe_mode:
-                return self._generate_synthetic_ohlcv(symbol, timeframe, limit)
-            raise APIException(f"OHLCV fetch failed: {e}")
+    """Получение OHLCV данных — всегда с реального рынка"""
+    try:
+        if not self.exchange:
+            self.exchange = ccxt.gateio({
+                'enableRateLimit': True,
+                'timeout': 30000,
+            })
+            self.exchange.load_markets()
 
-    def get_last_price(self, symbol: str) -> float:
-        """Получение последней цены"""
-        
-        try:
-            if self.safe_mode:
-                # Синтетическая цена для тестирования
-                if "BTC" in symbol:
-                    return 43000.0 + (time.time() % 1000)
-                elif "ETH" in symbol:
-                    return 2500.0 + (time.time() % 100)
-                else:
-                    return 100.0
-            
-            if not self.exchange:
-                raise APIException("Exchange not initialized")
-                
-            ticker = self.exchange.fetch_ticker(symbol)
-            price = float(ticker.get('last', 0))
-            
-            if price <= 0:
-                raise APIException(f"Invalid price received: {price}")
-                
-            return price
-            
-        except Exception as e:
-            logging.error(f"Failed to get last price for {symbol}: {e}")
-            raise APIException(f"Price fetch failed: {e}")
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not ohlcv:
+            raise APIException(f"No OHLCV data received for {symbol}")
 
-    def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
+        return ohlcv
+
+    except Exception as e:
+        logging.error(f"Failed to fetch OHLCV for {symbol}: {e}")
+        raise APIException(f"OHLCV fetch failed: {e}")
+
+def get_last_price(self, symbol: str) -> float:
+    """Получение последней цены — всегда с реального рынка"""
+    try:
+        if not self.exchange:
+            try:
+                self.exchange = ccxt.gateio({
+                    'enableRateLimit': True,
+                    'timeout': 30000,
+                })
+                self.exchange.load_markets()
+            except Exception as e:
+                raise APIException(f"Failed to init exchange for price fetch: {e}")
+
+        ticker = self.exchange.fetch_ticker(symbol)
+        price = float(ticker.get('last', 0))
+
+        if price <= 0:
+            raise APIException(f"Invalid price received: {price}")
+
+        return price
+
+    except Exception as e:
+        logging.error(f"Failed to get last price for {symbol}: {e}")
+        raise APIException(f"Price fetch failed: {e}")
+
+def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
         """Создание рыночного ордера на покупку"""
         
         with self._lock:
