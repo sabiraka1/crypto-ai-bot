@@ -88,7 +88,9 @@ class MultiTimeframeAnalyzer:
         # ATR (True Range)
         prev_close = close.shift(1)
         tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1 / self._atr_period, adjust=False, min_periods=5).mean()
+        from analysis.technical_indicators import _atr_series_for_ml
+	temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+	atr = _atr_series_for_ml(temp_df, self._atr_period)
         atr_norm = float((atr.iloc[-1] / (abs(close.iloc[-1]) + _EPS)) if atr.notna().any() else 0.0)
 
         # сглажённая метрика силы: ниже vol/atr_norm -> выше сила
