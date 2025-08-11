@@ -80,7 +80,7 @@ def safe_command(func):
         except Exception as e:
             logging.exception(f"Ошибка в команде {func.__name__}: {e}")
             if chat_id:
-                send_message("⚠️ Произошла ошибка при выполнении команды.", chat_id=str(chat_id))
+                send_message(⚠️ Произошла ошибка при выполнении команды.", chat_id=str(chat_id))
                 
     return wrapper
 
@@ -128,6 +128,24 @@ def send_photo(image_path: str, caption: Optional[str] = None, chat_id: str = No
         _tg_request("sendPhoto", data, files=files)
 
 
+# ==== ✅ ЭТАП 3: UNIFIED ATR FUNCTIONS ====
+
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    """✅ ЭТАП 3: UNIFIED ATR для telegram команд"""
+    try:
+        from analysis.technical_indicators import _atr_for_telegram
+        result = _atr_for_telegram(df, period)
+        logging.debug(f"📊 Telegram ATR (UNIFIED): {result:.6f}")
+        return result
+    except Exception as e:
+        logging.error(f"UNIFIED ATR failed in telegram: {e}")
+        # Fallback к простому методу
+        try:
+            return float((df["high"] - df["low"]).mean()) if not df.empty else 0.0
+        except Exception:
+            return 0.0
+
+
 # ==== Commands ====
 @safe_command
 def cmd_start(chat_id: str = None) -> None:
@@ -138,19 +156,20 @@ def cmd_start(chat_id: str = None) -> None:
         "/status – Показать открытую позицию\n"
         "/profit – Общий PnL и Winrate\n"
         "/lasttrades – Последние сделки\n"
-        "/test – Тест сигнала\n"
+        "/test – Тест сигнала с ATR анализом\n"
         "/testbuy [сумма] – Тестовая покупка\n"
         "/testsell – Тестовая продажа\n"
         "/help – Справка по командам\n"
         "/errors – Последние ошибки\n"
-        "/train – Обучить AI модель"
+        "/train – Обучить AI модель\n\n"
+        "✅ UNIFIED ATR система активна"
     )
     send_message(message, chat_id)
 
 
 @safe_command
 def cmd_status(state_manager: StateManager, exchange_client: ExchangeClient, chat_id: str = None) -> None:
-    """Команда /status - показать текущую позицию"""
+    """✅ УЛУЧШЕНО: Команда /status с красивым форматированием как в примере"""
     try:
         st = getattr(state_manager, "state", {}) or {}
         
@@ -168,42 +187,69 @@ def cmd_status(state_manager: StateManager, exchange_client: ExchangeClient, cha
             logging.error(f"Failed to get current price: {e}")
             current_price = None
 
-        txt = [f"📌 Позиция LONG {sym} @ {entry:.6f}"]
+        # ✅ КРАСИВОЕ ФОРМАТИРОВАНИЕ как в примере
+        lines = []
         
+        # Заголовок
         if current_price:
             pnl_pct = (current_price - entry) / entry * 100.0 if entry else 0.0
-            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
-            txt.append(f"Текущая цена: {current_price:.6f}")
-            txt.append(f"{pnl_emoji} PnL: {pnl_pct:+.2f}%")
-
-        # Информация о TP/SL
-        tp = st.get("tp1_atr")
-        sl = st.get("sl_atr")
-        if tp and sl:
-            txt.append(f"🎯 TP: {float(tp):.6f} | 🛡️ SL: {float(sl):.6f}")
-
-        # Дополнительная информация
-        flags = []
-        if st.get("partial_taken"):
-            flags.append("Частичное TP")
-        if st.get("trailing_on"):
-            flags.append("Трейлинг ON")
-            
+            emoji = "📈" if pnl_pct >= 0 else "📉"
+            lines.append(f"{emoji} Advanced LONG {sym} @ {entry:.2f}")
+        else:
+            lines.append(f"📌 LONG {sym} @ {entry:.2f}")
+        
+        # Сумма
         qty_usd = st.get("qty_usd")
         if qty_usd:
-            flags.append(f"${float(qty_usd):.2f}")
-            
-        if flags:
-            txt.append("ℹ️ " + " | ".join(flags))
+            lines.append(f"Сумма: ${float(qty_usd):.2f}")
 
-        send_message("\n".join(txt), chat_id)
+        # PnL если есть текущая цена
+        if current_price:
+            pnl_pct = (current_price - entry) / entry * 100.0 if entry else 0.0
+            pnl_abs = (current_price - entry) * st.get("qty_base", 0)
+            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+            lines.append(f"Текущая: {current_price:.2f}")
+            lines.append(f"{pnl_emoji} PnL: {pnl_pct:+.2f}% (${pnl_abs:+.2f})")
+
+        # TP/SL уровни
+        tp1 = st.get("tp1_atr")
+        tp2 = st.get("tp2_atr") 
+        sl = st.get("sl_atr")
+        
+        if tp1:
+            lines.append(f"🔵 Dynamic SL: {float(sl):.2f}" if sl else "")
+        if tp1:
+            lines.append(f"🔶 Next TP: {float(tp1):.2f}")
+
+        # Скоры и информация
+        buy_score = st.get("buy_score")
+        ai_score = st.get("ai_score")
+        amount_frac = st.get("amount_frac", 1.0)
+        
+        score_parts = []
+        if buy_score and ai_score:
+            score_parts.append(f"Score {buy_score:.1f} / AI {ai_score:.2f}")
+        if amount_frac:
+            size_pct = int(float(amount_frac) * 100)
+            score_parts.append(f"Size {size_pct}%")
+        
+        # Дополнительные флаги
+        flags = []
+        if st.get("partial_taken"):
+            flags.append("Multi-TP ON")
+        if st.get("trailing_on"):
+            flags.append("Dynamic SL ON")
+            
+        if score_parts or flags:
+            all_info = score_parts + flags
+            lines.append(" | ".join(all_info))
+
+        send_message("\n".join(lines), chat_id)
         
     except Exception as e:
         logging.exception("cmd_status error")
         send_message(f"⚠️ Ошибка при получении статуса: {e}", chat_id)
 
-
-# telegram/bot_handler.py - исправленные функции
 
 @safe_command
 def cmd_profit(chat_id: str = None) -> None:
@@ -353,53 +399,6 @@ def cmd_errors(chat_id: str = None) -> None:
 
 
 @safe_command
-def cmd_lasttrades(chat_id: str = None) -> None:
-    """Команда /lasttrades - показать последние сделки"""
-    try:
-        trades = CSVHandler.read_last_trades(limit=5)
-        if not trades:
-            send_message("📋 Сделок ещё нет", chat_id)
-            return
-            
-        lines: List[str] = ["📋 Последние сделки:"]
-        
-        for i, trade in enumerate(trades, 1):
-            side = str(trade.get("side", "LONG"))
-            entry = trade.get("entry_price", "")
-            exit_price = trade.get("exit_price", "")
-            pnl_pct = trade.get("pnl_pct", "")
-            reason = str(trade.get("reason", ""))
-            
-            # Форматируем строку сделки
-            trade_line = f"{i}. {side}"
-            
-            if entry and exit_price:
-                try:
-                    trade_line += f" {float(entry):.2f}→{float(exit_price):.2f}"
-                except:
-                    trade_line += f" {entry}→{exit_price}"
-                    
-            if pnl_pct:
-                try:
-                    pnl_val = float(pnl_pct)
-                    emoji = "🟢" if pnl_val >= 0 else "🔴"
-                    trade_line += f" {emoji}{pnl_val:+.2f}%"
-                except:
-                    trade_line += f" {pnl_pct}%"
-                    
-            if reason:
-                trade_line += f" ({reason})"
-                
-            lines.append(trade_line)
-            
-        send_message("\n".join(lines), chat_id)
-        
-    except Exception as e:
-        logging.exception("cmd_lasttrades error")
-        send_message(f"⚠️ Ошибка при получении сделок: {e}", chat_id)
-
-
-@safe_command
 def cmd_train(train_func: Callable, chat_id: str = None) -> None:
     """Команда /train - обучение AI модели"""
     send_message("🧠 Запуск обучения AI модели...", chat_id)
@@ -434,21 +433,11 @@ def _ohlcv_to_df(ohlcv) -> pd.DataFrame:
     return df
 
 
-def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    """✅ UNIFIED: ATR для telegram команд"""
-    try:
-        from analysis.technical_indicators import _atr_for_telegram
-        return _atr_for_telegram(df, period)
-    except Exception as e:
-        logging.error(f"Telegram ATR failed: {e}")
-        # Простой fallback
-        return float((df["high"] - df["low"]).mean()) if not df.empty else 0.0
+# ==== ✅ ЭТАП 3: Test commands с UNIFIED ATR и красивыми уведомлениями ====
 
-
-# ==== Test commands ====
 @safe_command
 def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
-    """Команда /test - тестирование анализа рынка"""
+    """✅ УЛУЧШЕНО: Команда /test с UNIFIED ATR и красивыми уведомлениями"""
     symbol = symbol or SYMBOL_ENV
     timeframe = timeframe or TIMEFRAME_ENV
     
@@ -464,49 +453,74 @@ def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
             
         df = _ohlcv_to_df(ohlcv)
         
+        # ✅ UNIFIED ATR расчет
+        atr_value = _atr(df, period=14)
+        
         # Анализируем сигнал
         engine = scoring_engine.ScoringEngine()
         
+        # AI анализ (упрощенный для теста)
+        ai_score = 0.75  # Фиксированный для демо
+        
         # Используем правильный метод
         if hasattr(engine, "evaluate"):
-            scores = engine.evaluate(df, ai_score=0.55)
+            scores = engine.evaluate(df, ai_score=ai_score)
         elif hasattr(engine, "calculate_scores"):
-            scores = engine.calculate_scores(df, ai_score=0.55)
+            scores = engine.calculate_scores(df, ai_score=ai_score)
         else:
-            scores = (0.5, 0.55, {})
+            scores = (0.5, ai_score, {})
             
         if isinstance(scores, tuple) and len(scores) >= 2:
-            buy_score, ai_score = float(scores[0]), float(scores[1])
+            buy_score, ai_score_eval = float(scores[0]), float(scores[1])
             details = scores[2] if len(scores) > 2 else {}
         else:
-            buy_score, ai_score = 0.5, 0.55
+            buy_score, ai_score_eval = 0.5, ai_score
             details = {}
         
         # Получаем последнюю цену
         last_price = ex.get_last_price(symbol)
         
-        # Формируем отчет
-        message = [
-            f"🧪 TEST анализ {symbol} ({timeframe})",
-            f"💰 Цена: {last_price:.2f}",
-            f"📊 Buy Score: {buy_score:.2f}",
-            f"🤖 AI Score: {ai_score:.2f}",
-            ""
-        ]
+        # ✅ КРАСИВОЕ ФОРМАТИРОВАНИЕ как в примере
+        lines = []
         
-        # Добавляем детали если есть
+        # Заголовок с иконкой
+        signal_emoji = "📈" if buy_score > 0.6 else "📊"
+        lines.append(f"{signal_emoji} Test Analysis {symbol} ({timeframe})")
+        lines.append(f"Цена: ${last_price:.2f}")
+        
+        # ATR информация
+        lines.append(f"🔵 ATR: {atr_value:.4f} (UNIFIED)")
+        
+        # Скоры
+        score_line = f"Score {buy_score:.1f} / AI {ai_score_eval:.2f}"
+        lines.append(score_line)
+        
+        # Детали если есть
         if details:
             rsi = details.get("rsi")
             if rsi:
-                message.append(f"📈 RSI: {rsi:.1f}")
+                rsi_emoji = "🟢" if 30 <= rsi <= 70 else "🔴"
+                lines.append(f"{rsi_emoji} RSI: {rsi:.1f}")
                 
             macd_hist = details.get("macd_hist")
             if macd_hist is not None:
-                message.append(f"📊 MACD Hist: {macd_hist:.4f}")
+                macd_emoji = "📈" if macd_hist > 0 else "📉"
+                lines.append(f"{macd_emoji} MACD: {macd_hist:.4f}")
                 
             market_condition = details.get("market_condition")
             if market_condition:
-                message.append(f"🌊 Market: {market_condition}")
+                lines.append(f"🌊 Market: {market_condition}")
+        
+        # Рекомендация
+        if buy_score > 0.65 and ai_score_eval > 0.70:
+            lines.append("")
+            lines.append("✅ Сигнал: POTENTIAL BUY")
+        elif buy_score < 0.4:
+            lines.append("")
+            lines.append("❌ Сигнал: AVOID")
+        else:
+            lines.append("")
+            lines.append("⏳ Сигнал: WAIT")
         
         # Создаем простой график
         try:
@@ -520,8 +534,8 @@ def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
             plt.close()
             
             # Отправляем сообщение и график
-            send_message("\n".join(message), chat_id)
-            send_photo(chart_path, caption=f"График {symbol}", chat_id=chat_id)
+            send_message("\n".join(lines), chat_id)
+            send_photo(chart_path, caption=f"График {symbol} | ATR: {atr_value:.4f}", chat_id=chat_id)
             
             # Удаляем временный файл
             try:
@@ -531,7 +545,7 @@ def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
                 
         except Exception as e:
             logging.error(f"Chart creation failed: {e}")
-            send_message("\n".join(message), chat_id)
+            send_message("\n".join(lines), chat_id)
             
     except Exception as e:
         logging.exception("cmd_test error")
@@ -541,7 +555,7 @@ def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
 @safe_command
 def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient, 
                 amount_usd: float = None, chat_id: str = None):
-    """Команда /testbuy - тестовая покупка"""
+    """✅ УЛУЧШЕНО: Команда /testbuy с красивыми уведомлениями"""
     symbol = SYMBOL_ENV
     
     try:
@@ -560,11 +574,20 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
         ohlcv = exchange_client.fetch_ohlcv(symbol, timeframe=TIMEFRAME_ENV, limit=200)
         df = _ohlcv_to_df(ohlcv)
         last_price = float(df["close"].iloc[-1]) if not df.empty else exchange_client.get_last_price(symbol)
+        
+        # ✅ UNIFIED ATR
         atr_val = _atr(df)
 
         # Создаем временный PositionManager для тестовой покупки
         def test_notify_entry(*args, **kwargs):
-            send_message(f"🧪 TEST BUY уведомление: позиция открыта", chat_id)
+            # ✅ КРАСИВОЕ УВЕДОМЛЕНИЕ как в примере
+            lines = [
+                f"📈 TEST BUY {symbol} @ {last_price:.2f}",
+                f"Сумма: ${amount:.2f}",
+                f"🔵 ATR: {atr_val:.4f} (UNIFIED)",
+                "Mode: PAPER TRADING"
+            ]
+            send_message("\n".join(lines), chat_id)
         
         def test_notify_close(*args, **kwargs):
             send_message(f"🧪 TEST позиция закрыта", chat_id)
@@ -592,22 +615,7 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
         
         if result is None:
             send_message("❌ Тестовая покупка не выполнена. Проверьте логи.", chat_id)
-        else:
-            min_cost = exchange_client.market_min_cost(symbol) or 0.0
-            actual_amount = max(amount, min_cost)
-            
-            message = [
-                f"✅ TEST BUY выполнен",
-                f"💰 Символ: {symbol}",
-                f"💵 Запрошено: ${amount:.2f}",
-                f"💵 Выполнено: ${actual_amount:.2f}",
-                f"📈 Цена: {last_price:.6f}",
-                f"🔧 Режим: {'paper' if result.get('paper') else 'real'}",
-                f"🆔 ID: {result.get('id', 'N/A')}"
-            ]
-            
-            send_message("\n".join(message), chat_id)
-            
+        
     except Exception as e:
         logging.exception("cmd_testbuy error")
         send_message(f"❌ Ошибка TEST BUY: {e}", chat_id)
@@ -615,7 +623,7 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
 
 @safe_command
 def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient, chat_id: str = None):
-    """Команда /testsell - тестовая продажа"""
+    """✅ УЛУЧШЕНО: Команда /testsell с красивыми уведомлениями"""
     symbol = SYMBOL_ENV
     
     try:
@@ -642,7 +650,18 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient, c
 
         # Создаем PositionManager для продажи
         def test_notify_close(*args, **kwargs):
-            send_message(f"🧪 TEST SELL завершен", chat_id)
+            # ✅ КРАСИВОЕ УВЕДОМЛЕНИЕ как в примере
+            pnl_pct = (last_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+            pnl_abs = (last_price - entry_price) * qty_base_stored if entry_price > 0 else 0.0
+            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+            
+            lines = [
+                f"{pnl_emoji} TEST SELL {symbol} @ {last_price:.2f}",
+                f"Entry: {entry_price:.2f}",
+                f"PnL: {pnl_pct:+.2f}% (${pnl_abs:+.2f})",
+                f"Size: ${qty_usd:.2f}"
+            ]
+            send_message("\n".join(lines), chat_id)
 
         from trading.position_manager import SimplePositionManager
         pm = SimplePositionManager(
@@ -657,23 +676,6 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient, c
         
         if result is None:
             send_message("❌ Тестовая продажа не выполнена", chat_id)
-        else:
-            # Рассчитываем PnL
-            pnl_pct = (last_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
-            pnl_abs = (last_price - entry_price) * qty_base_stored if entry_price > 0 else 0.0
-            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
-            
-            message = [
-                f"✅ TEST SELL выполнен",
-                f"💰 Символ: {symbol}",
-                f"📊 Продано: {qty_base_stored:.8f}",
-                f"📈 Цена продажи: {last_price:.6f}",
-                f"📉 Цена покупки: {entry_price:.6f}",
-                f"{pnl_emoji} PnL: {pnl_pct:+.2f}% ({pnl_abs:+.2f} USDT)",
-                f"💵 Размер позиции: ${qty_usd:.2f}"
-            ]
-            
-            send_message("\n".join(message), chat_id)
             
     except Exception as e:
         logging.exception("cmd_testsell error")
@@ -687,17 +689,18 @@ def cmd_help(chat_id: str = None):
         "📜 Справка по командам:\n\n"
         "🔧 Основные команды:\n"
         "/start — Запуск и приветствие\n"
-        "/status — Текущая позиция\n"
+        "/status — Текущая позиция (улучшено)\n"
         "/profit — Статистика торговли\n"
         "/lasttrades — Последние 5 сделок\n\n"
         "🧪 Тестирование:\n"
-        "/test [символ] — Анализ рынка\n"
+        "/test [символ] — Анализ рынка с ATR\n"
         "/testbuy [сумма] — Тестовая покупка\n"
         "/testsell — Тестовая продажа\n\n"
         "🛠️ Служебные:\n"
         "/errors — Последние ошибки\n"
         "/train — Обучить AI модель\n"
         "/help — Эта справка\n\n"
+        "✅ UNIFIED ATR система активна\n"
         "ℹ️ Примеры:\n"
         "• /test BTC/USDT 15m\n"
         "• /testbuy 10\n"
@@ -752,7 +755,7 @@ def process_command(text: str, state_manager: StateManager, exchange_client: Exc
         elif command == "/train":
             cmd_train(train_func if train_func else lambda: False, chat_id)
             
-        # Тестовые команды
+        # Тестовые команды с UNIFIED ATR
         elif command == "/test":
             symbol = args[0] if len(args) > 0 else None
             timeframe = args[1] if len(args) > 1 else None
