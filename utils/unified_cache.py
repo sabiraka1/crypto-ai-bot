@@ -394,17 +394,30 @@ class UnifiedCacheManager:
     return memory_ratio > self.MEMORY_WARNING_THRESHOLD
 
     def _handle_memory_pressure(self):
-        """Обработка нехватки памяти"""
-        self._stats["memory_pressure_cleanups"] += 1
-        logging.warning("🔧 Memory pressure detected, starting cleanup")
+    """✅ УЛУЧШЕНО: Трёхступенчатая очистка памяти"""
+    current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+    memory_ratio = current_memory / self.global_max_memory_mb
+    
+    self._stats["memory_pressure_cleanups"] += 1
+    
+    if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
+        # Экстренная очистка: удаляем 50%
+        logging.error("🔥 EMERGENCY cleanup: removing 50% of cache")
+        self._cleanup_expired()
+        self._cleanup_lru(target_reduction=0.5)
+        self._cleanup_by_namespace_priority()
         
-        # Удаляем истекшие записи
-        expired_count = self._cleanup_expired()
+    elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
+        # Критическая очистка: удаляем 30%
+        logging.warning("⚠️ CRITICAL cleanup: removing 30% of cache") 
+        self._cleanup_expired()
+        self._cleanup_lru(target_reduction=0.3)
         
-        # Если все еще нехватка - удаляем LRU записи
-        if self._check_memory_pressure():
-            lru_count = self._cleanup_lru(target_reduction=0.3)  # Удаляем 30%
-            logging.info(f"🔧 Memory pressure cleanup: {expired_count} expired + {lru_count} LRU")
+    else:
+        # Обычная очистка: удаляем истекшие + 15% LRU
+        logging.info("📊 Normal cleanup: expired + 15% LRU")
+        self._cleanup_expired()
+        self._cleanup_lru(target_reduction=0.15)
 
     def _cleanup_expired(self) -> int:
         """Очистка истекших записей"""
