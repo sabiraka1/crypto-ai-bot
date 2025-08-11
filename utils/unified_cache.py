@@ -85,6 +85,10 @@ class UnifiedCacheManager:
     
     def __init__(self, global_max_memory_mb: float = 500.0):
         self.global_max_memory_mb = global_max_memory_mb
+        # ✅ ИСПРАВЛЕНИЕ: Более ранние пороги срабатывания
+        self.MEMORY_WARNING_THRESHOLD = 0.6   # 60% - предупреждение
+        self.MEMORY_CRITICAL_THRESHOLD = 0.7  # 70% - агрессивная очистка  
+        self.MEMORY_EMERGENCY_THRESHOLD = 0.8 # 80% - экстренная очистка
         self._cache: Dict[str, CacheEntry] = {}
         self._lock = threading.RLock()
         self._stats = {
