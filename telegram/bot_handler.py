@@ -80,7 +80,7 @@ def safe_command(func):
         except Exception as e:
             logging.exception(f"Ошибка в команде {func.__name__}: {e}")
             if chat_id:
-                send_message(⚠️ Произошла ошибка при выполнении команды.", chat_id=str(chat_id))
+                send_message("⚠️ Произошла ошибка при выполнении команды.", chat_id=str(chat_id))
                 
     return wrapper
 
