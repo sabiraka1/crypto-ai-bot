@@ -1,4 +1,3 @@
-
 # utils/unified_cache.py — УНИФИЦИРОВАННЫЙ КЭШ
 # ВАЖНО: сохраняет публичный API (UnifiedCacheManager.get/set/cached) +
 # добавляет get_or_set, корректную работу с falsy-значениями, сжатие,
@@ -25,9 +24,11 @@ class CachePolicy(Enum):
 # Неймспейсы — можно расширять по проекту при необходимости
 class CacheNamespace(Enum):
     OHLCV = "ohlcv"              # свечи
+    PRICES = "prices"            # последние цены
+    INDICATORS = "indicators"    # ⬅ добавлено: индикаторы (для analysis/technical_indicators.py)
+    CSV_READS = "csv_reads"      # ⬅ добавлено: чтение CSV (для utils/csv_handler.py)
     MARKET_INFO = "market_info"  # инфо рынка/тикеры
     ML_FEATURES = "ml_features"  # фичи/индикаторы
-    PRICES = "prices"            # последние цены
     ORDER_STATUS = "order_status"
     TELEGRAM = "telegram"
     CHARTS = "charts"
@@ -80,12 +81,14 @@ class UnifiedCacheManager:
             "gets": 0, "hits": 0, "misses": 0,
             "sets": 0, "evictions": 0, "expired": 0, "errors": 0
         }
-        # Конфиг по умолчанию (сохранён из вашей версии, можно менять по месту)
+        # Конфиг по умолчанию (добавлены INDICATORS и CSV_READS)
         default_cfg = {
             CacheNamespace.OHLCV: NamespaceConfig(ttl=60.0, max_size=2000, max_memory_mb=128.0, policy=CachePolicy.LRU, compress=True),
+            CacheNamespace.PRICES: NamespaceConfig(ttl=5.0, max_size=10000, max_memory_mb=50.0, policy=CachePolicy.TTL),
+            CacheNamespace.INDICATORS: NamespaceConfig(ttl=120.0, max_size=2000, max_memory_mb=100.0, policy=CachePolicy.LRU, compress=False),
+            CacheNamespace.CSV_READS: NamespaceConfig(ttl=30.0, max_size=5000, max_memory_mb=80.0, policy=CachePolicy.TTL, compress=False),
             CacheNamespace.MARKET_INFO: NamespaceConfig(ttl=3600.0, max_size=100, max_memory_mb=20.0, policy=CachePolicy.TTL),
             CacheNamespace.ML_FEATURES: NamespaceConfig(ttl=300.0, max_size=1000, max_memory_mb=100.0, policy=CachePolicy.LRU),
-            CacheNamespace.PRICES: NamespaceConfig(ttl=5.0, max_size=10000, max_memory_mb=50.0, policy=CachePolicy.TTL),
             CacheNamespace.ORDER_STATUS: NamespaceConfig(ttl=600.0, max_size=2000, max_memory_mb=64.0, policy=CachePolicy.LRU),
             CacheNamespace.TELEGRAM: NamespaceConfig(ttl=300.0, max_size=5000, max_memory_mb=32.0, policy=CachePolicy.LRU),
             CacheNamespace.CHARTS: NamespaceConfig(ttl=3600.0, max_size=500, max_memory_mb=256.0, policy=CachePolicy.LRU, compress=True),
@@ -178,6 +181,29 @@ class UnifiedCacheManager:
                 "rss_mb": self._rss_mb(),
                 "per_ns": self._per_ns_stats_locked(),
             }
+
+    # ✅ Совместимость: многие модули зовут get_stats()
+    def get_stats(self) -> Dict[str, Any]:
+        return self.stats()
+
+    # ✅ Нужен both csv_handler и technical_indicators
+    def get_top_keys(self, namespace: CacheNamespace | str, limit: int = 10) -> List[Dict[str, Any]]:
+        ns = self._ns_key(namespace)
+        with self._lock:
+            items = [(k, e) for k, e in self._data.items() if e.namespace == ns]
+            # сортируем по hits, потом по last_accessed
+            items.sort(key=lambda kv: (kv[1].hits, kv[1].last_accessed), reverse=True)
+            out = []
+            for fk, e in items[:max(1, int(limit))]:
+                out.append({
+                    "key": fk.split(":", 1)[-1],
+                    "hits": e.hits,
+                    "size_bytes": e.size_bytes,
+                    "age_sec": round(time.time() - e.created_at, 3),
+                    "last_accessed_sec": round(time.time() - e.last_accessed, 3),
+                    "metadata": e.metadata,
+                })
+            return out
 
     # Удобная обёртка: возвращает значение если есть, иначе вычисляет и кладёт
     def get_or_set(self, key: str, namespace: CacheNamespace | str, ttl: Optional[float],
@@ -308,7 +334,6 @@ class UnifiedCacheManager:
                    if e.namespace == ns and not e.sticky and not (e.ttl and (now - e.created_at) > e.ttl)]
         # сортировки
         if policy == CachePolicy.TTL:
-            # ближайшие к истечению позже — выметаем сначала наименее полезные (низкий приоритет, мало hits, старые)
             entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
         elif policy == CachePolicy.LRU:
             entries.sort(key=lambda kv: (kv[1].priority, kv[1].last_accessed, kv[1].hits))
@@ -319,7 +344,6 @@ class UnifiedCacheManager:
             self._delete_full(fk)
 
     def _evict_global_locked(self, incoming_size: int) -> None:
-        # глобальная эвикция по приоритетам/использованию
         entries = [(k, e) for k, e in self._data.items() if not e.sticky]
         entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
         freed = 0
@@ -330,20 +354,15 @@ class UnifiedCacheManager:
                 break
 
     def _enforce_global_memory_locked(self) -> None:
-        # по счётчику байтов (по pickle)
         total_bytes = sum(e.size_bytes for e in self._data.values())
         if total_bytes <= self.global_max_memory_mb * 1024 * 1024:
             return
-        # давление — чистим наиболее «дешёвые» с низким приоритетом
         self._evict_global_locked(int(total_bytes - self.global_max_memory_mb * 1024 * 1024))
-
-        # контроль по реальному RSS (если psutil доступен)
         try:
             if psutil is not None:
                 rss = psutil.Process(os.getpid()).memory_info().rss
                 limit = int(self.global_max_memory_mb * 1024 * 1024 * 1.10)  # 10% буфер
                 if rss > limit:
-                    # очистим дополнительно 10% записей (самых дешёвых)
                     entries = [(k, e) for k, e in self._data.items() if not e.sticky]
                     cut = max(1, len(entries) // 10)
                     entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
@@ -389,26 +408,15 @@ ttl_until_next_slot = UnifiedCacheManager.ttl_until_next_slot
 ttl_until_next_candle = UnifiedCacheManager.ttl_until_next_candle
 parse_tf_to_seconds = UnifiedCacheManager.parse_tf_to_seconds
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Lightweight adapters for domain usage (trading / telegram)
-# They hide keys/TTL/namespace details from business code.
-# Import usage:
-#   from utils.unified_cache import trading_cache, telegram_cache
-#   df = trading_cache.get_ohlcv("BTC/USDT", "15m", exchange.fetch_ohlcv)
-#   path = telegram_cache.get_chart(chart_hash, lambda: draw_chart(df))
-# Nothing else in this module was removed or changed.
-# ──────────────────────────────────────────────────────────────────────────────
-
 class trading_cache:
     @staticmethod
     def _ohlcv_key(symbol: str, tf: str) -> str:
-        # Namespace уже задаётся через CacheNamespace.OHLCV, поэтому ключ без доп. префикса
         return f"ohlcv:{symbol}:{tf}:v1"
 
     @staticmethod
     def get_ohlcv(symbol: str, tf: str, fetch_fn):
-        # Кэш до конца текущей свечи + небольшой дрейф
         ttl = ttl_until_next_candle(tf, drift_sec=10)
         key = trading_cache._ohlcv_key(symbol, tf)
         return cache.get_or_set(
@@ -429,7 +437,6 @@ class trading_cache:
     @staticmethod
     def get_orderbook(symbol: str, depth: int, fetch_fn):
         key = f"orderbook:{symbol}:{int(depth)}:v1"
-        # ордербук быстро устаревает — 1–2 секунды
         return cache.get_or_set(
             key, CacheNamespace.MARKET_INFO, ttl=2,
             factory=lambda: fetch_fn(symbol, depth),
@@ -438,13 +445,11 @@ class trading_cache:
 
     @staticmethod
     def invalidate_md(prefix: str = "") -> int:
-        # Удаляет по префиксу в разных md-неймспейсах
         count = 0
         count += cache.delete(f"ohlcv:{prefix}", CacheNamespace.OHLCV, prefix=True)
         count += cache.delete(f"ticker:{prefix}", CacheNamespace.PRICES, prefix=True)
         count += cache.delete(f"orderbook:{prefix}", CacheNamespace.MARKET_INFO, prefix=True)
         return count
-
 
 class telegram_cache:
     @staticmethod
@@ -453,7 +458,6 @@ class telegram_cache:
 
     @staticmethod
     def get_chart(hash_: str, make_chart_fn):
-        # Кэширует путь к PNG/WEBP (или bytes) на 1 час
         return cache.get_or_set(
             telegram_cache._chart_key(hash_), CacheNamespace.CHARTS, ttl=3600,
             factory=make_chart_fn, priority=1, compress=False
@@ -466,11 +470,7 @@ class telegram_cache:
 # ──────────────────────────────────────────────────────────────────────────────
 # Backwards-compatible aliases (keep legacy imports working)
 def get_cache_manager():
-    # Old code may do: from utils.unified_cache import get_cache_manager
-    # This returns the module-level singleton 'cache'.
     return cache
 
 def cached_function(namespace, ttl=None, key_func=None, **set_kwargs):
-    # Old code may do: @cached_function(CacheNamespace.OHLCV, ttl=60)
-    # This delegates to the new .cached(...) decorator.
     return cache.cached(namespace, ttl, key_func=key_func, **set_kwargs)

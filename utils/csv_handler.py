@@ -27,12 +27,12 @@ except ImportError:
 class CSVRecord(NamedTuple):
     """Запись для батчинга"""
     file_path: str
-    fieldnames: List[str] 
+    fieldnames: List[str]
     data: Dict[str, Any]
 
 class BatchCSVWriter:
     """Батчированная запись в CSV файлы"""
-    
+
     def __init__(self, batch_size: int = 10, flush_interval: float = 30.0):
         self.batch_size = batch_size
         self.flush_interval = flush_interval
@@ -44,17 +44,17 @@ class BatchCSVWriter:
         self._thread = None
         self._stop = threading.Event()
         self._started = False
-    
+
     def add_record(self, file_path: str, fieldnames: List[str], data: Dict[str, Any]):
         """Добавить запись в буфер"""
         with self._lock:
             self._buffer.append(CSVRecord(file_path, fieldnames, data))
             self._total_records += 1
-            
+
             # Немедленный flush при превышении размера батча
             if len(self._buffer) >= self.batch_size:
                 self._flush_buffer()
-    
+
     def _background_flush_loop(self):
         """Фоновая петля сброса буфера (управляется start/stop)"""
         while not self._stop.is_set():
@@ -67,7 +67,7 @@ class BatchCSVWriter:
             if self._buffer:
                 self._flush_buffer()
         logging.debug("📄 Background CSV flusher stopped")
-    
+
     def start(self) -> bool:
         """Явный запуск фонового флашера (идемпотентно)."""
         if getattr(self, "_started", False):
@@ -78,7 +78,7 @@ class BatchCSVWriter:
         self._started = True
         logging.debug("📄 Background CSV flusher started")
         return True
-    
+
     def stop(self, timeout: float = 2.0) -> bool:
         """Остановка фонового флашера с ожиданием."""
         if not getattr(self, "_started", False):
@@ -88,16 +88,16 @@ class BatchCSVWriter:
             self._thread.join(timeout=timeout)
         self._started = False
         return True
-    
+
     def _flush_buffer(self):
         """Сбросить буфер в файлы"""
         if not self._buffer:
             return
-            
+
         # Группируем записи по файлам для эффективности
         by_file = {}
         buffer_size = len(self._buffer)
-        
+
         while self._buffer:
             record = self._buffer.popleft()
             if record.file_path not in by_file:
@@ -106,35 +106,35 @@ class BatchCSVWriter:
                     'records': []
                 }
             by_file[record.file_path]['records'].append(record.data)
-        
+
         # Записываем батчами по файлам
         for file_path, file_data in by_file.items():
             try:
                 self._write_batch_to_file(file_path, file_data['fieldnames'], file_data['records'])
             except Exception as e:
                 logging.error(f"Batch CSV write failed for {file_path}: {e}")
-        
+
         self._last_flush = time.time()
         self._flush_count += 1
-        
+
         logging.debug(f"📄 CSV batch flushed: {buffer_size} records to {len(by_file)} files")
-    
+
     def _write_batch_to_file(self, file_path: str, fieldnames: List[str], records: List[Dict[str, Any]]):
         """Записать батч записей в один файл"""
         if not records:
             return
-            
+
         # Создаем директорию и файл если нужно
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-        
+
         file_exists = os.path.isfile(file_path)
-        
+
         # Создаем заголовки если файл новый
         if not file_exists:
             with open(file_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-        
+
         # Добавляем все записи одним блоком
         with open(file_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -148,14 +148,14 @@ class BatchCSVWriter:
                         filtered_data[field] = str(value) if pd.notna(value) else ""
                     else:
                         filtered_data[field] = str(value) if value is not None else ""
-                        
+
                 writer.writerow(filtered_data)
-    
+
     def force_flush(self):
         """Принудительно сбросить буфер"""
         with self._lock:
             self._flush_buffer()
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Статистика батчера"""
         with self._lock:
@@ -177,19 +177,45 @@ _csv_batcher = BatchCSVWriter(batch_size=15, flush_interval=20.0)
 
 class CSVHandler:
     """CSV обработчик с UNIFIED CACHE системой"""
-    
+
     # Упрощенные поля для сигналов
     SIGNALS_FIELDS = [
-        "timestamp", "symbol", "timeframe", "close", 
+        "timestamp", "symbol", "timeframe", "close",
         "buy_score", "ai_score", "market_condition", "decision", "reason"
     ]
 
-    # Упрощенные поля для сделок  
+    # Упрощенные поля для сделок
     TRADES_FIELDS = [
         "timestamp_open", "timestamp_close", "symbol", "side",
-        "entry_price", "exit_price", "qty_usd", "pnl_pct", "pnl_abs", 
+        "entry_price", "exit_price", "qty_usd", "pnl_pct", "pnl_abs",
         "duration_minutes", "reason", "buy_score", "ai_score"
     ]
+
+    # ✅ НОВОЕ: для bootstrap (ждалось в логах)
+    @staticmethod
+    def start():
+        """Запуск CSV подсистемы: старт батчера и проверка unified cache."""
+        try:
+            _csv_batcher.start()
+        except Exception as e:
+            logging.warning(f"📄 CSV Handler: batch flusher start failed: {e}")
+        if UNIFIED_CACHE_AVAILABLE:
+            try:
+                cm = get_cache_manager()
+                test_key = "__csv_handler_start_probe__"
+                test_data = [{"ok": True}]
+                cm.set(test_key, test_data, CacheNamespace.CSV_READS, ttl=5)
+                got = cm.get(test_key, CacheNamespace.CSV_READS)
+                cm.delete(test_key, CacheNamespace.CSV_READS)
+                ok = bool(got == test_data)
+                if ok:
+                    logging.info("📄 CSVHandler.start: Unified Cache OK (CSV_READS)")
+                else:
+                    logging.warning("📄 CSVHandler.start: Unified Cache probe mismatch")
+            except Exception as e:
+                logging.warning(f"📄 CSVHandler.start: Unified Cache probe failed: {e}")
+        else:
+            logging.info("📄 CSVHandler.start: Unified Cache not available (fallback mode)")
 
     # ✅ НОВОЕ: Unified Cache вместо _read_cache
     @staticmethod
@@ -199,7 +225,7 @@ class CSVHandler:
             return get_cache_manager()
         return None
 
-    @staticmethod 
+    @staticmethod
     def _create_cache_key(file_path: str, use_mtime: bool = True) -> str:
         """Создание ключа кэша с учетом времени модификации файла"""
         try:
@@ -211,26 +237,22 @@ class CSVHandler:
                 return file_path
         except Exception:
             return file_path
-    
+
     @staticmethod
     def log_signal_snapshot(data: Dict[str, Any]):
         """Логирование сигнала с батчингом"""
         try:
-            # Добавляем timestamp если нет
             if "timestamp" not in data:
                 data["timestamp"] = datetime.now().isoformat()
-                
             _csv_batcher.add_record(SIGNALS_CSV, CSVHandler.SIGNALS_FIELDS, data)
             logging.debug("📊 Signal logged to batch")
-            
         except Exception as e:
             logging.error(f"Failed to log signal: {e}")
-    
-    @staticmethod  
+
+    @staticmethod
     def log_close_trade(data: Dict[str, Any]):
         """Логирование закрытой сделки с батчингом"""
         try:
-            # Адаптация данных под упрощенную схему
             adapted = {
                 "timestamp_open": data.get("entry_ts", ""),
                 "timestamp_close": data.get("close_ts", datetime.now().isoformat()),
@@ -246,10 +268,8 @@ class CSVHandler:
                 "buy_score": data.get("buy_score"),
                 "ai_score": data.get("ai_score")
             }
-            
             _csv_batcher.add_record(CLOSED_TRADES_CSV, CSVHandler.TRADES_FIELDS, adapted)
             logging.debug("💰 Trade logged to batch")
-            
         except Exception as e:
             logging.error(f"Failed to log trade: {e}")
 
@@ -258,42 +278,37 @@ class CSVHandler:
         """✅ ЭТАП 3: Чтение CSV с UNIFIED CACHE"""
         if not os.path.exists(file_path):
             return []
-        
-        # ✅ Используем unified cache если доступен
+
         cache_manager = CSVHandler._get_cache_manager()
-        
+
         if use_cache and cache_manager and UNIFIED_CACHE_AVAILABLE:
-            # Создаем ключ с учетом времени модификации
             cache_key = CSVHandler._create_cache_key(file_path, use_mtime=True)
-            
-            # Проверяем unified cache
             cached_data = cache_manager.get(cache_key, CacheNamespace.CSV_READS)
             if cached_data is not None:
                 logging.debug(f"📄 CSV Cache HIT (unified): {file_path}")
                 return cached_data.copy()
-        
-        # Читаем файл с диска
+
         try:
             with open(file_path, mode="r", newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 data = list(reader)
-            
-            # ✅ Сохраняем в unified cache
+
             if use_cache and cache_manager and UNIFIED_CACHE_AVAILABLE:
                 cache_key = CSVHandler._create_cache_key(file_path, use_mtime=True)
                 success = cache_manager.set(
-                    cache_key, 
-                    data.copy(), 
+                    cache_key,
+                    data.copy(),
                     CacheNamespace.CSV_READS,
                     metadata={"file_path": file_path, "rows": len(data)}
                 )
-                if success:
+                if success is None:
+                    # set() у нас ничего не возвращает — просто залогируем
                     logging.debug(f"📄 CSV Cache SET (unified): {file_path} ({len(data)} rows)")
                 else:
-                    logging.warning(f"📄 CSV Cache SET failed: {file_path}")
-            
+                    logging.debug(f"📄 CSV Cache SET (unified): {file_path} ({len(data)} rows)")
+
             return data
-            
+
         except Exception as e:
             logging.error(f"Failed to read CSV {file_path}: {e}")
             return []
@@ -308,16 +323,12 @@ class CSVHandler:
         """Последние сделки с unified cache оптимизацией"""
         try:
             trades = CSVHandler.read_csv_cached(CLOSED_TRADES_CSV, use_cache=True)
-            
-            # Фильтруем завершенные сделки
             completed = []
             for trade in trades:
                 exit_price = trade.get("exit_price", "")
                 if exit_price and str(exit_price).strip() and str(exit_price) != "0.0":
                     completed.append(trade)
-            
             return completed[-limit:] if completed else []
-            
         except Exception as e:
             logging.error(f"Failed to get last trades: {e}")
             return []
@@ -330,7 +341,6 @@ class CSVHandler:
             if not trades:
                 return {"count": 0, "win_rate": 0, "avg_pnl": 0}
 
-            # Эффективная фильтрация и расчет
             valid_pnl = []
             for trade in trades:
                 exit_price = trade.get("exit_price", "")
@@ -344,11 +354,10 @@ class CSVHandler:
             if not valid_pnl:
                 return {"count": 0, "win_rate": 0, "avg_pnl": 0}
 
-            # Быстрые векторные вычисления
             import numpy as np
             pnl_array = np.array(valid_pnl)
             wins = pnl_array[pnl_array > 0]
-            
+
             return {
                 "count": len(valid_pnl),
                 "win_rate": round((len(wins) / len(valid_pnl)) * 100, 2),
@@ -359,7 +368,7 @@ class CSVHandler:
                 "best_trade": round(np.max(pnl_array), 2),
                 "worst_trade": round(np.min(pnl_array), 2)
             }
-            
+
         except Exception as e:
             logging.error(f"Failed to calculate trade stats: {e}")
             return {"count": 0, "win_rate": 0, "avg_pnl": 0}
@@ -370,23 +379,20 @@ class CSVHandler:
         try:
             if not os.path.exists(file_path):
                 return {"exists": False}
-            
-            # Быстрая проверка без полного чтения
+
             file_stats = os.stat(file_path)
-            
-            # Читаем только если файл небольшой
+
             if file_stats.st_size < 1024 * 1024:  # < 1MB
                 data = CSVHandler.read_csv_cached(file_path, use_cache=True)
                 columns = list(data[0].keys()) if data else []
                 rows = len(data)
             else:
-                # Для больших файлов - только подсчет строк
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    rows = sum(1 for _ in f) - 1  # -1 для заголовка
+                    rows = sum(1 for _ in f) - 1
                     f.seek(0)
                     first_line = f.readline()
                     columns = first_line.strip().split(',') if first_line else []
-            
+
             return {
                 "exists": True,
                 "rows": rows,
@@ -394,7 +400,7 @@ class CSVHandler:
                 "file_size_kb": round(file_stats.st_size / 1024, 2),
                 "modified": datetime.fromtimestamp(file_stats.st_mtime).isoformat()
             }
-            
+
         except Exception as e:
             return {"exists": True, "error": str(e)}
 
@@ -413,34 +419,26 @@ class CSVHandler:
     def clear_cache():
         """✅ ЭТАП 3: Очистить unified cache CSV namespace"""
         cache_manager = CSVHandler._get_cache_manager()
-        
         if cache_manager and UNIFIED_CACHE_AVAILABLE:
-            # Очищаем весь namespace CSV_READS
             cache_manager.clear_namespace(CacheNamespace.CSV_READS)
             logging.info("📄 CSV unified cache cleared (namespace CSV_READS)")
         else:
             logging.info("📄 CSV cache clear skipped: unified cache not available")
 
-    @staticmethod 
+    @staticmethod
     def optimize_csv_file(file_path: str) -> bool:
         """Оптимизация CSV файла (удаление дубликатов, сортировка)"""
         try:
             if not os.path.exists(file_path):
                 return False
-                
-            # Читаем данные (не из кэша для оптимизации)
             data = CSVHandler.read_csv_cached(file_path, use_cache=False)
             if not data:
                 return False
-            
-            # Создаем DataFrame для оптимизации
+
             df = pd.DataFrame(data)
-            
-            # Удаляем дубликаты
             initial_size = len(df)
             df = df.drop_duplicates()
-            
-            # Сортируем по timestamp если есть
+
             timestamp_cols = [col for col in df.columns if 'timestamp' in col.lower()]
             if timestamp_cols:
                 try:
@@ -448,29 +446,21 @@ class CSVHandler:
                     df = df.sort_values(timestamp_cols[0])
                 except Exception:
                     pass
-            
-            # Создаем бэкап
+
             backup_path = f"{file_path}.backup"
             os.rename(file_path, backup_path)
-            
-            # Записываем оптимизированные данные
             df.to_csv(file_path, index=False)
-            
-            # Удаляем бэкап если все ОК
             os.remove(backup_path)
-            
+
             removed = initial_size - len(df)
             if removed > 0:
                 logging.info(f"📄 Optimized {file_path}: removed {removed} duplicates")
-            
-            # ✅ Очищаем unified cache для этого файла
+
             CSVHandler._invalidate_file_cache(file_path)
-            
             return True
-            
+
         except Exception as e:
             logging.error(f"Failed to optimize CSV {file_path}: {e}")
-            # Восстанавливаем из бэкапа если есть
             backup_path = f"{file_path}.backup"
             if os.path.exists(backup_path):
                 os.rename(backup_path, file_path)
@@ -480,18 +470,14 @@ class CSVHandler:
     def _invalidate_file_cache(file_path: str):
         """✅ НОВОЕ: Инвалидация кэша для конкретного файла"""
         cache_manager = CSVHandler._get_cache_manager()
-        
         if cache_manager and UNIFIED_CACHE_AVAILABLE:
-            # Создаем различные возможные ключи для файла
             possible_keys = [
                 CSVHandler._create_cache_key(file_path, use_mtime=True),
                 CSVHandler._create_cache_key(file_path, use_mtime=False),
                 file_path
             ]
-            
             for key in possible_keys:
                 cache_manager.delete(key, CacheNamespace.CSV_READS)
-            
             logging.debug(f"📄 Invalidated unified cache for: {file_path}")
 
     # =========================================================================
@@ -502,78 +488,36 @@ class CSVHandler:
     def get_cache_diagnostics() -> Dict[str, Any]:
         """✅ НОВОЕ: Диагностика unified cache для CSV"""
         cache_manager = CSVHandler._get_cache_manager()
-        
         if not cache_manager or not UNIFIED_CACHE_AVAILABLE:
-            return {
-                "unified_cache_available": False,
-                "fallback_mode": True
-            }
-        
+            return {"unified_cache_available": False, "fallback_mode": True}
         try:
-            # Получаем общую статистику
-            stats = cache_manager.get_stats()
-            
-            # Получаем топ ключей для CSV namespace
+            stats = cache_manager.get_stats()  # в unified_cache добавлен алиас
             top_keys = cache_manager.get_top_keys(CacheNamespace.CSV_READS, limit=5)
-            
             return {
                 "unified_cache_available": True,
-                "csv_namespace_stats": stats["namespaces"].get("csv_reads", {}),
-                "global_stats": stats["global"],
+                "csv_namespace_stats": stats.get("per_ns", {}).get("csv_reads", {}),
+                "global_stats": stats,
                 "top_csv_keys": top_keys,
-                "memory_pressure": stats["memory_pressure"]
             }
-            
         except Exception as e:
-            return {
-                "unified_cache_available": True,
-                "error": str(e)
-            }
+            return {"unified_cache_available": True, "error": str(e)}
 
     @staticmethod
     def test_unified_cache_integration():
         """✅ НОВОЕ: Тестирование unified cache интеграции"""
         cache_manager = CSVHandler._get_cache_manager()
-        
         if not cache_manager or not UNIFIED_CACHE_AVAILABLE:
-            return {
-                "test_passed": False,
-                "reason": "Unified cache not available"
-            }
-        
+            return {"test_passed": False, "reason": "Unified cache not available"}
         try:
-            # Тестовые данные
             test_key = "test_csv_file.csv"
             test_data = [{"col1": "value1", "col2": "value2"}]
-            
-            # Тест SET
-            set_success = cache_manager.set(test_key, test_data, CacheNamespace.CSV_READS)
-            
-            # Тест GET
+            cache_manager.set(test_key, test_data, CacheNamespace.CSV_READS)
             retrieved_data = cache_manager.get(test_key, CacheNamespace.CSV_READS)
-            
-            # Тест DELETE
-            delete_success = cache_manager.delete(test_key, CacheNamespace.CSV_READS)
-            
-            test_passed = (
-                set_success and 
-                retrieved_data == test_data and 
-                delete_success
-            )
-            
-            return {
-                "test_passed": test_passed,
-                "set_success": set_success,
-                "get_success": retrieved_data == test_data,
-                "delete_success": delete_success,
-                "cache_stats": cache_manager.get_stats()["namespaces"].get("csv_reads", {})
-            }
-            
+            cache_manager.delete(test_key, CacheNamespace.CSV_READS)
+            test_passed = (retrieved_data == test_data)
+            return {"test_passed": test_passed}
         except Exception as e:
-            return {
-                "test_passed": False,
-                "error": str(e)
-            }
+            return {"test_passed": False, "error": str(e)}
 
 # =============================================================================
 # УТИЛИТЫ МОНИТОРИНГА (обновленные)
@@ -588,32 +532,22 @@ def get_csv_system_stats() -> Dict[str, Any]:
             "trades": CSVHandler.get_csv_info(CLOSED_TRADES_CSV)
         }
     }
-    
-    # ✅ Добавляем unified cache статистику
     cache_diagnostics = CSVHandler.get_cache_diagnostics()
     base_stats["unified_cache"] = cache_diagnostics
-    
     return base_stats
 
 def maintenance_csv_system():
     """✅ ОБНОВЛЕНО: Обслуживание CSV системы с unified cache"""
     try:
-        # Принудительный flush
         CSVHandler.force_flush()
-        
-        # ✅ Очистка unified cache
         CSVHandler.clear_cache()
-        
-        # Оптимизация файлов (если не слишком большие)
         for file_path in [SIGNALS_CSV, CLOSED_TRADES_CSV]:
             if os.path.exists(file_path):
                 file_size = os.path.getsize(file_path)
                 if file_size > 1024 * 1024:  # > 1MB
                     CSVHandler.optimize_csv_file(file_path)
-        
         logging.info("📄 CSV system maintenance completed (with unified cache)")
         return True
-        
     except Exception as e:
         logging.error(f"CSV maintenance failed: {e}")
         return False
@@ -622,40 +556,32 @@ def maintenance_csv_system():
 # СОВМЕСТИМОСТЬ И МИГРАЦИЯ (без изменений)
 # =============================================================================
 
-# Алиасы для обратной совместимости
 def log_signal(data):
-    """Алиас для совместимости"""
     return CSVHandler.log_signal_snapshot(data)
 
 def log_closed_trade(data):
-    """Алиас для совместимости"""
     return CSVHandler.log_close_trade(data)
 
 def read_csv(file_path):
-    """Алиас для совместимости"""
     return CSVHandler.read_csv_safe(file_path)
 
 # Автоинициализация при импорте
 try:
     os.makedirs(LOGS_DIR, exist_ok=True)
-    
-    # ✅ Проверяем unified cache при инициализации
     if UNIFIED_CACHE_AVAILABLE:
         test_result = CSVHandler.test_unified_cache_integration()
-        if test_result["test_passed"]:
+        if test_result.get("test_passed"):
             logging.info("📄 CSV Handler initialized with UNIFIED CACHE (✅ test passed)")
         else:
             logging.warning(f"📄 CSV Handler: unified cache test failed - {test_result}")
     else:
         logging.info("📄 CSV Handler initialized in FALLBACK mode")
-        
 except Exception as e:
     logging.error(f"CSV Handler initialization failed: {e}")
 
-# Экспорт
 __all__ = [
     'CSVHandler',
-    'get_csv_system_stats', 
+    'get_csv_system_stats',
     'maintenance_csv_system',
-    '_csv_batcher'  # Для тестирования
+    '_csv_batcher'
 ]
