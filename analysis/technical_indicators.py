@@ -1,4 +1,4 @@
-# analysis/technical_indicators.py - UNIFIED ATR VERSION
+# analysis/technical_indicators.py - UNIFIED ATR + UNIFIED CACHE VERSION
 
 import time
 import logging
@@ -9,6 +9,17 @@ from typing import Optional, Tuple, Dict, Any
 from functools import lru_cache
 
 _EPS = 1e-12
+
+# ✅ UNIFIED CACHE INTEGRATION
+try:
+    from utils.unified_cache import get_cache_manager, CacheNamespace
+    cache_manager = get_cache_manager()
+    CACHE_AVAILABLE = True
+    logging.info("📊 Technical Indicators: Unified Cache Manager loaded")
+except ImportError as e:
+    logging.warning(f"📊 Technical Indicators: Unified Cache not available, using fallback: {e}")
+    cache_manager = None
+    CACHE_AVAILABLE = False
 
 # =============================================================================
 # UNIFIED ATR FUNCTIONS - ЗАМЕНЯЕТ ВСЕ ДУБЛИРУЮЩИЕСЯ ATR В ПРОЕКТЕ
@@ -195,61 +206,64 @@ def _atr_series_for_ml(df: pd.DataFrame, period: int = 14) -> pd.Series:
         return pd.Series([0.0] * len(df), index=df.index)
 
 # =============================================================================
-# СИСТЕМА КЭШИРОВАНИЯ ИНДИКАТОРОВ (без изменений)
+# ✅ UNIFIED CACHE FUNCTIONS - ЗАМЕНА СТАРОГО КЭША
 # =============================================================================
 
-class IndicatorCache:
-    """Кэш для технических индикаторов"""
-    
-    def __init__(self, ttl_seconds: int = 60, max_size: int = 100):
-        self.ttl = ttl_seconds
-        self.max_size = max_size
-        self._cache: Dict[str, Tuple[pd.DataFrame, float]] = {}
-        
-    def get(self, cache_key: str) -> Optional[pd.DataFrame]:
-        """Получить из кэша"""
-        if cache_key not in self._cache:
-            return None
-            
-        data, timestamp = self._cache[cache_key]
-        if time.time() - timestamp > self.ttl:
-            del self._cache[cache_key]
-            return None
-            
-        return data.copy()
-    
-    def set(self, cache_key: str, data: pd.DataFrame):
-        """Сохранить в кэш"""
-        # Ограничиваем размер кэша
-        if len(self._cache) >= self.max_size:
-            # Удаляем самые старые записи
-            oldest_keys = sorted(self._cache.keys(), 
-                               key=lambda k: self._cache[k][1])[:10]
-            for key in oldest_keys:
-                del self._cache[key]
-        
-        self._cache[cache_key] = (data.copy(), time.time())
-    
-    def create_key(self, df: pd.DataFrame) -> str:
-        """Создать ключ кэша из DataFrame"""
+def _create_cache_key(df: pd.DataFrame, params: str = "") -> str:
+    """Создание ключа кэша для DataFrame"""
+    try:
         if df.empty:
-            return "empty"
+            return f"empty_{params}"
         
-        # Используем последние 10 строк + размер для ключа
-        try:
-            tail_data = df.tail(10)[['close', 'volume', 'high', 'low']].values
-            data_str = f"{len(df)}_{str(tail_data)}"
-            return hashlib.md5(data_str.encode()).hexdigest()[:16]
-        except Exception:
-            return f"fallback_{len(df)}_{time.time()}"
-    
-    def clear(self):
-        """Очистить кэш"""
-        self._cache.clear()
-        logging.info("📊 Indicator cache cleared")
+        # Используем последние 10 строк + размер + params для ключа
+        tail_data = df.tail(10)[['close', 'volume', 'high', 'low']].values
+        data_str = f"{len(df)}_{str(tail_data)}_{params}"
+        return hashlib.md5(data_str.encode()).hexdigest()[:16]
+    except Exception:
+        return f"fallback_{len(df)}_{time.time()}_{params}"
 
-# Глобальный экземпляр кэша
-_indicator_cache = IndicatorCache(ttl_seconds=60, max_size=50)
+def _get_cached_indicators(df: pd.DataFrame, use_cache: bool = True) -> Optional[pd.DataFrame]:
+    """Получение индикаторов из unified кэша"""
+    if not use_cache or not CACHE_AVAILABLE:
+        return None
+    
+    try:
+        cache_key = _create_cache_key(df, "indicators")
+        cached_result = cache_manager.get(cache_key, CacheNamespace.INDICATORS)
+        
+        if cached_result is not None:
+            logging.debug(f"📊 Cache HIT for indicators: {cache_key[:8]}...")
+            return cached_result
+        else:
+            logging.debug(f"📊 Cache MISS for indicators: {cache_key[:8]}...")
+            return None
+            
+    except Exception as e:
+        logging.error(f"📊 Cache get failed: {e}")
+        return None
+
+def _set_cached_indicators(df: pd.DataFrame, result: pd.DataFrame, use_cache: bool = True) -> bool:
+    """Сохранение индикаторов в unified кэш"""
+    if not use_cache or not CACHE_AVAILABLE:
+        return False
+    
+    try:
+        cache_key = _create_cache_key(df, "indicators")
+        success = cache_manager.set(
+            cache_key, 
+            result.copy(), 
+            CacheNamespace.INDICATORS,
+            metadata={"rows": len(result), "cols": len(result.columns)}
+        )
+        
+        if success:
+            logging.debug(f"📊 Cache SET for indicators: {cache_key[:8]}...")
+        
+        return success
+        
+    except Exception as e:
+        logging.error(f"📊 Cache set failed: {e}")
+        return False
 
 # =============================================================================
 # БАЗОВЫЕ ФУНКЦИИ ИНДИКАТОРОВ (без изменений)
@@ -282,7 +296,7 @@ class IndicatorCalculator:
     """Калькулятор индикаторов с оптимизациями"""
     
     def __init__(self):
-        self._ema_cache = {}  # Кэш для EMA различных периодов
+        self._ema_cache = {}  # Локальный кэш для EMA различных периодов
         
     def calculate_emas(self, close: pd.Series, periods: list) -> Dict[int, pd.Series]:
         """Расчет множественных EMA за один проход"""
@@ -336,18 +350,20 @@ class IndicatorCalculator:
         self._ema_cache.clear()
 
 # =============================================================================
-# ГЛАВНАЯ ФУНКЦИЯ С UNIFIED ATR
+# ✅ ГЛАВНАЯ ФУНКЦИЯ С UNIFIED CACHE И UNIFIED ATR
 # =============================================================================
 
 def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.DataFrame:
     """
-    ✅ UPDATED VERSION: Расчёт индикаторов с UNIFIED ATR
+    ✅ UNIFIED VERSION: Расчёт индикаторов с UNIFIED CACHE и UNIFIED ATR
     
-    Теперь использует get_unified_atr() вместо встроенного ATR расчета
-    Это обеспечивает консистентность ATR по всему проекту
+    Теперь использует:
+    - Unified Cache Manager вместо _indicator_cache
+    - get_unified_atr() вместо встроенного ATR расчета
+    - Namespace INDICATORS для кэширования
     
     Features:
-    - Умное кэширование результатов
+    - Централизованное кэширование через UnifiedCacheManager
     - ЕДИНЫЙ ATR расчет через get_unified_atr()
     - Переиспользование промежуточных вычислений
     - Оптимизированные алгоритмы
@@ -355,7 +371,7 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
     
     Args:
         df: DataFrame с колонками open, high, low, close, volume
-        use_cache: Использовать кэширование (по умолчанию True)
+        use_cache: Использовать unified кэширование (по умолчанию True)
         
     Returns:
         DataFrame с добавленными техническими индикаторами
@@ -372,13 +388,12 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
         logging.error(f"📊 Missing required columns: {missing}")
         return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
-    # Проверяем кэш
-    if use_cache:
-        cache_key = _indicator_cache.create_key(df)
-        cached_result = _indicator_cache.get(cache_key)
-        if cached_result is not None:
-            logging.debug(f"📊 Cache hit for indicators, key: {cache_key[:8]}...")
-            return cached_result
+    # ✅ ПРОВЕРЯЕМ UNIFIED CACHE
+    cached_result = _get_cached_indicators(df, use_cache)
+    if cached_result is not None:
+        calc_time = time.time() - start_time
+        logging.debug(f"📊 Indicators from UNIFIED cache in {calc_time:.3f}s")
+        return cached_result
 
     logging.debug(f"📊 Calculating indicators for {len(df)} rows")
 
@@ -454,7 +469,7 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
         plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
         minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
 
-        # Используем уже рассчитанный ATR
+        # Используем уже рассчитанный UNIFIED ATR
         atr = out["atr"]
         plus_di = 100.0 * (plus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean() / (atr + _EPS))
         minus_di = 100.0 * (minus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean() / (atr + _EPS))
@@ -483,12 +498,12 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
         # Очищаем внутренний кэш калькулятора
         calc.clear_cache()
 
-        # Сохраняем в кэш
-        if use_cache:
-            _indicator_cache.set(cache_key, out)
+        # ✅ СОХРАНЯЕМ В UNIFIED CACHE
+        _set_cached_indicators(df, out, use_cache)
 
         calc_time = time.time() - start_time
-        logging.debug(f"📊 Indicators calculated in {calc_time:.3f}s, cached: {use_cache}")
+        cache_status = "UNIFIED cached" if use_cache and CACHE_AVAILABLE else "not cached"
+        logging.debug(f"📊 Indicators calculated in {calc_time:.3f}s, {cache_status}")
         
         return out
 
@@ -497,21 +512,38 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
         return df.copy()
 
 # =============================================================================
-# УТИЛИТЫ ДЛЯ УПРАВЛЕНИЯ КЭШЕМ (без изменений)
+# ✅ UNIFIED CACHE UTILITIES
 # =============================================================================
 
 def clear_indicator_cache():
-    """Очистить кэш индикаторов"""
-    _indicator_cache.clear()
+    """✅ ОБНОВЛЕНО: Очистить unified кэш индикаторов"""
+    if CACHE_AVAILABLE:
+        cache_manager.clear_namespace(CacheNamespace.INDICATORS)
+        logging.info("📊 Unified indicator cache cleared")
+    else:
+        logging.warning("📊 Unified cache not available")
 
 def get_cache_stats() -> Dict[str, Any]:
-    """Статистика кэша"""
-    return {
-        "size": len(_indicator_cache._cache),
-        "max_size": _indicator_cache.max_size,
-        "ttl_seconds": _indicator_cache.ttl,
-        "keys": list(_indicator_cache._cache.keys())[:5]  # Первые 5 ключей
-    }
+    """✅ ОБНОВЛЕНО: Статистика unified кэша"""
+    if CACHE_AVAILABLE:
+        all_stats = cache_manager.get_stats()
+        return {
+            "indicators_namespace": all_stats["namespaces"].get("indicators", {}),
+            "global_stats": all_stats["global"],
+            "unified_cache": True
+        }
+    else:
+        return {
+            "unified_cache": False,
+            "message": "Unified cache not available"
+        }
+
+def get_indicator_cache_top_keys(limit: int = 10) -> List[Dict[str, Any]]:
+    """✅ НОВОЕ: Топ ключей кэша индикаторов"""
+    if CACHE_AVAILABLE:
+        return cache_manager.get_top_keys(CacheNamespace.INDICATORS, limit)
+    else:
+        return []
 
 # =============================================================================
 # БЫСТРЫЕ ФУНКЦИИ ДЛЯ ОТДЕЛЬНЫХ ИНДИКАТОРОВ
@@ -586,6 +618,52 @@ def test_unified_atr_compatibility():
         print(f"❌ Unified ATR test failed: {e}")
         return False
 
+def test_unified_cache_integration():
+    """✅ НОВОЕ: Тестирование интеграции unified cache"""
+    if not CACHE_AVAILABLE:
+        print("❌ Unified cache not available for testing")
+        return False
+    
+    try:
+        # Создаем тестовые данные
+        test_data = pd.DataFrame({
+            'open': [100, 101, 102],
+            'high': [102, 103, 104], 
+            'low': [99, 100, 101],
+            'close': [101, 102, 103],
+            'volume': [1000, 1100, 1200]
+        })
+        
+        # Очищаем кэш
+        clear_indicator_cache()
+        
+        # Первый вызов - должен кэшироваться
+        start_time = time.time()
+        result1 = calculate_all_indicators(test_data, use_cache=True)
+        time1 = time.time() - start_time
+        
+        # Второй вызов - должен быть из кэша
+        start_time = time.time()
+        result2 = calculate_all_indicators(test_data, use_cache=True)
+        time2 = time.time() - start_time
+        
+        # Проверяем результаты
+        assert result1.equals(result2), "Cached result differs from original"
+        assert time2 < time1 * 0.5, f"Cache didn't speed up calculation: {time1:.3f}s vs {time2:.3f}s"
+        
+        # Проверяем статистику
+        stats = get_cache_stats()
+        assert stats["unified_cache"], "Unified cache should be available"
+        assert stats["indicators_namespace"]["entries"] > 0, "Cache should have entries"
+        
+        print("✅ Unified cache integration works correctly!")
+        print(f"📊 Performance: {time1:.3f}s -> {time2:.3f}s ({time2/time1*100:.1f}%)")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Unified cache test failed: {e}")
+        return False
+
 # Экспорт для обратной совместимости
 __all__ = [
     # ✅ НОВЫЕ UNIFIED ФУНКЦИИ
@@ -595,12 +673,16 @@ __all__ = [
     '_atr_for_risk_manager',     # Алиас для risk_manager.py
     '_atr_series_for_ml',        # Для ML модели
     
-    # Существующие функции (без изменений)
+    # Существующие функции (обновлены для unified cache)
     'calculate_all_indicators',
     'clear_indicator_cache', 
     'get_cache_stats',
     'get_last_indicator_value',
     
+    # ✅ НОВЫЕ UNIFIED CACHE ФУНКЦИИ
+    'get_indicator_cache_top_keys',
+    
     # Тестирование
-    'test_unified_atr_compatibility'
+    'test_unified_atr_compatibility',
+    'test_unified_cache_integration'
 ]
