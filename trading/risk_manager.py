@@ -128,15 +128,17 @@ class AdaptiveRiskManager:
 
     # --- вспомогательные методы ---
     def _calculate_atr(self, df: pd.DataFrame, period: Optional[int] = None) -> float:
-        """ATR"""
-        period = period or self.atr_period
-        if len(df) < period + 1:
-            return df["close"].iloc[-1] * 0.02
-        tr1 = df["high"] - df["low"]
-        tr2 = (df["high"] - df["close"].shift(1)).abs()
-        tr3 = (df["low"] - df["close"].shift(1)).abs()
-        atr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(window=period).mean().iloc[-1]
-        return float(atr) if pd.notna(atr) else df["close"].iloc[-1] * 0.02
+    """✅ UNIFIED: ATR для risk management"""
+    try:
+        from analysis.technical_indicators import _atr_for_risk_manager
+        return _atr_for_risk_manager(df, period)
+    except Exception as e:
+        logging.error(f"Risk manager ATR failed: {e}")
+        # Критический fallback
+        try:
+            return float(df["close"].iloc[-1] * 0.02)
+        except Exception:
+            return 100.0
 
     def _calculate_trend_strength(self, ema_series: pd.Series) -> float:
         """Сила тренда"""
