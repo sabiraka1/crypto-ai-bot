@@ -345,6 +345,26 @@ class TradingBot:
                 if df_15m.empty or last_price is None:
                     logging.error("Failed to fetch market data")
                     return
+                # ✅ UNIFIED ATR TEST - ВОТ ТУТ КОД ТЕСТИРОВАНИЯ
+                try:
+                    from telegram.bot_handler import _atr as tg_atr
+                    from trading.risk_manager import AdaptiveRiskManager
+                    
+                    tg_result = tg_atr(df_15m, 14)
+                    rm = AdaptiveRiskManager()
+                    risk_result = rm._calculate_atr(df_15m, 14)
+                    
+                    max_diff = max(abs(atr_val - tg_result), abs(atr_val - risk_result))
+                    logging.info(f"🧪 ATR UNIFIED: main={atr_val:.6f}, tg={tg_result:.6f}, "
+                                 f"risk={risk_result:.6f}, diff={max_diff:.6f}")
+                    
+                    if max_diff < 0.1:
+                        logging.info("✅ ATR functions unified successfully!")
+                    else:
+                        logging.warning(f"⚠️ ATR difference: {max_diff:.6f}")
+                except Exception as e:
+                    logging.error(f"ATR test failed: {e}")
+
 
                 # ✅ ПЕРВАЯ ПРОВЕРКА: Проверяем состояние позиции в самом начале
                 if self._is_position_active():
