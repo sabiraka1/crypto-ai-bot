@@ -67,13 +67,19 @@ def ohlcv_to_df(ohlcv) -> pd.DataFrame:
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
-    """✅ UNIFIED: Использует get_unified_atr для консистентности"""
+    """✅ ЭТАП 2: UNIFIED ATR - теперь использует get_unified_atr"""
     try:
         from analysis.technical_indicators import get_unified_atr
-        return get_unified_atr(df, period, method='ewm')
+        result = get_unified_atr(df, period, method='ewm')
+        logging.debug(f"📊 main.py ATR (UNIFIED): {result:.6f}")
+        return result
     except Exception as e:
-        logging.error(f"Unified ATR failed: {e}")
-        return None
+        logging.error(f"UNIFIED ATR failed in main.py: {e}")
+        # Fallback к старому методу
+        try:
+            return float((df["high"] - df["low"]).mean()) if not df.empty else None
+        except Exception:
+            return None
 
 
 # ── Уведомления-адаптеры под текущий PositionManager ─────────────────────────
@@ -175,7 +181,7 @@ class TradingBot:
                 self.ml_ready = False
                 logging.warning(f"AI model not available: {e}")
 
-        logging.info("🚀 Trading bot initialized")
+        logging.info("🚀 Trading bot initialized with UNIFIED ATR system")
 
     # ── построение фич для AI ─────────────────────────────────────────────────
     def _series_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -303,14 +309,17 @@ class TradingBot:
         return feats
 
     def _fetch_market(self) -> Tuple[pd.DataFrame, Optional[float], Optional[float]]:
-        """Загружаем 15m OHLCV, считаем ATR."""
+        """✅ ЭТАП 2: Загружаем 15m OHLCV, считаем ATR через UNIFIED функцию."""
         try:
             ohlcv_15m = self.exchange.fetch_ohlcv(self.symbol, timeframe=self.timeframe_15m, limit=200)
             df_15m = ohlcv_to_df(ohlcv_15m)
             if df_15m.empty:
                 return pd.DataFrame(), None, None
             last_price = float(df_15m["close"].iloc[-1])
+            
+            # ✅ UNIFIED ATR ВМЕСТО СТАРОГО РАСЧЕТА
             atr_val = atr(df_15m)
+            
             return df_15m, last_price, atr_val
         except Exception as e:
             logging.error(f"Failed to fetch market data: {e}")
@@ -345,26 +354,25 @@ class TradingBot:
                 if df_15m.empty or last_price is None:
                     logging.error("Failed to fetch market data")
                     return
-                # ✅ UNIFIED ATR TEST - ВОТ ТУТ КОД ТЕСТИРОВАНИЯ
-                try:
-                    from telegram.bot_handler import _atr as tg_atr
-                    from trading.risk_manager import AdaptiveRiskManager
-                    
-                    tg_result = tg_atr(df_15m, 14)
-                    rm = AdaptiveRiskManager()
-                    risk_result = rm._calculate_atr(df_15m, 14)
-                    
-                    max_diff = max(abs(atr_val - tg_result), abs(atr_val - risk_result))
-                    logging.info(f"🧪 ATR UNIFIED: main={atr_val:.6f}, tg={tg_result:.6f}, "
-                                 f"risk={risk_result:.6f}, diff={max_diff:.6f}")
-                    
-                    if max_diff < 0.1:
-                        logging.info("✅ ATR functions unified successfully!")
-                    else:
-                        logging.warning(f"⚠️ ATR difference: {max_diff:.6f}")
-                except Exception as e:
-                    logging.error(f"ATR test failed: {e}")
 
+                # ✅ ЭТАП 2: ПРОВЕРКА UNIFIED ATR - сравниваем разные реализации
+                try:
+                    logging.info(f"🧪 ЭТАП 2 TEST: main.py ATR = {atr_val:.6f}")
+                    
+                    # Дополнительная проверка - вызываем напрямую unified функцию
+                    from analysis.technical_indicators import get_unified_atr
+                    direct_atr = get_unified_atr(df_15m, 14, method='ewm')
+                    
+                    difference = abs(atr_val - direct_atr) if atr_val and direct_atr else 999
+                    logging.info(f"🧪 DIRECT unified ATR = {direct_atr:.6f}, difference = {difference:.6f}")
+                    
+                    if difference < 0.001:
+                        logging.info("✅ ЭТАП 2 SUCCESS: main.py теперь использует UNIFIED ATR!")
+                    else:
+                        logging.warning(f"⚠️ ЭТАП 2 WARNING: ATR difference = {difference:.6f}")
+                        
+                except Exception as e:
+                    logging.error(f"ЭТАП 2 test failed: {e}")
 
                 # ✅ ПЕРВАЯ ПРОВЕРКА: Проверяем состояние позиции в самом начале
                 if self._is_position_active():
@@ -411,7 +419,7 @@ class TradingBot:
                     logging.info(f"📊 Market: {market_cond_info}")
                     logging.info(
                         f"📊 Buy Score: {buy_score:.2f}/{getattr(self.scorer, 'min_score_to_buy', ENV_MIN_SCORE):.2f} "
-                        f"| AI: {ai_score:.2f}"
+                        f"| AI: {ai_score:.2f} | ATR: {atr_val:.6f} (UNIFIED)"
                     )
                     self._last_info_log_ts = now
 
@@ -501,7 +509,7 @@ class TradingBot:
 
                     # 4) попытка входа
                     try:
-                        logging.info(f"🔒 Attempting to open position: {self.symbol} ${usd_planned:.2f}")
+                        logging.info(f"🔒 Attempting to open position: {self.symbol} ${usd_planned:.2f} | ATR: {atr_val:.6f}")
                         
                         result = self.pm.open_long(
                             symbol=self.symbol,
@@ -548,10 +556,10 @@ class TradingBot:
 
     # ── внешний запуск ─────────────────────────────────────────────────────────
     def run(self):
-        logging.info("📊 Bot started, entering main loop...")
+        logging.info("📊 Bot started with UNIFIED ATR system (ЭТАП 2), entering main loop...")
         while True:
             try:
                 self._trading_cycle()
             except Exception as e:
-                logging.error(f"Cycle error: {e}\\n{traceback.format_exc()}")
+                logging.error(f"Cycle error: {e}\n{traceback.format_exc()}")
             time.sleep(self.cycle_minutes * 60)

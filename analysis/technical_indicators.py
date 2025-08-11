@@ -184,8 +184,8 @@ def _atr_series_for_ml(df: pd.DataFrame, period: int = 14) -> pd.Series:
         alpha = 1.0 / period
         atr_series = tr.ewm(alpha=alpha, adjust=False, min_periods=1).mean()
         
-        # Заполняем NaN значения
-        atr_series = atr_series.fillna(method='bfill').fillna(0.0)
+        # ✅ ИСПРАВЛЕНО: Заменяем deprecated fillna(method='bfill')
+        atr_series = atr_series.bfill().fillna(0.0)
         
         return atr_series.astype('float64')
         
