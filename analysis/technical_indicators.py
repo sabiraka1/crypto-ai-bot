@@ -1,5 +1,7 @@
 # analysis/technical_indicators.py
 
+import time
+import logging  # если еще нет
 import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
@@ -116,26 +118,48 @@ def _volume_ratio(volume: pd.Series, period: int = 20) -> pd.Series:
 
 def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Расчёт индикаторов (без TA-lib). Требуются: open, high, low, close, volume, индекс — DatetimeIndex (UTC).
-    Возвращает df с колонками (float64):
-      rsi, macd, macd_signal, macd_hist,
-      ema_fast(12), ema_slow(26), ema_200,
-      sma_50, sma_200,
-      stoch_k, stoch_d,
-      adx, bb_mid, bb_upper, bb_lower,
-      atr, volume_ratio
-    На коротких сериях считает максимум возможного. Хвостовые NaN заполняются.
+    ✅ УЛУЧШЕННАЯ ВЕРСИЯ: Расчёт индикаторов с улучшенной совместимостью
+    
+    Особенности:
+    - Автоматическое приведение индекса к datetime
+    - Совместимость с main.py (добавляет ema_20/ema_50)
+    - Диагностическое логирование
+    - Оптимизированные повторные расчеты
+    - Graceful обработка ошибок
+    
+    Args:
+        df: DataFrame с колонками open, high, low, close, volume
+        
+    Returns:
+        DataFrame с добавленными техническими индикаторами
     """
-    if not isinstance(df.index, pd.DatetimeIndex):
-        # не падаем — просто работаем как есть
-        pass
+    start_time = time.time()
+    
+    if df is None or df.empty:
+        logging.debug("📊 Technical indicators: empty DataFrame received")
+        return pd.DataFrame()
 
     required = {"open", "high", "low", "close", "volume"}
-    if df is None or df.empty or not required.issubset(df.columns):
-        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        logging.error(f"📊 Missing required columns: {missing}")
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    logging.debug(f"📊 Calculating indicators for {len(df)} rows, columns: {list(df.columns)}")
 
     out = df.copy()
-    # сортируем по времени на всякий случай
+    
+    # ✅ НОВОЕ: Автоматическое приведение индекса
+    if not isinstance(out.index, pd.DatetimeIndex):
+        try:
+            if hasattr(out.index, 'to_datetime'):
+                out.index = pd.to_datetime(out.index, utc=True)
+            elif out.index.dtype == 'object':
+                out.index = pd.to_datetime(out.index, utc=True, errors='coerce')
+        except Exception as e:
+            logging.debug(f"📊 Could not convert index to datetime: {e}")
+
+    # Сортируем по времени на всякий случай
     try:
         out = out.sort_index()
     except Exception:
@@ -147,19 +171,35 @@ def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     close = out["close"]; high = out["high"]; low = out["low"]; volume = out["volume"]
 
+    # ✅ НОВОЕ: Кеш для EMA расчетов (оптимизация)
+    ema_cache = {}
+    def get_ema(period):
+        if period not in ema_cache:
+            ema_cache[period] = close.ewm(span=period, adjust=False, min_periods=1).mean()
+        return ema_cache[period]
+
     # RSI
     out["rsi"] = _safe_tail_fill(_rsi(close, 14, minp=1))
 
-    # MACD + EMAs
-    macd, macd_sig, macd_hist, ema_fast, ema_slow = _macd(close, 12, 26, 9, minp=1)
+    # MACD + EMAs (оптимизированно)
+    ema_fast = get_ema(12)
+    ema_slow = get_ema(26)
+    macd = (ema_fast - ema_slow).astype("float64")
+    macd_sig = macd.ewm(span=9, adjust=False, min_periods=1).mean().astype("float64")
+    macd_hist = (macd - macd_sig).astype("float64")
+    
     out["macd"] = _safe_tail_fill(macd)
     out["macd_signal"] = _safe_tail_fill(macd_sig)
     out["macd_hist"] = _safe_tail_fill(macd_hist)
     out["ema_fast"] = _safe_tail_fill(ema_fast)
     out["ema_slow"] = _safe_tail_fill(ema_slow)
 
-    # EMA 200 / SMA 50 / SMA 200
-    out["ema_200"] = _safe_tail_fill(_ema(close, 200, minp=1))
+    # ✅ НОВОЕ: Добавляем EMA для совместимости с main.py
+    out["ema_20"] = _safe_tail_fill(get_ema(20))
+    out["ema_50"] = _safe_tail_fill(get_ema(50))
+    out["ema_200"] = _safe_tail_fill(get_ema(200))
+
+    # SMA 50 / SMA 200
     out["sma_50"] = _safe_tail_fill(_sma(close, 50, minp=1))
     out["sma_200"] = _safe_tail_fill(_sma(close, 200, minp=1))
 
@@ -177,12 +217,12 @@ def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["bb_upper"] = _safe_tail_fill(bb_upper)
     out["bb_lower"] = _safe_tail_fill(bb_lower)
 
-    # (опционально) позиция внутри полос Боллинджера — часто нужна для фичей
+    # Bollinger position (важно для AI)
     try:
         rng = (out["bb_upper"] - out["bb_lower"])
         out["bb_position"] = ((close - out["bb_lower"]) / (rng + _EPS)).clip(0.0, 1.0).astype("float64")
     except Exception:
-        pass  # не критично
+        out["bb_position"] = pd.Series(0.5, index=out.index, dtype="float64")
 
     # ATR
     out["atr"] = _safe_tail_fill(_atr(high, low, close, 14, minp=1))
@@ -190,17 +230,27 @@ def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Volume ratio
     out["volume_ratio"] = _safe_tail_fill(_volume_ratio(volume, 20))
 
+    # ✅ НОВОЕ: Совместимость алиасы
+    if "ema_fast" in out.columns:
+        out["ema_12"] = out["ema_fast"]  # Для ясности
+    if "ema_slow" in out.columns:
+        out["ema_26"] = out["ema_slow"]  # Для ясности
+
     # гарантируем float64 для всех новых колонок
     new_cols = [
         "rsi", "macd", "macd_signal", "macd_hist",
-        "ema_fast", "ema_slow", "ema_200",
+        "ema_fast", "ema_slow", "ema_12", "ema_26", "ema_20", "ema_50", "ema_200",
         "sma_50", "sma_200",
         "stoch_k", "stoch_d",
-        "adx", "bb_mid", "bb_upper", "bb_lower",
-        "atr", "volume_ratio", "bb_position"
+        "adx", "bb_mid", "bb_upper", "bb_lower", "bb_position",
+        "atr", "volume_ratio"
     ]
     for c in new_cols:
         if c in out.columns:
             out[c] = _to_f64(out[c])
 
+    # ✅ НОВОЕ: Диагностика
+    calc_time = time.time() - start_time
+    logging.debug(f"📊 Technical indicators calculated in {calc_time:.3f}s, output shape: {out.shape}")
+    
     return out

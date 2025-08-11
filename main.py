@@ -16,6 +16,7 @@ from analysis.scoring_engine import ScoringEngine
 from telegram import bot_handler as tgbot
 from utils.csv_handler import CSVHandler
 from config.settings import TradingConfig
+from analysis.technical_indicators import calculate_all_indicators
 
 # ── базовая настройка логов ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -66,48 +67,16 @@ def ohlcv_to_df(ohlcv) -> pd.DataFrame:
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
-    """ATR для risk-менеджмента."""
-    if df.empty or len(df) < period + 2:
+    """✅ ОБНОВЛЕНО: Использует качественный ATR из technical_indicators"""
+    try:
+        df_with_indicators = calculate_all_indicators(df.copy())
+        if df_with_indicators.empty:
+            return None
+        atr_value = df_with_indicators["atr"].iloc[-1]
+        return float(atr_value) if pd.notna(atr_value) else None
+    except Exception as e:
+        logging.error(f"ATR calculation failed: {e}")
         return None
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    prev_close = close.shift(1)
-
-    tr1 = (high - low).abs()
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    atr_series = tr.ewm(alpha=1 / period, adjust=False).mean()
-    val = float(atr_series.iloc[-1])
-    return val
-
-
-# ── простые индикаторы для фич ────────────────────────────────────────────────
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def sma(series: pd.Series, window: int) -> pd.Series:
-    return series.rolling(window=window, min_periods=window).mean()
-
-
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = np.where(delta > 0, delta, 0.0)
-    down = np.where(delta < 0, -delta, 0.0)
-    roll_up = pd.Series(up, index=series.index).rolling(period, min_periods=period).mean()
-    roll_down = pd.Series(down, index=series.index).rolling(period, min_periods=period).mean()
-    rs = roll_up / (roll_down + 1e-12)
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    macd_line = ema(series, fast) - ema(series, slow)
-    signal_line = ema(macd_line, signal)
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
 
 
 # ── Уведомления-адаптеры под текущий PositionManager ─────────────────────────
@@ -212,70 +181,41 @@ class TradingBot:
         logging.info("🚀 Trading bot initialized")
 
     # ── построение фич для AI ─────────────────────────────────────────────────
-    def _build_features(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Фичи строятся по ЗАКРЫТОЙ свече (t-1), чтобы избежать утечек будущего."""
-        feats: Dict[str, Any] = {}
-        try:
-            if df is None or df.empty or len(df) < 60:
-                return feats
-            
-            x = df.copy()
-            close = x["close"]
-
-            # индикаторы
-            rsi_14 = rsi(close, 14)
-            macd_line, macd_sig, macd_hist = macd(close, 12, 26, 9)
-            ema_20 = ema(close, 20)
-            ema_50 = ema(close, 50)
-            sma_20 = sma(close, 20)
-            sma_50 = sma(close, 50)
-
-            # изменения
-            price_change_1 = close.pct_change(1)
-            price_change_3 = close.pct_change(3)
-            price_change_5 = close.pct_change(5)
-            vol_change = x["volume"].pct_change(5)
-
-            # ATR 14
-            atr_val_series = self._series_atr(x, 14)
-
-            # берем t-1
-            feats = {
-                "rsi": float(rsi_14.iloc[-2]) if not np.isnan(rsi_14.iloc[-2]) else None,
-                "macd": float(macd_line.iloc[-2]),
-                "macd_signal": float(macd_sig.iloc[-2]),
-                "macd_hist": float(macd_hist.iloc[-2]),
-                "ema_20": float(ema_20.iloc[-2]),
-                "ema_50": float(ema_50.iloc[-2]),
-                "sma_20": float(sma_20.iloc[-2]) if not np.isnan(sma_20.iloc[-2]) else None,
-                "sma_50": float(sma_50.iloc[-2]) if not np.isnan(sma_50.iloc[-2]) else None,
-                "atr_14": float(atr_val_series.iloc[-2]) if not np.isnan(atr_val_series.iloc[-2]) else None,
-                "price_change_1": float(price_change_1.iloc[-2]) if not np.isnan(price_change_1.iloc[-2]) else None,
-                "price_change_3": float(price_change_3.iloc[-2]) if not np.isnan(price_change_3.iloc[-2]) else None,
-                "price_change_5": float(price_change_5.iloc[-2]) if not np.isnan(price_change_5.iloc[-2]) else None,
-                "vol_change": float(vol_change.iloc[-2]) if not np.isnan(vol_change.iloc[-2]) else None,
-                "market_condition": self._market_condition_guess(close.iloc[:-1]),
-            }
-        except Exception as e:
-            logging.exception(f"Feature build failed: {e}")
-        return feats
-
     def _series_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-        prev_close = close.shift(1)
-        tr1 = (high - low).abs()
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.ewm(alpha=1 / period, adjust=False).mean()
+        """✅ ОБНОВЛЕНО: Использует качественный ATR"""
+        try:
+            df_with_indicators = calculate_all_indicators(df.copy())
+            return df_with_indicators["atr"].fillna(0.0)
+        except Exception:
+            # Фолбэк на простой расчет
+            high, low, close = df["high"], df["low"], df["close"]
+            prev_close = close.shift(1)
+            tr1 = (high - low).abs()
+            tr2 = (high - prev_close).abs()
+            tr3 = (low - prev_close).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            return tr.ewm(alpha=1 / period, adjust=False).mean()
 
     def _market_condition_guess(self, close_series: pd.Series) -> str:
+        """✅ ИСПРАВЛЕНО: Использует calculate_all_indicators"""
         try:
-            e20 = ema(close_series, 20).iloc[-1]
-            e50 = ema(close_series, 50).iloc[-1]
-            if np.isnan(e20) or np.isnan(e50):
+            # Создаем временный DataFrame
+            temp_df = pd.DataFrame({
+                'open': close_series,
+                'high': close_series,
+                'low': close_series,
+                'close': close_series,
+                'volume': pd.Series([1000] * len(close_series), index=close_series.index)
+            })
+
+            df_with_indicators = calculate_all_indicators(temp_df)
+            if df_with_indicators.empty:
+                return "sideways"
+
+            e20 = df_with_indicators["ema_20"].iloc[-1]
+            e50 = df_with_indicators["ema_50"].iloc[-1]
+
+            if pd.isna(e20) or pd.isna(e50):
                 return "sideways"
             if e20 > e50 * 1.002:
                 return "bull"
@@ -285,82 +225,127 @@ class TradingBot:
         except Exception:
             return "sideways"
 
-    # ── AI-модель (оценка) ────────────────────────────────────────────────────
     def _predict_ai_score(self, df_15m: pd.DataFrame) -> float:
-        """✅ ИСПРАВЛЕНО: Получение AI score с правильной обработкой интерфейсов."""
+        """Получение AI score с фолбэком."""
         try:
             if not self.ai_enabled or not self.ml_ready or self.ml_model is None:
-                logging.debug("🤖 AI disabled or not ready, returning failover")
                 return self.ai_failover
 
             feats = self._build_features(df_15m)
             if not feats:
-                logging.debug("🤖 No features built, returning failover")
                 return self.ai_failover
 
-            logging.debug(f"🔍 AI Features built: {len(feats)} features")
-
-            # ✅ ИСПРАВЛЕНИЕ 1: Правильная работа с predict() method
+            # современный predict(features, market_condition)
             if hasattr(self.ml_model, "predict"):
                 try:
                     res = self.ml_model.predict(feats, feats.get("market_condition"))
-                    logging.debug(f"🔍 AI predict() returned: {res}, type: {type(res)}")
-                    
                     if isinstance(res, tuple) and len(res) >= 2:
-                        pred, conf = res  # ✅ ИСПРАВЛЕНО: правильная распаковка
+                        _, conf = res[0], res[1]
                         ai = float(conf)
-                        logging.debug(f"🤖 AI predict [tuple]: pred={pred}, conf={conf}")
                     elif isinstance(res, dict):
                         ai = float(res.get("confidence", self.ai_failover))
-                        logging.debug(f"🤖 AI predict [dict]: confidence={ai}")
                     else:
                         ai = float(res)
-                        logging.debug(f"🤖 AI predict [scalar]: {ai}")
-                    
-                    result = max(0.0, min(1.0, ai))
-                    logging.debug(f"🤖 AI predict result: {result}")
-                    return result
-                    
-                except Exception as e:
-                    logging.debug(f"predict(...) failed: {e}, trying predict_proba(...)")
+                    return max(0.0, min(1.0, ai))
+                except Exception:
+                    logging.debug("predict(...) failed, trying predict_proba(...)")
 
-            # ✅ ИСПРАВЛЕНИЕ 2: Fallback к predict_proba с правильными параметрами
+            # старый интерфейс: predict_proba(df | features)
             if hasattr(self.ml_model, "predict_proba"):
                 try:
-                    # Пробуем с DataFrame
                     ai = self.ml_model.predict_proba(df_15m.tail(100))
                     ai = float(ai or self.ai_failover)
-                    result = max(0.0, min(1.0, ai))
-                    logging.debug(f"🤖 AI predict_proba result: {result}")
-                    return result
-                except Exception as e:
-                    logging.debug(f"predict_proba(...) failed: {e}")
-
-            # ✅ ИСПРАВЛЕНИЕ 3: Дополнительный fallback для совместимости
-            if hasattr(self.ml_model, "_vec_from_features_dict"):
-                try:
-                    # Конвертируем dict в вектор
-                    feats_vec = self.ml_model._vec_from_features_dict(feats)
-                    res = self.ml_model.predict(feats_vec, feats.get("market_condition"))
-                    
-                    if isinstance(res, tuple) and len(res) >= 2:
-                        pred, conf = res
-                        ai = float(conf)
-                    else:
-                        ai = float(res)
-                    
-                    result = max(0.0, min(1.0, ai))
-                    logging.debug(f"🤖 AI vector predict result: {result}")
-                    return result
-                    
-                except Exception as e:
-                    logging.debug(f"Vector prediction failed: {e}")
+                    return max(0.0, min(1.0, ai))
+                except Exception:
+                    pass
 
         except Exception as e:
             logging.exception(f"AI predict failed: {e}")
 
-        logging.debug(f"🤖 AI returning failover: {self.ai_failover}")
         return self.ai_failover
+
+    # ── AI-модель (оценка) ────────────────────────────────────────────────────
+    def _build_features(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """✅ ОБНОВЛЕНО: Использует качественные индикаторы из technical_indicators"""
+        feats: Dict[str, Any] = {}
+        try:
+            if df is None or df.empty or len(df) < 60:
+                return feats
+
+            # ✅ НОВЫЙ ПОДХОД: Используем качественную систему индикаторов
+            df_with_indicators = calculate_all_indicators(df.copy())
+
+            if df_with_indicators.empty or len(df_with_indicators) < 2:
+                return feats
+
+            # Берем предпоследнюю строку (t-1) для избежания утечек будущего
+            last_row = df_with_indicators.iloc[-2]  # t-1
+
+            # Извлекаем готовые индикаторы
+            feats = {
+                "rsi": float(last_row.get("rsi", 50.0)) if pd.notna(last_row.get("rsi")) else 50.0,
+                "macd": float(last_row.get("macd", 0.0)) if pd.notna(last_row.get("macd")) else 0.0,
+                "macd_signal": float(last_row.get("macd_signal", 0.0)) if pd.notna(last_row.get("macd_signal")) else 0.0,
+                "macd_hist": float(last_row.get("macd_hist", 0.0)) if pd.notna(last_row.get("macd_hist")) else 0.0,
+                # ✅ ИСПРАВЛЕНО: используем ema_20/ema_50 вместо ema_fast/ema_slow
+                "ema_20": float(last_row.get("ema_20", 0.0)) if pd.notna(last_row.get("ema_20")) else 0.0,
+                "ema_50": float(last_row.get("ema_50", 0.0)) if pd.notna(last_row.get("ema_50")) else 0.0,
+                "sma_20": float(last_row.get("sma_50", 0.0)) if pd.notna(last_row.get("sma_50")) else 0.0,
+                "sma_50": float(last_row.get("sma_200", 0.0)) if pd.notna(last_row.get("sma_200")) else 0.0,
+                "atr_14": float(last_row.get("atr", 0.0)) if pd.notna(last_row.get("atr")) else 0.0,
+
+                # Дополнительные фичи (новые возможности!)
+                "stoch_k": float(last_row.get("stoch_k", 50.0)) if pd.notna(last_row.get("stoch_k")) else 50.0,
+                "stoch_d": float(last_row.get("stoch_d", 50.0)) if pd.notna(last_row.get("stoch_d")) else 50.0,
+                "adx": float(last_row.get("adx", 20.0)) if pd.notna(last_row.get("adx")) else 20.0,
+                "bb_position": float(last_row.get("bb_position", 0.5)) if pd.notna(last_row.get("bb_position")) else 0.5,
+                "volume_ratio": float(last_row.get("volume_ratio", 1.0)) if pd.notna(last_row.get("volume_ratio")) else 1.0,
+            }
+
+            # Вычисляемые фичи
+            try:
+                # Price changes (используем исходный df)
+                close = df["close"]
+                if len(close) >= 2:
+                    feats["price_change_1"] = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) if close.iloc[-2] != 0 else 0.0
+                else:
+                    feats["price_change_1"] = 0.0
+
+                if len(close) >= 4:
+                    feats["price_change_3"] = float((close.iloc[-1] - close.iloc[-4]) / close.iloc[-4]) if close.iloc[-4] != 0 else 0.0
+                else:
+                    feats["price_change_3"] = 0.0
+
+                if len(close) >= 6:
+                    feats["price_change_5"] = float((close.iloc[-1] - close.iloc[-6]) / close.iloc[-6]) if close.iloc[-6] != 0 else 0.0
+                else:
+                    feats["price_change_5"] = 0.0
+
+                # Volume change
+                volume = df["volume"]
+                if len(volume) >= 6:
+                    feats["vol_change"] = float((volume.iloc[-1] - volume.iloc[-6]) / volume.iloc[-6]) if volume.iloc[-6] != 0 else 0.0
+                else:
+                    feats["vol_change"] = 0.0
+
+                # Market condition (упрощенный)
+                feats["market_condition"] = self._market_condition_guess(close.iloc[:-1])
+
+            except Exception as e:
+                logging.debug(f"Error calculating derived features: {e}")
+                # Заполняем дефолтами при ошибках
+                feats.update({
+                    "price_change_1": 0.0,
+                    "price_change_3": 0.0,
+                    "price_change_5": 0.0,
+                    "vol_change": 0.0,
+                    "market_condition": "sideways"
+                })
+
+        except Exception as e:
+            logging.exception(f"Feature build failed: {e}")
+
+        return feats
 
     # ── получение рынка ────────────────────────────────────────────────────────
     def _fetch_market(self) -> Tuple[pd.DataFrame, Optional[float], Optional[float]]:
@@ -621,5 +606,5 @@ class TradingBot:
             try:
                 self._trading_cycle()
             except Exception as e:
-                logging.error(f"Cycle error: {e}\n{traceback.format_exc()}")
+                logging.error(f"Cycle error: {e}\\n{traceback.format_exc()}")
             time.sleep(self.cycle_minutes * 60)
