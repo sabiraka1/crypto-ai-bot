@@ -9,7 +9,8 @@ import atexit
 from typing import Optional
 import requests
 from flask import Flask, request, jsonify
-
+import psutil
+from datetime import datetime
 # --- наши модули ---
 from main import TradingBot
 from trading.exchange_client import ExchangeClient
@@ -64,6 +65,224 @@ class SensitiveDataFilter(logging.Filter):
 # Применяем фильтр
 for handler in logging.getLogger().handlers:
     handler.addFilter(SensitiveDataFilter())
+
+
+# ================== ВСТРОЕННЫЙ UNIFIED MONITOR ==================
+class UnifiedMonitor:
+    """Встроенная система мониторинга без отдельных файлов"""
+    
+    def __init__(self):
+        self._start_time = time.time()
+        self._last_metrics = {}
+        self._cache_ttl = 30  # кэш на 30 секунд
+        self._last_cache_time = 0
+        
+    def get_health_status(self, trading_bot=None) -> dict:
+        """Единый health check - заменяет все старые endpoint'ы"""
+        now = time.time()
+        
+        # Используем кэш если данные свежие
+        if now - self._last_cache_time < self._cache_ttl and self._last_metrics:
+            return self._last_metrics
+        
+        try:
+            # Системные метрики
+            process = psutil.Process(os.getpid())
+            cpu_pct = process.cpu_percent(interval=0.1)
+            memory_mb = process.memory_info().rss / (1024 * 1024)
+            
+            # Торговые метрики
+            bot_status = self._get_bot_status(trading_bot)
+            
+            # Потоки
+            trading_thread_alive = any(
+                t.name == "TradingLoop" and t.is_alive() 
+                for t in threading.enumerate()
+            )
+            
+            status = {
+                "ok": True,
+                "timestamp": datetime.now().isoformat(),
+                "uptime_hours": round((now - self._start_time) / 3600, 2),
+                
+                # Системные ресурсы  
+                "system": {
+                    "cpu_percent": round(cpu_pct, 1),
+                    "memory_mb": round(memory_mb, 1),
+                    "threads": process.num_threads()
+                },
+                
+                # Торговля
+                "trading": {
+                    "bot_initialized": trading_bot is not None,
+                    "thread_alive": trading_thread_alive,
+                    "position_active": bot_status.get("position_active", False),
+                    "last_check": bot_status.get("last_check")
+                },
+                
+                # Конфигурация
+                "config": {
+                    "safe_mode": CFG.SAFE_MODE,
+                    "trading_enabled": CFG.ENABLE_TRADING,
+                    "webhook_enabled": CFG.ENABLE_WEBHOOK,
+                    "symbol": CFG.SYMBOL,
+                    "timeframe": CFG.TIMEFRAME
+                }
+            }
+            
+            # Алерты при превышении порогов
+            alerts = []
+            if cpu_pct > 85:
+                alerts.append(f"High CPU: {cpu_pct:.1f}%")
+            if memory_mb > 1000:
+                alerts.append(f"High Memory: {memory_mb:.1f}MB")
+            if not trading_thread_alive and bot_status.get("should_be_running"):
+                alerts.append("Trading thread stopped")
+                
+            if alerts:
+                status["alerts"] = alerts
+                status["ok"] = len(alerts) < 3  # OK если < 3 алертов
+            
+            # Кэшируем результат
+            self._last_metrics = status
+            self._last_cache_time = now
+            
+            return status
+            
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def _get_bot_status(self, trading_bot) -> dict:
+        """Получить статус торгового бота"""
+        if not trading_bot:
+            return {"position_active": False, "should_be_running": CFG.ENABLE_TRADING}
+            
+        try:
+            position_active = False
+            last_check = None
+            
+            if hasattr(trading_bot, 'state'):
+                position_active = bool(trading_bot.state.get("in_position"))
+                last_check = trading_bot.state.get("last_manage_check")
+            
+            return {
+                "position_active": position_active,
+                "last_check": last_check,
+                "should_be_running": CFG.ENABLE_TRADING
+            }
+            
+        except Exception as e:
+            return {
+                "position_active": False, 
+                "error": str(e)[:100],
+                "should_be_running": False
+            }
+
+class SimpleWatchdog:
+    """Упрощенный watchdog встроенный в app.py"""
+    
+    def __init__(self, check_interval: int = 600):  # 10 минут
+        self.check_interval = check_interval
+        self._running = False
+        self._thread = None
+        
+    def start(self, bot_ref_func, restart_func):
+        """Запустить простой watchdog"""
+        if self._running:
+            return
+            
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._watch_loop,
+            args=(bot_ref_func, restart_func),
+            daemon=True,
+            name="SimpleWatchdog"
+        )
+        self._thread.start()
+        logging.info("🐕 Simple watchdog started")
+    
+    def stop(self):
+        """Остановить watchdog"""
+        self._running = False
+    
+    def _watch_loop(self, bot_ref_func, restart_func):
+        """Упрощенный цикл наблюдения"""
+        failures = 0
+        
+        while self._running:
+            try:
+                time.sleep(self.check_interval)
+                
+                if not self._running:
+                    break
+                
+                # Простая проверка: есть ли торговый поток
+                trading_alive = any(
+                    t.name == "TradingLoop" and t.is_alive() 
+                    for t in threading.enumerate()
+                )
+                
+                # Проверяем что бот существует
+                bot_exists = False
+                try:
+                    bot = bot_ref_func()
+                    bot_exists = bot is not None
+                except Exception:
+                    pass
+                
+                # Логика перезапуска только при критических проблемах
+                if not trading_alive and bot_exists and CFG.ENABLE_TRADING:
+                    failures += 1
+                    logging.warning(f"🐕 Trading thread missing #{failures}")
+                    
+                    if failures >= 2:  # Перезапуск после 2 неудач
+                        try:
+                            logging.warning("🐕 Attempting restart...")
+                            restart_func()
+                            failures = 0
+                        except Exception as e:
+                            logging.error(f"🐕 Restart failed: {e}")
+                else:
+                    failures = 0  # Сброс при успехе
+                    
+            except Exception as e:
+                logging.error(f"🐕 Watchdog error: {e}")
+                time.sleep(60)
+
+# ================== ГЛОБАЛЬНЫЕ ЭКЗЕМПЛЯРЫ ==================
+# Создаем глобальные экземпляры прямо в app.py
+_unified_monitor = UnifiedMonitor()
+_simple_watchdog = SimpleWatchdog()
+
+# ================== ФУНКЦИИ ДЛЯ ЗАМЕНЫ ИМПОРТА ==================
+def get_health_response(trading_bot=None) -> dict:
+    """✅ ЕДИНЫЙ health check - заменяет все старые endpoint'ы"""
+    return _unified_monitor.get_health_status(trading_bot)
+
+def init_monitoring(bot_ref_func, restart_func):
+    """✅ ЕДИНАЯ ИНИЦИАЛИЗАЦИЯ мониторинга"""
+    global _simple_watchdog
+    
+    try:
+        # Запускаем упрощенный watchdog
+        _simple_watchdog.start(bot_ref_func, restart_func)
+        logging.info("✅ Unified monitoring initialized")
+    except Exception as e:
+        logging.error(f"Failed to start monitoring: {e}")
+
+def cleanup_monitoring():
+    """Очистка мониторинга при завершении"""
+    global _simple_watchdog
+    
+    try:
+        _simple_watchdog.stop()
+        logging.info("✅ Monitoring cleanup completed")
+    except Exception as e:
+        logging.error(f"Monitoring cleanup error: {e}")
 
 # ================== FLASK ==================
 app = Flask(__name__)
@@ -249,30 +468,14 @@ def _acquire_file_lock(lock_path: str) -> bool:
         logging.exception("Lock create failed")
         return False
 
-# ================== HEALTH ==================
+
+
+# ================== UNIFIED HEALTH ENDPOINTS ==================
 @app.route("/health", methods=["GET"])
 @app.route("/healthz", methods=["GET"])
-def health():
-    """Health check endpoint"""
-    status = {
-        "ok": True,
-        "status": "running",
-        "trading_bot_active": _TRADING_BOT is not None,
-        "safe_mode": CFG.SAFE_MODE,
-        "webhook_enabled": CFG.ENABLE_WEBHOOK,
-        "trading_enabled": CFG.ENABLE_TRADING,
-        "bootstrap_done": _BOOTSTRAP_DONE
-    }
-    
-    # Проверяем состояние торгового бота
-    if _TRADING_BOT:
-        try:
-            position_active = _TRADING_BOT._is_position_active()
-            status["position_active"] = position_active
-        except Exception as e:
-            status["position_active"] = f"error: {e}"
-    
-    return jsonify(status), 200
+@app.route("/status", methods=["GET"])
+def unified_health():
+    return jsonify(get_health_response(_TRADING_BOT))
 
 # ================== DISPATCH (ИСПРАВЛЕННАЯ ВЕРСИЯ) ==================
 def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
@@ -473,106 +676,7 @@ def start_trading_loop():
     logging.info("✅ Trading loop thread started")
 
 # ================== WATCHDOG & MONITORING ==================
-import psutil
-
-def send_telegram_alert(message):
-    """Отправка критических уведомлений"""
-    try:
-        _send_message(f"🚨 {message}")
-    except Exception as e:
-        logging.error(f"[Telegram Alert Error] {e}")
-
-def monitor_resources():
-    """Мониторинг ресурсов системы"""
-    try:
-        process = psutil.Process(os.getpid())
-        mem_mb = process.memory_info().rss / (1024 * 1024)
-        cpu_pct = process.cpu_percent(interval=1)
-        
-        logging.debug(f"[Resources] CPU: {cpu_pct:.1f}%, RAM: {mem_mb:.1f} MB")
-        
-        # Проверяем критические уровни
-        total_memory_mb = psutil.virtual_memory().total / (1024 * 1024)
-        memory_threshold = total_memory_mb * 0.8
-        
-        if cpu_pct > 85 or mem_mb > memory_threshold:
-            send_telegram_alert(f"High resource usage! CPU: {cpu_pct:.1f}%, RAM: {mem_mb:.1f} MB")
-            
-        return cpu_pct, mem_mb
-    except Exception as e:
-        logging.error(f"[Resource Monitor] Error: {e}")
-        return 0, 0
-
-def watchdog():
-    """
-    ✅ GUNICORN VERSION: Улучшенный watchdog
-    """
-    global _TRADING_BOT
-    consecutive_failures = 0
-    max_failures = 3
-    
-    while True:
-        try:
-            # Мониторинг ресурсов
-            monitor_resources()
-            
-            # Проверяем состояние торгового потока
-            trading_thread_alive = any(
-                t.name == "TradingLoop" and t.is_alive() 
-                for t in threading.enumerate()
-            )
-            
-            # ✅ ИСПРАВЛЕНИЕ: Проверяем что бот существует и поток жив
-            bot_exists = _TRADING_BOT is not None
-            
-            if CFG.ENABLE_TRADING and (not trading_thread_alive or not bot_exists):
-                consecutive_failures += 1
-                status = f"thread_alive={trading_thread_alive}, bot_exists={bot_exists}"
-                logging.warning(f"⚠️ Trading system down ({status}), failure #{consecutive_failures}")
-                
-                if consecutive_failures >= max_failures:
-                    send_telegram_alert(f"Trading system failed {consecutive_failures} times! Attempting restart...")
-                    try:
-                        # Принудительно сбрасываем бота если он завис
-                        with _TRADING_BOT_LOCK:
-                            if _TRADING_BOT is not None:
-                                logging.warning("🔄 Force resetting hung trading bot")
-                                _TRADING_BOT = None
-                        
-                        start_trading_loop()
-                        consecutive_failures = 0  # Сбрасываем счетчик при успешном запуске
-                        logging.info("✅ Trading loop restarted by watchdog")
-                    except Exception as e:
-                        send_telegram_alert(f"Failed to restart trading loop: {e}")
-                        logging.error(f"❌ Watchdog restart failed: {e}")
-            else:
-                consecutive_failures = 0  # Сбрасываем счетчик если все OK
-            
-            # Проверяем состояние позиций (если бот доступен)
-            if _TRADING_BOT and hasattr(_TRADING_BOT, 'state'):
-                try:
-                    position_state = _TRADING_BOT.state.state
-                    if position_state.get("in_position"):
-                        last_check = position_state.get("last_manage_check")
-                        if last_check:
-                            from datetime import datetime, timezone
-                            last_dt = datetime.fromisoformat(last_check.replace("Z", "+00:00"))
-                            now_dt = datetime.now(timezone.utc)
-                            minutes_since = (now_dt - last_dt).total_seconds() / 60
-                            
-                            # Если позиция не управлялась более 30 минут - предупреждение
-                            if minutes_since > 30:
-                                logging.warning(f"⚠️ Position not managed for {minutes_since:.1f} minutes")
-                                send_telegram_alert(f"Position not managed for {minutes_since:.1f} minutes")
-                                
-                except Exception as e:
-                    logging.debug(f"Position check error: {e}")
-                    
-        except Exception as e:
-            logging.error(f"[Watchdog] Error: {e}")
-        
-        time.sleep(300)  # Проверка каждые 5 минут
-
+# (заменено на UnifiedMonitor + SimpleWatchdog в app_monitoring_fix.py)
 # ================== BOOTSTRAP (ДЛЯ GUNICORN) ==================
 def _bootstrap_once():
     """
@@ -608,13 +712,13 @@ def _bootstrap_once():
         logging.exception("start_trading_loop failed")
         
     try:
-        # ✅ GUNICORN: Запускаем watchdog как daemon thread
-        if not _WATCHDOG_THREAD or not _WATCHDOG_THREAD.is_alive():
-            _WATCHDOG_THREAD = threading.Thread(target=watchdog, daemon=True, name="Watchdog")
-            _WATCHDOG_THREAD.start()
-            logging.info("✅ Watchdog started")
+        # ✅ Unified monitoring init
+        init_monitoring(
+            bot_ref_func=lambda: _TRADING_BOT,
+            restart_func=start_trading_loop
+        )
     except Exception:
-        logging.exception("watchdog start failed")
+        logging.exception("monitoring init failed")
         
     _BOOTSTRAP_DONE = True
     logging.info("✅ Gunicorn bootstrap completed successfully")
@@ -635,46 +739,7 @@ def _bootstrap_once():
     except Exception:
         pass
 
-# ================== ДОПОЛНИТЕЛЬНЫЕ ENDPOINTS ==================
-@app.route("/status", methods=["GET"])
-def status_endpoint():
-    """Детальный статус системы"""
-    try:
-        status = {
-            "timestamp": time.time(),
-            "config": {
-                "symbol": CFG.SYMBOL,
-                "timeframe": CFG.TIMEFRAME,
-                "safe_mode": CFG.SAFE_MODE,
-                "ai_enabled": CFG.AI_ENABLE,
-                "webhook_enabled": CFG.ENABLE_WEBHOOK,
-                "trading_enabled": CFG.ENABLE_TRADING
-            },
-            "trading_bot": {
-                "initialized": _TRADING_BOT is not None,
-                "thread_alive": any(t.name == "TradingLoop" and t.is_alive() for t in threading.enumerate())
-            }
-        }
-        
-        # Информация о позиции
-        if _TRADING_BOT:
-            try:
-                status["position"] = _TRADING_BOT.pm.get_position_summary()
-            except Exception as e:
-                status["position"] = {"error": f"failed_to_get_summary: {e}"}
-        
-        # Ресурсы
-        try:
-            cpu, mem = monitor_resources()
-            status["resources"] = {"cpu_percent": cpu, "memory_mb": mem}
-        except Exception as e:
-            status["resources"] = {"error": f"failed_to_get_resources: {e}"}
-            
-        return jsonify(status)
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+# ================== ДОПОЛНИТЕЛЬНЫЕ ENDPOINTС ==================
 @app.route("/force_restart", methods=["POST"])
 def force_restart():
     """Принудительный перезапуск торгового бота"""
@@ -749,6 +814,71 @@ def get_logs():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ================== CACHE ENDPOINTS ==================
+@app.route("/cache_stats", methods=["GET"])
+def cache_stats():
+    """Статистика кэшей"""
+    try:
+        from analysis.technical_indicators import get_cache_stats as get_indicator_stats
+        from utils.csv_handler import get_csv_system_stats
+        
+        stats = {
+            "indicators": get_indicator_stats(),
+            "csv": get_csv_system_stats(),
+            "timestamp": time.time()
+        }
+        
+        # Exchange cache (если есть кэширование)
+        if hasattr(_GLOBAL_EX, 'get_cache_stats'):
+            stats["exchange"] = _GLOBAL_EX.get_cache_stats()
+        else:
+            stats["exchange"] = {"status": "not_implemented"}
+            
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/clear_cache", methods=["POST"])
+def clear_all_cache():
+    """Очистить все кэши"""
+    try:
+        results = {}
+        
+        # Очистка кэша индикаторов
+        try:
+            from analysis.technical_indicators import clear_indicator_cache
+            clear_indicator_cache()
+            results["indicators"] = "cleared"
+        except Exception as e:
+            results["indicators"] = f"error: {e}"
+        
+        # Очистка кэша exchange (если реализовано)
+        try:
+            if hasattr(_GLOBAL_EX, 'clear_cache'):
+                _GLOBAL_EX.clear_cache()
+                results["exchange"] = "cleared"
+            else:
+                results["exchange"] = "not_implemented"
+        except Exception as e:
+            results["exchange"] = f"error: {e}"
+            
+        # Очистка кэша CSV
+        try:
+            from utils.csv_handler import CSVHandler
+            CSVHandler.clear_cache()
+            results["csv"] = "cleared"
+        except Exception as e:
+            results["csv"] = f"error: {e}"
+        
+        return jsonify({
+            "ok": True, 
+            "message": "Cache clear completed",
+            "details": results
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ================== CLEANUP FOR GUNICORN ==================
 def cleanup_on_exit():
     """Очистка при завершении работы"""
@@ -781,6 +911,12 @@ def cleanup_on_exit():
     except Exception as e:
         logging.error(f"Error during cleanup: {e}")
     
+    # Останавливаем unified monitoring
+    try:
+        cleanup_monitoring()
+    except Exception:
+        logging.exception("cleanup_monitoring failed")
+
     # Удаляем lock файлы
     for lock_file in [LOCK_FILE, WEBHOOK_LOCK_FILE]:
         try:
