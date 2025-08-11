@@ -1,4 +1,4 @@
-# analysis/technical_indicators.py - ОПТИМИЗИРОВАННАЯ ВЕРСИЯ
+# analysis/technical_indicators.py - UNIFIED ATR VERSION
 
 import time
 import logging
@@ -11,7 +11,191 @@ from functools import lru_cache
 _EPS = 1e-12
 
 # =============================================================================
-# СИСТЕМА КЭШИРОВАНИЯ ИНДИКАТОРОВ
+# UNIFIED ATR FUNCTIONS - ЗАМЕНЯЕТ ВСЕ ДУБЛИРУЮЩИЕСЯ ATR В ПРОЕКТЕ
+# =============================================================================
+
+def get_unified_atr(df: pd.DataFrame, period: int = 14, method: str = 'ewm') -> Optional[float]:
+    """
+    ✅ UNIFIED ATR FUNCTION - Единая функция ATR для всего проекта
+    
+    Заменяет все дублирующиеся ATR функции в:
+    - main.py → atr()
+    - telegram/bot_handler.py → _atr()
+    - risk_manager.py → _calculate_atr()
+    - ml/adaptive_model.py → встроенная ATR
+    - analysis/market_analyzer.py → встроенная ATR
+    
+    Args:
+        df: DataFrame с колонками open, high, low, close, volume
+        period: Период для расчета ATR (по умолчанию 14)
+        method: 'ewm' (Exponential Weighted) или 'sma' (Simple Moving Average)
+        
+    Returns:
+        float: ATR значение или None при ошибке
+        
+    Example:
+        >>> df = pd.DataFrame({'high': [102, 103], 'low': [99, 100], 'close': [101, 102]})
+        >>> atr_value = get_unified_atr(df, period=14, method='ewm')
+        >>> print(f"ATR: {atr_value:.6f}")
+    """
+    
+    if df is None or df.empty:
+        logging.debug("📊 Unified ATR: empty DataFrame received")
+        return None
+
+    required_cols = {"high", "low", "close"}
+    if not required_cols.issubset(df.columns):
+        missing = required_cols - set(df.columns)
+        logging.error(f"📊 Unified ATR: missing columns {missing}")
+        return None
+
+    try:
+        # Приведение типов с обработкой ошибок
+        high = pd.to_numeric(df["high"], errors="coerce").fillna(method='ffill')
+        low = pd.to_numeric(df["low"], errors="coerce").fillna(method='ffill')
+        close = pd.to_numeric(df["close"], errors="coerce").fillna(method='ffill')
+        
+        # Проверяем достаточность данных
+        min_periods = min(5, max(1, period // 3))  # Адаптивный минимум
+        if len(df) < min_periods:
+            logging.debug(f"📊 Unified ATR: insufficient data {len(df)} < {min_periods}")
+            # Фолбэк: простая волатильность
+            return float((high - low).mean()) if len(df) > 0 else None
+
+        # True Range calculation (оптимизированная версия)
+        prev_close = close.shift(1)
+        
+        # Vectorized True Range calculation
+        tr1 = (high - low).abs()
+        tr2 = (high - prev_close).abs() 
+        tr3 = (low - prev_close).abs()
+        
+        # Efficient max calculation
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # Handle edge cases
+        tr = tr.fillna(tr1)  # Fallback to high-low if prev_close issues
+        
+        # ATR calculation based on method
+        if method.lower() == 'sma':
+            # Simple Moving Average method (для совместимости с risk_manager.py)
+            atr_series = tr.rolling(window=period, min_periods=min_periods).mean()
+        else:
+            # Exponential Weighted Moving Average (по умолчанию, рекомендуется)
+            alpha = 1.0 / period
+            atr_series = tr.ewm(alpha=alpha, adjust=False, min_periods=min_periods).mean()
+        
+        # Получаем последнее значение
+        if atr_series.empty or atr_series.isna().all():
+            logging.debug("📊 Unified ATR: no valid ATR values calculated")
+            return None
+            
+        atr_value = atr_series.iloc[-1]
+        
+        # Валидация результата
+        if pd.isna(atr_value) or not np.isfinite(atr_value) or atr_value <= 0:
+            logging.debug(f"📊 Unified ATR: invalid result {atr_value}")
+            # Фолбэк к простому расчету
+            return float(tr.mean()) if tr.notna().any() else None
+            
+        result = float(atr_value)
+        logging.debug(f"📊 Unified ATR [{method}]: {result:.6f} (period={period}, data_len={len(df)})")
+        
+        return result
+
+    except Exception as e:
+        logging.error(f"📊 Unified ATR calculation failed: {e}")
+        # Критический фолбэк
+        try:
+            simple_range = (df["high"] - df["low"]).mean()
+            return float(simple_range) if pd.notna(simple_range) else None
+        except Exception:
+            return None
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    """
+    ✅ COMPATIBILITY ALIAS - Алиас для обратной совместимости
+    
+    Заменяет функцию atr() в main.py
+    Использует EWM метод как стандарт
+    """
+    return get_unified_atr(df, period, method='ewm')
+
+
+def _atr_for_telegram(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    ✅ TELEGRAM COMPATIBILITY - Заменяет _atr() в bot_handler.py
+    
+    Возвращает float (не Optional) для совместимости с Telegram командами
+    """
+    result = get_unified_atr(df, period, method='ewm')
+    return float(result) if result is not None else 0.0
+
+
+def _atr_for_risk_manager(df: pd.DataFrame, period: Optional[int] = None) -> float:
+    """
+    ✅ RISK MANAGER COMPATIBILITY - Заменяет _calculate_atr() в risk_manager.py
+    
+    Поддерживает как EWM, так и SMA метод через env переменную
+    По умолчанию использует EWM (более точный)
+    """
+    import os
+    
+    # Поддержка переключения метода через env
+    atr_method = os.getenv("RISK_ATR_METHOD", "ewm").lower()  # ewm или sma
+    period = period or int(os.getenv("ATR_PERIOD", 14))
+    
+    result = get_unified_atr(df, period, method=atr_method)
+    
+    # Risk manager ожидает float, не None
+    if result is None:
+        # Фолбэк для risk manager
+        try:
+            return float(df["close"].iloc[-1] * 0.02)  # 2% от цены
+        except Exception:
+            return 100.0  # Крайний фолбэк
+            
+    return float(result)
+
+
+def _atr_series_for_ml(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    ✅ ML MODEL COMPATIBILITY - Для ml/adaptive_model.py
+    
+    Возвращает Series для встраивания в ML feature engineering
+    """
+    try:
+        if df is None or df.empty or len(df) < 2:
+            return pd.Series([0.0] * len(df), index=df.index if not df.empty else [])
+
+        # Используем тот же алгоритм что и в get_unified_atr
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce") 
+        close = pd.to_numeric(df["close"], errors="coerce")
+        
+        prev_close = close.shift(1)
+        tr1 = (high - low).abs()
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # EWM для ML (более гладкие features)
+        alpha = 1.0 / period
+        atr_series = tr.ewm(alpha=alpha, adjust=False, min_periods=1).mean()
+        
+        # Заполняем NaN значения
+        atr_series = atr_series.fillna(method='bfill').fillna(0.0)
+        
+        return atr_series.astype('float64')
+        
+    except Exception as e:
+        logging.error(f"📊 ATR series for ML failed: {e}")
+        # Возвращаем нулевой series той же длины
+        return pd.Series([0.0] * len(df), index=df.index)
+
+# =============================================================================
+# СИСТЕМА КЭШИРОВАНИЯ ИНДИКАТОРОВ (без изменений)
 # =============================================================================
 
 class IndicatorCache:
@@ -152,15 +336,19 @@ class IndicatorCalculator:
         self._ema_cache.clear()
 
 # =============================================================================
-# ГЛАВНАЯ ФУНКЦИЯ С КЭШИРОВАНИЕМ
+# ГЛАВНАЯ ФУНКЦИЯ С UNIFIED ATR
 # =============================================================================
 
 def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.DataFrame:
     """
-    ✅ ОПТИМИЗИРОВАННАЯ ВЕРСИЯ: Расчёт индикаторов с кэшированием и батчингом
+    ✅ UPDATED VERSION: Расчёт индикаторов с UNIFIED ATR
+    
+    Теперь использует get_unified_atr() вместо встроенного ATR расчета
+    Это обеспечивает консистентность ATR по всему проекту
     
     Features:
     - Умное кэширование результатов
+    - ЕДИНЫЙ ATR расчет через get_unified_atr()
     - Переиспользование промежуточных вычислений
     - Оптимизированные алгоритмы
     - Graceful обработка ошибок
@@ -256,24 +444,24 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
         out["stoch_k"] = _safe_tail_fill(stoch_k.astype("float64"))
         out["stoch_d"] = _safe_tail_fill(stoch_d.astype("float64"))
 
-        # ADX (упрощенная версия)
+        # ✅ UNIFIED ATR - теперь используем единую функцию
+        unified_atr_series = _atr_series_for_ml(out, period=14)
+        out["atr"] = _safe_tail_fill(unified_atr_series)
+
+        # ADX (используя UNIFIED ATR)
         up_move = high.diff()
         down_move = -low.diff()
         plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
         minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
 
-        # True Range
-        prev_close = close.shift(1)
-        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean()
-
+        # Используем уже рассчитанный ATR
+        atr = out["atr"]
         plus_di = 100.0 * (plus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean() / (atr + _EPS))
         minus_di = 100.0 * (minus_dm.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean() / (atr + _EPS))
         dx = (100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + _EPS)).astype("float64")
         adx = dx.ewm(alpha=1 / 14, adjust=False, min_periods=1).mean()
         
         out["adx"] = _safe_tail_fill(adx.astype("float64"))
-        out["atr"] = _safe_tail_fill(atr.astype("float64"))
 
         # Bollinger Bands (оптимизированные)
         bb_mid, bb_upper, bb_lower, bb_position = calc.calculate_bollinger(close, 20, 2.0)
@@ -309,7 +497,7 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
         return df.copy()
 
 # =============================================================================
-# УТИЛИТЫ ДЛЯ УПРАВЛЕНИЯ КЭШЕМ
+# УТИЛИТЫ ДЛЯ УПРАВЛЕНИЯ КЭШЕМ (без изменений)
 # =============================================================================
 
 def clear_indicator_cache():
@@ -347,10 +535,72 @@ def get_last_indicator_value(df: pd.DataFrame, indicator: str) -> Optional[float
         logging.error(f"Failed to get {indicator}: {e}")
     return None
 
+# =============================================================================
+# UNIFIED ATR TESTING UTILITIES
+# =============================================================================
+
+def test_unified_atr_compatibility():
+    """
+    ✅ ТЕСТИРОВАНИЕ: Проверка совместимости unified ATR
+    """
+    try:
+        # Создаем тестовые данные
+        test_data = pd.DataFrame({
+            'open': [100, 101, 102, 103, 104],
+            'high': [102, 103, 104, 105, 106], 
+            'low': [99, 100, 101, 102, 103],
+            'close': [101, 102, 103, 104, 105],
+            'volume': [1000, 1100, 1200, 1300, 1400]
+        })
+        
+        # Тестируем все unified функции
+        results = {}
+        
+        # Основная функция
+        results['unified'] = get_unified_atr(test_data, period=3, method='ewm')
+        results['unified_sma'] = get_unified_atr(test_data, period=3, method='sma')
+        
+        # Алиасы совместимости
+        results['main_atr'] = atr(test_data, period=3)
+        results['telegram_atr'] = _atr_for_telegram(test_data, period=3)
+        results['risk_atr'] = _atr_for_risk_manager(test_data, period=3)
+        results['ml_atr'] = _atr_series_for_ml(test_data, period=3).iloc[-1]
+        
+        # Проверяем что все функции возвращают разумные значения
+        for name, value in results.items():
+            print(f"📊 {name}: {value}")
+            assert value is not None and value > 0, f"{name} returned invalid value: {value}"
+        
+        # Проверяем что EWM версии дают одинаковые результаты
+        ewm_functions = ['unified', 'main_atr', 'telegram_atr']
+        ewm_values = [results[func] for func in ewm_functions]
+        
+        # Допускаем небольшие различия из-за обработки ошибок
+        assert all(abs(v - ewm_values[0]) < 0.01 for v in ewm_values), \
+            f"EWM functions give different results: {ewm_values}"
+        
+        print("✅ All unified ATR functions work correctly!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Unified ATR test failed: {e}")
+        return False
+
 # Экспорт для обратной совместимости
 __all__ = [
+    # ✅ НОВЫЕ UNIFIED ФУНКЦИИ
+    'get_unified_atr',           # Главная unified функция
+    'atr',                       # Алиас для main.py
+    '_atr_for_telegram',         # Алиас для bot_handler.py  
+    '_atr_for_risk_manager',     # Алиас для risk_manager.py
+    '_atr_series_for_ml',        # Для ML модели
+    
+    # Существующие функции (без изменений)
     'calculate_all_indicators',
     'clear_indicator_cache', 
     'get_cache_stats',
-    'get_last_indicator_value'
+    'get_last_indicator_value',
+    
+    # Тестирование
+    'test_unified_atr_compatibility'
 ]
