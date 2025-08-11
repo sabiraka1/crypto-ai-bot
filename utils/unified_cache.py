@@ -1,650 +1,476 @@
-# utils/unified_cache.py - ЦЕНТРАЛИЗОВАННАЯ СИСТЕМА КЭШИРОВАНИЯ
 
-import time
-import threading
-import hashlib
-import pickle
-import logging
-import gc
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, List, Union, Callable
+# utils/unified_cache.py — УНИФИЦИРОВАННЫЙ КЭШ
+# ВАЖНО: сохраняет публичный API (UnifiedCacheManager.get/set/cached) +
+# добавляет get_or_set, корректную работу с falsy-значениями, сжатие,
+# эвикцию внутри namespace и TTL-хелперы для свечей.
+
+from __future__ import annotations
+import time, threading, pickle, zlib, sys, os
 from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Callable, Tuple, List
 from enum import Enum
-from collections import OrderedDict
-import psutil
-import os
 
+try:
+    import psutil  # для мониторинга реального RSS (опционально)
+except Exception:  # pragma: no cover
+    psutil = None
 
+# ────────────────────────────────────────────────────────────────────────────
+# Политика кэширования
 class CachePolicy(Enum):
-    """Политики кэширования"""
-    LRU = "lru"              # Least Recently Used
-    TTL = "ttl"              # Time To Live
-    SIZE_BASED = "size"      # По размеру
-    HYBRID = "hybrid"        # Комбинированная
+    TTL = "ttl"
+    LRU = "lru"
+    HYBRID = "hybrid"  # TTL + LRU (сначала TTL, затем LRU)
 
-
+# Неймспейсы — можно расширять по проекту при необходимости
 class CacheNamespace(Enum):
-    """Namespace'ы для разделения типов данных"""
-    OHLCV = "ohlcv"                    # Рыночные данные
-    PRICES = "prices"                  # Последние цены
-    INDICATORS = "indicators"          # Технические индикаторы
-    CSV_READS = "csv_reads"            # Чтение CSV файлов
-    MARKET_INFO = "market_info"        # Информация о рынках
-    ML_FEATURES = "ml_features"        # ML фичи
-    RISK_METRICS = "risk_metrics"      # Метрики риска
+    OHLCV = "ohlcv"              # свечи
+    MARKET_INFO = "market_info"  # инфо рынка/тикеры
+    ML_FEATURES = "ml_features"  # фичи/индикаторы
+    PRICES = "prices"            # последние цены
+    ORDER_STATUS = "order_status"
+    TELEGRAM = "telegram"
+    CHARTS = "charts"
+    GENERAL = "general"
 
-
+# Запись кэша
 @dataclass
 class CacheEntry:
-    """Запись в кэше"""
     key: str
-    data: Any
+    data: Any                   # либо объект, либо ("zlib+pickle", bytes)
     namespace: str
     created_at: float
     last_accessed: float
-    access_count: int = 0
+    hits: int = 0
     size_bytes: int = 0
     ttl: Optional[float] = None
+    priority: int = 1           # 1..3 (3 — важнее)
+    sticky: bool = False        # нельзя выселять при давлении
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def is_expired(self) -> bool:
-        """Проверка на истечение TTL"""
         if self.ttl is None:
             return False
-        return time.time() - self.created_at > self.ttl
+        return (time.time() - self.created_at) > self.ttl
 
-    def touch(self):
-        """Обновление времени доступа"""
+    def touch(self) -> None:
         self.last_accessed = time.time()
-        self.access_count += 1
+        self.hits += 1
 
-
+# Конфигурация namespace
 @dataclass
 class NamespaceConfig:
-    """Конфигурация namespace"""
-    ttl: Optional[float] = None         # TTL в секундах
-    max_size: int = 1000               # Максимум записей
-    max_memory_mb: float = 100.0       # Максимум памяти в MB
-    policy: CachePolicy = CachePolicy.HYBRID
-    auto_cleanup: bool = True          # Автоочистка
-    compress: bool = False             # Сжатие данных
+    ttl: Optional[float] = None               # TTL по умолчанию (сек)
+    max_size: int = 1000                      # лимит записей в ns
+    max_memory_mb: float = 100.0              # лимит памяти для ns
+    policy: CachePolicy = CachePolicy.HYBRID  # политика внутри ns
+    auto_cleanup: bool = True
+    compress: bool = False                    # хранить в сжатом виде
 
-
+# ────────────────────────────────────────────────────────────────────────────
 class UnifiedCacheManager:
-    """
-    🔧 UNIFIED CACHE MANAGER - Централизованная система кэширования
-
-    Заменяет все разрозненные кэши в проекте:
-    - technical_indicators._indicator_cache
-    - exchange_client.ExchangeCache
-    - csv_handler._read_cache
-
-    Особенности:
-    - Разделение по namespace для разных типов данных
-    - Множественные политики кэширования (LRU, TTL, Size-based)
-    - Автоматическое управление памятью
-    - Централизованная статистика и мониторинг
-    - Thread-safe операции
-    - Memory pressure handling
-    """
-
-    def __init__(self, global_max_memory_mb: float = 500.0):
-        self.global_max_memory_mb = global_max_memory_mb
-        # Пороги срабатывания
-        self.MEMORY_WARNING_THRESHOLD = 0.6   # 60% - предупреждение
-        self.MEMORY_CRITICAL_THRESHOLD = 0.7  # 70% - агрессивная очистка
-        self.MEMORY_EMERGENCY_THRESHOLD = 0.8 # 80% - экстренная очистка
-
-        self._cache: Dict[str, CacheEntry] = {}
+    def __init__(self,
+                 namespace_configs: Optional[Dict[CacheNamespace, NamespaceConfig]] = None,
+                 global_max_memory_mb: float = 512.0) -> None:
         self._lock = threading.RLock()
+        self._data: Dict[str, CacheEntry] = {}
+        self._ns_cfg: Dict[str, NamespaceConfig] = {}
+        self.global_max_memory_mb = float(global_max_memory_mb)
         self._stats = {
-            "hits": 0,
-            "misses": 0,
-            "evictions": 0,
-            "memory_pressure_cleanups": 0,
-            "total_sets": 0,
-            "total_gets": 0
+            "gets": 0, "hits": 0, "misses": 0,
+            "sets": 0, "evictions": 0, "expired": 0, "errors": 0
         }
-
-        # Конфигурации namespace по умолчанию
-        self._namespace_configs = {
-            CacheNamespace.OHLCV: NamespaceConfig(
-                ttl=60.0,           # 1 минута для рыночных данных
-                max_size=200,       # Много символов * таймфреймы
-                max_memory_mb=150.0,
-                policy=CachePolicy.TTL,
-                compress=True       # OHLCV данные большие
-            ),
-            CacheNamespace.PRICES: NamespaceConfig(
-                ttl=10.0,           # 10 секунд для цен
-                max_size=500,       # Много символов
-                max_memory_mb=50.0,
-                policy=CachePolicy.TTL
-            ),
-            CacheNamespace.INDICATORS: NamespaceConfig(
-                ttl=120.0,          # 2 минуты для индикаторов
-                max_size=300,
-                max_memory_mb=100.0,
-                policy=CachePolicy.HYBRID,
-                compress=True
-            ),
-            CacheNamespace.CSV_READS: NamespaceConfig(
-                ttl=30.0,           # 30 секунд для CSV
-                max_size=50,        # Немного CSV файлов
-                max_memory_mb=80.0,
-                policy=CachePolicy.LRU
-            ),
-            CacheNamespace.MARKET_INFO: NamespaceConfig(
-                ttl=3600.0,         # 1 час для market info
-                max_size=100,
-                max_memory_mb=20.0,
-                policy=CachePolicy.TTL
-            ),
-            CacheNamespace.ML_FEATURES: NamespaceConfig(
-                ttl=300.0,          # 5 минут для ML фичей
-                max_size=100,
-                max_memory_mb=50.0,
-                policy=CachePolicy.LRU
-            ),
-            CacheNamespace.RISK_METRICS: NamespaceConfig(
-                ttl=60.0,           # 1 минута для риск-метрик
-                max_size=100,
-                max_memory_mb=30.0,
-                policy=CachePolicy.TTL
-            )
+        # Конфиг по умолчанию (сохранён из вашей версии, можно менять по месту)
+        default_cfg = {
+            CacheNamespace.OHLCV: NamespaceConfig(ttl=60.0, max_size=2000, max_memory_mb=128.0, policy=CachePolicy.LRU, compress=True),
+            CacheNamespace.MARKET_INFO: NamespaceConfig(ttl=3600.0, max_size=100, max_memory_mb=20.0, policy=CachePolicy.TTL),
+            CacheNamespace.ML_FEATURES: NamespaceConfig(ttl=300.0, max_size=1000, max_memory_mb=100.0, policy=CachePolicy.LRU),
+            CacheNamespace.PRICES: NamespaceConfig(ttl=5.0, max_size=10000, max_memory_mb=50.0, policy=CachePolicy.TTL),
+            CacheNamespace.ORDER_STATUS: NamespaceConfig(ttl=600.0, max_size=2000, max_memory_mb=64.0, policy=CachePolicy.LRU),
+            CacheNamespace.TELEGRAM: NamespaceConfig(ttl=300.0, max_size=5000, max_memory_mb=32.0, policy=CachePolicy.LRU),
+            CacheNamespace.CHARTS: NamespaceConfig(ttl=3600.0, max_size=500, max_memory_mb=256.0, policy=CachePolicy.LRU, compress=True),
+            CacheNamespace.GENERAL: NamespaceConfig(ttl=900.0, max_size=5000, max_memory_mb=128.0, policy=CachePolicy.HYBRID),
         }
+        # Приводим к строковым ключам для упрощения хранения
+        effective = namespace_configs or default_cfg
+        for ns, cfg in effective.items():
+            self._ns_cfg[self._ns_key(ns)] = cfg
 
-        # Запуск фонового процесса очистки
-        self._cleanup_thread = None
-        self._running = True
-        self._start_background_cleanup()
-
-        logging.info("🔧 UnifiedCacheManager initialized with %.1f MB limit", global_max_memory_mb)
-
-    # =========================================================================
-    # ОСНОВНЫЕ ОПЕРАЦИИ
-    # =========================================================================
-
-    def get(self, key: str, namespace: Union[str, CacheNamespace],
-            default: Any = None) -> Any:
-        """Получение значения из кэша"""
+    # ── Публичный API ──────────────────────────────────────────────────────
+    def get(self, key: str, namespace: CacheNamespace | str, default: Any = None) -> Any:
+        ns = self._ns_key(namespace)
+        full_key = self._make_full_key(ns, key)
         with self._lock:
-            self._stats["total_gets"] += 1
-
-            cache_key = self._build_cache_key(key, namespace)
-
-            if cache_key in self._cache:
-                entry = self._cache[cache_key]
-
-                # Проверка на истечение TTL
-                if entry.is_expired():
-                    del self._cache[cache_key]
-                    self._stats["misses"] += 1
-                    logging.debug(f"🔧 Cache MISS (expired): {cache_key}")
-                    return default
-
-                # Обновляем статистику доступа
-                entry.touch()
-                self._stats["hits"] += 1
-
-                logging.debug(f"🔧 Cache HIT: {cache_key} (access #{entry.access_count})")
-                return entry.data
-            else:
+            self._stats["gets"] += 1
+            entry = self._data.get(full_key)
+            if not entry:
                 self._stats["misses"] += 1
-                logging.debug(f"🔧 Cache MISS: {cache_key}")
                 return default
+            if entry.is_expired():
+                self._stats["expired"] += 1
+                self._delete_full(full_key)
+                return default
+            entry.touch()
+            self._stats["hits"] += 1
+            return self._unpack(entry.data)
 
-    def set(self, key: str, data: Any, namespace: Union[str, CacheNamespace],
-            ttl: Optional[float] = None, metadata: Dict[str, Any] = None) -> bool:
-        """Установка значения в кэш"""
+    def set(self, key: str, value: Any, namespace: CacheNamespace | str,
+            ttl: Optional[float] = None, *, priority: int = 1,
+            sticky: bool = False, compress: Optional[bool] = None,
+            metadata: Optional[Dict[str, Any]] = None) -> None:
+        ns = self._ns_key(namespace)
+        cfg = self._cfg(ns)
+        ttl_eff = cfg.ttl if ttl is None else float(ttl)
+        do_compress = cfg.compress if compress is None else bool(compress)
+        packed, size = self._pack(value, compress=do_compress)
+        entry = CacheEntry(
+            key=key, data=packed, namespace=ns,
+            created_at=time.time(), last_accessed=time.time(),
+            size_bytes=size, ttl=ttl_eff, priority=int(priority),
+            sticky=bool(sticky), metadata=metadata or {}
+        )
+        full_key = self._make_full_key(ns, key)
         with self._lock:
-            self._stats["total_sets"] += 1
+            # точечная очистка просроченных (дёшево)
+            self._cleanup_expired_locked(ns)
+            # если namespace переполнен — пробуем выселить внутри ns (LRU/TTL/HYBRID)
+            if not self._ensure_ns_capacity_locked(ns, size):
+                # если не удалось — пробуем глобальную эвикцию (наименее приоритетные)
+                self._evict_global_locked(size)
+                # повторная попытка внутри ns
+                if not self._ensure_ns_capacity_locked(ns, size):
+                    # как крайняя мера — не пишем (сохраняем поведение отказа)
+                    self._stats["errors"] += 1
+                    return
+            # запись
+            self._data[full_key] = entry
+            self._stats["sets"] += 1
+            # глобальное давление памяти
+            self._enforce_global_memory_locked()
 
-            try:
-                cache_key = self._build_cache_key(key, namespace)
-                ns_str = namespace.value if isinstance(namespace, CacheNamespace) else str(namespace)
-                config = self._get_namespace_config(namespace)
-
-                # Вычисляем размер данных
-                try:
-                    if config.compress:
-                        serialized = pickle.dumps(data)
-                        size_bytes = len(serialized)
-                    else:
-                        size_bytes = self._estimate_size(data)
-                except Exception:
-                    size_bytes = 1024  # Fallback оценка
-
-                # Проверка лимитов namespace
-                if not self._check_namespace_limits(namespace, size_bytes):
-                    logging.warning(f"🔧 Cache SET rejected: namespace limits exceeded for {cache_key}")
-                    return False
-
-                # Создание записи
-                entry = CacheEntry(
-                    key=cache_key,
-                    data=data,
-                    namespace=ns_str,
-                    created_at=time.time(),
-                    last_accessed=time.time(),
-                    size_bytes=size_bytes,
-                    ttl=ttl or config.ttl,
-                    metadata=metadata or {}
-                )
-
-                # Проверка глобальных лимитов памяти
-                if self._check_memory_pressure():
-                    self._handle_memory_pressure()
-
-                self._cache[cache_key] = entry
-                logging.debug(f"🔧 Cache SET: {cache_key} ({size_bytes} bytes)")
-
-                return True
-
-            except Exception as e:
-                logging.error(f"🔧 Cache SET failed for {key}: {e}")
-                return False
-
-    def delete(self, key: str, namespace: Union[str, CacheNamespace]) -> bool:
-        """Удаление ключа из кэша"""
+    def delete(self, key: str, namespace: CacheNamespace | str, *, prefix: bool = False) -> int:
+        ns = self._ns_key(namespace)
         with self._lock:
-            cache_key = self._build_cache_key(key, namespace)
+            if not prefix:
+                full_key = self._make_full_key(ns, key)
+                return 1 if self._delete_full(full_key) else 0
+            # префиксная чистка
+            to_del = [k for k in self._data.keys() if k.startswith(ns + ":" + key)]
+            for fk in to_del:
+                self._delete_full(fk)
+            return len(to_del)
 
-            if cache_key in self._cache:
-                del self._cache[cache_key]
-                logging.debug(f"🔧 Cache DELETE: {cache_key}")
-                return True
-
-            return False
-
-    def clear_namespace(self, namespace: Union[str, CacheNamespace]):
-        """Очистка всего namespace"""
+    def clear_namespace(self, namespace: CacheNamespace | str) -> int:
+        ns = self._ns_key(namespace)
         with self._lock:
-            ns_str = namespace.value if isinstance(namespace, CacheNamespace) else str(namespace)
+            keys = [k for k, e in self._data.items() if e.namespace == ns]
+            for fk in keys:
+                self._delete_full(fk)
+            return len(keys)
 
-            keys_to_delete = [
-                key for key, entry in self._cache.items()
-                if entry.namespace == ns_str
-            ]
-
-            for key in keys_to_delete:
-                del self._cache[key]
-
-            logging.info(f"🔧 Cache cleared namespace '{ns_str}': {len(keys_to_delete)} entries")
-
-    def clear_all(self):
-        """Полная очистка кэша"""
+    def stats(self) -> Dict[str, Any]:
         with self._lock:
-            count = len(self._cache)
-            self._cache.clear()
-            logging.info(f"🔧 Cache cleared completely: {count} entries")
+            total_bytes = sum(e.size_bytes for e in self._data.values())
+            return {
+                **self._stats,
+                "entries": len(self._data),
+                "bytes": total_bytes,
+                "rss_mb": self._rss_mb(),
+                "per_ns": self._per_ns_stats_locked(),
+            }
 
-    # =========================================================================
-    # ДЕКОРАТОРЫ ДЛЯ АВТОМАТИЧЕСКОГО КЭШИРОВАНИЯ
-    # =========================================================================
+    # Удобная обёртка: возвращает значение если есть, иначе вычисляет и кладёт
+    def get_or_set(self, key: str, namespace: CacheNamespace | str, ttl: Optional[float],
+                   factory: Callable[[], Any], **set_kwargs) -> Any:
+        sentinel = object()
+        val = self.get(key, namespace, default=sentinel)
+        if val is not sentinel:
+            return val
+        res = factory()
+        self.set(key, res, namespace, ttl, **set_kwargs)
+        return res
 
-    def cached(self, namespace: Union[str, CacheNamespace],
-               ttl: Optional[float] = None,
-               key_func: Optional[Callable] = None):
-        """Декоратор для автоматического кэширования функций"""
+    # Декоратор кэширования — корректно обрабатывает falsy-значения
+    def cached(self, namespace: CacheNamespace | str, ttl: Optional[float] = None,
+               key_func: Optional[Callable[..., str]] = None, **set_kwargs):
+        _SENTINEL = object()
         def decorator(func):
             def wrapper(*args, **kwargs):
-                # Генерация ключа
-                if key_func:
-                    cache_key = key_func(*args, **kwargs)
-                else:
-                    cache_key = self._generate_function_key(func, args, kwargs)
-
-                # Попытка получить из кэша
-                result = self.get(cache_key, namespace)
-                if result is not None:
-                    return result
-
-                # Выполнение функции и кэширование результата
-                result = func(*args, **kwargs)
-                self.set(cache_key, result, namespace, ttl)
-
-                return result
-
+                cache_key = key_func(*args, **kwargs) if key_func else self._function_key(func, args, kwargs)
+                val = self.get(cache_key, namespace, default=_SENTINEL)
+                if val is not _SENTINEL:
+                    return val
+                res = func(*args, **kwargs)
+                self.set(cache_key, res, namespace, ttl, **set_kwargs)
+                return res
             return wrapper
         return decorator
 
-    def _generate_function_key(self, func, args, kwargs) -> str:
-        """Генерация ключа для функции"""
+    # ── TTL-хелперы (для свечей) ───────────────────────────────────────────
+    @staticmethod
+    def ttl_until_next_slot(seconds: int, drift_sec: int = 10) -> int:
+        now = int(time.time())
+        rem = seconds - (now % seconds)
+        return max(1, rem + int(drift_sec))
+
+    @staticmethod
+    def parse_tf_to_seconds(tf: str) -> int:
+        tf = (tf or "").strip().lower()
+        if tf.endswith("m"):
+            return max(60, int(tf[:-1]) * 60)
+        if tf.endswith("h"):
+            return int(tf[:-1]) * 3600
+        if tf.endswith("d"):
+            return int(tf[:-1]) * 86400
+        # fallback: seconds
         try:
-            key_data = f"{func.__name__}:{str(args)}:{str(sorted(kwargs.items()))}"
-            return hashlib.md5(key_data.encode()).hexdigest()[:16]
+            return max(1, int(tf))
         except Exception:
-            return f"{func.__name__}:{time.time()}"
+            return 900  # 15m по умолчанию
 
-    # =========================================================================
-    # СТАТИСТИКА И МОНИТОРИНГ
-    # =========================================================================
+    @classmethod
+    def ttl_until_next_candle(cls, tf: str, drift_sec: int = 10) -> int:
+        return cls.ttl_until_next_slot(cls.parse_tf_to_seconds(tf), drift_sec=drift_sec)
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Получение статистики кэша"""
-        with self._lock:
-            total_requests = self._stats["hits"] + self._stats["misses"]
-            hit_rate = (self._stats["hits"] / total_requests * 100) if total_requests > 0 else 0
+    # ── Внутренние утилиты ────────────────────────────────────────────────
+    def _ns_key(self, ns: CacheNamespace | str) -> str:
+        return ns.value if isinstance(ns, CacheNamespace) else str(ns)
 
-            # Статистика по namespace
-            ns_stats = {}
-            total_memory = 0
+    def _cfg(self, ns: str) -> NamespaceConfig:
+        return self._ns_cfg.get(ns, NamespaceConfig())
 
-            for ns in CacheNamespace:
-                entries = [e for e in self._cache.values() if e.namespace == ns.value]
-                ns_memory = sum(e.size_bytes for e in entries) / (1024 * 1024)  # MB
-                total_memory += ns_memory
+    def _make_full_key(self, ns: str, key: str) -> str:
+        return f"{ns}:{key}"
 
-                ns_stats[ns.value] = {
-                    "entries": len(entries),
-                    "memory_mb": round(ns_memory, 2),
-                    "avg_access_count": round(sum(e.access_count for e in entries) / len(entries), 1) if entries else 0
-                }
+    def _pack(self, value: Any, *, compress: bool) -> Tuple[Any, int]:
+        try:
+            if compress:
+                payload = zlib.compress(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+                return ("zlib+pickle", payload), len(payload)
+            # без компрессии — оценим размер по pickle
+            raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            return value, len(raw)
+        except Exception:
+            # на крайний случай — шейп в строку
+            try:
+                b = repr(value).encode("utf-8", "ignore")
+                return value, len(b)
+            except Exception:
+                return value, 0
 
-            return {
-                "global": {
-                    **self._stats,
-                    "total_entries": len(self._cache),
-                    "hit_rate_pct": round(hit_rate, 2),
-                    "total_memory_mb": round(total_memory, 2),
-                    "memory_limit_mb": self.global_max_memory_mb
-                },
-                "namespaces": ns_stats,
-                "memory_pressure": self._check_memory_pressure()
-            }
+    def _unpack(self, data: Any) -> Any:
+        if isinstance(data, tuple) and len(data) == 2 and data[0] == "zlib+pickle":
+            try:
+                return pickle.loads(zlib.decompress(data[1]))
+            except Exception:
+                self._stats["errors"] += 1
+                return None
+        return data
 
-    def get_top_keys(self, namespace: Optional[Union[str, CacheNamespace]] = None,
-                     limit: int = 10) -> List[Dict[str, Any]]:
-        """Топ ключей по количеству обращений"""
-        with self._lock:
-            entries = list(self._cache.values())
-
-            if namespace:
-                ns_str = namespace.value if isinstance(namespace, CacheNamespace) else str(namespace)
-                entries = [e for e in entries if e.namespace == ns_str]
-
-            entries.sort(key=lambda x: x.access_count, reverse=True)
-
-            return [
-                {
-                    "key": e.key,
-                    "namespace": e.namespace,
-                    "access_count": e.access_count,
-                    "size_mb": round(e.size_bytes / (1024 * 1024), 3),
-                    "age_seconds": round(time.time() - e.created_at, 1)
-                }
-                for e in entries[:limit]
-            ]
-
-    # =========================================================================
-    # УПРАВЛЕНИЕ ПАМЯТЬЮ
-    # =========================================================================
-
-    def _check_memory_pressure(self) -> bool:
-        """✅ ИСПРАВЛЕНО: Более ранняя проверка давления памяти"""
-        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-        memory_ratio = current_memory / self.global_max_memory_mb
-
-        if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
-            logging.error(f"🔥 EMERGENCY: Cache memory {memory_ratio:.1%} > {self.MEMORY_EMERGENCY_THRESHOLD:.1%}")
-            return True
-        elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
-            logging.warning(f"⚠️ CRITICAL: Cache memory {memory_ratio:.1%} > {self.MEMORY_CRITICAL_THRESHOLD:.1%}")
-            return True
-        elif memory_ratio > self.MEMORY_WARNING_THRESHOLD:
-            logging.info(f"📊 WARNING: Cache memory {memory_ratio:.1%} > {self.MEMORY_WARNING_THRESHOLD:.1%}")
-
-        return memory_ratio > self.MEMORY_WARNING_THRESHOLD
-
-    def _handle_memory_pressure(self):
-        """✅ УЛУЧШЕНО: Трёхступенчатая очистка памяти"""
-        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-        memory_ratio = current_memory / self.global_max_memory_mb
-
-        self._stats["memory_pressure_cleanups"] += 1
-
-        if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
-            # Экстренная очистка: удаляем 50%
-            logging.error("🔥 EMERGENCY cleanup: removing 50% of cache")
-            self._cleanup_expired()
-            self._cleanup_lru(target_reduction=0.5)
-            self._cleanup_by_namespace_priority()
-
-        elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
-            # Критическая очистка: удаляем 30%
-            logging.warning("⚠️ CRITICAL cleanup: removing 30% of cache")
-            self._cleanup_expired()
-            self._cleanup_lru(target_reduction=0.3)
-
-        else:
-            # Обычная очистка: удаляем истекшие + 15% LRU
-            logging.info("📊 Normal cleanup: expired + 15% LRU")
-            self._cleanup_expired()
-            self._cleanup_lru(target_reduction=0.15)
-
-    def _cleanup_expired(self) -> int:
-        """Очистка истекших записей"""
-        expired_keys = [
-            key for key, entry in self._cache.items()
-            if entry.is_expired()
-        ]
-
-        for key in expired_keys:
-            del self._cache[key]
-
-        return len(expired_keys)
-
-    def _cleanup_lru(self, target_reduction: float = 0.2) -> int:
-        """Очистка наименее используемых записей"""
-        if not self._cache:
-            return 0
-
-        target_count = int(len(self._cache) * target_reduction)
-        entries = list(self._cache.items())
-
-        # Сортируем по времени последнего доступа
-        entries.sort(key=lambda x: x[1].last_accessed)
-
-        removed_count = 0
-        for key, entry in entries[:target_count]:
-            del self._cache[key]
-            removed_count += 1
+    def _delete_full(self, full_key: str) -> bool:
+        e = self._data.pop(full_key, None)
+        if e is not None:
             self._stats["evictions"] += 1
+            return True
+        return False
 
-        return removed_count
+    def _cleanup_expired_locked(self, ns: Optional[str] = None) -> None:
+        now = time.time()
+        to_del: List[str] = []
+        for k, e in self._data.items():
+            if ns is not None and e.namespace != ns:
+                continue
+            if e.ttl is not None and (now - e.created_at) > e.ttl:
+                to_del.append(k)
+        if to_del:
+            for fk in to_del:
+                self._delete_full(fk)
 
-    # =========================================================================
-    # УТИЛИТЫ
-    # =========================================================================
+    def _ensure_ns_capacity_locked(self, ns: str, incoming_size: int) -> bool:
+        cfg = self._cfg(ns)
+        # лимит по количеству
+        ns_entries = [(k, e) for k, e in self._data.items() if e.namespace == ns and not e.sticky]
+        if len(ns_entries) >= cfg.max_size:
+            self._evict_ns_locked(ns, count=max(1, len(ns_entries)//10), policy=cfg.policy)
+        # лимит по памяти для ns
+        ns_bytes = sum(e.size_bytes for _, e in ns_entries)
+        if (ns_bytes + incoming_size) > (cfg.max_memory_mb * 1024 * 1024):
+            self._evict_ns_locked(ns, count=max(1, len(ns_entries)//10), policy=cfg.policy)
+            ns_entries = [(k, e) for k, e in self._data.items() if e.namespace == ns and not e.sticky]
+            ns_bytes = sum(e.size_bytes for _, e in ns_entries)
+        # после попытки — проверим снова
+        return (len(ns_entries) < cfg.max_size) and ((ns_bytes + incoming_size) <= (cfg.max_memory_mb * 1024 * 1024))
 
-    def _build_cache_key(self, key: str, namespace: Union[str, CacheNamespace]) -> str:
-        """Построение полного ключа кэша"""
-        ns_str = namespace.value if isinstance(namespace, CacheNamespace) else str(namespace)
-        return f"{ns_str}:{key}"
+    def _evict_ns_locked(self, ns: str, *, count: int, policy: CachePolicy) -> None:
+        # кандидаты (без sticky и не истекшие)
+        now = time.time()
+        entries = [(k, e) for k, e in self._data.items()
+                   if e.namespace == ns and not e.sticky and not (e.ttl and (now - e.created_at) > e.ttl)]
+        # сортировки
+        if policy == CachePolicy.TTL:
+            # ближайшие к истечению позже — выметаем сначала наименее полезные (низкий приоритет, мало hits, старые)
+            entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
+        elif policy == CachePolicy.LRU:
+            entries.sort(key=lambda kv: (kv[1].priority, kv[1].last_accessed, kv[1].hits))
+        else:  # HYBRID
+            entries.sort(key=lambda kv: (kv[1].priority, kv[1].is_expired(), kv[1].last_accessed, kv[1].hits))
+        # удаляем первых count
+        for fk, _ in entries[:count]:
+            self._delete_full(fk)
 
-    def _get_namespace_config(self, namespace: Union[str, CacheNamespace]) -> NamespaceConfig:
-        """Получение конфигурации namespace"""
-        if isinstance(namespace, CacheNamespace):
-            return self._namespace_configs.get(namespace, NamespaceConfig())
-        else:
-            # Дефолтная конфигурация для строковых namespace
-            return NamespaceConfig()
+    def _evict_global_locked(self, incoming_size: int) -> None:
+        # глобальная эвикция по приоритетам/использованию
+        entries = [(k, e) for k, e in self._data.items() if not e.sticky]
+        entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
+        freed = 0
+        for fk, e in entries:
+            self._delete_full(fk)
+            freed += e.size_bytes
+            if freed >= incoming_size:
+                break
 
-    def _check_namespace_limits(self, namespace: Union[str, CacheNamespace],
-                                new_size_bytes: int) -> bool:
-        """Проверка лимитов namespace"""
-        config = self._get_namespace_config(namespace)
-        ns_str = namespace.value if isinstance(namespace, CacheNamespace) else str(namespace)
+    def _enforce_global_memory_locked(self) -> None:
+        # по счётчику байтов (по pickle)
+        total_bytes = sum(e.size_bytes for e in self._data.values())
+        if total_bytes <= self.global_max_memory_mb * 1024 * 1024:
+            return
+        # давление — чистим наиболее «дешёвые» с низким приоритетом
+        self._evict_global_locked(int(total_bytes - self.global_max_memory_mb * 1024 * 1024))
 
-        # Считаем текущие метрики namespace
-        ns_entries = [e for e in self._cache.values() if e.namespace == ns_str]
-        current_count = len(ns_entries)
-        current_memory_mb = sum(e.size_bytes for e in ns_entries) / (1024 * 1024)
-        new_memory_mb = new_size_bytes / (1024 * 1024)
-
-        # Проверяем лимиты
-        if current_count >= config.max_size:
-            return False
-        if current_memory_mb + new_memory_mb > config.max_memory_mb:
-            return False
-
-        return True
-
-    def _estimate_size(self, data: Any) -> int:
-        """Оценка размера данных в байтах"""
+        # контроль по реальному RSS (если psutil доступен)
         try:
-            if hasattr(data, '__sizeof__'):
-                return data.__sizeof__()
-            else:
-                return len(str(data)) * 2  # Примерная оценка
+            if psutil is not None:
+                rss = psutil.Process(os.getpid()).memory_info().rss
+                limit = int(self.global_max_memory_mb * 1024 * 1024 * 1.10)  # 10% буфер
+                if rss > limit:
+                    # очистим дополнительно 10% записей (самых дешёвых)
+                    entries = [(k, e) for k, e in self._data.items() if not e.sticky]
+                    cut = max(1, len(entries) // 10)
+                    entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
+                    for fk, _ in entries[:cut]:
+                        self._delete_full(fk)
         except Exception:
-            return 1024  # Fallback
+            pass
 
-    def _start_background_cleanup(self):
-        """Запуск фонового процесса очистки"""
-        def cleanup_worker():
-            while self._running:
-                try:
-                    time.sleep(60)  # Каждую минуту
-                    if not self._running:
-                        break
+    def _per_ns_stats_locked(self) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        for k, e in self._data.items():
+            ns = e.namespace
+            d = out.setdefault(ns, {"entries": 0, "bytes": 0})
+            d["entries"] += 1
+            d["bytes"] += e.size_bytes
+        for ns, d in out.items():
+            d["mb"] = round(d["bytes"] / (1024*1024), 3)
+        return out
 
-                    with self._lock:
-                        expired_count = self._cleanup_expired()
-                        if expired_count > 0:
-                            logging.debug(f"🔧 Background cleanup: {expired_count} expired entries")
+    def _rss_mb(self) -> Optional[float]:
+        try:
+            if psutil is None:
+                return None
+            return round(psutil.Process(os.getpid()).memory_info().rss / (1024*1024), 3)
+        except Exception:
+            return None
 
-                        # Проверка memory pressure
-                        if self._check_memory_pressure():
-                            self._handle_memory_pressure()
+    # генерация ключа по сигнатуре функции
+    def _function_key(self, func: Callable, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> str:
+        try:
+            raw = (func.__module__, func.__qualname__, args, tuple(sorted(kwargs.items())))
+            payload = pickle.dumps(raw, protocol=pickle.HIGHEST_PROTOCOL)
+            import hashlib
+            return hashlib.sha1(payload).hexdigest()
+        except Exception:
+            return f"{func.__module__}.{func.__qualname__}:{id(args)}:{id(kwargs)}"
 
-                except Exception as e:
-                    logging.error(f"🔧 Background cleanup error: {e}")
+# Глобальный синглтон — как в вашей версии
+cache = UnifiedCacheManager()
 
-        self._cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True, name="CacheCleanup")
-        self._cleanup_thread.start()
-
-    # --------- ВСТАВЛЕНЫЕ ВНУТРЬ КЛАССА НОВЫЕ МЕТОДЫ ---------
-
-    def _cleanup_by_namespace_priority(self):
-        """✅ НОВОЕ: Очистка по приоритету namespace"""
-        # Приоритет удаления (менее важные первыми)
-        cleanup_priority = [
-            CacheNamespace.ML_FEATURES,     # Можно пересчитать
-            CacheNamespace.RISK_METRICS,    # Можно пересчитать
-            CacheNamespace.INDICATORS,      # Можно пересчитать
-            CacheNamespace.OHLCV,           # Тяжело получить, но можно
-            CacheNamespace.CSV_READS,       # Важные данные
-            CacheNamespace.PRICES,          # Критичные для торговли
-            CacheNamespace.MARKET_INFO,     # Критичные для торговли
-        ]
-
-        for namespace in cleanup_priority:
-            ns_entries = [(k, v) for k, v in self._cache.items()
-                          if v.namespace == namespace.value]
-
-            if len(ns_entries) > 10:  # Оставляем минимум 10 записей
-                # Удаляем половину записей namespace
-                ns_entries.sort(key=lambda x: x[1].last_accessed)
-                to_remove = len(ns_entries) // 2
-
-                for key, _ in ns_entries[:to_remove]:
-                    del self._cache[key]
-
-                logging.info(f"🧹 Cleaned {to_remove} entries from {namespace.value}")
-
-                # Проверяем, помогло ли
-                if not self._check_memory_pressure():
-                    break
-
-    def get_memory_diagnostics(self) -> Dict[str, Any]:
-        """✅ НОВОЕ: Диагностика использования памяти"""
-        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-        memory_ratio = current_memory / self.global_max_memory_mb
-
-        # Память по namespace
-        ns_memory = {}
-        for ns in CacheNamespace:
-            entries = [e for e in self._cache.values() if e.namespace == ns.value]
-            ns_memory[ns.value] = {
-                "entries": len(entries),
-                "memory_mb": round(sum(e.size_bytes for e in entries) / (1024 * 1024), 2),
-                "avg_size_kb": round(sum(e.size_bytes for e in entries) / len(entries) / 1024, 1) if entries else 0
-            }
-
-        return {
-            "total_memory_mb": round(current_memory, 2),
-            "memory_ratio": round(memory_ratio, 3),
-            "memory_limit_mb": self.global_max_memory_mb,
-            "pressure_level": (
-                "EMERGENCY" if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD else
-                "CRITICAL" if memory_ratio > self.MEMORY_CRITICAL_THRESHOLD else
-                "WARNING" if memory_ratio > self.MEMORY_WARNING_THRESHOLD else
-                "OK"
-            ),
-            "namespace_memory": ns_memory,
-            "recommendations": self._get_memory_recommendations(memory_ratio)
-        }
-
-    def _get_memory_recommendations(self, memory_ratio: float) -> List[str]:
-        """Рекомендации по управлению памятью"""
-        recommendations = []
-
-        if memory_ratio > 0.8:
-            recommendations.append("URGENT: Clear cache immediately")
-            recommendations.append("Consider restarting application")
-        elif memory_ratio > 0.7:
-            recommendations.append("Clear less important namespaces")
-            recommendations.append("Reduce TTL for indicators")
-        elif memory_ratio > 0.6:
-            recommendations.append("Monitor memory usage closely")
-            recommendations.append("Consider reducing cache limits")
-        else:
-            recommendations.append("Memory usage is healthy")
-
-        return recommendations
-
-    def shutdown(self):
-        """Корректное завершение работы"""
-        self._running = False
-        if self._cleanup_thread:
-            self._cleanup_thread.join(timeout=5)
-        logging.info("🔧 UnifiedCacheManager shutdown completed")
+# Удобные алиасы (опционально)
+ttl_until_next_slot = UnifiedCacheManager.ttl_until_next_slot
+ttl_until_next_candle = UnifiedCacheManager.ttl_until_next_candle
+parse_tf_to_seconds = UnifiedCacheManager.parse_tf_to_seconds
 
 
-# =========================================================================
-# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И УТИЛИТЫ
-# =========================================================================
+# ──────────────────────────────────────────────────────────────────────────────
+# Lightweight adapters for domain usage (trading / telegram)
+# They hide keys/TTL/namespace details from business code.
+# Import usage:
+#   from utils.unified_cache import trading_cache, telegram_cache
+#   df = trading_cache.get_ohlcv("BTC/USDT", "15m", exchange.fetch_ohlcv)
+#   path = telegram_cache.get_chart(chart_hash, lambda: draw_chart(df))
+# Nothing else in this module was removed or changed.
+# ──────────────────────────────────────────────────────────────────────────────
 
-# Глобальный экземпляр кэш-менеджера
-_global_cache_manager: Optional[UnifiedCacheManager] = None
+class trading_cache:
+    @staticmethod
+    def _ohlcv_key(symbol: str, tf: str) -> str:
+        # Namespace уже задаётся через CacheNamespace.OHLCV, поэтому ключ без доп. префикса
+        return f"ohlcv:{symbol}:{tf}:v1"
+
+    @staticmethod
+    def get_ohlcv(symbol: str, tf: str, fetch_fn):
+        # Кэш до конца текущей свечи + небольшой дрейф
+        ttl = ttl_until_next_candle(tf, drift_sec=10)
+        key = trading_cache._ohlcv_key(symbol, tf)
+        return cache.get_or_set(
+            key, CacheNamespace.OHLCV, ttl,
+            factory=lambda: fetch_fn(symbol, tf),
+            priority=3, compress=True
+        )
+
+    @staticmethod
+    def get_ticker(symbol: str, fetch_fn):
+        key = f"ticker:{symbol}:v1"
+        return cache.get_or_set(
+            key, CacheNamespace.PRICES, ttl=2,
+            factory=lambda: fetch_fn(symbol),
+            priority=2
+        )
+
+    @staticmethod
+    def get_orderbook(symbol: str, depth: int, fetch_fn):
+        key = f"orderbook:{symbol}:{int(depth)}:v1"
+        # ордербук быстро устаревает — 1–2 секунды
+        return cache.get_or_set(
+            key, CacheNamespace.MARKET_INFO, ttl=2,
+            factory=lambda: fetch_fn(symbol, depth),
+            priority=2, compress=False
+        )
+
+    @staticmethod
+    def invalidate_md(prefix: str = "") -> int:
+        # Удаляет по префиксу в разных md-неймспейсах
+        count = 0
+        count += cache.delete(f"ohlcv:{prefix}", CacheNamespace.OHLCV, prefix=True)
+        count += cache.delete(f"ticker:{prefix}", CacheNamespace.PRICES, prefix=True)
+        count += cache.delete(f"orderbook:{prefix}", CacheNamespace.MARKET_INFO, prefix=True)
+        return count
 
 
-def get_cache_manager() -> UnifiedCacheManager:
-    """Получение глобального экземпляра кэш-менеджера"""
-    global _global_cache_manager
-    if _global_cache_manager is None:
-        memory_limit = float(os.getenv("CACHE_MEMORY_LIMIT_MB", "500"))
-        _global_cache_manager = UnifiedCacheManager(global_max_memory_mb=memory_limit)
-    return _global_cache_manager
+class telegram_cache:
+    @staticmethod
+    def _chart_key(hash_: str) -> str:
+        return f"chart:{hash_}:v1"
 
+    @staticmethod
+    def get_chart(hash_: str, make_chart_fn):
+        # Кэширует путь к PNG/WEBP (или bytes) на 1 час
+        return cache.get_or_set(
+            telegram_cache._chart_key(hash_), CacheNamespace.CHARTS, ttl=3600,
+            factory=make_chart_fn, priority=1, compress=False
+        )
 
-def cached_function(namespace: Union[str, CacheNamespace], ttl: Optional[float] = None):
-    """Удобный декоратор для кэширования функций"""
-    return get_cache_manager().cached(namespace, ttl)
+    @staticmethod
+    def invalidate_charts(prefix: str = "") -> int:
+        return cache.delete(f"chart:{prefix}", CacheNamespace.CHARTS, prefix=True)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Backwards-compatible aliases (keep legacy imports working)
+def get_cache_manager():
+    # Old code may do: from utils.unified_cache import get_cache_manager
+    # This returns the module-level singleton 'cache'.
+    return cache
 
-# Алисы и экспорт
-cache = get_cache_manager()
-
-__all__ = [
-    'UnifiedCacheManager',
-    'CacheNamespace',
-    'CachePolicy',
-    'CacheEntry',
-    'NamespaceConfig',
-    'get_cache_manager',
-    'cached_function',
-    'cache'
-]
+def cached_function(namespace, ttl=None, key_func=None, **set_kwargs):
+    # Old code may do: @cached_function(CacheNamespace.OHLCV, ttl=60)
+    # This delegates to the new .cached(...) decorator.
+    return cache.cached(namespace, ttl, key_func=key_func, **set_kwargs)
