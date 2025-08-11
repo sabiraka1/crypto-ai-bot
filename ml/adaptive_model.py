@@ -472,8 +472,7 @@ class AdaptiveMLModel:
 
             if ema_gap > strong_gap and rsi >= 55:
                 return MarketCondition.STRONG_BULL.value
-            if ema_gap > 0 and rsi >= 50:
-                return MarketCondition.WEAK_BULL.value
+            if ema_gap > 0 analue
             if ema_gap < -strong_gap and rsi <= 45:
                 return MarketCondition.STRONG_BEAR.value
             if ema_gap < 0 and rsi <= 50:
