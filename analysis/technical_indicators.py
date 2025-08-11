@@ -51,9 +51,9 @@ def get_unified_atr(df: pd.DataFrame, period: int = 14, method: str = 'ewm') -> 
 
     try:
         # Приведение типов с обработкой ошибок
-        high = pd.to_numeric(df["high"], errors="coerce").fillna(method='ffill')
-        low = pd.to_numeric(df["low"], errors="coerce").fillna(method='ffill')
-        close = pd.to_numeric(df["close"], errors="coerce").fillna(method='ffill')
+        high = pd.to_numeric(df["high"], errors="coerce").ffill()
+        low = pd.to_numeric(df["low"], errors="coerce").ffill()
+        close = pd.to_numeric(df["close"], errors="coerce").ffill()
         
         # Проверяем достаточность данных
         min_periods = min(5, max(1, period // 3))  # Адаптивный минимум
