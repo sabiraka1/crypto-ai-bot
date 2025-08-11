@@ -225,6 +225,20 @@ class TradingBot:
         except Exception:
             return "sideways"
 
+
+    def _calculate_price_change(self, close_series: pd.Series) -> float:
+        """ΔP/P (t vs t-1) с защитой от NaN/деления на 0"""
+        try:
+            if close_series is None or len(close_series) < 2:
+                return 0.0
+            prev = float(close_series.iloc[-2])
+            cur = float(close_series.iloc[-1])
+            if prev == 0 or not np.isfinite(prev) or not np.isfinite(cur):
+                return 0.0
+            return (cur - prev) / prev
+        except Exception:
+            return 0.0
+
     def _predict_ai_score(self, df_15m: pd.DataFrame) -> float:
         """Получение AI score с фолбэком."""
         try:
@@ -266,88 +280,31 @@ class TradingBot:
 
     # ── AI-модель (оценка) ────────────────────────────────────────────────────
     def _build_features(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """✅ ОБНОВЛЕНО: Использует качественные индикаторы из technical_indicators"""
+        """Использует готовые индикаторы (упрощённая версия)"""
         feats: Dict[str, Any] = {}
         try:
-            if df is None or df.empty or len(df) < 60:
+            if df is None or df.empty:
                 return feats
-
-            # ✅ НОВЫЙ ПОДХОД: Используем качественную систему индикаторов
-            df_with_indicators = calculate_all_indicators(df.copy())
-
-            if df_with_indicators.empty or len(df_with_indicators) < 2:
+            df_indicators = calculate_all_indicators(df.copy())
+            if df_indicators.empty or len(df_indicators) < 2:
                 return feats
-
-            # Берем предпоследнюю строку (t-1) для избежания утечек будущего
-            last_row = df_with_indicators.iloc[-2]  # t-1
-
-            # Извлекаем готовые индикаторы
+            # t-1 для избежания утечек будущего
+            last_row = df_indicators.iloc[-2]
             feats = {
-                "rsi": float(last_row.get("rsi", 50.0)) if pd.notna(last_row.get("rsi")) else 50.0,
-                "macd": float(last_row.get("macd", 0.0)) if pd.notna(last_row.get("macd")) else 0.0,
-                "macd_signal": float(last_row.get("macd_signal", 0.0)) if pd.notna(last_row.get("macd_signal")) else 0.0,
-                "macd_hist": float(last_row.get("macd_hist", 0.0)) if pd.notna(last_row.get("macd_hist")) else 0.0,
-                # ✅ ИСПРАВЛЕНО: используем ema_20/ema_50 вместо ema_fast/ema_slow
-                "ema_20": float(last_row.get("ema_20", 0.0)) if pd.notna(last_row.get("ema_20")) else 0.0,
-                "ema_50": float(last_row.get("ema_50", 0.0)) if pd.notna(last_row.get("ema_50")) else 0.0,
-                "sma_20": float(last_row.get("sma_50", 0.0)) if pd.notna(last_row.get("sma_50")) else 0.0,
-                "sma_50": float(last_row.get("sma_200", 0.0)) if pd.notna(last_row.get("sma_200")) else 0.0,
-                "atr_14": float(last_row.get("atr", 0.0)) if pd.notna(last_row.get("atr")) else 0.0,
-
-                # Дополнительные фичи (новые возможности!)
-                "stoch_k": float(last_row.get("stoch_k", 50.0)) if pd.notna(last_row.get("stoch_k")) else 50.0,
-                "stoch_d": float(last_row.get("stoch_d", 50.0)) if pd.notna(last_row.get("stoch_d")) else 50.0,
-                "adx": float(last_row.get("adx", 20.0)) if pd.notna(last_row.get("adx")) else 20.0,
-                "bb_position": float(last_row.get("bb_position", 0.5)) if pd.notna(last_row.get("bb_position")) else 0.5,
-                "volume_ratio": float(last_row.get("volume_ratio", 1.0)) if pd.notna(last_row.get("volume_ratio")) else 1.0,
+                "rsi": float(last_row.get("rsi", 50.0)),
+                "macd": float(last_row.get("macd", 0.0)),
+                "ema_20": float(last_row.get("ema_20", 0.0)),
+                "ema_50": float(last_row.get("ema_50", 0.0)),
+                "stoch_k": float(last_row.get("stoch_k", 50.0)),
+                "adx": float(last_row.get("adx", 20.0)),
+                "volume_ratio": float(last_row.get("volume_ratio", 1.0)),
+                "price_change_1": self._calculate_price_change(df["close"]) if "close" in df.columns else 0.0,
+                "market_condition": self._market_condition_guess(df["close"]) if "close" in df.columns else "sideways",
             }
-
-            # Вычисляемые фичи
-            try:
-                # Price changes (используем исходный df)
-                close = df["close"]
-                if len(close) >= 2:
-                    feats["price_change_1"] = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]) if close.iloc[-2] != 0 else 0.0
-                else:
-                    feats["price_change_1"] = 0.0
-
-                if len(close) >= 4:
-                    feats["price_change_3"] = float((close.iloc[-1] - close.iloc[-4]) / close.iloc[-4]) if close.iloc[-4] != 0 else 0.0
-                else:
-                    feats["price_change_3"] = 0.0
-
-                if len(close) >= 6:
-                    feats["price_change_5"] = float((close.iloc[-1] - close.iloc[-6]) / close.iloc[-6]) if close.iloc[-6] != 0 else 0.0
-                else:
-                    feats["price_change_5"] = 0.0
-
-                # Volume change
-                volume = df["volume"]
-                if len(volume) >= 6:
-                    feats["vol_change"] = float((volume.iloc[-1] - volume.iloc[-6]) / volume.iloc[-6]) if volume.iloc[-6] != 0 else 0.0
-                else:
-                    feats["vol_change"] = 0.0
-
-                # Market condition (упрощенный)
-                feats["market_condition"] = self._market_condition_guess(close.iloc[:-1])
-
-            except Exception as e:
-                logging.debug(f"Error calculating derived features: {e}")
-                # Заполняем дефолтами при ошибках
-                feats.update({
-                    "price_change_1": 0.0,
-                    "price_change_3": 0.0,
-                    "price_change_5": 0.0,
-                    "vol_change": 0.0,
-                    "market_condition": "sideways"
-                })
-
         except Exception as e:
             logging.exception(f"Feature build failed: {e}")
-
         return feats
 
-    # ── получение рынка ────────────────────────────────────────────────────────
     def _fetch_market(self) -> Tuple[pd.DataFrame, Optional[float], Optional[float]]:
         """Загружаем 15m OHLCV, считаем ATR."""
         try:
@@ -414,17 +371,7 @@ class TradingBot:
 
                 # ✅ ИСПРАВЛЕНИЕ 3: Унифицированный вызов scorer
                 try:
-                    if hasattr(self.scorer, 'evaluate'):
-                        result = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
-                    elif hasattr(self.scorer, 'calculate_scores'):
-                        result = self.scorer.calculate_scores(df_15m, ai_score=ai_score_raw)
-                    elif hasattr(self.scorer, 'score'):
-                        result = self.scorer.score(df_15m, ai_score=ai_score_raw)
-                    else:
-                        logging.warning("⚠️ No known scoring method found, using defaults")
-                        result = (0.5, ai_score_raw, {})
-                    
-                    # ✅ ИСПРАВЛЕНИЕ 4: Безопасная распаковка результата
+                    result = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
                     if isinstance(result, tuple) and len(result) >= 3:
                         buy_score, ai_score_eval, details = result
                     elif isinstance(result, tuple) and len(result) >= 2:
@@ -432,7 +379,6 @@ class TradingBot:
                         details = {}
                     else:
                         buy_score, ai_score_eval, details = 0.5, ai_score_raw, {}
-                        
                 except Exception as e:
                     logging.error(f"Scoring failed: {e}")
                     buy_score, ai_score_eval, details = 0.5, ai_score_raw, {}
@@ -554,23 +500,7 @@ class TradingBot:
                         
                         if result is not None:
                             logging.info(f"✅ LONG позиция открыта: {self.symbol} на ${usd_planned:.2f}")
-                            # лог входа в CSV
-                            try:
-                                CSVHandler.log_open_trade({
-                                    "timestamp": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                                    "symbol": self.symbol,
-                                    "side": "LONG",
-                                    "entry_price": float(last_price),
-                                    "qty_usd": float(usd_planned),
-                                    "reason": "strategy_enter",
-                                    "buy_score": float(buy_score),
-                                    "ai_score": float(ai_score),
-                                    "entry_ts": df_15m.index[-1].isoformat().replace("+00:00", "Z"),
-                                    "market_condition": market_condition,
-                                    "pattern": pattern,
-                                })
-                            except Exception:
-                                pass
+                            # логирование открытия сделки упрощено/отключено по новой схеме
                         else:
                             logging.warning("⚠️ Position opening returned None")
 
