@@ -450,47 +450,47 @@ class UnifiedCacheManager:
     # УПРАВЛЕНИЕ ПАМЯТЬЮ
     # =========================================================================
 
-    def _check_memory_pressure(self) -> bool:
-    """✅ ИСПРАВЛЕНО: Более ранняя проверка давления памяти"""
-    current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-    memory_ratio = current_memory / self.global_max_memory_mb
-    
-    if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
-        logging.error(f"🔥 EMERGENCY: Cache memory {memory_ratio:.1%} > {self.MEMORY_EMERGENCY_THRESHOLD:.1%}")
-        return True
-    elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
-        logging.warning(f"⚠️ CRITICAL: Cache memory {memory_ratio:.1%} > {self.MEMORY_CRITICAL_THRESHOLD:.1%}")
-        return True
-    elif memory_ratio > self.MEMORY_WARNING_THRESHOLD:
-        logging.info(f"📊 WARNING: Cache memory {memory_ratio:.1%} > {self.MEMORY_WARNING_THRESHOLD:.1%}")
+     def _check_memory_pressure(self) -> bool:
+        """✅ ИСПРАВЛЕНО: Более ранняя проверка давления памяти"""
+        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+        memory_ratio = current_memory / self.global_max_memory_mb
         
-    return memory_ratio > self.MEMORY_WARNING_THRESHOLD
+        if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
+            logging.error(f"🔥 EMERGENCY: Cache memory {memory_ratio:.1%} > {self.MEMORY_EMERGENCY_THRESHOLD:.1%}")
+            return True
+        elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
+            logging.warning(f"⚠️ CRITICAL: Cache memory {memory_ratio:.1%} > {self.MEMORY_CRITICAL_THRESHOLD:.1%}")
+            return True
+        elif memory_ratio > self.MEMORY_WARNING_THRESHOLD:
+            logging.info(f"📊 WARNING: Cache memory {memory_ratio:.1%} > {self.MEMORY_WARNING_THRESHOLD:.1%}")
+            
+        return memory_ratio > self.MEMORY_WARNING_THRESHOLD
 
-    def _handle_memory_pressure(self):
-    """✅ УЛУЧШЕНО: Трёхступенчатая очистка памяти"""
-    current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-    memory_ratio = current_memory / self.global_max_memory_mb
-    
-    self._stats["memory_pressure_cleanups"] += 1
-    
-    if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
-        # Экстренная очистка: удаляем 50%
-        logging.error("🔥 EMERGENCY cleanup: removing 50% of cache")
-        self._cleanup_expired()
-        self._cleanup_lru(target_reduction=0.5)
-        self._cleanup_by_namespace_priority()
+     def _handle_memory_pressure(self):
+        """✅ УЛУЧШЕНО: Трёхступенчатая очистка памяти"""
+        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+        memory_ratio = current_memory / self.global_max_memory_mb
         
-    elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
-        # Критическая очистка: удаляем 30%
-        logging.warning("⚠️ CRITICAL cleanup: removing 30% of cache") 
-        self._cleanup_expired()
-        self._cleanup_lru(target_reduction=0.3)
+        self._stats["memory_pressure_cleanups"] += 1
         
-    else:
-        # Обычная очистка: удаляем истекшие + 15% LRU
-        logging.info("📊 Normal cleanup: expired + 15% LRU")
-        self._cleanup_expired()
-        self._cleanup_lru(target_reduction=0.15)
+        if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
+            # Экстренная очистка: удаляем 50%
+            logging.error("🔥 EMERGENCY cleanup: removing 50% of cache")
+            self._cleanup_expired()
+            self._cleanup_lru(target_reduction=0.5)
+            self._cleanup_by_namespace_priority()
+            
+        elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
+            # Критическая очистка: удаляем 30%
+            logging.warning("⚠️ CRITICAL cleanup: removing 30% of cache") 
+            self._cleanup_expired()
+            self._cleanup_lru(target_reduction=0.3)
+            
+        else:
+            # Обычная очистка: удаляем истекшие + 15% LRU
+            logging.info("📊 Normal cleanup: expired + 15% LRU")
+            self._cleanup_expired()
+            self._cleanup_lru(target_reduction=0.15)
 
     def _cleanup_expired(self) -> int:
         """Очистка истекших записей"""
@@ -594,36 +594,7 @@ class UnifiedCacheManager:
         self._cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True, name="CacheCleanup")
         self._cleanup_thread.start()
 
-    def shutdown(self):
-        """Корректное завершение работы"""
-        self._running = False
-        if self._cleanup_thread:
-            self._cleanup_thread.join(timeout=5)
-        logging.info("🔧 UnifiedCacheManager shutdown completed")
-
-# =========================================================================
-# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И УТИЛИТЫ
-# =========================================================================
-
-# Глобальный экземпляр кэш-менеджера
-_global_cache_manager: Optional[UnifiedCacheManager] = None
-
-def get_cache_manager() -> UnifiedCacheManager:
-    """Получение глобального экземпляра кэш-менеджера"""
-    global _global_cache_manager
-    if _global_cache_manager is None:
-        memory_limit = float(os.getenv("CACHE_MEMORY_LIMIT_MB", "500"))
-        _global_cache_manager = UnifiedCacheManager(global_max_memory_mb=memory_limit)
-    return _global_cache_manager
-
-def cached_function(namespace: Union[str, CacheNamespace], ttl: Optional[float] = None):
-    """Удобный декоратор для кэширования функций"""
-    return get_cache_manager().cached(namespace, ttl)
-
-# Алиасы для удобства
-cache = get_cache_manager()
-
-def _cleanup_by_namespace_priority(self):
+    ef _cleanup_by_namespace_priority(self):
         """✅ НОВОЕ: Очистка по приоритету namespace"""
         # Приоритет удаления (менее важные первыми)
         cleanup_priority = [
@@ -701,18 +672,9 @@ def _cleanup_by_namespace_priority(self):
             
         return recommendations
 
-# =========================================================================
-# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И УТИЛИТЫ
-# =========================================================================
-
-# Экспорт
-__all__ = [
-    'UnifiedCacheManager',
-    'CacheNamespace', 
-    'CachePolicy',
-    'CacheEntry',
-    'NamespaceConfig',
-    'get_cache_manager',
-    'cached_function',
-    'cache'
-]
+    def shutdown(self):
+        """Корректное завершение работы"""
+        self._running = False
+        if self._cleanup_thread:
+            self._cleanup_thread.join(timeout=5)
+        logging.info("🔧 UnifiedCacheManager shutdown completed")
