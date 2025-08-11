@@ -86,10 +86,10 @@ class MultiTimeframeAnalyzer:
         vol = max(0.0, vol)
 
         # ATR (True Range)
-        prev_close = close.shift(1)
-        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        # ATR (True Range) - используем unified функцию
         from analysis.technical_indicators import _atr_series_for_ml
-	temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+        temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+        atr = _atr_series_for_ml(temp_df, self._atr_period)
 	atr = _atr_series_for_ml(temp_df, self._atr_period)
         atr_norm = float((atr.iloc[-1] / (abs(close.iloc[-1]) + _EPS)) if atr.notna().any() else 0.0)
 
