@@ -378,9 +378,20 @@ class UnifiedCacheManager:
     # =========================================================================
 
     def _check_memory_pressure(self) -> bool:
-        """Проверка нехватки памяти"""
-        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-        return current_memory > self.global_max_memory_mb * 0.8  # 80% порог
+    """✅ ИСПРАВЛЕНО: Более ранняя проверка давления памяти"""
+    current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+    memory_ratio = current_memory / self.global_max_memory_mb
+    
+    if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
+        logging.error(f"🔥 EMERGENCY: Cache memory {memory_ratio:.1%} > {self.MEMORY_EMERGENCY_THRESHOLD:.1%}")
+        return True
+    elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
+        logging.warning(f"⚠️ CRITICAL: Cache memory {memory_ratio:.1%} > {self.MEMORY_CRITICAL_THRESHOLD:.1%}")
+        return True
+    elif memory_ratio > self.MEMORY_WARNING_THRESHOLD:
+        logging.info(f"📊 WARNING: Cache memory {memory_ratio:.1%} > {self.MEMORY_WARNING_THRESHOLD:.1%}")
+        
+    return memory_ratio > self.MEMORY_WARNING_THRESHOLD
 
     def _handle_memory_pressure(self):
         """Обработка нехватки памяти"""
