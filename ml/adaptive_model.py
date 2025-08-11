@@ -463,7 +463,10 @@ class AdaptiveMLModel:
         try:
             close = df["close"].astype("float64")
             ema_fast = close.ewm(span=20, adjust=False, min_periods=5).mean()
-            ema_slow = close.ewmфыв
+            ema_slow = close.ewm(span=50, adjust=False, min_periods=5).mean()
+
+            ema_gap = float((ema_fast.iloc[-1] - ema_slow.iloc[-1]) / (abs(ema_slow.iloc[-1]) + _EPS))
+            rsi = self._rsi(close, 14)
 
             strong_gap = 0.004  # ~0.4%
 
