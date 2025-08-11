@@ -703,6 +703,13 @@ def _bootstrap_once():
             set_webhook()
     except Exception:
         logging.exception("set_webhook at bootstrap failed")
+    try:
+        # ✅ Запускаем фоновый CSV-флашер один раз на воркер
+        from utils.csv_handler import CSVHandler
+        CSVHandler.start()
+    except Exception:
+        logging.exception("CSVHandler.start at bootstrap failed")
+
         
     try:
         # ✅ GUNICORN: Запускаем торговый цикл только один раз
