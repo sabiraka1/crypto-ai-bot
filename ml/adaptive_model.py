@@ -432,7 +432,7 @@ class AdaptiveMLModel:
         val = float(rsi.iloc[-1])
         return float(val) if np.isfinite(val) else 50.0
 
-            def _adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
+        def _adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
         if len(close) < period + 2:
             return 20.0
         up_move = high.diff()
