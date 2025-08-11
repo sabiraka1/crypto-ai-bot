@@ -84,6 +84,7 @@ class UnifiedCacheManager:
     """
     
     def __init__(self, global_max_memory_mb: float = 500.0):
+<<<<<<< HEAD
         self.global_max_memory_mb = global_max_memory_mb
         # ✅ ИСПРАВЛЕНИЕ: Более ранние пороги срабатывания
         self.MEMORY_WARNING_THRESHOLD = 0.6   # 60% - предупреждение
@@ -154,6 +155,80 @@ class UnifiedCacheManager:
         self._start_background_cleanup()
         
         logging.info("🔧 UnifiedCacheManager initialized with %.1f MB limit", global_max_memory_mb)
+=======
+    self.global_max_memory_mb = global_max_memory_mb
+    
+    # ✅ НОВОЕ: Пороги памяти
+    self.MEMORY_WARNING_THRESHOLD = 0.6   # 60% - предупреждение
+    self.MEMORY_CRITICAL_THRESHOLD = 0.7  # 70% - агрессивная очистка  
+    self.MEMORY_EMERGENCY_THRESHOLD = 0.8 # 80% - экстренная очистка
+    
+    self._cache: Dict[str, CacheEntry] = {}
+    self._lock = threading.RLock()
+    self._stats = {
+        "hits": 0,
+        "misses": 0, 
+        "evictions": 0,
+        "memory_pressure_cleanups": 0,
+        "total_sets": 0,
+        "total_gets": 0
+    }
+    
+    # ✅ ИСПРАВЛЕНИЕ: Уменьшенные лимиты namespace
+    self._namespace_configs = {
+        CacheNamespace.OHLCV: NamespaceConfig(
+            ttl=30.0,           # Было 60, стало 30 секунд
+            max_size=100,       # Было 200, стало 100  
+            max_memory_mb=80.0, # Было 150, стало 80
+            policy=CachePolicy.TTL,
+            compress=True
+        ),
+        CacheNamespace.PRICES: NamespaceConfig(
+            ttl=10.0,           # Без изменений
+            max_size=200,       # Было 500, стало 200
+            max_memory_mb=30.0, # Было 50, стало 30
+            policy=CachePolicy.TTL
+        ),
+        CacheNamespace.INDICATORS: NamespaceConfig(
+            ttl=30.0,           # Было 120, стало 30 секунд
+            max_size=50,        # Было 300, стало 50
+            max_memory_mb=50.0, # Было 100, стало 50
+            policy=CachePolicy.HYBRID,
+            compress=True
+        ),
+        CacheNamespace.CSV_READS: NamespaceConfig(
+            ttl=30.0,           # Без изменений
+            max_size=30,        # Было 50, стало 30
+            max_memory_mb=40.0, # Было 80, стало 40
+            policy=CachePolicy.LRU
+        ),
+        CacheNamespace.MARKET_INFO: NamespaceConfig(
+            ttl=3600.0,         # Без изменений
+            max_size=50,        # Было 100, стало 50
+            max_memory_mb=15.0, # Было 20, стало 15
+            policy=CachePolicy.TTL
+        ),
+        CacheNamespace.ML_FEATURES: NamespaceConfig(
+            ttl=300.0,          # Без изменений
+            max_size=50,        # Было 100, стало 50
+            max_memory_mb=25.0, # Было 50, стало 25
+            policy=CachePolicy.LRU
+        ),
+        CacheNamespace.RISK_METRICS: NamespaceConfig(
+            ttl=60.0,           # Без изменений
+            max_size=50,        # Было 100, стало 50
+            max_memory_mb=20.0, # Было 30, стало 20
+            policy=CachePolicy.TTL
+        )
+    }
+    
+    # Запуск фонового процесса очистки
+    self._cleanup_thread = None
+    self._running = True
+    self._start_background_cleanup()
+    
+    logging.info("🔧 UnifiedCacheManager initialized with %.1f MB limit", global_max_memory_mb)
+>>>>>>> 39c34aa2e9b89b6925c13f2a424be79f5adf4432
 
     # =========================================================================
     # ОСНОВНЫЕ ОПЕРАЦИИ
@@ -376,22 +451,46 @@ class UnifiedCacheManager:
     # =========================================================================
 
     def _check_memory_pressure(self) -> bool:
-        """Проверка нехватки памяти"""
-        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
-        return current_memory > self.global_max_memory_mb * 0.8  # 80% порог
+    """✅ ИСПРАВЛЕНО: Более ранняя проверка давления памяти"""
+    current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+    memory_ratio = current_memory / self.global_max_memory_mb
+    
+    if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
+        logging.error(f"🔥 EMERGENCY: Cache memory {memory_ratio:.1%} > {self.MEMORY_EMERGENCY_THRESHOLD:.1%}")
+        return True
+    elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
+        logging.warning(f"⚠️ CRITICAL: Cache memory {memory_ratio:.1%} > {self.MEMORY_CRITICAL_THRESHOLD:.1%}")
+        return True
+    elif memory_ratio > self.MEMORY_WARNING_THRESHOLD:
+        logging.info(f"📊 WARNING: Cache memory {memory_ratio:.1%} > {self.MEMORY_WARNING_THRESHOLD:.1%}")
+        
+    return memory_ratio > self.MEMORY_WARNING_THRESHOLD
 
     def _handle_memory_pressure(self):
-        """Обработка нехватки памяти"""
-        self._stats["memory_pressure_cleanups"] += 1
-        logging.warning("🔧 Memory pressure detected, starting cleanup")
+    """✅ УЛУЧШЕНО: Трёхступенчатая очистка памяти"""
+    current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+    memory_ratio = current_memory / self.global_max_memory_mb
+    
+    self._stats["memory_pressure_cleanups"] += 1
+    
+    if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD:
+        # Экстренная очистка: удаляем 50%
+        logging.error("🔥 EMERGENCY cleanup: removing 50% of cache")
+        self._cleanup_expired()
+        self._cleanup_lru(target_reduction=0.5)
+        self._cleanup_by_namespace_priority()
         
-        # Удаляем истекшие записи
-        expired_count = self._cleanup_expired()
+    elif memory_ratio > self.MEMORY_CRITICAL_THRESHOLD:
+        # Критическая очистка: удаляем 30%
+        logging.warning("⚠️ CRITICAL cleanup: removing 30% of cache") 
+        self._cleanup_expired()
+        self._cleanup_lru(target_reduction=0.3)
         
-        # Если все еще нехватка - удаляем LRU записи
-        if self._check_memory_pressure():
-            lru_count = self._cleanup_lru(target_reduction=0.3)  # Удаляем 30%
-            logging.info(f"🔧 Memory pressure cleanup: {expired_count} expired + {lru_count} LRU")
+    else:
+        # Обычная очистка: удаляем истекшие + 15% LRU
+        logging.info("📊 Normal cleanup: expired + 15% LRU")
+        self._cleanup_expired()
+        self._cleanup_lru(target_reduction=0.15)
 
     def _cleanup_expired(self) -> int:
         """Очистка истекших записей"""
@@ -523,6 +622,88 @@ def cached_function(namespace: Union[str, CacheNamespace], ttl: Optional[float] 
 
 # Алиасы для удобства
 cache = get_cache_manager()
+
+def _cleanup_by_namespace_priority(self):
+        """✅ НОВОЕ: Очистка по приоритету namespace"""
+        # Приоритет удаления (менее важные первыми)
+        cleanup_priority = [
+            CacheNamespace.ML_FEATURES,     # Можно пересчитать
+            CacheNamespace.RISK_METRICS,    # Можно пересчитать  
+            CacheNamespace.INDICATORS,      # Можно пересчитать
+            CacheNamespace.OHLCV,          # Тяжело получить, но можно
+            CacheNamespace.CSV_READS,      # Важные данные
+            CacheNamespace.PRICES,         # Критичные для торговли
+            CacheNamespace.MARKET_INFO,    # Критичные для торговли
+        ]
+        
+        for namespace in cleanup_priority:
+            ns_entries = [(k, v) for k, v in self._cache.items() 
+                         if v.namespace == namespace.value]
+            
+            if len(ns_entries) > 10:  # Оставляем минимум 10 записей
+                # Удаляем половину записей namespace
+                ns_entries.sort(key=lambda x: x[1].last_accessed)
+                to_remove = len(ns_entries) // 2
+                
+                for key, _ in ns_entries[:to_remove]:
+                    del self._cache[key]
+                    
+                logging.info(f"🧹 Cleaned {to_remove} entries from {namespace.value}")
+                
+                # Проверяем, помогло ли
+                if not self._check_memory_pressure():
+                    break
+
+    def get_memory_diagnostics(self) -> Dict[str, Any]:
+        """✅ НОВОЕ: Диагностика использования памяти"""
+        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+        memory_ratio = current_memory / self.global_max_memory_mb
+        
+        # Память по namespace
+        ns_memory = {}
+        for ns in CacheNamespace:
+            entries = [e for e in self._cache.values() if e.namespace == ns.value]
+            ns_memory[ns.value] = {
+                "entries": len(entries),
+                "memory_mb": round(sum(e.size_bytes for e in entries) / (1024 * 1024), 2),
+                "avg_size_kb": round(sum(e.size_bytes for e in entries) / len(entries) / 1024, 1) if entries else 0
+            }
+        
+        return {
+            "total_memory_mb": round(current_memory, 2),
+            "memory_ratio": round(memory_ratio, 3),
+            "memory_limit_mb": self.global_max_memory_mb,
+            "pressure_level": (
+                "EMERGENCY" if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD else
+                "CRITICAL" if memory_ratio > self.MEMORY_CRITICAL_THRESHOLD else  
+                "WARNING" if memory_ratio > self.MEMORY_WARNING_THRESHOLD else
+                "OK"
+            ),
+            "namespace_memory": ns_memory,
+            "recommendations": self._get_memory_recommendations(memory_ratio)
+        }
+
+    def _get_memory_recommendations(self, memory_ratio: float) -> List[str]:
+        """Рекомендации по управлению памятью"""
+        recommendations = []
+        
+        if memory_ratio > 0.8:
+            recommendations.append("URGENT: Clear cache immediately")
+            recommendations.append("Consider restarting application")
+        elif memory_ratio > 0.7:
+            recommendations.append("Clear less important namespaces")
+            recommendations.append("Reduce TTL for indicators")
+        elif memory_ratio > 0.6:
+            recommendations.append("Monitor memory usage closely") 
+            recommendations.append("Consider reducing cache limits")
+        else:
+            recommendations.append("Memory usage is healthy")
+            
+        return recommendations
+
+# =========================================================================
+# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И УТИЛИТЫ
+# =========================================================================
 
 # Экспорт
 __all__ = [
