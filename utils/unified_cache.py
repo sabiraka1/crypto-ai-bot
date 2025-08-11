@@ -550,6 +550,88 @@ def cached_function(namespace: Union[str, CacheNamespace], ttl: Optional[float] 
 # Алиасы для удобства
 cache = get_cache_manager()
 
+def _cleanup_by_namespace_priority(self):
+        """✅ НОВОЕ: Очистка по приоритету namespace"""
+        # Приоритет удаления (менее важные первыми)
+        cleanup_priority = [
+            CacheNamespace.ML_FEATURES,     # Можно пересчитать
+            CacheNamespace.RISK_METRICS,    # Можно пересчитать  
+            CacheNamespace.INDICATORS,      # Можно пересчитать
+            CacheNamespace.OHLCV,          # Тяжело получить, но можно
+            CacheNamespace.CSV_READS,      # Важные данные
+            CacheNamespace.PRICES,         # Критичные для торговли
+            CacheNamespace.MARKET_INFO,    # Критичные для торговли
+        ]
+        
+        for namespace in cleanup_priority:
+            ns_entries = [(k, v) for k, v in self._cache.items() 
+                         if v.namespace == namespace.value]
+            
+            if len(ns_entries) > 10:  # Оставляем минимум 10 записей
+                # Удаляем половину записей namespace
+                ns_entries.sort(key=lambda x: x[1].last_accessed)
+                to_remove = len(ns_entries) // 2
+                
+                for key, _ in ns_entries[:to_remove]:
+                    del self._cache[key]
+                    
+                logging.info(f"🧹 Cleaned {to_remove} entries from {namespace.value}")
+                
+                # Проверяем, помогло ли
+                if not self._check_memory_pressure():
+                    break
+
+    def get_memory_diagnostics(self) -> Dict[str, Any]:
+        """✅ НОВОЕ: Диагностика использования памяти"""
+        current_memory = sum(e.size_bytes for e in self._cache.values()) / (1024 * 1024)
+        memory_ratio = current_memory / self.global_max_memory_mb
+        
+        # Память по namespace
+        ns_memory = {}
+        for ns in CacheNamespace:
+            entries = [e for e in self._cache.values() if e.namespace == ns.value]
+            ns_memory[ns.value] = {
+                "entries": len(entries),
+                "memory_mb": round(sum(e.size_bytes for e in entries) / (1024 * 1024), 2),
+                "avg_size_kb": round(sum(e.size_bytes for e in entries) / len(entries) / 1024, 1) if entries else 0
+            }
+        
+        return {
+            "total_memory_mb": round(current_memory, 2),
+            "memory_ratio": round(memory_ratio, 3),
+            "memory_limit_mb": self.global_max_memory_mb,
+            "pressure_level": (
+                "EMERGENCY" if memory_ratio > self.MEMORY_EMERGENCY_THRESHOLD else
+                "CRITICAL" if memory_ratio > self.MEMORY_CRITICAL_THRESHOLD else  
+                "WARNING" if memory_ratio > self.MEMORY_WARNING_THRESHOLD else
+                "OK"
+            ),
+            "namespace_memory": ns_memory,
+            "recommendations": self._get_memory_recommendations(memory_ratio)
+        }
+
+    def _get_memory_recommendations(self, memory_ratio: float) -> List[str]:
+        """Рекомендации по управлению памятью"""
+        recommendations = []
+        
+        if memory_ratio > 0.8:
+            recommendations.append("URGENT: Clear cache immediately")
+            recommendations.append("Consider restarting application")
+        elif memory_ratio > 0.7:
+            recommendations.append("Clear less important namespaces")
+            recommendations.append("Reduce TTL for indicators")
+        elif memory_ratio > 0.6:
+            recommendations.append("Monitor memory usage closely") 
+            recommendations.append("Consider reducing cache limits")
+        else:
+            recommendations.append("Memory usage is healthy")
+            
+        return recommendations
+
+# =========================================================================
+# ГЛОБАЛЬНЫЙ ЭКЗЕМПЛЯР И УТИЛИТЫ
+# =========================================================================
+
 # Экспорт
 __all__ = [
     'UnifiedCacheManager',
