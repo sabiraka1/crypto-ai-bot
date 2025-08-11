@@ -14,7 +14,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 
 from config.settings import MarketCondition
-from core.exceptions import MLModelException
+class MLModelException(Exception):
+    """Ошибки ML модели"""
+    pass
 
 
 _EPS = 1e-12
@@ -212,36 +214,45 @@ class AdaptiveMLModel:
         market_condition: Optional[str] = None
     ) -> Tuple[float, float]:
         """
-        Принимает либо ndarray, либо dict фич (совместимо с main.py).
+        ✅ ИСПРАВЛЕНО: Принимает либо ndarray, либо dict фич (совместимо с main.py).
         Возвращает (pred, confidence) где confidence ∈ [0..1].
         """
         try:
             if isinstance(x_vec, dict):
                 x = self._vec_from_features_dict(x_vec).reshape(1, -1)
+                logging.debug(f"🤖 Converted dict features to vector: shape={x.shape}")
             else:
                 x = np.asarray(x_vec, dtype=np.float64).reshape(1, -1)
+                logging.debug(f"🤖 Using provided vector: shape={x.shape}")
 
             # сначала условная модель, если есть
             if market_condition and market_condition in self.models:
                 prob = self._predict_proba_with("cond", market_condition, x)
                 if prob is not None:
-                    return (1.0 if prob >= 0.5 else 0.0), float(prob)
+                    result = (1.0 if prob >= 0.5 else 0.0), float(prob)
+                    logging.debug(f"🤖 AI predict [cond:{market_condition}]: {result}")  # ✅ ДОБАВЛЕНО
+                    return result
 
             # затем GLOBAL
             if "GLOBAL" in self.models:
                 prob = self._predict_proba_with("global", "GLOBAL", x)
                 if prob is not None:
-                    return (1.0 if prob >= 0.5 else 0.0), float(prob)
+                    result = (1.0 if prob >= 0.5 else 0.0), float(prob)
+                    logging.debug(f"🤖 AI predict [GLOBAL]: {result}")  # ✅ ДОБАВЛЕНО
+                    return result
 
             # фолбэк
             pred, conf = self._fallback_prediction(x.reshape(-1))
+            logging.debug(f"🤖 AI predict [fallback]: ({pred}, {conf})")  # ✅ ДОБАВЛЕНО
             return pred, conf
 
         except Exception as e:
             logging.error(f"Prediction failed: {e}")
-            return self._fallback_prediction(
+            fallback_result = self._fallback_prediction(
                 self._vec_from_features_dict(x_vec) if isinstance(x_vec, dict) else np.asarray(x_vec, dtype=np.float64)
             )
+            logging.debug(f"🤖 AI predict [error_fallback]: {fallback_result}")  # ✅ ДОБАВЛЕНО
+            return fallback_result
 
     def _predict_proba_with(self, tag: str, key: str, x: np.ndarray) -> Optional[float]:
         try:
@@ -250,7 +261,7 @@ class AdaptiveMLModel:
             xs = scaler.transform(x)
             proba = model.predict_proba(xs)[0, 1]
             proba = float(np.clip(proba, 0.0, 1.0))
-            logging.debug(f"predict_proba[{tag}:{key}] → {proba:.3f}")
+            logging.debug(f"🤖 predict_proba[{tag}:{key}] → {proba:.3f}")
             return proba
         except Exception as e:
             logging.error(f"predict_proba[{tag}:{key}] failed: {e}")
@@ -258,14 +269,21 @@ class AdaptiveMLModel:
 
     # High-level API (поддержка df)
     def predict_proba(self, df_tail_15m: pd.DataFrame, fallback_when_short=True) -> float:
+        """✅ ИСПРАВЛЕНО: Добавлено логирование для отладки"""
         try:
+            logging.debug(f"🤖 predict_proba called with df shape: {df_tail_15m.shape}")
             x = self._features_from_df(df_tail_15m)
             if x is None:
+                logging.debug("🤖 Features extraction failed, returning fallback")
                 return 0.55 if fallback_when_short else 0.50
 
             cond = self._infer_condition_from_df(df_tail_15m)
+            logging.debug(f"🤖 Inferred market condition: {cond}")
+            
             _pred, prob = self.predict(x, cond)
-            return _clip01(prob)
+            result = _clip01(prob)
+            logging.debug(f"🤖 predict_proba result: {result}")
+            return result
         except Exception:
             logging.exception("predict_proba failed")
             return 0.55 if fallback_when_short else 0.50

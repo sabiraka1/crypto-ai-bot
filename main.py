@@ -287,42 +287,79 @@ class TradingBot:
 
     # ── AI-модель (оценка) ────────────────────────────────────────────────────
     def _predict_ai_score(self, df_15m: pd.DataFrame) -> float:
-        """Получение AI score с фолбэком."""
+        """✅ ИСПРАВЛЕНО: Получение AI score с правильной обработкой интерфейсов."""
         try:
             if not self.ai_enabled or not self.ml_ready or self.ml_model is None:
+                logging.debug("🤖 AI disabled or not ready, returning failover")
                 return self.ai_failover
 
             feats = self._build_features(df_15m)
             if not feats:
+                logging.debug("🤖 No features built, returning failover")
                 return self.ai_failover
 
-            # современный predict(features, market_condition)
+            logging.debug(f"🔍 AI Features built: {len(feats)} features")
+
+            # ✅ ИСПРАВЛЕНИЕ 1: Правильная работа с predict() method
             if hasattr(self.ml_model, "predict"):
                 try:
                     res = self.ml_model.predict(feats, feats.get("market_condition"))
+                    logging.debug(f"🔍 AI predict() returned: {res}, type: {type(res)}")
+                    
                     if isinstance(res, tuple) and len(res) >= 2:
-                        _, conf = res[0], res[1]
+                        pred, conf = res  # ✅ ИСПРАВЛЕНО: правильная распаковка
                         ai = float(conf)
+                        logging.debug(f"🤖 AI predict [tuple]: pred={pred}, conf={conf}")
                     elif isinstance(res, dict):
                         ai = float(res.get("confidence", self.ai_failover))
+                        logging.debug(f"🤖 AI predict [dict]: confidence={ai}")
                     else:
                         ai = float(res)
-                    return max(0.0, min(1.0, ai))
-                except Exception:
-                    logging.debug("predict(...) failed, trying predict_proba(...)")
+                        logging.debug(f"🤖 AI predict [scalar]: {ai}")
+                    
+                    result = max(0.0, min(1.0, ai))
+                    logging.debug(f"🤖 AI predict result: {result}")
+                    return result
+                    
+                except Exception as e:
+                    logging.debug(f"predict(...) failed: {e}, trying predict_proba(...)")
 
-            # старый интерфейс: predict_proba(df | features)
+            # ✅ ИСПРАВЛЕНИЕ 2: Fallback к predict_proba с правильными параметрами
             if hasattr(self.ml_model, "predict_proba"):
                 try:
+                    # Пробуем с DataFrame
                     ai = self.ml_model.predict_proba(df_15m.tail(100))
                     ai = float(ai or self.ai_failover)
-                    return max(0.0, min(1.0, ai))
-                except Exception:
-                    pass
+                    result = max(0.0, min(1.0, ai))
+                    logging.debug(f"🤖 AI predict_proba result: {result}")
+                    return result
+                except Exception as e:
+                    logging.debug(f"predict_proba(...) failed: {e}")
+
+            # ✅ ИСПРАВЛЕНИЕ 3: Дополнительный fallback для совместимости
+            if hasattr(self.ml_model, "_vec_from_features_dict"):
+                try:
+                    # Конвертируем dict в вектор
+                    feats_vec = self.ml_model._vec_from_features_dict(feats)
+                    res = self.ml_model.predict(feats_vec, feats.get("market_condition"))
+                    
+                    if isinstance(res, tuple) and len(res) >= 2:
+                        pred, conf = res
+                        ai = float(conf)
+                    else:
+                        ai = float(res)
+                    
+                    result = max(0.0, min(1.0, ai))
+                    logging.debug(f"🤖 AI vector predict result: {result}")
+                    return result
+                    
+                except Exception as e:
+                    logging.debug(f"Vector prediction failed: {e}")
 
         except Exception as e:
             logging.exception(f"AI predict failed: {e}")
 
+        logging.debug(f"🤖 AI returning failover: {self.ai_failover}")
         return self.ai_failover
 
     # ── получение рынка ────────────────────────────────────────────────────────
@@ -386,10 +423,38 @@ class TradingBot:
                     logging.debug(f"⏩ Same candle {current_candle_id}, skipping decision logic")
                     return
 
-                # Считаем все метрики (для логов и для решений)
+                # ✅ ИСПРАВЛЕНИЕ 2: Улучшенная обработка AI-скоринга
                 ai_score_raw = self._predict_ai_score(df_15m)
-                buy_score, ai_score_eval, details = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
+                logging.debug(f"🔍 AI Debug: raw_score={ai_score_raw}, type={type(ai_score_raw)}")
+
+                # ✅ ИСПРАВЛЕНИЕ 3: Унифицированный вызов scorer
+                try:
+                    if hasattr(self.scorer, 'evaluate'):
+                        result = self.scorer.evaluate(df_15m, ai_score=ai_score_raw)
+                    elif hasattr(self.scorer, 'calculate_scores'):
+                        result = self.scorer.calculate_scores(df_15m, ai_score=ai_score_raw)
+                    elif hasattr(self.scorer, 'score'):
+                        result = self.scorer.score(df_15m, ai_score=ai_score_raw)
+                    else:
+                        logging.warning("⚠️ No known scoring method found, using defaults")
+                        result = (0.5, ai_score_raw, {})
+                    
+                    # ✅ ИСПРАВЛЕНИЕ 4: Безопасная распаковка результата
+                    if isinstance(result, tuple) and len(result) >= 3:
+                        buy_score, ai_score_eval, details = result
+                    elif isinstance(result, tuple) and len(result) >= 2:
+                        buy_score, ai_score_eval = result
+                        details = {}
+                    else:
+                        buy_score, ai_score_eval, details = 0.5, ai_score_raw, {}
+                        
+                except Exception as e:
+                    logging.error(f"Scoring failed: {e}")
+                    buy_score, ai_score_eval, details = 0.5, ai_score_raw, {}
+
                 ai_score = max(0.0, min(1.0, float(ai_score_eval if ai_score_eval is not None else ai_score_raw)))
+                
+                logging.debug(f"🔍 Scoring Debug: buy={buy_score}, ai_eval={ai_score_eval}, final_ai={ai_score}")
 
                 # ── Информационный лог каждые INFO_LOG_INTERVAL_SEC ──
                 now = time.time()

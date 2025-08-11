@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any, Optional
 
 class ScoringEngine:
     """
-    Единый движок скоринга:
+    ✅ ИСПРАВЛЕНО: Единый движок скоринга с унифицированным API:
     - Buy Score (нормирован в [0..1]): MACD (до 2 баллов) + RSI (1 балл) → raw 0..3 → /3
     - AI Score: подаётся извне (0..1), если нет — дефолт 0.50
     - Порог входа задаётся через .env MIN_SCORE_TO_BUY (по умолчанию 0.65, так как now [0..1])
@@ -26,7 +26,7 @@ class ScoringEngine:
         self.pos_min = float(os.getenv("POSITION_MIN_FRACTION", "0.30"))  # для linear
         self.pos_max = float(os.getenv("POSITION_MAX_FRACTION", "1.00"))  # для linear
 
-    # ---------- публичный API ----------
+    # ---------- публичный API (унифицированный) ----------
 
     def evaluate(
         self,
@@ -34,7 +34,7 @@ class ScoringEngine:
         ai_score: Optional[float] = None
     ) -> Tuple[float, float, Dict[str, Any]]:
         """
-        Возвращает:
+        ✅ ОСНОВНОЙ МЕТОД: Возвращает:
         - buy_score_norm (float в [0..1])
         - ai_score (float 0..1)
         - details (dict)  -> пригодно для телеграм-уведомлений и логов
@@ -82,6 +82,8 @@ class ScoringEngine:
             "buy_score_raw": buy_raw,
             "buy_score_norm": buy_norm,
             "min_score_to_buy": self.min_score_to_buy,
+            "market_condition": self._guess_market_condition(df),
+            "pattern": ""  # Заглушка для совместимости
         }
 
         return buy_norm, ai, details
@@ -166,7 +168,30 @@ class ScoringEngine:
         is_growing = last > prev
         return last, is_growing
 
-    # ---- Backwards compatibility shims ----
+    def _guess_market_condition(self, df: pd.DataFrame) -> str:
+        """Простая оценка рыночных условий для совместимости"""
+        try:
+            if df.empty or len(df) < 50:
+                return "sideways"
+            
+            close = df["close"]
+            ema_20 = close.ewm(span=20).mean().iloc[-1]
+            ema_50 = close.ewm(span=50).mean().iloc[-1]
+            
+            if np.isnan(ema_20) or np.isnan(ema_50):
+                return "sideways"
+                
+            if ema_20 > ema_50 * 1.005:  # 0.5% выше
+                return "bull"
+            elif ema_20 < ema_50 * 0.995:  # 0.5% ниже
+                return "bear"
+            else:
+                return "sideways"
+        except Exception:
+            return "sideways"
+
+    # ---- ✅ ИСПРАВЛЕНО: Обратная совместимость с унифицированными методами ----
+    
     def score(self, df, ai_score=None):
         """Совместимость: возвращает (buy_score_norm, ai_score, details)."""
         return self.evaluate(df, ai_score=ai_score)
