@@ -86,21 +86,31 @@ def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
 def _notify_entry_tg(symbol: str, entry_price: float, amount_usd: float,
                      tp_pct: float, sl_pct: float, tp1_atr: float, tp2_atr: float,
                      buy_score: float = None, ai_score: float = None, amount_frac: float = None):
-    """Адаптер под сигнатуру notify_entry(...) из PositionManager."""
-    parts = [f"📥 Вход LONG {symbol} @ {entry_price:.6f}"]
-    parts.append(f"Сумма: ${amount_usd:.2f}")
-    parts.append(f"TP%≈{tp_pct:.6f} | SL%≈{sl_pct:.6f}")
+    """Адаптер под сигнатуру notify_entry(.) из PositionManager."""
+    # восстановим фактический SL по проценту
+    sl_price = entry_price * (1 - float(sl_pct or 0) / 100.0)
+
+    lines = [
+        f"📥 Вход LONG {symbol} @ {entry_price:.6f}",
+        f"Сумма: ${amount_usd:.2f}",
+        f"SL: {sl_price:.6f} (−{abs(sl_pct):.2f}%) | "
+        f"TP1: {tp1_atr:.6f} (+{tp_pct:.2f}%)" + (f" | TP2: {tp2_atr:.6f}" if tp2_atr else "")
+    ]
+
     extra = []
     if buy_score is not None and ai_score is not None:
-        extra.append(f"Score {buy_score:.2f} / AI {ai_score:.2f}")
+        extra.append(f"Score {buy_score:.2f} ≥ {ENV_MIN_SCORE:.2f}")
+        extra.append(f"AI {ai_score:.2f} ≥ {ENV_AI_MIN_TO_TRADE:.2f}")
     if amount_frac is not None:
         extra.append(f"Size {int(amount_frac * 100)}%")
     if extra:
-        parts.append(" | ".join(extra))
+        lines.append(" | ".join(extra))
+
     try:
-        tgbot.send_message("\n".join(parts))
+        tgbot.send_message("\n".join(lines))
     except Exception:
         logging.exception("notify_entry send failed")
+
 
 
 def _notify_close_tg(symbol: str, price: float, reason: str,
