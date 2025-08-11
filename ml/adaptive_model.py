@@ -433,26 +433,31 @@ class AdaptiveMLModel:
         return float(val) if np.isfinite(val) else 50.0
 
     def _adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
-        if len(close) < period + 2:
-            return 20.0
-        up_move = high.diff()
-        down_move = -low.diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
+    if len(close) < period + 2:
+        return 20.0
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
 
-        prev_close = close.shift(1)
-        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        # В методе _adx()
-            from analysis.technical_indicators import _atr_series_for_ml
-            temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})  
-            atr = _atr_series_for_ml(temp_df, period)
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    
+    # ✅ ИСПРАВЛЕННЫЙ ATR БЛОК
+    try:
+        from analysis.technical_indicators import _atr_series_for_ml
+        temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+        atr = _atr_series_for_ml(temp_df, period)
+    except Exception:
+        # Fallback к старому методу
+        atr = tr.ewm(alpha=1 / period, adjust=False).mean()
 
-        plus_di = 100.0 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
-        minus_di = 100.0 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
-        dx = (100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + _EPS))
-        adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-        val = float(adx.iloc[-1])
-        return float(val) if np.isfinite(val) else 20.0
+    plus_di = 100.0 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
+    minus_di = 100.0 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
+    dx = (100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + _EPS))
+    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+    val = float(adx.iloc[-1])
+    return float(val) if np.isfinite(val) else 20.0
 
     def _infer_condition_from_df(self, df: pd.DataFrame) -> str:
         try:
