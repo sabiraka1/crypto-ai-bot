@@ -112,7 +112,6 @@ def _notify_entry_tg(symbol: str, entry_price: float, amount_usd: float,
         logging.exception("notify_entry send failed")
 
 
-
 def _notify_close_tg(symbol: str, price: float, reason: str,
                      pnl_pct: float, pnl_abs: float = None,
                      buy_score: float = None, ai_score: float = None, amount_usd: float = None):
@@ -449,7 +448,7 @@ class TradingBot:
                 except Exception:
                     pass
 
-                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Принятие решения только по новой свече
+                # ✅ КРИТИЧЕСКИ ВАЖНО: Принятие решения только по новой свече
                 try:
                     # ✅ ПЕРЕД КАЖДОЙ ПРОВЕРКОЙ: Убеждаемся что позиция НЕ активна
                     if self._is_position_active():
@@ -461,6 +460,17 @@ class TradingBot:
                     min_thr = getattr(self.scorer, "min_score_to_buy", ENV_MIN_SCORE)
                     if buy_score < float(min_thr):
                         logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
+                        # ── информативное уведомление об отказе по порогу
+                        try:
+                            tgbot.send_message(
+                                "❎ Сигнал ниже порога\n"
+                                f"Score: {buy_score:.2f} (мин {float(min_thr):.2f})\n"
+                                f"AI: {ai_score:.2f}\n"
+                                f"ATR(15m): {atr_val:.4f} | Price: {last_price:.2f} | "
+                                f"Market: {details.get('market_condition','sideways')}"
+                            )
+                        except Exception:
+                            pass
                         self._last_decision_candle = current_candle_id
                         return
 
@@ -470,15 +480,29 @@ class TradingBot:
                         self._last_decision_candle = current_candle_id
                         return
 
-                    # 2) AI gate
+                    # 2) AI gate — информативная карточка
                     if ENV_ENFORCE_AI_GATE and (ai_score < ENV_AI_MIN_TO_TRADE):
                         logging.info(f"⛔ AI gate: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f} → вход запрещён")
                         try:
-                            tgbot.send_message(
-                                f"⛔ Вход отклонён AI-гейтом: ai={ai_score:.2f} < {ENV_AI_MIN_TO_TRADE:.2f}"
-                            )
+                            market = details.get("market_condition", "sideways")
+                            rsi    = details.get("rsi")
+                            macd   = details.get("macd_hist") or details.get("macd")
+
+                            msg = [
+                                "⛔ Вход отклонён AI-гейтом",
+                                f"Score: {buy_score:.2f} (мин {float(min_thr):.2f})",
+                                f"AI: {ai_score:.2f} (порог {ENV_AI_MIN_TO_TRADE:.2f})",
+                                f"ATR(15m): {atr_val:.4f} | Price: {last_price:.2f} | Market: {market}",
+                            ]
+                            if rsi is not None:
+                                msg.append(f"RSI: {float(rsi):.1f}")
+                            if macd is not None:
+                                msg.append(f"MACD: {float(macd):.4f}")
+
+                            tgbot.send_message("\n".join(msg))
                         except Exception:
-                            pass
+                            logging.exception("ai_gate notify failed")
+
                         self._last_decision_candle = current_candle_id
                         return
 
