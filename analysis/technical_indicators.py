@@ -1,12 +1,15 @@
 # analysis/technical_indicators.py - UNIFIED ATR + UNIFIED CACHE VERSION
 
+from __future__ import annotations
+
 import time
 import logging
 import hashlib
 import numpy as np
 import pandas as pd
-from typing import Optional, Tuple, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 from functools import lru_cache
+
 
 _EPS = 1e-12
 
