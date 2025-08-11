@@ -84,72 +84,78 @@ class UnifiedCacheManager:
     """
     
     def __init__(self, global_max_memory_mb: float = 500.0):
-        self.global_max_memory_mb = global_max_memory_mb
-        self._cache: Dict[str, CacheEntry] = {}
-        self._lock = threading.RLock()
-        self._stats = {
-            "hits": 0,
-            "misses": 0, 
-            "evictions": 0,
-            "memory_pressure_cleanups": 0,
-            "total_sets": 0,
-            "total_gets": 0
-        }
-        
-        # Конфигурации namespace по умолчанию
-        self._namespace_configs = {
-            CacheNamespace.OHLCV: NamespaceConfig(
-                ttl=60.0,           # 1 минута для рыночных данных
-                max_size=200,       # Много символов * таймфреймы
-                max_memory_mb=150.0,
-                policy=CachePolicy.TTL,
-                compress=True       # OHLCV данные большие
-            ),
-            CacheNamespace.PRICES: NamespaceConfig(
-                ttl=10.0,           # 10 секунд для цен
-                max_size=500,       # Много символов
-                max_memory_mb=50.0,
-                policy=CachePolicy.TTL
-            ),
-            CacheNamespace.INDICATORS: NamespaceConfig(
-                ttl=120.0,          # 2 минуты для индикаторов
-                max_size=300,
-                max_memory_mb=100.0,
-                policy=CachePolicy.HYBRID,
-                compress=True
-            ),
-            CacheNamespace.CSV_READS: NamespaceConfig(
-                ttl=30.0,           # 30 секунд для CSV
-                max_size=50,        # Немного CSV файлов
-                max_memory_mb=80.0,
-                policy=CachePolicy.LRU
-            ),
-            CacheNamespace.MARKET_INFO: NamespaceConfig(
-                ttl=3600.0,         # 1 час для market info
-                max_size=100,
-                max_memory_mb=20.0,
-                policy=CachePolicy.TTL
-            ),
-            CacheNamespace.ML_FEATURES: NamespaceConfig(
-                ttl=300.0,          # 5 минут для ML фичей
-                max_size=100,
-                max_memory_mb=50.0,
-                policy=CachePolicy.LRU
-            ),
-            CacheNamespace.RISK_METRICS: NamespaceConfig(
-                ttl=60.0,           # 1 минута для риск-метрик  
-                max_size=100,
-                max_memory_mb=30.0,
-                policy=CachePolicy.TTL
-            )
-        }
-        
-        # Запуск фонового процесса очистки
-        self._cleanup_thread = None
-        self._running = True
-        self._start_background_cleanup()
-        
-        logging.info("🔧 UnifiedCacheManager initialized with %.1f MB limit", global_max_memory_mb)
+    self.global_max_memory_mb = global_max_memory_mb
+    
+    # ✅ НОВОЕ: Пороги памяти
+    self.MEMORY_WARNING_THRESHOLD = 0.6   # 60% - предупреждение
+    self.MEMORY_CRITICAL_THRESHOLD = 0.7  # 70% - агрессивная очистка  
+    self.MEMORY_EMERGENCY_THRESHOLD = 0.8 # 80% - экстренная очистка
+    
+    self._cache: Dict[str, CacheEntry] = {}
+    self._lock = threading.RLock()
+    self._stats = {
+        "hits": 0,
+        "misses": 0, 
+        "evictions": 0,
+        "memory_pressure_cleanups": 0,
+        "total_sets": 0,
+        "total_gets": 0
+    }
+    
+    # ✅ ИСПРАВЛЕНИЕ: Уменьшенные лимиты namespace
+    self._namespace_configs = {
+        CacheNamespace.OHLCV: NamespaceConfig(
+            ttl=30.0,           # Было 60, стало 30 секунд
+            max_size=100,       # Было 200, стало 100  
+            max_memory_mb=80.0, # Было 150, стало 80
+            policy=CachePolicy.TTL,
+            compress=True
+        ),
+        CacheNamespace.PRICES: NamespaceConfig(
+            ttl=10.0,           # Без изменений
+            max_size=200,       # Было 500, стало 200
+            max_memory_mb=30.0, # Было 50, стало 30
+            policy=CachePolicy.TTL
+        ),
+        CacheNamespace.INDICATORS: NamespaceConfig(
+            ttl=30.0,           # Было 120, стало 30 секунд
+            max_size=50,        # Было 300, стало 50
+            max_memory_mb=50.0, # Было 100, стало 50
+            policy=CachePolicy.HYBRID,
+            compress=True
+        ),
+        CacheNamespace.CSV_READS: NamespaceConfig(
+            ttl=30.0,           # Без изменений
+            max_size=30,        # Было 50, стало 30
+            max_memory_mb=40.0, # Было 80, стало 40
+            policy=CachePolicy.LRU
+        ),
+        CacheNamespace.MARKET_INFO: NamespaceConfig(
+            ttl=3600.0,         # Без изменений
+            max_size=50,        # Было 100, стало 50
+            max_memory_mb=15.0, # Было 20, стало 15
+            policy=CachePolicy.TTL
+        ),
+        CacheNamespace.ML_FEATURES: NamespaceConfig(
+            ttl=300.0,          # Без изменений
+            max_size=50,        # Было 100, стало 50
+            max_memory_mb=25.0, # Было 50, стало 25
+            policy=CachePolicy.LRU
+        ),
+        CacheNamespace.RISK_METRICS: NamespaceConfig(
+            ttl=60.0,           # Без изменений
+            max_size=50,        # Было 100, стало 50
+            max_memory_mb=20.0, # Было 30, стало 20
+            policy=CachePolicy.TTL
+        )
+    }
+    
+    # Запуск фонового процесса очистки
+    self._cleanup_thread = None
+    self._running = True
+    self._start_background_cleanup()
+    
+    logging.info("🔧 UnifiedCacheManager initialized with %.1f MB limit", global_max_memory_mb)
 
     # =========================================================================
     # ОСНОВНЫЕ ОПЕРАЦИИ
