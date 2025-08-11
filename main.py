@@ -67,15 +67,12 @@ def ohlcv_to_df(ohlcv) -> pd.DataFrame:
 
 
 def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
-    """✅ ОБНОВЛЕНО: Использует качественный ATR из technical_indicators"""
+    """✅ UNIFIED: Использует get_unified_atr для консистентности"""
     try:
-        df_with_indicators = calculate_all_indicators(df.copy())
-        if df_with_indicators.empty:
-            return None
-        atr_value = df_with_indicators["atr"].iloc[-1]
-        return float(atr_value) if pd.notna(atr_value) else None
+        from analysis.technical_indicators import get_unified_atr
+        return get_unified_atr(df, period, method='ewm')
     except Exception as e:
-        logging.error(f"ATR calculation failed: {e}")
+        logging.error(f"Unified ATR failed: {e}")
         return None
 
 

@@ -435,22 +435,14 @@ def _ohlcv_to_df(ohlcv) -> pd.DataFrame:
 
 
 def _atr(df: pd.DataFrame, period: int = 14) -> float:
-    """Расчет ATR"""
-    if df.empty or len(df) < period + 2:
-        return 0.0
-        
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    prev_close = close.shift(1)
-    
-    tr = pd.concat([
-        (high - low).abs(),
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
-    
-    return float(tr.ewm(alpha=1/period, adjust=False).mean().iloc[-1])
+    """✅ UNIFIED: ATR для telegram команд"""
+    try:
+        from analysis.technical_indicators import _atr_for_telegram
+        return _atr_for_telegram(df, period)
+    except Exception as e:
+        logging.error(f"Telegram ATR failed: {e}")
+        # Простой fallback
+        return float((df["high"] - df["low"]).mean()) if not df.empty else 0.0
 
 
 # ==== Test commands ====
