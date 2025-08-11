@@ -4,14 +4,125 @@ import threading
 import time
 import os
 import csv
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from decimal import Decimal, ROUND_DOWN
+from dataclasses import dataclass
 
 
 class APIException(Exception):
     """Исключение для ошибок API биржи"""
     pass
+
+
+@dataclass
+class CacheEntry:
+    """Запись в кэше"""
+    data: any
+    timestamp: float
+    access_count: int = 0
+
+
+class ExchangeCache:
+    """Кэширование для ExchangeClient"""
+    
+    def __init__(self, 
+                 price_ttl: int = 10,      # Цены кэшируем 10 сек
+                 ohlcv_ttl: int = 60,      # OHLCV кэшируем 60 сек  
+                 market_ttl: int = 3600,   # Информация о рынках - 1 час
+                 max_entries: int = 100):  # Максимум записей
+        
+        self.price_ttl = price_ttl
+        self.ohlcv_ttl = ohlcv_ttl  
+        self.market_ttl = market_ttl
+        self.max_entries = max_entries
+        
+        self._cache = {}
+        self._lock = threading.RLock()
+        
+        # Статистика
+        self._hits = 0
+        self._misses = 0
+        
+    def _create_key(self, prefix: str, *args) -> str:
+        """Создать ключ кэша"""
+        key_str = f"{prefix}:" + ":".join(str(arg) for arg in args)
+        return hashlib.md5(key_str.encode()).hexdigest()[:16]
+    
+    def get(self, key: str, ttl: int):
+        """Получить из кэша"""
+        with self._lock:
+            if key not in self._cache:
+                self._misses += 1
+                return None
+                
+            entry = self._cache[key]
+            
+            # Проверяем свежесть
+            if time.time() - entry.timestamp > ttl:
+                del self._cache[key]
+                self._misses += 1
+                return None
+            
+            # Обновляем статистику
+            entry.access_count += 1
+            self._hits += 1
+            
+            logging.debug(f"📦 Cache HIT: {key[:8]}...")
+            return entry.data
+    
+    def set(self, key: str, data):
+        """Сохранить в кэш"""
+        with self._lock:
+            # Ограничиваем размер кэша
+            if len(self._cache) >= self.max_entries:
+                self._evict_old_entries()
+            
+            self._cache[key] = CacheEntry(
+                data=data,
+                timestamp=time.time(),
+                access_count=1
+            )
+            
+            logging.debug(f"📦 Cache SET: {key[:8]}...")
+    
+    def _evict_old_entries(self):
+        """Удаление старых записей при переполнении"""
+        # Удаляем 20% самых старых записей
+        entries_to_remove = len(self._cache) // 5
+        
+        # Сортируем по времени последнего доступа
+        sorted_items = sorted(
+            self._cache.items(),
+            key=lambda x: x[1].timestamp
+        )
+        
+        for i in range(entries_to_remove):
+            key, _ = sorted_items[i]
+            del self._cache[key]
+        
+        logging.debug(f"📦 Evicted {entries_to_remove} old cache entries")
+    
+    def clear(self):
+        """Очистить кэш"""
+        with self._lock:
+            self._cache.clear()
+            logging.info("📦 Exchange cache cleared")
+    
+    def get_stats(self):
+        """Статистика кэша"""
+        with self._lock:
+            total_requests = self._hits + self._misses
+            hit_rate = (self._hits / total_requests * 100) if total_requests > 0 else 0
+            
+            return {
+                "entries": len(self._cache),
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate_pct": round(hit_rate, 1),
+                "max_entries": self.max_entries
+            }
 
 
 class ExchangeClient:
@@ -25,6 +136,7 @@ class ExchangeClient:
     - Автосоздание CSV файлов
     - Логирование открытых и закрытых позиций
     - Цены и анализ всегда с реального рынка
+    - ✅ КЭШИРОВАНИЕ API запросов для производительности
     """
 
     def __init__(self, api_key: str = None, api_secret: str = None, safe_mode: bool = True, csv_file: str = "trades.csv"):
@@ -35,7 +147,10 @@ class ExchangeClient:
         self.csv_file = csv_file
         self._lock = threading.RLock()
         
-        # Кэш для информации о рынках
+        # ✅ НОВОЕ: Система кэширования
+        self.cache = ExchangeCache()
+        
+        # Кэш для информации о рынках (старый, будет заменен)
         self._markets_cache = {}
         self._cache_timestamp = 0
         self._cache_ttl = 3600  # 1 час
@@ -55,7 +170,7 @@ class ExchangeClient:
         self._init_exchange()
         
         mode_text = "SAFE MODE (paper trading)" if self.safe_mode else "LIVE MODE (real trading)"
-        logging.info(f"🏦 Exchange client initialized in {mode_text}")
+        logging.info(f"🏦 Exchange client initialized in {mode_text} with caching")
 
     def _init_csv(self):
         """Инициализация CSV файла с заголовками"""
@@ -131,10 +246,20 @@ class ExchangeClient:
         
         logging.debug(f"📊 Trade logged: {side} {amount:.8f} {symbol} @ {price:.6f}")
 
-    # ==================== MARKET DATA (всегда реальные данные) ====================
+    # ==================== MARKET DATA (с кэшированием) ====================
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 200) -> List[List]:
-        """Получение OHLCV данных - всегда с реального рынка"""
+        """✅ КЭШИРОВАННАЯ версия - Получение OHLCV данных"""
+        # Кэш ключ учитывает symbol, timeframe, limit
+        cache_key = self.cache._create_key("ohlcv", symbol, timeframe, limit)
+        
+        # Проверяем кэш
+        cached_ohlcv = self.cache.get(cache_key, self.cache.ohlcv_ttl)
+        if cached_ohlcv is not None:
+            logging.debug(f"📈 OHLCV {symbol} {timeframe} from cache")
+            return cached_ohlcv
+        
+        # Получаем с биржи
         try:
             if not self.exchange:
                 self._init_exchange()
@@ -143,7 +268,10 @@ class ExchangeClient:
             if not ohlcv:
                 raise APIException(f"No OHLCV data received for {symbol}")
 
-            logging.debug(f"📈 Fetched {len(ohlcv)} candles for {symbol} {timeframe}")
+            # Сохраняем в кэш
+            self.cache.set(cache_key, ohlcv)
+            
+            logging.debug(f"📈 Fetched {len(ohlcv)} candles for {symbol} {timeframe} (from exchange)")
             return ohlcv
 
         except Exception as e:
@@ -151,7 +279,16 @@ class ExchangeClient:
             raise APIException(f"OHLCV fetch failed: {e}")
 
     def get_last_price(self, symbol: str) -> float:
-        """Получение последней цены - всегда с реального рынка"""
+        """✅ КЭШИРОВАННАЯ версия - Получение последней цены"""
+        cache_key = self.cache._create_key("price", symbol)
+        
+        # Проверяем кэш
+        cached_price = self.cache.get(cache_key, self.cache.price_ttl)
+        if cached_price is not None:
+            logging.debug(f"💰 Price {symbol} from cache: {cached_price:.6f}")
+            return float(cached_price)
+        
+        # Получаем с биржи
         try:
             if not self.exchange:
                 self._init_exchange()
@@ -162,7 +299,10 @@ class ExchangeClient:
             if price <= 0:
                 raise APIException(f"Invalid price received: {price}")
 
-            logging.debug(f"💰 Last price {symbol}: {price:.6f}")
+            # Сохраняем в кэш
+            self.cache.set(cache_key, price)
+            
+            logging.debug(f"💰 Last price {symbol}: {price:.6f} (from exchange)")
             return price
 
         except Exception as e:
@@ -176,7 +316,7 @@ class ExchangeClient:
         
         with self._lock:
             try:
-                # Получаем текущую цену (всегда реальную)
+                # Получаем текущую цену (теперь с кэшированием)
                 price = self.get_last_price(symbol)
                 cost = amount * price
                 
@@ -253,7 +393,7 @@ class ExchangeClient:
         
         with self._lock:
             try:
-                # Получаем текущую цену (всегда реальную)
+                # Получаем текущую цену (теперь с кэшированием)
                 price = self.get_last_price(symbol)
                 cost = amount * price
                 
@@ -383,7 +523,7 @@ class ExchangeClient:
             }
             logging.info("🔄 Paper balances reset to default values")
 
-    # ==================== MARKET INFO ====================
+    # ==================== MARKET INFO (с кэшированием) ====================
 
     def market_min_cost(self, symbol: str) -> float:
         """Минимальная стоимость ордера в USDT"""
@@ -434,29 +574,20 @@ class ExchangeClient:
             return round(price, 6)
 
     def _get_market_info(self, symbol: str) -> Dict[str, Any]:
-        """Получение информации о рынке с кэшированием"""
+        """✅ КЭШИРОВАННАЯ версия - Получение информации о рынке"""
+        cache_key = self.cache._create_key("market", symbol)
         
-        current_time = time.time()
+        # Проверяем кэш (длительное время жизни)
+        cached_info = self.cache.get(cache_key, self.cache.market_ttl)
+        if cached_info is not None:
+            return cached_info
         
-        # Проверяем кэш
-        if (symbol in self._markets_cache and 
-            current_time - self._cache_timestamp < self._cache_ttl):
-            return self._markets_cache[symbol]
-        
+        # Получаем информацию о рынке
         try:
             if not self.exchange:
-                # Дефолтная информация если нет подключения
+                # Дефолтная информация
                 market_info = {
-                    'id': symbol,
-                    'symbol': symbol,
-                    'base': symbol.split('/')[0],
-                    'quote': symbol.split('/')[1],
-                    'active': True,
-                    'type': 'spot',
-                    'precision': {
-                        'amount': 8,
-                        'price': 6
-                    },
+                    'precision': {'amount': 8, 'price': 6},
                     'limits': {
                         'amount': {'min': 0.00001, 'max': 10000},
                         'price': {'min': 0.01, 'max': 1000000},
@@ -470,22 +601,35 @@ class ExchangeClient:
                 if not market_info:
                     raise APIException(f"Market {symbol} not found")
             
-            # Обновляем кэш
-            self._markets_cache[symbol] = market_info
-            self._cache_timestamp = current_time
+            # Сохраняем в кэш (долго)
+            self.cache.set(cache_key, market_info)
             
             return market_info
             
         except Exception as e:
             logging.error(f"Failed to get market info for {symbol}: {e}")
             # Возвращаем дефолтную информацию
-            return {
+            default_info = {
                 'precision': {'amount': 8, 'price': 6},
                 'limits': {
                     'amount': {'min': 0.00001},
                     'cost': {'min': 5.0}
                 }
             }
+            
+            # Кэшируем дефолт на короткое время
+            self.cache.set(cache_key, default_info)
+            return default_info
+
+    # ==================== CACHE MANAGEMENT ====================
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """✅ НОВОЕ: Статистика кэша для мониторинга"""
+        return self.cache.get_stats()
+
+    def clear_cache(self):
+        """✅ НОВОЕ: Очистить кэш (для /clear_cache endpoint)"""
+        self.cache.clear()
 
     # ==================== UTILITY METHODS ====================
 
@@ -577,5 +721,7 @@ class ExchangeClient:
             "balances": balances,
             "csv_file": self.csv_file,
             "markets_cached": len(self._markets_cache),
-            "last_cache_update": datetime.fromtimestamp(self._cache_timestamp).isoformat() if self._cache_timestamp else None
+            "last_cache_update": datetime.fromtimestamp(self._cache_timestamp).isoformat() if self._cache_timestamp else None,
+            # ✅ НОВОЕ: Статистика кэша
+            "cache_stats": self.get_cache_stats()
         }
