@@ -1,7 +1,5 @@
 # utils/unified_cache.py — УНИФИЦИРОВАННЫЙ КЭШ
-# ВАЖНО: сохраняет публичный API (UnifiedCacheManager.get/set/cached) +
-# добавляет get_or_set, корректную работу с falsy-значениями, сжатие,
-# эвикцию внутри namespace и TTL-хелперы для свечей.
+# ВАЖНО: публичный API сохранён (get/set/cached) + get_or_set, TTL-хелперы.
 
 from __future__ import annotations
 import time, threading, pickle, zlib, sys, os
@@ -16,18 +14,16 @@ except Exception:  # pragma: no cover
     psutil = None
 
 # ────────────────────────────────────────────────────────────────────────────
-# Политика кэширования
 class CachePolicy(Enum):
     TTL = "ttl"
     LRU = "lru"
     HYBRID = "hybrid"  # TTL + LRU (сначала TTL, затем LRU)
 
-# Неймспейсы — можно расширять по проекту при необходимости
 class CacheNamespace(Enum):
     OHLCV = "ohlcv"              # свечи
     PRICES = "prices"            # последние цены
-    INDICATORS = "indicators"    # ⬅ добавлено: индикаторы (для analysis/technical_indicators.py)
-    CSV_READS = "csv_reads"      # ⬅ добавлено: чтение CSV (для utils/csv_handler.py)
+    INDICATORS = "indicators"    # индикаторы
+    CSV_READS = "csv_reads"      # чтение CSV
     MARKET_INFO = "market_info"  # инфо рынка/тикеры
     ML_FEATURES = "ml_features"  # фичи/индикаторы
     ORDER_STATUS = "order_status"
@@ -35,7 +31,6 @@ class CacheNamespace(Enum):
     CHARTS = "charts"
     GENERAL = "general"
 
-# Запись кэша
 @dataclass
 class CacheEntry:
     key: str
@@ -59,7 +54,6 @@ class CacheEntry:
         self.last_accessed = time.time()
         self.hits += 1
 
-# Конфигурация namespace
 @dataclass
 class NamespaceConfig:
     ttl: Optional[float] = None               # TTL по умолчанию (сек)
@@ -82,7 +76,6 @@ class UnifiedCacheManager:
             "gets": 0, "hits": 0, "misses": 0,
             "sets": 0, "evictions": 0, "expired": 0, "errors": 0
         }
-        # Конфиг по умолчанию (добавлены INDICATORS и CSV_READS)
         default_cfg = {
             CacheNamespace.OHLCV: NamespaceConfig(ttl=60.0, max_size=2000, max_memory_mb=128.0, policy=CachePolicy.LRU, compress=True),
             CacheNamespace.PRICES: NamespaceConfig(ttl=5.0, max_size=10000, max_memory_mb=50.0, policy=CachePolicy.TTL),
@@ -95,7 +88,6 @@ class UnifiedCacheManager:
             CacheNamespace.CHARTS: NamespaceConfig(ttl=3600.0, max_size=500, max_memory_mb=256.0, policy=CachePolicy.LRU, compress=True),
             CacheNamespace.GENERAL: NamespaceConfig(ttl=900.0, max_size=5000, max_memory_mb=128.0, policy=CachePolicy.HYBRID),
         }
-        # Приводим к строковым ключам для упрощения хранения
         effective = namespace_configs or default_cfg
         for ns, cfg in effective.items():
             self._ns_cfg[self._ns_key(ns)] = cfg
@@ -120,7 +112,6 @@ class UnifiedCacheManager:
                 return self._unpack(entry.data)
         except Exception:
             self._stats["errors"] += 1
-            # подробный трейсбек
             logging.exception(
                 "UnifiedCache.get failed",
                 extra={"namespace": ns, "key_hash": hash(full_key)}
@@ -130,7 +121,7 @@ class UnifiedCacheManager:
     def set(self, key: str, value: Any, namespace: CacheNamespace | str,
             ttl: Optional[float] = None, *, priority: int = 1,
             sticky: bool = False, compress: Optional[bool] = None,
-            metadata: Optional[Dict[str, Any]] = None) -> None:
+            metadata: Optional[Dict[str, Any]] = None) -> bool:
         ns = self._ns_key(namespace)
         try:
             cfg = self._cfg(ns)
@@ -145,25 +136,36 @@ class UnifiedCacheManager:
             )
             full_key = self._make_full_key(ns, key)
             with self._lock:
-                # точечная очистка просроченных (дёшево)
+                # точечная очистка просроченных
                 self._cleanup_expired_locked(ns)
-                # если namespace переполнен — пробуем выселить внутри ns (LRU/TTL/HYBRID)
+                # проверка/эвикция внутри namespace
                 if not self._ensure_ns_capacity_locked(ns, size):
-                    # если не удалось — пробуем глобальную эвикцию (наименее приоритетные)
+                    # глобальная эвикция и повторная попытка
                     self._evict_global_locked(size)
-                    # повторная попытка внутри ns
                     if not self._ensure_ns_capacity_locked(ns, size):
-                        # как крайняя мера — не пишем (сохраняем поведение отказа)
                         self._stats["errors"] += 1
-                        return
+                        logging.warning(
+                            "UnifiedCache.set dropped entry due to capacity",
+                            extra={
+                                "namespace": ns,
+                                "key_hash": hash(key),
+                                "size_bytes": size,
+                                "ns_config": {
+                                    "max_size": cfg.max_size,
+                                    "max_memory_mb": cfg.max_memory_mb,
+                                    "policy": cfg.policy.value
+                                }
+                            }
+                        )
+                        return False
                 # запись
                 self._data[full_key] = entry
                 self._stats["sets"] += 1
                 # глобальное давление памяти
                 self._enforce_global_memory_locked()
+                return True
         except Exception:
             self._stats["errors"] += 1
-            # подробный трейсбек
             approx_size = None
             try:
                 approx_size = len(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
@@ -180,7 +182,7 @@ class UnifiedCacheManager:
                     "approx_pickle_size": approx_size
                 }
             )
-            return
+            return False
 
     def delete(self, key: str, namespace: CacheNamespace | str, *, prefix: bool = False) -> int:
         ns = self._ns_key(namespace)
@@ -188,7 +190,6 @@ class UnifiedCacheManager:
             if not prefix:
                 full_key = self._make_full_key(ns, key)
                 return 1 if self._delete_full(full_key) else 0
-            # префиксная чистка
             to_del = [k for k in self._data.keys() if k.startswith(ns + ":" + key)]
             for fk in to_del:
                 self._delete_full(fk)
@@ -213,16 +214,13 @@ class UnifiedCacheManager:
                 "per_ns": self._per_ns_stats_locked(),
             }
 
-    # ✅ Совместимость: многие модули зовут get_stats()
     def get_stats(self) -> Dict[str, Any]:
         return self.stats()
 
-    # ✅ Нужен both csv_handler и technical_indicators
     def get_top_keys(self, namespace: CacheNamespace | str, limit: int = 10) -> List[Dict[str, Any]]:
         ns = self._ns_key(namespace)
         with self._lock:
             items = [(k, e) for k, e in self._data.items() if e.namespace == ns]
-            # сортируем по hits, потом по last_accessed
             items.sort(key=lambda kv: (kv[1].hits, kv[1].last_accessed), reverse=True)
             out = []
             for fk, e in items[:max(1, int(limit))]:
@@ -236,7 +234,6 @@ class UnifiedCacheManager:
                 })
             return out
 
-    # Удобная обёртка: возвращает значение если есть, иначе вычисляет и кладёт
     def get_or_set(self, key: str, namespace: CacheNamespace | str, ttl: Optional[float],
                    factory: Callable[[], Any], **set_kwargs) -> Any:
         sentinel = object()
@@ -247,7 +244,6 @@ class UnifiedCacheManager:
         self.set(key, res, namespace, ttl, **set_kwargs)
         return res
 
-    # Декоратор кэширования — корректно обрабатывает falsy-значения
     def cached(self, namespace: CacheNamespace | str, ttl: Optional[float] = None,
                key_func: Optional[Callable[..., str]] = None, **set_kwargs):
         _SENTINEL = object()
@@ -279,7 +275,6 @@ class UnifiedCacheManager:
             return int(tf[:-1]) * 3600
         if tf.endswith("d"):
             return int(tf[:-1]) * 86400
-        # fallback: seconds
         try:
             return max(1, int(tf))
         except Exception:
@@ -304,11 +299,9 @@ class UnifiedCacheManager:
             if compress:
                 payload = zlib.compress(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
                 return ("zlib+pickle", payload), len(payload)
-            # без компрессии — оценим размер по pickle
             raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
             return value, len(raw)
         except Exception:
-            # на крайний случай — шейп в строку
             try:
                 b = repr(value).encode("utf-8", "ignore")
                 return value, len(b)
@@ -345,32 +338,26 @@ class UnifiedCacheManager:
 
     def _ensure_ns_capacity_locked(self, ns: str, incoming_size: int) -> bool:
         cfg = self._cfg(ns)
-        # лимит по количеству
         ns_entries = [(k, e) for k, e in self._data.items() if e.namespace == ns and not e.sticky]
         if len(ns_entries) >= cfg.max_size:
             self._evict_ns_locked(ns, count=max(1, len(ns_entries)//10), policy=cfg.policy)
-        # лимит по памяти для ns
         ns_bytes = sum(e.size_bytes for _, e in ns_entries)
         if (ns_bytes + incoming_size) > (cfg.max_memory_mb * 1024 * 1024):
             self._evict_ns_locked(ns, count=max(1, len(ns_entries)//10), policy=cfg.policy)
             ns_entries = [(k, e) for k, e in self._data.items() if e.namespace == ns and not e.sticky]
             ns_bytes = sum(e.size_bytes for _, e in ns_entries)
-        # после попытки — проверим снова
         return (len(ns_entries) < cfg.max_size) and ((ns_bytes + incoming_size) <= (cfg.max_memory_mb * 1024 * 1024))
 
     def _evict_ns_locked(self, ns: str, *, count: int, policy: CachePolicy) -> None:
-        # кандидаты (без sticky и не истекшие)
         now = time.time()
         entries = [(k, e) for k, e in self._data.items()
                    if e.namespace == ns and not e.sticky and not (e.ttl and (now - e.created_at) > e.ttl)]
-        # сортировки
         if policy == CachePolicy.TTL:
             entries.sort(key=lambda kv: (kv[1].priority, kv[1].hits, kv[1].last_accessed))
         elif policy == CachePolicy.LRU:
             entries.sort(key=lambda kv: (kv[1].priority, kv[1].last_accessed, kv[1].hits))
         else:  # HYBRID
             entries.sort(key=lambda kv: (kv[1].priority, kv[1].is_expired(), kv[1].last_accessed, kv[1].hits))
-        # удаляем первых count
         for fk, _ in entries[:count]:
             self._delete_full(fk)
 
@@ -421,7 +408,6 @@ class UnifiedCacheManager:
         except Exception:
             return None
 
-    # генерация ключа по сигнатуре функции
     def _function_key(self, func: Callable, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> str:
         try:
             raw = (func.__module__, func.__qualname__, args, tuple(sorted(kwargs.items())))
@@ -431,16 +417,15 @@ class UnifiedCacheManager:
         except Exception:
             return f"{func.__module__}.{func.__qualname__}:{id(args)}:{id(kwargs)}"
 
-# Глобальный синглтон — как в вашей версии
+# Глобальный синглтон
 cache = UnifiedCacheManager()
 
-# Удобные алиасы (опционально)
+# Алиасы
 ttl_until_next_slot = UnifiedCacheManager.ttl_until_next_slot
 ttl_until_next_candle = UnifiedCacheManager.ttl_until_next_candle
 parse_tf_to_seconds = UnifiedCacheManager.parse_tf_to_seconds
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Lightweight adapters for domain usage (trading / telegram)
+# Domain helpers
 class trading_cache:
     @staticmethod
     def _ohlcv_key(symbol: str, tf: str) -> str:
@@ -498,8 +483,7 @@ class telegram_cache:
     def invalidate_charts(prefix: str = "") -> int:
         return cache.delete(f"chart:{prefix}", CacheNamespace.CHARTS, prefix=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Backwards-compatible aliases (keep legacy imports working)
+# Backwards-compatible aliases
 def get_cache_manager():
     return cache
 
