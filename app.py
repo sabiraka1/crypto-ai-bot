@@ -921,6 +921,13 @@ def cleanup_on_exit():
     # Останавливаем unified monitoring
     try:
         cleanup_monitoring()
+    # Останавливаем CSV флашер (graceful)
+    try:
+        from utils.csv_handler import CSVHandler
+        CSVHandler.stop(timeout=2.0)
+    except Exception:
+        logging.exception("CSVHandler.stop failed")
+
     except Exception:
         logging.exception("cleanup_monitoring failed")
 

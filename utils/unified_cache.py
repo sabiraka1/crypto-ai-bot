@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import time, threading, pickle, zlib, sys, os
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Callable, Tuple, List
 from enum import Enum
@@ -103,53 +104,83 @@ class UnifiedCacheManager:
     def get(self, key: str, namespace: CacheNamespace | str, default: Any = None) -> Any:
         ns = self._ns_key(namespace)
         full_key = self._make_full_key(ns, key)
-        with self._lock:
-            self._stats["gets"] += 1
-            entry = self._data.get(full_key)
-            if not entry:
-                self._stats["misses"] += 1
-                return default
-            if entry.is_expired():
-                self._stats["expired"] += 1
-                self._delete_full(full_key)
-                return default
-            entry.touch()
-            self._stats["hits"] += 1
-            return self._unpack(entry.data)
+        try:
+            with self._lock:
+                self._stats["gets"] += 1
+                entry = self._data.get(full_key)
+                if not entry:
+                    self._stats["misses"] += 1
+                    return default
+                if entry.is_expired():
+                    self._stats["expired"] += 1
+                    self._delete_full(full_key)
+                    return default
+                entry.touch()
+                self._stats["hits"] += 1
+                return self._unpack(entry.data)
+        except Exception:
+            self._stats["errors"] += 1
+            # подробный трейсбек
+            logging.exception(
+                "UnifiedCache.get failed",
+                extra={"namespace": ns, "key_hash": hash(full_key)}
+            )
+            return default
 
     def set(self, key: str, value: Any, namespace: CacheNamespace | str,
             ttl: Optional[float] = None, *, priority: int = 1,
             sticky: bool = False, compress: Optional[bool] = None,
             metadata: Optional[Dict[str, Any]] = None) -> None:
         ns = self._ns_key(namespace)
-        cfg = self._cfg(ns)
-        ttl_eff = cfg.ttl if ttl is None else float(ttl)
-        do_compress = cfg.compress if compress is None else bool(compress)
-        packed, size = self._pack(value, compress=do_compress)
-        entry = CacheEntry(
-            key=key, data=packed, namespace=ns,
-            created_at=time.time(), last_accessed=time.time(),
-            size_bytes=size, ttl=ttl_eff, priority=int(priority),
-            sticky=bool(sticky), metadata=metadata or {}
-        )
-        full_key = self._make_full_key(ns, key)
-        with self._lock:
-            # точечная очистка просроченных (дёшево)
-            self._cleanup_expired_locked(ns)
-            # если namespace переполнен — пробуем выселить внутри ns (LRU/TTL/HYBRID)
-            if not self._ensure_ns_capacity_locked(ns, size):
-                # если не удалось — пробуем глобальную эвикцию (наименее приоритетные)
-                self._evict_global_locked(size)
-                # повторная попытка внутри ns
+        try:
+            cfg = self._cfg(ns)
+            ttl_eff = cfg.ttl if ttl is None else float(ttl)
+            do_compress = cfg.compress if compress is None else bool(compress)
+            packed, size = self._pack(value, compress=do_compress)
+            entry = CacheEntry(
+                key=key, data=packed, namespace=ns,
+                created_at=time.time(), last_accessed=time.time(),
+                size_bytes=size, ttl=ttl_eff, priority=int(priority),
+                sticky=bool(sticky), metadata=metadata or {}
+            )
+            full_key = self._make_full_key(ns, key)
+            with self._lock:
+                # точечная очистка просроченных (дёшево)
+                self._cleanup_expired_locked(ns)
+                # если namespace переполнен — пробуем выселить внутри ns (LRU/TTL/HYBRID)
                 if not self._ensure_ns_capacity_locked(ns, size):
-                    # как крайняя мера — не пишем (сохраняем поведение отказа)
-                    self._stats["errors"] += 1
-                    return
-            # запись
-            self._data[full_key] = entry
-            self._stats["sets"] += 1
-            # глобальное давление памяти
-            self._enforce_global_memory_locked()
+                    # если не удалось — пробуем глобальную эвикцию (наименее приоритетные)
+                    self._evict_global_locked(size)
+                    # повторная попытка внутри ns
+                    if not self._ensure_ns_capacity_locked(ns, size):
+                        # как крайняя мера — не пишем (сохраняем поведение отказа)
+                        self._stats["errors"] += 1
+                        return
+                # запись
+                self._data[full_key] = entry
+                self._stats["sets"] += 1
+                # глобальное давление памяти
+                self._enforce_global_memory_locked()
+        except Exception:
+            self._stats["errors"] += 1
+            # подробный трейсбек
+            approx_size = None
+            try:
+                approx_size = len(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+            except Exception:
+                pass
+            logging.exception(
+                "UnifiedCache.set failed",
+                extra={
+                    "namespace": ns,
+                    "key_hash": hash(key),
+                    "ttl": ttl,
+                    "priority": priority,
+                    "sticky": sticky,
+                    "approx_pickle_size": approx_size
+                }
+            )
+            return
 
     def delete(self, key: str, namespace: CacheNamespace | str, *, prefix: bool = False) -> int:
         ns = self._ns_key(namespace)
