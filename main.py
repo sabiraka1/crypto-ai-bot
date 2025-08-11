@@ -30,7 +30,7 @@ CFG = TradingConfig()
 # Валидация конфигурации при запуске
 config_errors = CFG.validate_config()
 if config_errors:
-    logging.warning(⚠️ "Configuration issues found:")
+    logging.warning("⚠️ Configuration issues found:")
     for error in config_errors:
         logging.warning(f"  - {error}")
 
