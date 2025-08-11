@@ -443,8 +443,8 @@ class AdaptiveMLModel:
         prev_close = close.shift(1)
         tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         # В методе _adx()
-	from analysis.technical_indicators import _atr_series_for_ml
-	temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+    from analysis.technical_indicators import _atr_series_for_ml
+    temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
     atr = _atr_series_for_ml(temp_df, period)
 
         plus_di = 100.0 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
