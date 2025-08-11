@@ -445,7 +445,7 @@ class AdaptiveMLModel:
         # В методе _adx()
 	from analysis.technical_indicators import _atr_series_for_ml
 	temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
-	atr = _atr_series_for_ml(temp_df, period)
+    atr = _atr_series_for_ml(temp_df, period)
 
         plus_di = 100.0 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
         minus_di = 100.0 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
