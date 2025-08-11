@@ -38,7 +38,8 @@ def check_integration():
     # 2. Проверка CSV батчинга
     try:
         from utils.csv_handler import CSVHandler, get_csv_system_stats
-        
+        CSVHandler.start()
+
         # Тест записи
         test_signal = {
             'timestamp': '2024-01-01T00:00:00Z',

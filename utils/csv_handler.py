@@ -41,10 +41,10 @@ class BatchCSVWriter:
         self._last_flush = time.time()
         self._total_records = 0
         self._flush_count = 0
-        
-        # Запускаем фоновый флушер
-        self._start_background_flusher()
-        
+        self._thread = None
+        self._stop = threading.Event()
+        self._started = False
+    
     def add_record(self, file_path: str, fieldnames: List[str], data: Dict[str, Any]):
         """Добавить запись в буфер"""
         with self._lock:
@@ -55,18 +55,39 @@ class BatchCSVWriter:
             if len(self._buffer) >= self.batch_size:
                 self._flush_buffer()
     
-    def _start_background_flusher(self):
-        """Запустить фоновый процесс сброса буфера"""
-        def background_flush():
-            while True:
-                time.sleep(self.flush_interval)
-                with self._lock:
-                    if self._buffer and time.time() - self._last_flush > self.flush_interval:
-                        self._flush_buffer()
-        
-        thread = threading.Thread(target=background_flush, daemon=True, name="CSVBatchFlusher")
-        thread.start()
+    def _background_flush_loop(self):
+        """Фоновая петля сброса буфера (управляется start/stop)"""
+        while not self._stop.is_set():
+            time.sleep(self.flush_interval)
+            with self._lock:
+                if self._buffer and time.time() - self._last_flush > self.flush_interval:
+                    self._flush_buffer()
+        # финальный flush на выходе
+        with self._lock:
+            if self._buffer:
+                self._flush_buffer()
+        logging.debug("📄 Background CSV flusher stopped")
+    
+    def start(self) -> bool:
+        """Явный запуск фонового флашера (идемпотентно)."""
+        if getattr(self, "_started", False):
+            return False
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._background_flush_loop, daemon=True, name="CSVBatchFlusher")
+        self._thread.start()
+        self._started = True
         logging.debug("📄 Background CSV flusher started")
+        return True
+    
+    def stop(self, timeout: float = 2.0) -> bool:
+        """Остановка фонового флашера с ожиданием."""
+        if not getattr(self, "_started", False):
+            return False
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=timeout)
+        self._started = False
+        return True
     
     def _flush_buffer(self):
         """Сбросить буфер в файлы"""

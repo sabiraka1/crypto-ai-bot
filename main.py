@@ -30,9 +30,12 @@ CFG = TradingConfig()
 # Валидация конфигурации при запуске
 config_errors = CFG.validate_config()
 if config_errors:
-    logging.warning("⚠️ Configuration issues found:")
+    logging.warning(⚠️ Configuration issues found:")
     for error in config_errors:
         logging.warning(f"  - {error}")
+
+# Явный запуск CSV обработчика
+CSVHandler.start()
 
 # ── ENV-пороги и настройка AI ─────────────────────────────────────────────────
 ENV_MIN_SCORE = CFG.MIN_SCORE_TO_BUY
