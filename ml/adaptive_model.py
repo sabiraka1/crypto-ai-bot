@@ -40,10 +40,12 @@ def _clip01(x: float) -> float:
 
 class AdaptiveMLModel:
     """
-    Адаптивная ML модель:
+    ✅ ЭТАП 5: UNIFIED ATR ИНТЕГРАЦИЯ
+    Адаптивная ML модель с unified ATR системой:
       - подмодели под рыночные условия + GLOBAL
       - извлечение фич из df OHLCV
       - predict(...) принимает как ndarray, так и dict фич (совместимо с main.py)
+      - UNIFIED ATR во всех расчетах
     """
 
     def __init__(self, models_dir: Optional[str] = None, *, model_dir: Optional[str] = None):
@@ -230,7 +232,7 @@ class AdaptiveMLModel:
                 prob = self._predict_proba_with("cond", market_condition, x)
                 if prob is not None:
                     result = (1.0 if prob >= 0.5 else 0.0), float(prob)
-                    logging.debug(f"🤖 AI predict [cond:{market_condition}]: {result}")  # ✅ ДОБАВЛЕНО
+                    logging.debug(f"🤖 AI predict [cond:{market_condition}]: {result}")
                     return result
 
             # затем GLOBAL
@@ -238,12 +240,12 @@ class AdaptiveMLModel:
                 prob = self._predict_proba_with("global", "GLOBAL", x)
                 if prob is not None:
                     result = (1.0 if prob >= 0.5 else 0.0), float(prob)
-                    logging.debug(f"🤖 AI predict [GLOBAL]: {result}")  # ✅ ДОБАВЛЕНО
+                    logging.debug(f"🤖 AI predict [GLOBAL]: {result}")
                     return result
 
             # фолбэк
             pred, conf = self._fallback_prediction(x.reshape(-1))
-            logging.debug(f"🤖 AI predict [fallback]: ({pred}, {conf})")  # ✅ ДОБАВЛЕНО
+            logging.debug(f"🤖 AI predict [fallback]: ({pred}, {conf})")
             return pred, conf
 
         except Exception as e:
@@ -251,7 +253,7 @@ class AdaptiveMLModel:
             fallback_result = self._fallback_prediction(
                 self._vec_from_features_dict(x_vec) if isinstance(x_vec, dict) else np.asarray(x_vec, dtype=np.float64)
             )
-            logging.debug(f"🤖 AI predict [error_fallback]: {fallback_result}")  # ✅ ДОБАВЛЕНО
+            logging.debug(f"🤖 AI predict [error_fallback]: {fallback_result}")
             return fallback_result
 
     def _predict_proba_with(self, tag: str, key: str, x: np.ndarray) -> Optional[float]:
@@ -358,10 +360,10 @@ class AdaptiveMLModel:
             return 0.0, 0.5
 
     # -------------------------------------------------------------------------
-    # FEATURE ENGINEERING
+    # ✅ ЭТАП 5: FEATURE ENGINEERING С UNIFIED ATR
     # -------------------------------------------------------------------------
     def _features_from_df(self, df: pd.DataFrame) -> Optional[np.ndarray]:
-        """Строим 8-фич вектор из df с OHLCV."""
+        """✅ ЭТАП 5: Строим 8-фич вектор из df с UNIFIED ATR."""
         if df is None or df.empty or not {"open", "high", "low", "close", "volume"}.issubset(df.columns):
             return None
 
@@ -400,8 +402,8 @@ class AdaptiveMLModel:
         stoch_k = float((close.iloc[-1] - ll.iloc[-1]) / (denom + _EPS) * 100.0) if np.isfinite(denom) else 50.0
         stoch_k = float(np.clip(stoch_k, 0.0, 100.0))
 
-        # ADX(14)
-        adx = self._adx(high, low, close, 14)
+        # ✅ ЭТАП 5: ADX С UNIFIED ATR
+        adx = self._adx_with_unified_atr(high, low, close, 14)
 
         # Volume ratio(20)
         vma = vol.rolling(window=20, min_periods=5).mean()
@@ -432,33 +434,41 @@ class AdaptiveMLModel:
         val = float(rsi.iloc[-1])
         return float(val) if np.isfinite(val) else 50.0
 
-    def _adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
+    def _adx_with_unified_atr(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
+        """✅ ЭТАП 5: ADX с UNIFIED ATR системой"""
         if len(close) < period + 2:
             return 20.0
-        up_move = high.diff()
-        down_move = -low.diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
-
-        prev_close = close.shift(1)
-        tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        
-        # ✅ Исправленный ATR-блок
+            
         try:
-            from analysis.technical_indicators import _atr_series_for_ml
-            temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
-            atr = _atr_series_for_ml(temp_df, period)
-        except Exception:
-            atr = tr.ewm(alpha=1 / period, adjust=False).mean()
+            up_move = high.diff()
+            down_move = -low.diff()
+            plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
+            minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
 
-        plus_di = 100.0 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
-        minus_di = 100.0 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
-        dx = (100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + _EPS))
-        adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-        val = float(adx.iloc[-1])
-        return float(val) if np.isfinite(val) else 20.0
+            # ✅ UNIFIED ATR ИНТЕГРАЦИЯ
+            try:
+                from analysis.technical_indicators import _atr_series_for_ml
+                temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+                atr = _atr_series_for_ml(temp_df, period)
+                logging.debug(f"🤖 ML Model: Using UNIFIED ATR for ADX calculation")
+            except Exception as e:
+                logging.warning(f"🤖 ML Model: UNIFIED ATR failed, using fallback: {e}")
+                # Fallback к прямому расчету
+                prev_close = close.shift(1)
+                tr = pd.concat([(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+                atr = tr.ewm(alpha=1 / period, adjust=False).mean()
 
-
+            plus_di = 100.0 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
+            minus_di = 100.0 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr + _EPS))
+            dx = (100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + _EPS))
+            adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+            
+            val = float(adx.iloc[-1])
+            return float(val) if np.isfinite(val) else 20.0
+            
+        except Exception as e:
+            logging.error(f"🤖 ML Model: ADX calculation failed: {e}")
+            return 20.0
 
     def _infer_condition_from_df(self, df: pd.DataFrame) -> str:
         try:
