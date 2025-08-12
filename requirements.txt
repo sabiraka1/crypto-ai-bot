@@ -1,50 +1,80 @@
-# ==== WEB ====
-flask==2.3.3
-werkzeug==2.3.7
-gunicorn==23.0.0
+# ============================================================================
+# CRYPTO AI BOT - PRODUCTION REQUIREMENTS
+# ============================================================================
+# Python 3.10+ (рекомендуется 3.11 для лучшей производительности)
 
-# ==== HTTP ====
-requests==2.32.3
-urllib3==2.2.2
-certifi==2024.7.4
-aiohttp==3.9.5
-aiosignal==1.3.1
-async-timeout==4.0.3
+# ==== CORE WEB FRAMEWORK ====
+flask==3.0.3                # Обновлена до последней стабильной
+werkzeug==3.0.3            # Совместимость с Flask 3.0
+gunicorn==21.2.0            # Стабильная версия для production
 
-# ==== DS CORE (Py3.12) ====
-numpy==1.26.4
-pandas==2.2.2
-scipy==1.11.4
+# ==== HTTP & NETWORKING ====
+requests==2.32.3           # HTTP клиент
+urllib3==2.2.2             # HTTP библиотека
+certifi==2024.7.4          # SSL сертификаты
+aiohttp==3.10.5            # Async HTTP (обновлена для безопасности)
+aiosignal==1.3.1           # Async сигналы
 
-# ==== ML ====
-scikit-learn==1.4.2
-joblib==1.3.2
-threadpoolctl==3.2.0
+# ==== DATA SCIENCE CORE ====
+numpy==1.26.4              # Численные вычисления
+pandas==2.2.2              # Работа с данными
+scipy==1.13.1              # Научные вычисления (обновлена)
 
-# ==== TRADING ====
-ccxt==4.3.89
+# ==== MACHINE LEARNING ====
+scikit-learn==1.5.1        # ML алгоритмы (обновлена)
+joblib==1.4.2              # Сериализация ML моделей (обновлена)
+threadpoolctl==3.2.0       # Контроль потоков
+
+# ==== TRADING & CRYPTO ====
+ccxt==4.4.7                # Crypto exchange connectors (обновлена)
 
 # ==== TECHNICAL ANALYSIS ====
-ta==0.10.3
-# TA-Lib часто не ставится в облаках. Оставь закомментированным, если нет системной библиотеки:
+ta==0.11.0                  # Technical analysis (обновлена)
+# TA-Lib - установка через системный пакетный менеджер:
+# Ubuntu/Debian: apt-get install libta-lib-dev ta-lib
+# MacOS: brew install ta-lib
 # TA-Lib==0.4.28
 
 # ==== VISUALIZATION ====
-matplotlib==3.8.4
-plotly==5.22.0
-kaleido==0.2.1
+matplotlib==3.9.2          # Графики (обновлена)
+plotly==5.24.1             # Интерактивные графики (обновлена)
+kaleido==0.2.1             # Экспорт Plotly в статичные форматы
 
-# ==== CONFIG ====
-python-dotenv==1.0.1
+# ==== CONFIGURATION ====
+python-dotenv==1.0.1       # Загрузка .env файлов
+pydantic==2.8.2            # Валидация конфигурации (добавлена)
 
-# ==== SCHEDULING ====
-schedule==1.2.1
+# ==== SCHEDULING & ASYNC ====
+schedule==1.2.2            # Планировщик задач (обновлена)
+APScheduler==3.10.4        # Продвинутый планировщик (добавлена)
 
-# ==== SYSTEM ====
-psutil==5.9.8
+# ==== SYSTEM MONITORING ====
+psutil==6.0.0              # Системные метрики (обновлена)
 
-# ==== SECURITY (актуальные под 3.12) ====
-cryptography==42.0.8
-pyopenssl==24.2.1
+# ==== SECURITY ====
+cryptography==43.0.0       # Криптография (обновлена для безопасности)
+pyopenssl==24.2.1          # OpenSSL биндинги
 
-# Дополнительно пинить pip/setuptools/wheel не нужно в requirements.txt
+# ==== LOGGING & MONITORING ====
+structlog==24.4.0          # Структурированные логи (добавлена)
+prometheus-client==0.21.0  # Метрики Prometheus (добавлена)
+
+# ==== DATABASE (OPTIONAL) ====
+# Раскомментировать при необходимости
+# sqlalchemy==2.0.32       # ORM для базы данных
+# alembic==1.13.2          # Миграции БД
+# psycopg2-binary==2.9.9   # PostgreSQL driver
+# redis==5.0.8             # Redis для кэширования
+
+# ==== TESTING (DEV ONLY) ====
+# pytest==8.3.2
+# pytest-cov==5.0.0
+# pytest-mock==3.14.0
+# pytest-asyncio==0.23.8
+# black==24.8.0
+# flake8==7.1.1
+# mypy==1.11.2
+
+# ==== DEVELOPMENT TOOLS ====
+# pre-commit==3.8.0
+# bandit==1.7.9            # Security linting
