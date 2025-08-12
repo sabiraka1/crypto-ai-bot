@@ -276,6 +276,11 @@ class UnifiedCacheManager:
             return max(1, int(tf))
         except Exception:
             return 900  # 15m по умолчанию
+    @staticmethod
+    def ttl_until_next_slot(seconds: int, drift_sec: int = 10) -> int:
+        now = int(time.time())
+        rem = seconds - (now % seconds)
+        return max(1, rem + int(drift_sec))    
 
     @classmethod
     def ttl_until_next_candle(cls, tf: str, drift_sec: int = 10) -> int:
