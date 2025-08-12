@@ -19,7 +19,7 @@ CFG = TradingConfig()
 
 SYMBOL_ENV = CFG.SYMBOL
 TIMEFRAME_ENV = CFG.TIMEFRAME
-TRADE_AMOUNT = CFG.TRADE_AMOUNT
+TRADE_AMOUNT = CFG.POSITION_SIZE_USD
 
 # ==== Anti-spam settings ====
 _last_command_time = {}
