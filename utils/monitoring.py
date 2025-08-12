@@ -22,6 +22,15 @@ class SystemMetrics:
     threads_count: int
     disk_usage_mb: float
     uptime_seconds: float
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Преобразование в словарь для совместимости с тестами"""
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SystemMetrics':
+        """Создание экземпляра из словаря"""
+        return cls(**data)
 
 @dataclass
 class TradingMetrics:
@@ -348,6 +357,199 @@ class AppMonitoring:
 app_monitoring = AppMonitoring()
 
 # =============================================================================
+# ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СОВМЕСТИМОСТИ С ТЕСТАМИ
+# =============================================================================
+
+class PerformanceMonitor:
+    """Класс для мониторинга производительности (совместимость с тестами)"""
+    
+    def __init__(self):
+        self.start_time = time.time()
+        self.metrics_history = []
+        self.alerts = []
+        
+    def capture_metrics(self) -> SystemMetrics:
+        """Захват текущих системных метрик"""
+        monitor = SimpleMonitor()
+        return monitor.get_system_metrics()
+
+
+def get_system_metrics() -> SystemMetrics:
+    """Получение текущих системных метрик (совместимость с тестами)"""
+    monitor = SimpleMonitor()
+    return monitor.get_system_metrics()
+
+
+def log_system_state(output_file: Optional[str] = None) -> Dict[str, Any]:
+    """Логирование текущего состояния системы"""
+    metrics = get_system_metrics()
+    
+    log_data = {
+        "timestamp": datetime.now().isoformat(),
+        "system_metrics": metrics.to_dict(),
+        "app_info": {
+            "python_version": "3.13.6",
+            "process_id": os.getpid(),
+        }
+    }
+    
+    if output_file:
+        try:
+            import json
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"Ошибка записи лога: {e}")
+    
+    return log_data
+
+
+def monitor_performance(duration_seconds: int = 60, interval_seconds: int = 5) -> list:
+    """Мониторинг производительности в течение заданного времени"""
+    metrics_list = []
+    monitor = SimpleMonitor()
+    
+    start_time = time.time()
+    
+    while time.time() - start_time < duration_seconds:
+        metrics = monitor.get_system_metrics()
+        metrics_list.append(metrics)
+        time.sleep(interval_seconds)
+    
+    return metrics_list
+
+
+def check_system_health() -> Dict[str, Any]:
+    """Проверка состояния системы и возвращение рекомендаций"""
+    metrics = get_system_metrics()
+    
+    health_status = {
+        "overall_status": "healthy",
+        "warnings": [],
+        "recommendations": [],
+        "metrics": metrics.to_dict()
+    }
+    
+    # Проверка использования памяти
+    if metrics.memory_mb > 8000:  # > 8GB
+        health_status["warnings"].append("Высокое использование памяти")
+        health_status["recommendations"].append("Рассмотрите возможность увеличения RAM")
+        health_status["overall_status"] = "warning"
+    
+    # Проверка CPU
+    if metrics.cpu_percent > 80:
+        health_status["warnings"].append("Высокая загрузка CPU")
+        health_status["recommendations"].append("Оптимизируйте нагрузку на процессор")
+        health_status["overall_status"] = "warning"
+    
+    # Проверка дискового пространства
+    if metrics.disk_usage_mb > 50000:  # > 50GB
+        health_status["warnings"].append("Высокое использование диска")
+        health_status["recommendations"].append("Очистите временные файлы")
+        health_status["overall_status"] = "warning"
+    
+    return health_status
+
+
+class ResourceTracker:
+    """Класс для отслеживания использования ресурсов во времени"""
+    
+    def __init__(self, max_history: int = 1000):
+        self.max_history = max_history
+        self.history = []
+        self.lock = threading.Lock()
+    
+    def record_metrics(self) -> None:
+        """Запись текущих метрик в историю"""
+        metrics = get_system_metrics()
+        
+        with self.lock:
+            self.history.append(metrics)
+            
+            # Ограничиваем размер истории
+            if len(self.history) > self.max_history:
+                self.history = self.history[-self.max_history:]
+    
+    def get_average_metrics(self, last_n: Optional[int] = None) -> Optional[SystemMetrics]:
+        """Получение средних метрик за последние N записей"""
+        with self.lock:
+            if not self.history:
+                return None
+            
+            data = self.history[-last_n:] if last_n else self.history
+            
+            if not data:
+                return None
+            
+            # Вычисляем средние значения
+            avg_memory = sum(m.memory_mb for m in data) / len(data)
+            avg_cpu = sum(m.cpu_percent for m in data) / len(data)
+            avg_threads = sum(m.threads_count for m in data) / len(data)
+            avg_disk = sum(m.disk_usage_mb for m in data) / len(data)
+            avg_uptime = sum(m.uptime_seconds for m in data) / len(data)
+            
+            return SystemMetrics(
+                timestamp=time.time(),
+                memory_mb=avg_memory,
+                cpu_percent=avg_cpu,
+                threads_count=int(avg_threads),
+                disk_usage_mb=avg_disk,
+                uptime_seconds=avg_uptime
+            )
+    
+    def export_history(self, filename: str) -> bool:
+        """Экспорт истории метрик в файл"""
+        try:
+            import json
+            with self.lock:
+                data = [metrics.to_dict() for metrics in self.history]
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "export_time": datetime.now().isoformat(),
+                    "total_records": len(data),
+                    "metrics": data
+                }, f, indent=2, ensure_ascii=False)
+            
+            return True
+        except Exception as e:
+            logging.error(f"Ошибка экспорта истории: {e}")
+            return False
+
+
+# Глобальный экземпляр трекера ресурсов
+_resource_tracker = ResourceTracker()
+
+
+def start_background_monitoring(interval_seconds: int = 30) -> threading.Thread:
+    """Запуск фонового мониторинга ресурсов"""
+    def monitoring_loop():
+        while True:
+            try:
+                _resource_tracker.record_metrics()
+                time.sleep(interval_seconds)
+            except Exception as e:
+                logging.error(f"Ошибка в фоновом мониторинге: {e}")
+                time.sleep(interval_seconds)
+    
+    thread = threading.Thread(target=monitoring_loop, daemon=True)
+    thread.start()
+    return thread
+
+
+def get_resource_summary() -> Dict[str, Any]:
+    """Получение сводки по использованию ресурсов"""
+    current = get_system_metrics()
+    average = _resource_tracker.get_average_metrics(last_n=10)  # последние 10 записей
+    
+    return {
+        "current": current.to_dict(),
+        "average_last_10": average.to_dict() if average else None,
+        "history_count": len(_resource_tracker.history),
+        "psutil_available": True
+    }
+
+# =============================================================================
 # ЭКСПОРТ И СОВМЕСТИМОСТЬ
 # =============================================================================
 
@@ -372,5 +574,13 @@ __all__ = [
     'AppMonitoring',
     'app_monitoring',
     'SystemMetrics',
-    'TradingMetrics'
+    'TradingMetrics',
+    'PerformanceMonitor',
+    'ResourceTracker',
+    'get_system_metrics',
+    'log_system_state',
+    'monitor_performance',
+    'check_system_health',
+    'start_background_monitoring',
+    'get_resource_summary'
 ]
