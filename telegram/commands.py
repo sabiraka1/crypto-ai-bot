@@ -19,7 +19,7 @@ CFG = TradingConfig()
 
 SYMBOL_ENV = CFG.SYMBOL
 TIMEFRAME_ENV = CFG.TIMEFRAME
-TRADE_AMOUNT = CFG.TEST_TRADE_AMOUNT
+TRADE_AMOUNT = CFG.TRADE_AMOUNT
 
 # ==== Anti-spam settings ====
 _last_command_time = {}
@@ -436,9 +436,9 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
     """Команда /testbuy"""
     symbol = SYMBOL_ENV
     try:
-        amount = float(amount_usd if amount_usd is not None else TEST_TRADE_AMOUNT)
+        amount = float(amount_usd if amount_usd is not None else TRADE_AMOUNT)
     except (ValueError, TypeError):
-        amount = TEST_TRADE_AMOUNT
+        amount = TRADE_AMOUNT
 
     try:
         st = state_manager.state
