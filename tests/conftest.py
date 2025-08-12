@@ -1,3 +1,36 @@
+# --- psutil stub for tests (put at very top of tests/conftest.py) ---
+import sys, types, time
+
+if "psutil" not in sys.modules:
+    # Создаём лёгкую заглушку, которую используют utils/monitoring.py
+    _vmem = types.SimpleNamespace(
+        percent=42.0,
+        total=16 * 1024**3,
+        available=8 * 1024**3,
+    )
+    _disk = types.SimpleNamespace(
+        total=1_000_000_000,
+        used=200_000_000,
+        free=800_000_000,
+        percent=20.0,
+    )
+    _pinfo = types.SimpleNamespace(rss=100 * 1024**2)
+    _proc = types.SimpleNamespace(memory_info=lambda: _pinfo)
+
+    psutil_stub = types.SimpleNamespace(
+        cpu_percent=lambda interval=None: 12.3,
+        cpu_count=lambda logical=True: 8,
+        virtual_memory=lambda: _vmem,
+        disk_usage=lambda path="/": _disk,
+        boot_time=lambda: time.time() - 3600,
+        sensors_temperatures=lambda: {},
+        sensors_battery=lambda: types.SimpleNamespace(percent=77.0, power_plugged=True),
+        Process=lambda pid=None: _proc,
+        getloadavg=lambda: (0.1, 0.1, 0.1),  # на случай, если вызывается
+    )
+    sys.modules["psutil"] = psutil_stub
+# --- end psutil stub ---
+
 # conftest.py - РЕКОМЕНДУЕМЫЙ
 """Настройки тестов для торгового бота."""
 
