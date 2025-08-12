@@ -327,17 +327,20 @@ class StateManager:
         with self._lock:
             return dict(self.state)
 
-    def import_state(self, new_state: Dict[str, Any]) -> None:
-        """Импорт состояния (осторожно!)"""
+    def import_state(self, new_state: Dict[str, Any]) -> bool:
+        """Импорт состояния (осторожно!)
+
+        Возвращает True при успешном импорте, иначе False.
+
+        :raises ValueError: если ``new_state`` не является словарём.
+        """
         with self._lock:
-            # Проверяем что это валидный словарь
-            if isinstance(new_state, dict):
-                # мягкая валидация ключей, чтобы ловить опечатки
-                defaults = self._default_state()
-                unknown = set(new_state.keys()) - set(defaults.keys())
-                if unknown:
-                    import logging
-                    logging.warning("import_state: unknown keys: %s", sorted(unknown))
+            if not isinstance(new_state, dict):
+                raise ValueError("new_state must be a dict")
+            try:
                 self.state = dict(new_state)
                 self._ensure_defaults()
                 self._atomic_write(self.state)
+                return True
+            except Exception:
+                return False

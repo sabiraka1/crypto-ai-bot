@@ -77,84 +77,67 @@ class ExchangeCacheCompat:
         key_str = f"{prefix}:" + ":".join(str(arg) for arg in args)
         return hashlib.md5(key_str.encode()).hexdigest()[:16]
     
-    def get(self, key: str, ttl: int):
+    def get(self, key: str, ttl: int, namespace: 'CacheNamespace | None' = None):
         """
         ✅ UNIFIED CACHE INTEGRATION: Получить из кэша
         
-        Маппинг TTL → Namespace:
-        - ttl == price_ttl → PRICES
-        - ttl == ohlcv_ttl → OHLCV  
-        - ttl == market_ttl → MARKET_INFO
+        Namespace передаётся явно или определяется по префиксу ключа.
+        TTL используется только как параметр времени жизни (если поддерживается
+        бекендом), но **не** влияет на выбор namespace.
         """
         if not self._unified_cache:
             self._misses += 1
             return None
         
         try:
-            # ✅ Определяем namespace по TTL (для обратной совместимости)
-            namespace = self._ttl_to_namespace(ttl)
+            # ✅ Определяем namespace: явный параметр, иначе — по префиксу ключа
+            ns = namespace or self._key_to_namespace(key)
             
             # ✅ Запрашиваем из unified cache
-            result = self._unified_cache.get(key, namespace)
+            result = self._unified_cache.get(key, ns)
             
             if result is not None:
                 self._hits += 1
-                logging.debug(f"🏦 Cache HIT (unified): {key[:8]}... → {namespace.value}")
+                logging.debug(f"🏦 Cache HIT (unified): {key[:8]}... → {ns.value}")
                 return result
             else:
                 self._misses += 1
-                logging.debug(f"🏦 Cache MISS (unified): {key[:8]}... → {namespace.value}")
+                logging.debug(f"🏦 Cache MISS (unified): {key[:8]}... → {ns.value}")
                 return None
                 
         except Exception as e:
             logging.error(f"Unified cache GET failed: {e}")
             self._misses += 1
             return None
-    
-    def set(self, key: str, data):
+
+    def set(self, key: str, data, namespace: 'CacheNamespace | None' = None):
         """
         ✅ UNIFIED CACHE INTEGRATION: Сохранить в кэш
         
-        Автоматически определяет namespace по префиксу ключа:
-        - price: → PRICES
-        - ohlcv: → OHLCV
-        - market: → MARKET_INFO
+        Namespace можно передать явно, либо он будет определён по префиксу ключа.
         """
         if not self._unified_cache:
             return
         
         try:
-            # ✅ Определяем namespace по префиксу ключа
-            namespace = self._key_to_namespace(key)
+            # ✅ Определяем namespace по параметру / префиксу ключа
+            ns = namespace or self._key_to_namespace(key)
             
-            # ✅ Сохраняем в unified cache (TTL берется из конфигурации namespace)
+            # ✅ Сохраняем в unified cache
             success = self._unified_cache.set(
-                key, 
-                data, 
-                namespace,
+                key,
+                data,
+                ns,
                 metadata={"source": "exchange_client", "timestamp": time.time()}
             )
             
             if success:
-                logging.debug(f"🏦 Cache SET (unified): {key[:8]}... → {namespace.value}")
+                logging.debug(f"🏦 Cache SET (unified): {key[:8]}... → {ns.value}")
             else:
                 logging.warning(f"🏦 Cache SET failed (unified): {key[:8]}...")
                 
         except Exception as e:
             logging.error(f"Unified cache SET failed: {e}")
-    
-    def _ttl_to_namespace(self, ttl: int) -> CacheNamespace:
-        """Маппинг TTL → Namespace для обратной совместимости"""
-        if ttl == self.price_ttl:
-            return CacheNamespace.PRICES
-        elif ttl == self.ohlcv_ttl:
-            return CacheNamespace.OHLCV
-        elif ttl == self.market_ttl:
-            return CacheNamespace.MARKET_INFO
-        else:
-            # Fallback для неизвестных TTL
-            return CacheNamespace.MARKET_INFO
-    
     def _key_to_namespace(self, key: str) -> CacheNamespace:
         """Определение namespace по префиксу ключа"""
         key_lower = key.lower()
@@ -369,7 +352,7 @@ class ExchangeClient:
         cache_key = self.cache._create_key("ohlcv", symbol, timeframe, limit)
         
         # ✅ Проверяем unified cache (namespace OHLCV)
-        cached_ohlcv = self.cache.get(cache_key, self.cache.ohlcv_ttl)
+        cached_ohlcv = self.cache.get(cache_key, self.cache.ohlcv_ttl, namespace=CacheNamespace.OHLCV)
         if cached_ohlcv is not None:
             logging.debug(f"📈 OHLCV {symbol} {timeframe} from UNIFIED cache")
             return cached_ohlcv
@@ -384,7 +367,7 @@ class ExchangeClient:
                 raise APIException(f"No OHLCV data received for {symbol}")
 
             # ✅ Сохраняем в unified cache (namespace OHLCV)
-            self.cache.set(cache_key, ohlcv)
+            self.cache.set(cache_key, ohlcv, namespace=CacheNamespace.OHLCV)
             
             logging.debug(f"📈 Fetched {len(ohlcv)} candles for {symbol} {timeframe} (from exchange, cached in UNIFIED)")
             return ohlcv
@@ -399,7 +382,7 @@ class ExchangeClient:
         cache_key = self.cache._create_key("price", symbol)
         
         # ✅ Проверяем unified cache (namespace PRICES)
-        cached_price = self.cache.get(cache_key, self.cache.price_ttl)
+        cached_price = self.cache.get(cache_key, self.cache.price_ttl, namespace=CacheNamespace.PRICES)
         if cached_price is not None:
             logging.debug(f"💰 Price {symbol} from UNIFIED cache: {cached_price:.6f}")
             return float(cached_price)
@@ -416,7 +399,7 @@ class ExchangeClient:
                 raise APIException(f"Invalid price received: {price}")
 
             # ✅ Сохраняем в unified cache (namespace PRICES)
-            self.cache.set(cache_key, price)
+            self.cache.set(cache_key, price, namespace=CacheNamespace.PRICES)
             
             logging.debug(f"💰 Last price {symbol}: {price:.6f} (from exchange, cached in UNIFIED)")
             return price
@@ -695,7 +678,7 @@ class ExchangeClient:
         cache_key = self.cache._create_key("market", symbol)
         
         # ✅ Проверяем unified cache (namespace MARKET_INFO)
-        cached_info = self.cache.get(cache_key, self.cache.market_ttl)
+        cached_info = self.cache.get(cache_key, self.cache.market_ttl, namespace=CacheNamespace.MARKET_INFO)
         if cached_info is not None:
             logging.debug(f"📊 Market info {symbol} from UNIFIED cache")
             return cached_info
@@ -720,7 +703,7 @@ class ExchangeClient:
                     raise APIException(f"Market {symbol} not found")
             
             # ✅ Сохраняем в unified cache (namespace MARKET_INFO)
-            self.cache.set(cache_key, market_info)
+            self.cache.set(cache_key, market_info, namespace=CacheNamespace.MARKET_INFO)
             logging.debug(f"📊 Market info {symbol} fetched and cached in UNIFIED")
             
             return market_info
@@ -737,7 +720,7 @@ class ExchangeClient:
             }
             
             # ✅ Кэшируем дефолт в unified cache
-            self.cache.set(cache_key, default_info)
+            self.cache.set(cache_key, default_info, namespace=CacheNamespace.MARKET_INFO)
             return default_info
 
     # ==================== ✅ ЭТАП 4: UNIFIED CACHE MANAGEMENT ====================
@@ -854,7 +837,7 @@ class ExchangeClient:
             # Очистка тестовых данных
             cache_manager = get_cache_manager()
             for namespace in [CacheNamespace.PRICES, CacheNamespace.OHLCV, CacheNamespace.MARKET_INFO]:
-                cache_manager.delete(f"test_{namespace.value}", namespace)
+                cache_manager.delete(f"test_{ns.value}", namespace)
             
             return {
                 "test_passed": all_tests_passed,
