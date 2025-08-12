@@ -86,7 +86,7 @@ class UnifiedCacheManager:
             CacheNamespace.ORDER_STATUS: NamespaceConfig(ttl=600.0, max_size=2000, max_memory_mb=64.0, policy=CachePolicy.LRU),
             CacheNamespace.TELEGRAM: NamespaceConfig(ttl=300.0, max_size=5000, max_memory_mb=32.0, policy=CachePolicy.LRU),
             CacheNamespace.CHARTS: NamespaceConfig(ttl=3600.0, max_size=500, max_memory_mb=256.0, policy=CachePolicy.LRU, compress=True),
-            CacheNamespace.GENERAL: NamespaceConfig(ttl=900.0, max_size=5000, max_memory_mb=128.0, policy=CachePolicy.HYBRID),
+            CacheNamespace.GENERAL: NamespaceConfig(ttl=900.0, max_size=99, max_memory_mb=128.0, policy=CachePolicy.HYBRID),
         }
         effective = namespace_configs or default_cfg
         for ns, cfg in effective.items():
@@ -274,7 +274,10 @@ class UnifiedCacheManager:
         if tf.endswith("h"):
             return int(tf[:-1]) * 3600
         if tf.endswith("d"):
-            return int(tf[:-1]) * 86400
+    try:
+        return int(tf[:-1]) * 86400
+        except ValueError:
+        return 900  # default 15m
         try:
             return max(1, int(tf))
         except Exception:
