@@ -69,7 +69,6 @@ class TradingConfig:
     TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
     ANALYSIS_INTERVAL: int = getenv_int("ANALYSIS_INTERVAL", 15)
     POSITION_SIZE_USD: float = getenv_float("TRADE_AMOUNT", 3.0)
-    TEST_TRADE_AMOUNT: float = getenv_float("TEST_TRADE_AMOUNT", 3.0)
 
     # ==== ✅ НОВОЕ: UNIFIED ATR СИСТЕМА ====
     # Период для всех ATR расчетов в проекте
