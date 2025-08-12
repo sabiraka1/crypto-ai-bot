@@ -32,7 +32,7 @@ if "psutil" not in sys.modules:
     sys.modules["psutil"] = psutil_stub
 # --- end psutil stub ---
 
-\"\"\"Настройки тестов для торгового бота.\"\"\"
+"""Настройки тестов для торгового бота."""
 
 import pytest
 import sys
