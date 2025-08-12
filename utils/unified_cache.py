@@ -276,11 +276,20 @@ class UnifiedCacheManager:
             return max(1, int(tf))
         except Exception:
             return 900  # 15m по умолчанию
-    @staticmethod
-    def ttl_until_next_slot(seconds: int, drift_sec: int = 10) -> int:
+
+    @classmethod
+    def ttl_until_next_slot(cls, tf_or_seconds: int | str, drift_sec: int = 10) -> int:
+        """
+        Универсальная обёртка:
+        - если передана строка таймфрейма (например, '1m', '1h') — проксирует в ttl_until_next_candle
+        - если передано число секунд — ведёт себя как прежняя реализация
+        """
+        if isinstance(tf_or_seconds, str):
+            return cls.ttl_until_next_candle(tf_or_seconds, drift_sec=drift_sec)
+        seconds = max(1, int(tf_or_seconds))
         now = int(time.time())
         rem = seconds - (now % seconds)
-        return max(1, rem + int(drift_sec))    
+        return max(1, rem + int(drift_sec))
 
     @classmethod
     def ttl_until_next_candle(cls, tf: str, drift_sec: int = 10) -> int:
