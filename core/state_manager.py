@@ -40,7 +40,7 @@ class StateManager:
         try:
             if not os.path.exists(src_path):
                 return None
-            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             bak_path = f"{src_path}.bak.{ts}"
             shutil.copy2(src_path, bak_path)
             return bak_path
@@ -119,6 +119,7 @@ class StateManager:
             "last_reason": None,
             # цикл/свечи
             "last_candle_ts": None,
+            "updated_at": None,
             # управление позицией
             "last_manage_check": None,
             "entry_ts": None,
@@ -216,7 +217,7 @@ class StateManager:
                 cooldown_time = datetime.fromisoformat(ts)
             except Exception:
                 return False
-            return datetime.now() < cooldown_time
+            return datetime.now(timezone.utc) < cooldown_time
 
     def start_cooldown(self, seconds: Optional[int] = None) -> None:
         """
