@@ -261,27 +261,21 @@ class UnifiedCacheManager:
 
     # ── TTL-хелперы (для свечей) ───────────────────────────────────────────
     @staticmethod
-    def ttl_until_next_slot(seconds: int, drift_sec: int = 10) -> int:
-        now = int(time.time())
-        rem = seconds - (now % seconds)
-        return max(1, rem + int(drift_sec))
-
-    @staticmethod
-    def parse_tf_to_seconds(tf: str) -> int:
-        tf = (tf or "").strip().lower()
-        if tf.endswith("m"):
-            return max(60, int(tf[:-1]) * 60)
-        if tf.endswith("h"):
-            return int(tf[:-1]) * 3600
-        if tf.endswith("d"):
-    try:
-        return int(tf[:-1]) * 86400
-        except ValueError:
-        return 900  # default 15m
+def parse_tf_to_seconds(tf: str) -> int:
+    tf = (tf or "").strip().lower()
+    if tf.endswith("m"):
+        return max(60, int(tf[:-1]) * 60)
+    if tf.endswith("h"):
+        return int(tf[:-1]) * 3600
+    if tf.endswith("d"):
         try:
-            return max(1, int(tf))
-        except Exception:
-            return 900  # 15m по умолчанию
+            return int(tf[:-1]) * 86400
+        except ValueError:
+            return 900  # default 15m
+    try:
+        return max(1, int(tf))
+    except Exception:
+        return 900  # 15m по умолчанию
 
     @classmethod
     def ttl_until_next_candle(cls, tf: str, drift_sec: int = 10) -> int:
