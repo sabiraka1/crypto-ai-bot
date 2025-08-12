@@ -47,7 +47,7 @@ if str(ROOT) not in sys.path:
 
 @pytest.fixture
 def sample_ohlcv():
-    \"\"\"Мини-набор OHLCV для быстрых тестов\"\"\"
+    """Мини-набор OHLCV для быстрых тестов"""
     return pd.DataFrame({
         'open': [50000, 50100, 50200, 50150, 50300],
         'high': [50200, 50300, 50400, 50350, 50500],
@@ -58,7 +58,7 @@ def sample_ohlcv():
 
 @pytest.fixture
 def mock_exchange():
-    \"\"\"Мок биржи для безопасного тестирования\"\"\"
+    """Мок биржи для безопасного тестирования"""
     exchange = Mock()
     exchange.get_last_price.return_value = 50000.0
     exchange.fetch_ohlcv.return_value = [
@@ -77,7 +77,7 @@ def mock_exchange():
 
 @pytest.fixture
 def mock_state():
-    \"\"\"Простой мок StateManager\"\"\"
+    """Простой мок StateManager"""
     state = Mock()
     state.get.return_value = False
     state.is_position_active.return_value = False
