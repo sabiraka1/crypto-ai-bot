@@ -1,8 +1,9 @@
 # --- psutil stub for tests (put at very top of tests/conftest.py) ---
+# Делает тесты стабильными на CI/Windows без настоящего psutil
 import sys, types, time
 
 if "psutil" not in sys.modules:
-    # Создаём лёгкую заглушку, которую используют utils/monitoring.py
+    # Лёгкая заглушка, которую используют utils/monitoring.py
     _vmem = types.SimpleNamespace(
         percent=42.0,
         total=16 * 1024**3,
@@ -31,8 +32,7 @@ if "psutil" not in sys.modules:
     sys.modules["psutil"] = psutil_stub
 # --- end psutil stub ---
 
-# conftest.py - РЕКОМЕНДУЕМЫЙ
-"""Настройки тестов для торгового бота."""
+\"\"\"Настройки тестов для торгового бота.\"\"\"
 
 import pytest
 import sys
@@ -40,14 +40,14 @@ from pathlib import Path
 from unittest.mock import Mock
 import pandas as pd
 
-# Путь к проекту
+# Путь к корню проекта чтобы импорты работали одинаково локально и в CI
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 @pytest.fixture
 def sample_ohlcv():
-    """Реальные OHLCV данные для тестов"""
+    \"\"\"Мини-набор OHLCV для быстрых тестов\"\"\"
     return pd.DataFrame({
         'open': [50000, 50100, 50200, 50150, 50300],
         'high': [50200, 50300, 50400, 50350, 50500],
@@ -58,7 +58,7 @@ def sample_ohlcv():
 
 @pytest.fixture
 def mock_exchange():
-    """Мок биржи для безопасного тестирования"""
+    \"\"\"Мок биржи для безопасного тестирования\"\"\"
     exchange = Mock()
     exchange.get_last_price.return_value = 50000.0
     exchange.fetch_ohlcv.return_value = [
@@ -68,13 +68,18 @@ def mock_exchange():
     exchange.create_market_buy_order.return_value = {
         'id': 'test_123', 'status': 'closed'
     }
+    exchange.create_market_sell_order.return_value = {
+        'id': 'sell_123', 'status': 'closed'
+    }
     exchange.market_min_cost.return_value = 5.0
+    exchange.round_amount.side_effect = lambda symbol, amt: round(float(amt), 8)
     return exchange
 
 @pytest.fixture
 def mock_state():
-    """Мок StateManager"""
+    \"\"\"Простой мок StateManager\"\"\"
     state = Mock()
     state.get.return_value = False
     state.is_position_active.return_value = False
+    state.set.side_effect = lambda *args, **kwargs: None
     return state
