@@ -215,6 +215,8 @@ class StateManager:
                 return False
             try:
                 cooldown_time = datetime.fromisoformat(ts)
+                if cooldown_time.tzinfo is None:
+                    cooldown_time = cooldown_time.replace(tzinfo=timezone.utc)
             except Exception:
                 return False
             return datetime.now(timezone.utc) < cooldown_time
