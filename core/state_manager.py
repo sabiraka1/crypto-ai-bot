@@ -146,6 +146,7 @@ class StateManager:
             "last_candle_ts",
             "updated_at",
             "last_signal_ts",
+            "last_manage_check",
         }
         # Возвращаем только те ключи, которые существуют в defaults и не являются служебными
         return {k for k in defaults.keys() if k not in non_position}
