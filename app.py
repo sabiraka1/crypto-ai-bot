@@ -15,7 +15,8 @@ from datetime import datetime
 from main import TradingBot
 from trading.exchange_client import ExchangeClient
 from core.state_manager import StateManager
-from telegram import bot_handler as tgbot
+from telegram import commands as tg_commands
+from telegram.api_utils import send_message
 from config.settings import TradingConfig
 
 # ================== ЛОГИ ==================
@@ -451,7 +452,7 @@ def _train_model_safe() -> bool:
 def _send_message(text: str) -> None:
     """Отправка сообщения в Telegram"""
     try:
-        tgbot.send_message(text)
+        send_message(text)
     except Exception:
         logging.exception("Failed to send Telegram message")
 
@@ -486,7 +487,7 @@ def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
     # Проверка авторизации
     if chat_id and not CFG.is_admin(chat_id):
         logger.warning("Unauthorized access denied for chat_id=%s", chat_id)
-        tgbot.send_message("❌ У вас нет прав для выполнения команд.", chat_id=chat_id)
+        send_message("❌ У вас нет прав для выполнения команд.", chat_id=chat_id)
         return
 
     text = (text or "").strip()
@@ -503,10 +504,10 @@ def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
             state_manager = _TRADING_BOT.state
             exchange_client = _TRADING_BOT.exchange
 
-        # ✅ Используем централизованную обработку команд из bot_handler
-        tgbot.process_command(
-            text=text, 
-            state_manager=state_manager, 
+        # ✅ Используем централизованную обработку команд
+        tg_commands.process_command(
+            text=text,
+            state_manager=state_manager,
             exchange_client=exchange_client, 
             train_func=_train_model_safe,
             chat_id=chat_id
@@ -515,7 +516,7 @@ def _dispatch(text: str, chat_id: Optional[str] = None) -> None:
         logging.exception("Dispatch error")
         # Уведомляем пользователя об ошибке
         if chat_id:
-            tgbot.send_message(f"⚠️ Ошибка обработки команды: {text}", chat_id=chat_id)
+            send_message(f"⚠️ Ошибка обработки команды: {text}", chat_id=chat_id)
 
 # ================== WEBHOOK ==================
 if CFG.ENABLE_WEBHOOK and CFG.WEBHOOK_SECRET:

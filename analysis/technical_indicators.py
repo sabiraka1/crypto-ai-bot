@@ -34,7 +34,7 @@ def get_unified_atr(df: pd.DataFrame, period: int = 14, method: str = 'ewm') -> 
     
     Заменяет все дублирующиеся ATR функции в:
     - main.py → atr()
-    - telegram/bot_handler.py → _atr()
+    - telegram/commands.py → _atr()
     - risk_manager.py → _calculate_atr()
     - ml/adaptive_model.py → встроенная ATR
     - analysis/market_analyzer.py → встроенная ATR
@@ -139,7 +139,7 @@ def atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
 
 def _atr_for_telegram(df: pd.DataFrame, period: int = 14) -> float:
     """
-    ✅ TELEGRAM COMPATIBILITY - Заменяет _atr() в bot_handler.py
+    ✅ TELEGRAM COMPATIBILITY - Заменяет _atr() в telegram/commands.py
     
     Возвращает float (не Optional) для совместимости с Telegram командами
     """
@@ -672,7 +672,7 @@ __all__ = [
     # ✅ НОВЫЕ UNIFIED ФУНКЦИИ
     'get_unified_atr',           # Главная unified функция
     'atr',                       # Алиас для main.py
-    '_atr_for_telegram',         # Алиас для bot_handler.py  
+    '_atr_for_telegram',         # Алиас для telegram/commands.py  
     '_atr_for_risk_manager',     # Алиас для risk_manager.py
     '_atr_series_for_ml',        # Для ML модели
     

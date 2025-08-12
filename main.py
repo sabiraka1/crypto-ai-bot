@@ -13,7 +13,7 @@ import numpy as np
 from core.state_manager import StateManager
 from trading.exchange_client import ExchangeClient, APIException
 from analysis.scoring_engine import ScoringEngine
-from telegram import bot_handler as tgbot
+from telegram.api_utils import send_message
 from utils.csv_handler import CSVHandler
 from config.settings import TradingConfig
 from analysis.technical_indicators import calculate_all_indicators
@@ -110,7 +110,7 @@ def _notify_entry_tg(symbol: str, entry_price: float, amount_usd: float,
         lines.append(" | ".join(extra))
 
     try:
-        tgbot.send_message("\n".join(lines))
+        send_message("\n".join(lines))
     except Exception:
         logging.exception("notify_entry send failed")
 
@@ -131,7 +131,7 @@ def _notify_close_tg(symbol: str, price: float, reason: str,
     if extra:
         parts[-1] += f" ({' | '.join(extra)})"
     try:
-        tgbot.send_message("\n".join(parts))
+        send_message("\n".join(parts))
     except Exception:
         logging.exception("notify_close send failed")
 
@@ -465,7 +465,7 @@ class TradingBot:
                         logging.info(f"❎ Filtered by Buy Score (score={buy_score:.2f} < {float(min_thr):.2f})")
                         # ── информативное уведомление об отказе по порогу
                         try:
-                            tgbot.send_message(
+                            send_message(
                                 "❎ Сигнал ниже порога\n"
                                 f"Score: {buy_score:.2f} (мин {float(min_thr):.2f})\n"
                                 f"AI: {ai_score:.2f}\n"
@@ -502,7 +502,7 @@ class TradingBot:
                             if macd is not None:
                                 msg.append(f"MACD: {float(macd):.4f}")
 
-                            tgbot.send_message("\n".join(msg))
+                            send_message("\n".join(msg))
                         except Exception:
                             logging.exception("ai_gate notify failed")
 
@@ -528,7 +528,7 @@ class TradingBot:
                         msg = f"⛔ AI Score {ai_score:.2f} -> position 0%. Вход пропущен."
                         logging.info(msg)
                         try:
-                            tgbot.send_message(msg)
+                            send_message(msg)
                         except Exception:
                             pass
                         self._last_decision_candle = current_candle_id
@@ -569,13 +569,13 @@ class TradingBot:
                     except APIException as e:
                         logging.warning(f"💤 Биржа отклонила вход: {e}")
                         try:
-                            tgbot.send_message(f"💤 Вход отклонён биржей: {e}")
+                            send_message(f"💤 Вход отклонён биржей: {e}")
                         except Exception:
                             pass
                     except Exception as e:
                         logging.exception("Error while opening long")
                         try:
-                            tgbot.send_message("❌ Ошибка при открытии позиции (см. логи)")
+                            send_message("❌ Ошибка при открытии позиции (см. логи)")
                         except Exception:
                             pass
                 finally:

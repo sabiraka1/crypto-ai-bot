@@ -300,7 +300,7 @@ class SmartWatchdog:
             
             # Отправляем уведомление
             try:
-                from telegram.bot_handler import send_message
+                from telegram.api_utils import send_message
                 send_message("🔄 Watchdog restarting trading bot due to failures")
             except Exception:
                 pass
@@ -361,7 +361,7 @@ def monitor_resources():
 def send_telegram_alert(message):
     """Legacy функция отправки алертов"""
     try:
-        from telegram.bot_handler import send_message
+        from telegram.api_utils import send_message
         send_message(f"🚨 {message}")
     except Exception as e:
         logging.error(f"Alert send failed: {e}")
