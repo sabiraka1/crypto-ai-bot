@@ -313,7 +313,8 @@ class TestStateManager:
             # Если дошли сюда, значит ошибка была обработана
         except Exception as e:
             # Или проверяем что это ожидаемая ошибка
-            assert "Permission denied" in str(e) or "Read-only" in str(e)
+            assert ("Permission denied" in str(e) or "Read-only" in str(e) or 
+                    "Erişim engellendi" in str(e) or "WinError 5" in str(e))
         finally:
             # Восстанавливаем права для cleanup
             os.chmod(state_file, 0o644)
