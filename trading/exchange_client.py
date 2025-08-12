@@ -78,20 +78,28 @@ class ExchangeCacheCompat:
         return hashlib.md5(key_str.encode()).hexdigest()[:16]
     
     def get(self, key: str, ttl: int, namespace: 'CacheNamespace | None' = None):
-        """
-        ✅ UNIFIED CACHE INTEGRATION: Получить из кэша
-        
-        Namespace передаётся явно или определяется по префиксу ключа.
-        TTL используется только как параметр времени жизни (если поддерживается
-        бекендом), но **не** влияет на выбор namespace.
-        """
-        if not self._unified_cache:
-            self._misses += 1
-            return None
-        
-        try:
-            # ✅ Определяем namespace: явный параметр, иначе — по префиксу ключа
-            ns = namespace or self._key_to_namespace(key)
+    """
+    ✅ UNIFIED CACHE INTEGRATION: Получить из кэша
+    
+    Namespace передаётся явно или определяется по TTL.
+    """
+    if not self._unified_cache:
+        self._misses += 1
+        return None
+    
+    try:
+        # ✅ Определяем namespace: явный параметр, иначе — по TTL
+        ns = namespace or self._ttl_to_namespace(ttl)
+        def _ttl_to_namespace(self, ttl: int) -> CacheNamespace:
+    """Определение namespace по TTL (для обратной совместимости)"""
+    if ttl == self.price_ttl:  # 10
+        return CacheNamespace.PRICES
+    elif ttl == self.ohlcv_ttl:  # 60
+        return CacheNamespace.OHLCV
+    elif ttl == self.market_ttl:  # 3600
+        return CacheNamespace.MARKET_INFO
+    else:
+        return CacheNamespace.MARKET_INFO  # fallback
             
             # ✅ Запрашиваем из unified cache
             result = self._unified_cache.get(key, ns)
