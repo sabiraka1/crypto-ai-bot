@@ -1,27 +1,76 @@
-name: CI
+name: Tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
 
 jobs:
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'  # Стабильная и быстрая
+        python-version: '3.12'
         
-    - name: Install dependencies
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+        
+    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest pytest-cov pytest-mock
+        pip install pytest pytest-cov pytest-mock pytest-asyncio
+        
+    - name: Install TA-Lib (with fallback)
+      run: |
+        pip install TA-Lib || echo "TA-Lib installation failed, continuing without it"
+        
+    - name: Verify critical imports
+      run: |
+        python -c "
+        try:
+            import pandas, numpy, ccxt, matplotlib
+            print('✅ Critical dependencies imported successfully')
+        except ImportError as e:
+            print(f'❌ Import error: {e}')
+            exit(1)
+        "
         
     - name: Run tests
-      run: pytest tests/ -v --cov=.
+      run: |
+        pytest tests/ -v --cov=. --cov-report=term --cov-report=xml --tb=short
+        
+    - name: Upload coverage
+      if: success()
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        fail_ci_if_error: false
+        
+    - name: Archive test results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results
+        path: |
+          coverage.xml
+          htmlcov/
