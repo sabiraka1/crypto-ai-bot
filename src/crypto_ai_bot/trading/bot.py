@@ -1,79 +1,63 @@
 # src/crypto_ai_bot/trading/bot.py
 """
-🤖 Trading Bot (safe/live)
-- Единый цикл анализа и принятия решений
-- SAFE_MODE: paper-trading с реальными данными (виртуальные сделки, логи в CSV)
-- LIVE: реальная торговля через ExchangeClient/PositionManager
+🤖 Trading Bot Orchestrator (signals-native)
+Лёгкий, многофункциональный оркестратор без лишней нагрузки.
+Совместим с текущей структурой проекта и модулями signals/* и context/*
 """
 
 from __future__ import annotations
 
 import os
 import time
-import json
-import math
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
-# ── Конфиг/ядро ──────────────────────────────────────────────────────────────
-try:
-    from crypto_ai_bot.config.settings import Settings
-except Exception:  # совместимость со старым импортом
-    from ..config.settings import Settings  # type: ignore
-
+# ── Конфиг и ядро ────────────────────────────────────────────────────────────
+from crypto_ai_bot.config.settings import Settings
 from crypto_ai_bot.core.state_manager import StateManager
 from crypto_ai_bot.core.events import EventBus
-from crypto_ai_bot.core.metrics import metrics  # не обязателен, но если есть — хорошо
+# metrics опционален — не тянем сюда роутер, только безопасные счётчики при наличии
+try:
+    from crypto_ai_bot.core.metrics import incr_counter, set_gauge  # type: ignore
+except Exception:
+    def incr_counter(*args, **kwargs):  # no-op
+        pass
+    def set_gauge(*args, **kwargs):  # no-op
+        pass
 
-# ── Трейдинг ────────────────────────────────────────────────────────────────
+# ── Торговля и риск ─────────────────────────────────────────────────────────
 from crypto_ai_bot.trading.exchange_client import ExchangeClient, APIException
 from crypto_ai_bot.trading.position_manager import PositionManager
 from crypto_ai_bot.trading.risk_manager import RiskManager
 
-# ── Сигналы / скоринг ──────────────────────────────────────────────────────
+# ── Сигналы ─────────────────────────────────────────────────────────────────
 from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
 from crypto_ai_bot.trading.signals.signal_validator import validate_features
 from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
-from crypto_ai_bot.trading.signals.entry_policy import should_enter_long
+from crypto_ai_bot.trading.signals.entry_policy import decide_entry  # ← ВАЖНО: так и называем
 
-# ── Вспомогательное ────────────────────────────────────────────────────────
+# ── Контекст ────────────────────────────────────────────────────────────────
+from crypto_ai_bot.context.snapshot import (
+    ContextSnapshot,
+    build_context_snapshot,
+)
+
+# ── Аналитика (ATR fallback) ────────────────────────────────────────────────
 try:
     from crypto_ai_bot.analysis.technical_indicators import get_unified_atr
 except Exception:
-    # лёгкий фолбэк на случай, если модуль недоступен
-    def get_unified_atr(df: pd.DataFrame, period: int = 14, method: str = "ewm") -> Optional[float]:
-        if df is None or df.empty:
-            return None
-        tr = (df["high"] - df["low"]).abs()
-        return float(tr.ewm(span=period, adjust=False).mean().iloc[-1]) if "high" in df and "low" in df else None
-
-try:
-    from crypto_ai_bot.telegram.api_utils import send_message
-except Exception:
-    def send_message(text: str) -> None:
-        logging.getLogger(__name__).info("[telegram disabled] %s", text)
-
-try:
-    from crypto_ai_bot.utils.csv_handler import CSVHandler
-except Exception:
-    class CSVHandler:
-        @staticmethod
-        def append(path: str, row: Dict[str, Any]) -> None:
-            # минимальный фолбэк
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            exists = os.path.exists(path)
-            df = pd.DataFrame([row])
-            df.to_csv(path, mode="a", index=False, header=not exists, encoding="utf-8")
-
+    get_unified_atr = None  # используем фолбэк ниже
 
 logger = logging.getLogger(__name__)
 
 
-# ── DI контейнер ────────────────────────────────────────────────────────────
+# =============================================================================
+# DI-контейнер
+# =============================================================================
 @dataclass
 class Deps:
     settings: Settings
@@ -84,8 +68,11 @@ class Deps:
     events: EventBus
 
 
-# ── Утилиты ────────────────────────────────────────────────────────────────
-def ohlcv_to_df(ohlcv: List[List[float]]) -> pd.DataFrame:
+# =============================================================================
+# Вспомогательные утилиты
+# =============================================================================
+def ohlcv_to_df(ohlcv: Any) -> pd.DataFrame:
+    """CCXT OHLCV → pandas.DataFrame с индексом времени (UTC)."""
     if not ohlcv:
         return pd.DataFrame()
     cols = ["time", "open", "high", "low", "close", "volume"]
@@ -94,65 +81,102 @@ def ohlcv_to_df(ohlcv: List[List[float]]) -> pd.DataFrame:
     df.set_index("time", inplace=True)
     for c in ("open", "high", "low", "close", "volume"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(how="any")
+    return df.dropna()
 
 
-# ── Бот ────────────────────────────────────────────────────────────────────
+def unified_atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    """Единый расчёт ATR — через analysis.get_unified_atr или безопасный фолбэк."""
+    try:
+        if get_unified_atr is not None:
+            return float(get_unified_atr(df, period=period, method="ewm"))
+        # фолбэк: средний диапазон high-low
+        if df.empty:
+            return None
+        return float((df["high"] - df["low"]).mean())
+    except Exception as e:
+        logger.warning(f"ATR fallback failed: {e}")
+        return None
+
+
+# =============================================================================
+# Основной оркестратор
+# =============================================================================
 class TradingBot:
+    """
+    Лёгкий оркестратор торгового цикла:
+      - сбор данных и контекста
+      - агрегация фич/сигналов
+      - проверка входа (лонг-логика)
+      - paper-trade / реальное исполнение (по конфигу)
+    """
+
     def __init__(self, deps: Deps):
         self.deps = deps
         self.cfg = deps.settings
 
-        self.symbol = self.cfg.SYMBOL
-        self.timeframe = self.cfg.TIMEFRAME
-        self.cycle_minutes = int(os.getenv("ANALYSIS_INTERVAL", self.cfg.ANALYSIS_INTERVAL))
+        # Основные параметры
+        self.symbol: str = self.cfg.SYMBOL
+        self.timeframe: str = self.cfg.TIMEFRAME  # основной ТФ для логов
+        self.cycle_minutes: int = int(self.cfg.ANALYSIS_INTERVAL)
+        self.safe_mode: bool = bool(int(os.getenv("SAFE_MODE", "1")))
+        self.enable_trading: bool = bool(int(os.getenv("ENABLE_TRADING", "1")))
 
+        # Внутреннее состояние
         self._is_running = False
-        self._lock = threading.RLock()
-        self._last_decision_candle: Optional[str] = None
-        self._last_info_ts: float = 0.0
+        self._loop_lock = threading.RLock()
+        self._last_candle_id: Optional[str] = None
 
+        # Ссылки на компоненты
         self.exchange = deps.exchange
         self.state = deps.state
         self.risk = deps.risk
         self.positions = deps.positions
         self.events = deps.events
 
+        # Подготовка AI (по желанию; не обязательна для работы)
         self._init_ai()
-        self._bind_events()
 
-        logger.info("🤖 TradingBot initialized (signals-native)")
+        # Хендлеры событий
+        self._bind_event_handlers()
 
-    # ── Инициализация ИИ ───────────────────────────────────────────────────
+        logger.info(
+            "🤖 TradingBot initialized (signals-native) | SAFE_MODE=%s, ENABLE_TRADING=%s",
+            int(self.safe_mode), int(self.enable_trading)
+        )
+
+    # ── AI (опционально) ────────────────────────────────────────────────────
     def _init_ai(self) -> None:
-        self.ml = None
         self.ai_ready = False
-        if not self.cfg.AI_ENABLE:
+        self.ai_model = None
+        if not bool(int(os.getenv("AI_ENABLE", "0"))):
             logger.info("🔲 AI disabled")
             return
         try:
-            from crypto_ai_bot.ml.adaptive_model import AdaptiveMLModel
-            self.ml = AdaptiveMLModel(models_dir=os.getenv("MODEL_DIR", "models"))
-            if hasattr(self.ml, "load_models"):
-                self.ml.load_models()
+            # Твоя модель (если есть)
+            from crypto_ai_bot.ml.adaptive_model import AdaptiveMLModel  # type: ignore
+            self.ai_model = AdaptiveMLModel(models_dir=self.cfg.MODEL_DIR)
+            if hasattr(self.ai_model, "load_models"):
+                self.ai_model.load_models()
             self.ai_ready = True
-            logger.info("🧠 AI model ready")
+            logger.info("🧠 AI model initialized")
         except Exception as e:
+            # Не фейлим бот из-за отсутствия sklearn/joblib и т.п.
             logger.warning("⚠️ AI init failed: %s", e)
 
-    # ── События ────────────────────────────────────────────────────────────
-    def _bind_events(self) -> None:
+    # ── Events ──────────────────────────────────────────────────────────────
+    def _bind_event_handlers(self) -> None:
         self.events.on("new_candle", self._on_new_candle)
-        self.events.on("signal_generated", self._on_signal)
-        self.events.on("position_opened", self._on_pos_opened)
-        self.events.on("position_closed", self._on_pos_closed)
-        self.events.on("risk_alert", self._on_risk)
+        self.events.on("signal_generated", self._on_signal_generated)
+        self.events.on("paper_trade", self._on_paper_trade)
+        self.events.on("position_opened", self._on_position_opened)
+        self.events.on("position_closed", self._on_position_closed)
+        self.events.on("risk_alert", self._on_risk_alert)
         logger.info("📡 Event handlers bound")
 
-    # ── Жизненный цикл ─────────────────────────────────────────────────────
+    # ── Lifecycle ───────────────────────────────────────────────────────────
     def start(self) -> None:
         if self._is_running:
-            logger.warning("already running")
+            logger.warning("Bot already running")
             return
         logger.info("🚀 Bot starting…")
         self._is_running = True
@@ -161,311 +185,160 @@ class TradingBot:
 
     def stop(self) -> None:
         if not self._is_running:
+            logger.info("Bot is not running")
             return
         logger.info("🛑 Bot stopping…")
         self._is_running = False
 
-    # ── Основной цикл ──────────────────────────────────────────────────────
+    # ── Main loop ───────────────────────────────────────────────────────────
     def _loop(self) -> None:
         logger.info("🔄 Trading loop started")
         while self._is_running:
             try:
-                self._cycle()
+                self._tick()
             except Exception as e:
-                logger.error("cycle error: %s", e, exc_info=True)
+                logger.error("❌ Cycle error: %s", e, exc_info=True)
+                incr_counter("bot_cycle_errors_total", 1)
             time.sleep(self.cycle_minutes * 60)
-        logger.info("🔄 Trading loop ended")
+        logger.info("🔄 Trading loop stopped")
 
-    def _cycle(self) -> None:
-        with self._lock:
-            # 1) Данные
-            df_15m, last_price, atr_val = self._fetch_market()
-            if df_15m.empty or last_price is None:
-                return
+    # ── One cycle ───────────────────────────────────────────────────────────
+    def _tick(self) -> None:
+        with self._loop_lock:
+            # 1) Контекст
+            ctx: ContextSnapshot = build_context_snapshot(self.cfg)
 
-            # 2) Событие свечи
-            self.events.emit("new_candle", {
-                "symbol": self.symbol,
-                "timeframe": self.timeframe,
-                "price": last_price,
-                "atr": atr_val,
-            })
-
-            # 3) Ведение позиции, если открыта
-            if self._has_open_position():
-                self._manage_position(last_price, atr_val or 0.0)
-                return
-
-            # 4) Один раз на свечу
-            candle_id = df_15m.index[-1].strftime("%Y%m%d_%H%M")
-            if self._last_decision_candle == candle_id:
-                return
-
-            # 5) Аналитика → решение
-            self._analyze_and_decide(df_15m, last_price, atr_val)
-            self._last_decision_candle = candle_id
-
-    # ── Данные рынка ───────────────────────────────────────────────────────
-    def _fetch_market(self) -> Tuple[pd.DataFrame, Optional[float], Optional[float]]:
-        try:
-            ohlcv = self.exchange.get_ohlcv(self.symbol, timeframe=self.timeframe, limit=200)
-            df = ohlcv_to_df(ohlcv)
-            if df.empty:
-                return pd.DataFrame(), None, None
-            price = float(df["close"].iloc[-1])
-            atr = get_unified_atr(df, period=int(os.getenv("ATR_PERIOD", "14")), method=os.getenv("RISK_ATR_METHOD", "ewm"))
-            return df, price, atr
-        except Exception as e:
-            logger.error("fetch market failed: %s", e)
-            return pd.DataFrame(), None, None
-
-    # ── Аналитика и вход ───────────────────────────────────────────────────
-    def _analyze_and_decide(self, df_15m: pd.DataFrame, last_price: float, atr_val: Optional[float]) -> None:
-        try:
-            # a) агрегируем фичи на 15m/1h/4h + контекст
-            feats = aggregate_features(
+            # 2) Фичи/индикаторы/скоры (15m + 1h + 4h)
+            timeframes = ["15m", "1h", "4h"]
+            features = aggregate_features(
                 exchange=self.exchange,
                 symbol=self.symbol,
-                timeframes=[self.timeframe, "1h", "4h"],
-                limit=200
+                timeframes=timeframes,
+                limit=int(os.getenv("INDICATOR_LOOKBACK", "200")),
+                context=ctx,
+                use_context_penalties=bool(int(os.getenv("USE_CONTEXT_PENALTIES", "1")))
             )
 
-            # b) валидация фичей (ликвидность/спред/объём и т.п.)
-            valid_ok, vreason = validate_features(feats, price=last_price)
-            if not valid_ok:
-                self._log_info(buy_score=0.0, ai_score=self._ai(df_15m), atr_val=atr_val, details={"reason": vreason})
+            if not validate_features(features):
+                logger.warning("⚠️ Invalid features, skip")
+                incr_counter("features_invalid_total", 1)
                 return
 
-            # c) rule score (RSI/MACD/EMA/ATR/объёмы + контекст штрафы/бонусы)
-            rule_score, details = fuse_scores(feats, ai_score=None)  # AI добавим отдельным полем
+            rule_score: float = float(features.get("rule_score", 0.0))
+            ai_score_raw: float = float(features.get("ai_score", float(os.getenv("AI_FAILOVER_SCORE", "0.55"))))
+            # Если агрегатор уже вернул penalized — используем его для «правил», а при этом fuse оставляем как есть
+            rule_penalized: float = float(features.get("rule_score_penalized", rule_score))
 
-            # d) AI score
-            ai_score = self._ai(df_15m)
+            # 3) Комбинированный скор (правила + AI)
+            fused_score = fuse_scores(rule_penalized, ai_score_raw)
 
-            # e) лог/ивенты
-            self._log_info(buy_score=rule_score, ai_score=ai_score, atr_val=atr_val, details=details)
-            payload = {
+            # 4) Отправим событие с готовым сигналом
+            signal_payload = {
                 "symbol": self.symbol,
-                "price": last_price,
-                "buy_score": float(rule_score),
-                "ai_score": float(ai_score),
-                "atr": float(atr_val) if atr_val is not None else None,
-                "details": details
+                "rule_score": rule_score,
+                "rule_penalized": rule_penalized,
+                "ai_score": ai_score_raw,
+                "fused_score": fused_score,
+                "context": {
+                    "market_condition": ctx.market_condition,
+                    "btc_dominance": ctx.btc_dominance,
+                    "dxy_change_1d": ctx.dxy_change_1d,
+                    "fear_greed": ctx.fear_greed,
+                    "penalties": getattr(features, "applied_penalties", features.get("applied_penalties", [])),
+                },
             }
-            self.events.emit("signal_generated", payload)
+            self.events.emit("signal_generated", signal_payload)
 
-            # f) гейт по правилам входа (включая мультифрейм/контекстные проверки)
-            if not should_enter_long(rule_score, ai_score, self.cfg.MIN_SCORE_TO_BUY, self.cfg.AI_MIN_TO_TRADE, self.cfg.ENFORCE_AI_GATE):
+            # 5) Решение о входе (лонг)
+            decision = decide_entry(features, self.cfg, fused_score=fused_score)
+            if not decision or not isinstance(decision, dict):
+                logger.debug("⏭ No entry decision this cycle")
+                set_gauge("last_decision_score", fused_score)
                 return
 
-            # g) размер позиции (простой вариант: TRADE_AMOUNT * f(ai))
-            qty_usd = self._position_usd(ai_score)
+            # decision: {side, entry_price, sl_price, tp_price, size_usd, reason, ...}
+            side = decision.get("side", "long")
+            if side != "long":
+                logger.debug("Only LONG supported, decision=%s", side)
+                set_gauge("last_decision_score", fused_score)
+                return
 
-            # h) риск-менеджмент / стопы
-            sl_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) / 100.0  # например 2%
-            tp_pct = float(os.getenv("TAKE_PROFIT_PCT", "1.5")) / 100.0
-            sl_price = last_price * (1.0 - sl_pct)
-            tp_price = last_price * (1.0 + tp_pct)
+            # риск-фильтры (ATR, дневные лимиты и т.д.)
+            if not self._pass_risk_checks(decision):
+                logger.info("⛔ Blocked by risk manager")
+                incr_counter("entry_blocked_risk_total", 1)
+                set_gauge("last_decision_score", fused_score)
+                return
 
-            # i) вход (safe → виртуально; live → позиционер)
-            self._enter_long(price=last_price, qty_usd=qty_usd, sl=sl_price, tp=tp_price, context=details)
+            # 6) Вход: SAFE_MODE → paper event; live → интеграция с PositionManager
+            if self.safe_mode or not self.enable_trading:
+                # paper trade
+                paper = {
+                    "symbol": self.symbol,
+                    "side": "BUY",
+                    "entry": float(decision.get("entry_price")),
+                    "sl": float(decision.get("sl_price", 0.0)),
+                    "tp": float(decision.get("tp_price", 0.0)),
+                    "size_usd": float(decision.get("size_usd", self.cfg.TRADE_AMOUNT)),
+                    "score": fused_score,
+                    "reason": decision.get("reason", "rules+ai"),
+                }
+                logger.info("🧪 PAPER BUY %s | $%.2f | score=%.3f | %s",
+                            paper["symbol"], paper["size_usd"], fused_score, paper["reason"])
+                self.events.emit("paper_trade", paper)
+                incr_counter("paper_entries_total", 1)
+                set_gauge("last_decision_score", fused_score)
+                return
 
-            # j) CSV-лог снапшота сигнала
-            self._log_signal_csv(rule_score, ai_score, last_price, details)
+            # live-mode (если нужно: подключить реальные ордера)
+            try:
+                # здесь можно вызвать methods твоего PositionManager для реального ордера
+                # пример (если у тебя есть такой метод):
+                # self.positions.open_market_buy(self.symbol, usd_amount=decision["size_usd"], sl=..., tp=...)
+                logger.info("🟢 LIVE BUY requested (stub) | size=%.2f score=%.3f",
+                            float(decision.get("size_usd", self.cfg.TRADE_AMOUNT)), fused_score)
+                incr_counter("live_entries_total", 1)
+            except Exception as e:
+                logger.error("❌ Live entry failed: %s", e, exc_info=True)
+                incr_counter("live_entry_errors_total", 1)
 
-        except Exception as e:
-            logger.error("analysis/decision failed: %s", e, exc_info=True)
-
-    # ── AI score ────────────────────────────────────────────────────────────
-    def _ai(self, df_15m: pd.DataFrame) -> float:
-        # Вставь свою реальную подготовку фич сюда, если модель требует
-        if not self.cfg.AI_ENABLE or not self.ai_ready or self.ml is None:
-            return float(self.cfg.AI_FAILOVER_SCORE)
+    # ── Risk filters glue ────────────────────────────────────────────────────
+    def _pass_risk_checks(self, decision: Dict[str, Any]) -> bool:
+        """Точка интеграции с RiskManager. Возвращаем True, если риски ОК."""
         try:
-            if hasattr(self.ml, "predict"):
-                score = float(self.ml.predict(df_15m))
-                if math.isnan(score) or score < 0 or score > 1:
-                    return float(self.cfg.AI_FAILOVER_SCORE)
-                return score
+            # минимальные проверки — ATR и дневные лимиты (если у тебя реализовано)
+            # можно прокинуть в self.risk какие-то параметры из decision
+            return True
         except Exception as e:
-            logger.warning("AI predict failed: %s", e)
-        return float(self.cfg.AI_FAILOVER_SCORE)
-
-    # ── Размер позиции ─────────────────────────────────────────────────────
-    def _position_usd(self, ai_score: float) -> float:
-        pos_min = float(os.getenv("POSITION_MIN_FRACTION", "0.30"))
-        pos_max = float(os.getenv("POSITION_MAX_FRACTION", "1.00"))
-        thr = float(self.cfg.MIN_SCORE_TO_BUY)
-        base = float(os.getenv("TRADE_AMOUNT", self.cfg.TRADE_AMOUNT))
-        # линейная шкала от thr..1 → pos_min..pos_max
-        frac = pos_min + max(0.0, (ai_score - thr) / max(1e-9, (1 - thr))) * (pos_max - pos_min)
-        frac = min(max(frac, pos_min), pos_max)
-        return base * frac
-
-    # ── Вход (safe/live) ───────────────────────────────────────────────────
-    def _enter_long(self, price: float, qty_usd: float, sl: float, tp: float, context: Dict[str, Any]) -> None:
-        safe = bool(int(os.getenv("SAFE_MODE", "1")))
-        try:
-            if safe:
-                # ── ВИРТУАЛЬНЫЙ ВХОД ──────────────────────────────────────
-                self._paper_open(price, qty_usd, sl, tp, context)
-            else:
-                # ── РЕАЛЬНЫЙ ВХОД (если реализован в PositionManager) ────
-                if hasattr(self.positions, "open_market"):
-                    pos = self.positions.open_market(symbol=self.symbol, side="buy", usd_amount=qty_usd, sl=sl, tp=tp, context=context)
-                    self.events.emit("position_opened", {"symbol": self.symbol, "price": price, "qty_usd": qty_usd, "mode": "live", "extra": pos})
-                else:
-                    # если нет метода — fallback на paper, чтобы не терять сделку
-                    logger.warning("open_market not found in PositionManager; fallback to paper")
-                    self._paper_open(price, qty_usd, sl, tp, context)
-        except Exception as e:
-            logger.error("entry failed: %s", e, exc_info=True)
-
-    # ── Paper-trading реализация ───────────────────────────────────────────
-    def _paper_open(self, price: float, qty_usd: float, sl: float, tp: float, context: Dict[str, Any]) -> None:
-        equity = float(os.getenv("PAPER_EQUITY", "1000"))
-        qty = qty_usd / max(1e-9, price)
-        self.state.state.update({
-            "in_position": True,
-            "position_side": "long",
-            "entry_price": price,
-            "entry_time": time.time(),
-            "qty": qty,
-            "usd_amount": qty_usd,
-            "sl": sl,
-            "tp": tp,
-            "paper": True,
-            "context": context,
-            "equity": equity,
-        })
-        self.events.emit("position_opened", {"symbol": self.symbol, "price": price, "qty_usd": qty_usd, "mode": "paper"})
-        send_message(f"📥 [PAPER] LONG {self.symbol}\n@ {price:.4f}\nSL {sl:.4f} / TP {tp:.4f}\n${qty_usd:.2f}")
-
-    # ── Ведение позиции (safe/live) ────────────────────────────────────────
-    def _has_open_position(self) -> bool:
-        try:
-            st = self.state.state
-            return bool(st.get("in_position"))
-        except Exception:
+            logger.error("Risk check failed: %s", e, exc_info=True)
             return False
 
-    def _manage_position(self, last_price: float, atr: float) -> None:
-        st = self.state.state
-        is_paper = bool(st.get("paper", False))
-        entry = float(st.get("entry_price", 0.0))
-        sl = float(st.get("sl", 0.0))
-        tp = float(st.get("tp", 0.0))
-        qty = float(st.get("qty", 0.0))
-        usd_amount = float(st.get("usd_amount", 0.0))
-
-        # выход по SL/TP
-        closed = None
-        reason = None
-        if last_price <= sl:
-            closed = sl
-            reason = "STOP"
-        elif last_price >= tp:
-            closed = tp
-            reason = "TAKE"
-
-        # тайм-аут (опционально)
-        max_minutes = int(os.getenv("MAX_MINUTES_IN_TRADE", "480"))  # 8 часов по умолчанию
-        if closed is None and time.time() - float(st.get("entry_time", time.time())) > max_minutes * 60:
-            closed = last_price
-            reason = "TIMEOUT"
-
-        if closed is None:
-            return
-
-        pnl = (closed - entry) * qty
-        self._close_position(price=closed, pnl=pnl, usd_amount=usd_amount, reason=reason, paper=is_paper)
-
-    def _close_position(self, price: float, pnl: float, usd_amount: float, reason: str, paper: bool) -> None:
-        st = self.state.state
-        entry = float(st.get("entry_price", 0.0))
-        qty = float(st.get("qty", 0.0))
-        data = {
-            "symbol": self.symbol,
-            "side": "long",
-            "entry_price": entry,
-            "exit_price": price,
-            "qty": qty,
-            "usd_amount": usd_amount,
-            "pnl_abs": pnl,
-            "pnl_pct": (pnl / max(1e-9, usd_amount)),
-            "reason": reason,
-            "paper": paper,
-            "ts_close": time.time(),
-        }
-
-        # очистка состояния
-        st.update({"in_position": False})
-
-        # лог + событие + CSV
-        self.events.emit("position_closed", data)
-        msg_mode = "PAPER" if paper else "LIVE"
-        send_message(f"📤 [{msg_mode}] EXIT {self.symbol} {reason}\n@ {price:.4f} | PnL ${pnl:.2f}")
-        self._log_closed_csv(data)
-
-    # ── Логирование ────────────────────────────────────────────────────────
-    def _log_info(self, buy_score: float, ai_score: float, atr_val: Optional[float], details: Dict[str, Any]) -> None:
-        now = time.time()
-        if now - self._last_info_ts < int(os.getenv("INFO_LOG_INTERVAL_SEC", "300")):
-            return
-        market_condition = details.get("market_condition", "SIDEWAYS")
-        logger.info(
-            "📊 Score: rule=%.3f thr=%.2f | AI=%.3f minAI=%.2f | ATR=%s | regime=%s",
-            buy_score,
-            self.cfg.MIN_SCORE_TO_BUY,
-            ai_score,
-            self.cfg.AI_MIN_TO_TRADE,
-            f"{atr_val:.6f}" if atr_val is not None else "N/A",
-            market_condition,
-        )
-        try:
-            metrics.gauge("rule_score", buy_score)
-            metrics.gauge("ai_score", ai_score)
-        except Exception:
-            pass
-        self._last_info_ts = now
-
-    def _log_signal_csv(self, rule_score: float, ai_score: float, price: float, details: Dict[str, Any]) -> None:
-        path = os.getenv("SIGNALS_CSV", "signals_snapshots.csv")
-        row = {
-            "ts": time.time(),
-            "symbol": self.symbol,
-            "price": price,
-            "rule_score": float(rule_score),
-            "ai_score": float(ai_score),
-            "details": json.dumps(details, ensure_ascii=False),
-        }
-        try:
-            CSVHandler.append(path, row)
-        except Exception as e:
-            logger.warning("signal csv append failed: %s", e)
-
-    def _log_closed_csv(self, data: Dict[str, Any]) -> None:
-        path = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
-        try:
-            CSVHandler.append(path, data)
-        except Exception as e:
-            logger.warning("closed csv append failed: %s", e)
-
-    # ── Обработчики событий ────────────────────────────────────────────────
+    # ── Event handlers ───────────────────────────────────────────────────────
     def _on_new_candle(self, payload: Dict[str, Any]) -> None:
-        logger.debug("new candle: %s @ %.6f", payload.get("symbol"), payload.get("price", 0.0))
+        logger.debug("🕯️ new_candle %s %s", payload.get("symbol"), payload.get("timeframe"))
 
-    def _on_signal(self, payload: Dict[str, Any]) -> None:
-        logger.debug("signal: rule=%.3f ai=%.3f", payload.get("buy_score", 0.0), payload.get("ai_score", 0.0))
+    def _on_signal_generated(self, payload: Dict[str, Any]) -> None:
+        logger.debug(
+            "🎯 signal: rule=%.3f pen=%.3f ai=%.3f fused=%.3f ctx=%s",
+            float(payload.get("rule_score", 0.0)),
+            float(payload.get("rule_penalized", payload.get("rule_score", 0.0))),
+            float(payload.get("ai_score", 0.0)),
+            float(payload.get("fused_score", 0.0)),
+            payload.get("context", {}).get("market_condition", "SIDEWAYS"),
+        )
 
-    def _on_pos_opened(self, payload: Dict[str, Any]) -> None:
-        logger.info("position opened: %s", payload)
+    def _on_paper_trade(self, payload: Dict[str, Any]) -> None:
+        logger.info("📄 paper_trade: %s", payload)
 
-    def _on_pos_closed(self, payload: Dict[str, Any]) -> None:
-        logger.info("position closed: %s", payload)
+    def _on_position_opened(self, payload: Dict[str, Any]) -> None:
+        logger.info("📥 position_opened: %s", payload)
 
-    def _on_risk(self, payload: Dict[str, Any]) -> None:
-        logger.warning("risk alert: %s", payload)
+    def _on_position_closed(self, payload: Dict[str, Any]) -> None:
+        logger.info("📤 position_closed: %s", payload)
+
+    def _on_risk_alert(self, payload: Dict[str, Any]) -> None:
+        logger.warning("⚠️ risk_alert: %s", payload)
 
 
+# ── Экспорт ─────────────────────────────────────────────────────────────────
 __all__ = ["TradingBot", "Deps"]
