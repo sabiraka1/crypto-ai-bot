@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Единый «снимок контекста» рынка для скоринга/бота.
-Никаких внешних HTTP-запросов здесь — только вызовы модулей из context.market.*
-и внутренних сервисов (например, ExchangeClient) + безопасные fallbacks.
+Единый «снимок контекста» рынка: BTC Dominance, DXY (1d change), Fear & Greed.
+Источники задаются через ENV (с дефолтами на наши модули market/*).
+Безопасные fallbacks: любые ошибки не ломают цикл — поля остаются None/фолбэк.
 """
 
 from __future__ import annotations
 
+import os
+import importlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,138 +16,111 @@ from typing import Optional, Dict, Any
 
 from crypto_ai_bot.config.settings import Settings
 
-# Модули контекста. Импортируем бережно: если чего-то нет — не падаем.
-try:
-    from .market.correlation import compute_symbol_btc_corr, classify_corr
-except Exception:  # pragma: no cover
-    compute_symbol_btc_corr = None  # type: ignore
-    classify_corr = lambda _v: "unknown"  # type: ignore
-
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────── helpers ───────────────────────────
+
+def _import_first_callable(module_path: str, candidates: tuple[str, ...]):
+    """
+    Пытается импортировать модуль module_path и вернуть первую найденную функцию из candidates.
+    Вернёт None, если не получилось.
+    """
+    try:
+        mod = importlib.import_module(module_path)
+        for name in candidates:
+            fn = getattr(mod, name, None)
+            if callable(fn):
+                return fn
+    except Exception as e:
+        logger.debug(f"Context import failed for {module_path}: {e}")
+    return None
+
+
+def _safe_call(fn, *args, **kwargs):
+    """Вызывает функцию безопасно: exceptions → warning и None."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        name = getattr(fn, "__name__", fn.__class__.__name__)
+        logger.warning(f"context source failed: {name}: {e}")
+        return None
+
+
+# ─────────────────────────── model ───────────────────────────
+
 @dataclass
 class ContextSnapshot:
-    """
-    Минимальный пригодный контекст.
-    Все поля Optional: если источник временно недоступен — просто None.
-    """
-    market_condition: str = "SIDEWAYS"        # грубая оценка режима
-    atr_pct: Optional[float] = None           # % ATR от цены (если где-то посчитали)
-    btc_dominance_delta: Optional[float] = None   # ∆ BTC.D (например, 24h), в процентах
-    dxy_delta: Optional[float] = None             # ∆ DXY (например, 5d), в процентах
-    fear_greed: Optional[int] = None              # индекс «страх/жадность» (0..100)
-    corr_btc_15m: Optional[float] = None         # корреляция с BTC по 15m
-    corr_class: str = "unknown"                   # классификация корреляции
+    market_condition: str = "SIDEWAYS"          # грубый режим (ищется в сигналах 4h/15m)
+    btc_dominance: Optional[float] = None       # %
+    dxy_change_1d: Optional[float] = None       # % изменение за 1 день
+    fear_greed: Optional[int] = None            # 0..100
+
+    # опционально: полезные метаданные
     meta: Dict[str, Any] = field(default_factory=dict)
     ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    # Удобный фабричный метод
     @staticmethod
     def neutral() -> "ContextSnapshot":
         return ContextSnapshot()
 
-# ──────────────────────────────────────────────────────────────────────────────
 
-def _safe_call(fn, *args, **kwargs):
-    """Вызывает функцию безопасно: ошибки → лог, результат → None."""
-    try:
-        return fn(*args, **kwargs)
-    except Exception as e:
-        logger.warning(f"context source failed: {getattr(fn, '__name__', fn)}: {e}")
-        return None
-
+# ─────────────────────────── public ───────────────────────────
 
 def build_context_snapshot(
     settings: Settings,
-    exchange,      # ExchangeClient
-    symbol: str,   # например "BTC/USDT"
+    exchange,      # ExchangeClient (не используем здесь, но оставляем сигнатуру для совместимости)
+    symbol: str,
     timeframe: str = "15m",
 ) -> ContextSnapshot:
     """
-    Сбор «реального» контекста с безопасными отказами.
-    BTC.D / DXY / Fear&Greed берём из модулей context.market.*, если они есть.
-    Корреляцию считаем локально через свечи (без HTTP).
+    Собирает «реальный» контекст: BTC.D, DXY(1d), Fear&Greed.
+    Источники берутся из ENV:
+      - BTC_DOMINANCE_SOURCE (default: crypto_ai_bot.context.market.btc_dominance)
+            ожидаем функцию: fetch_btc_dominance() -> float|None
+      - DXY_SOURCE (default: crypto_ai_bot.context.market.dxy_index)
+            ожидаем функцию: dxy_change_pct_1d() -> float|None
+      - FEAR_GREED_SOURCE (default: crypto_ai_bot.context.market.fear_greed)
+            ожидаем функцию: fetch_fear_greed() -> int|None
+    Любой источник может вернуть None — это ок.
     """
+    timeout = int(os.getenv("CONTEXT_TIMEOUT_SEC", "6"))
 
-    snap = ContextSnapshot.neutral()
+    # 1) BTC Dominance (текущее значение, %)
+    src_btc_dom = os.getenv("BTC_DOMINANCE_SOURCE", "crypto_ai_bot.context.market.btc_dominance")
+    fn_btc = _import_first_callable(src_btc_dom, ("fetch_btc_dominance", "get_btc_dominance"))
+    btc_dom = _safe_call(fn_btc, timeout=timeout) if fn_btc else None
 
-    # 1) BTC Dominance (если модуль подключён)
-    try:
-        from .market import btc_dominance as _bd  # type: ignore
-        # Пробуем популярные имена функций
-        fn = (
-            getattr(_bd, "get_btc_dominance_delta", None)
-            or getattr(_bd, "fetch_btc_dominance_delta", None)
-            or getattr(_bd, "btc_dominance_delta", None)
-        )
-        if callable(fn):
-            snap.btc_dominance_delta = _safe_call(fn)
-    except Exception:
-        pass
+    # 2) DXY: дневное изменение в %
+    src_dxy = os.getenv("DXY_SOURCE", "crypto_ai_bot.context.market.dxy_index")
+    fn_dxy = _import_first_callable(src_dxy, ("dxy_change_pct_1d", "get_dxy_change_pct_1d"))
+    dxy_ch = _safe_call(fn_dxy, timeout=timeout) if fn_dxy else None
 
-    # 2) DXY (если модуль подключён)
-    try:
-        from .market import dxy_index as _dxy  # type: ignore
-        fn = (
-            getattr(_dxy, "get_dxy_delta", None)
-            or getattr(_dxy, "fetch_dxy_delta", None)
-            or getattr(_dxy, "dxy_delta", None)
-        )
-        if callable(fn):
-            snap.dxy_delta = _safe_call(fn)
-    except Exception:
-        pass
+    # 3) Fear & Greed (0..100)
+    src_fng = os.getenv("FEAR_GREED_SOURCE", "crypto_ai_bot.context.market.fear_greed")
+    fn_fng = _import_first_callable(src_fng, ("fetch_fear_greed", "get_fng_value", "fear_greed_value"))
+    fng_fb = int(os.getenv("FEAR_GREED_FALLBACK", "50"))
+    fng = _safe_call(fn_fng, timeout=timeout) if fn_fng else None
+    if fng is None:
+        fng = fng_fb
 
-    # 3) Fear & Greed (если модуль подключён)
-    try:
-        from .market import fear_greed as _fg  # type: ignore
-        fn = (
-            getattr(_fg, "get_fng_value", None)
-            or getattr(_fg, "fetch_fng_value", None)
-            or getattr(_fg, "fear_greed_value", None)
-        )
-        if callable(fn):
-            snap.fear_greed = _safe_call(fn)
-    except Exception:
-        pass
-
-    # 4) Корреляция символа с BTC — считаем из свечей через ExchangeClient
-    if callable(compute_symbol_btc_corr):
-        snap.corr_btc_15m = _safe_call(
-            compute_symbol_btc_corr,
-            exchange,
-            symbol,
-            timeframe=timeframe,
-            limit=getattr(settings, "OHLCV_LIMIT", 200),
-            btc_symbol="BTC/USDT",
-            window=96,  # ~сутки на 15m
-        )
-        snap.corr_class = classify_corr(snap.corr_btc_15m)
-
-    # 5) Простая эвристика режима рынка
-    #    Можно заменить на более продвинутый детектор, когда он будет готов.
-    cond = "SIDEWAYS"
-    try:
-        bd = snap.btc_dominance_delta
-        dx = snap.dxy_delta
-        if bd is not None and dx is not None:
-            if bd < 0 and dx < 0:
-                cond = "BULLISH"
-            elif bd > 0 and dx > 0:
-                cond = "BEARISH"
-        # небольшая поправка по сильной корреляции с BTC
-        if snap.corr_btc_15m is not None and snap.corr_btc_15m >= 0.75:
-            cond = "RISK_ON"
-    except Exception:
-        pass
-
-    snap.market_condition = cond
-    snap.meta.update({
-        "source": "build_context_snapshot",
-        "timeframe": timeframe,
-        "symbol": symbol,
-    })
+    # 4) Собираем снапшот
+    snap = ContextSnapshot(
+        market_condition="SIDEWAYS",   # финальный режим формируется в сигнал-агрегаторе (4h/15m)
+        btc_dominance=btc_dom,
+        dxy_change_1d=dxy_ch,
+        fear_greed=fng,
+        meta={
+            "source": "build_context_snapshot",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "modules": {
+                "btc_dom": src_btc_dom,
+                "dxy": src_dxy,
+                "fear_greed": src_fng,
+            },
+        },
+    )
     snap.ts = datetime.now(timezone.utc)
     return snap
 

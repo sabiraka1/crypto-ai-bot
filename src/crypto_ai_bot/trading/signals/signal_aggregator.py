@@ -1,12 +1,15 @@
-# src/crypto_ai_bot/trading/signals/signal_aggregator.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, timezone
 
 import pandas as pd
 import numpy as np
+
+from crypto_ai_bot.context.snapshot import build_context_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +47,6 @@ def _macd_hist(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 
     return (macd_line - signal_line)
 
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    # True Range
     prev_close = df["close"].shift(1)
     tr = pd.concat([
         (df["high"] - df["low"]),
@@ -85,7 +87,8 @@ def _compute_indicators_15m(df15: pd.DataFrame) -> Dict[str, Any]:
     out["atr_pct"] = float(out["atr"] / out["price"] * 100.0) if out["price"] > 0 else None
 
     vol_sma20 = vol.rolling(20).mean()
-    vr = float(vol.iloc[-1] / vol_sma20.iloc[-1]) if vol_sma20.iloc[-1] and not np.isnan(vol_sma20.iloc[-1]) else None
+    vr_val = vol_sma20.iloc[-1] if len(vol_sma20) else np.nan
+    vr = float(vol.iloc[-1] / vr_val) if (vr_val and not np.isnan(vr_val)) else None
     out["volume_ratio"] = vr
 
     return out
@@ -114,16 +117,80 @@ def _market_condition(ind_15m: Dict[str, Any], trend_4h: Optional[bool]) -> str:
 def _rule_score(ind: Dict[str, Any]) -> float:
     """Весовая модель без AI: 0..1"""
     score = 0.0
-    # веса как обсуждали
-    score += 0.20 * (1.0 if ind.get("rsi") is not None and 30 < ind["rsi"] < 70 else 0.0)  # «в рабочей зоне»
+    score += 0.20 * (1.0 if ind.get("rsi") is not None and 30 < ind["rsi"] < 70 else 0.0)
     score += 0.20 * (1.0 if ind.get("macd_hist", 0) > 0 else 0.0)
     score += 0.20 * (1.0 if ind.get("ema9", 0) > ind.get("ema21", 0) else 0.0)
     score += 0.15 * (1.0 if ind.get("ema20", 0) > ind.get("ema50", 0) else 0.0)
     vr = ind.get("volume_ratio")
     if vr is not None and np.isfinite(vr):
         score += 0.15 * _clamp(vr / 2.0, 0.0, 1.0)  # 2×среднего → +0.15
-    # BB_reentry не считаем — можно добавить позже
     return _clamp(score)
+
+# ----------------------- Context penalties -----------------------
+
+def _is_alt_symbol(symbol: str) -> bool:
+    """Грубая эвристика: альт — если не BTC/xxx и не xxx/BTC."""
+    s = (symbol or "").upper()
+    return not (s.startswith("BTC/") or s.endswith("/BTC"))
+
+def _apply_context_penalties(
+    symbol: str,
+    base_score: float,
+    snap: Any,  # ContextSnapshot
+) -> Tuple[float, Dict[str, Any]]:
+    """Применяет мягкие штрафы/бонусы по ENV. Возвращает (скор_после, детали)."""
+    if not int(os.getenv("USE_CONTEXT_PENALTIES", "0")):
+        return base_score, {"enabled": False, "applied": []}
+
+    clamp_min = float(os.getenv("CTX_SCORE_CLAMP_MIN", "0.0"))
+    clamp_max = float(os.getenv("CTX_SCORE_CLAMP_MAX", "1.0"))
+
+    # BTC Dominance (штраф только для альтов — если включено)
+    penalties = []
+    score = base_score
+
+    try:
+        alts_only = int(os.getenv("CTX_BTC_DOM_ALTS_ONLY", "1")) == 1
+        dom_thresh = float(os.getenv("CTX_BTC_DOM_THRESH", "52.0"))
+        dom_pen = float(os.getenv("CTX_BTC_DOM_PENALTY", "-0.05"))
+
+        if snap.btc_dominance is not None:
+            cond_alts = (not alts_only) or _is_alt_symbol(symbol)
+            if cond_alts and float(snap.btc_dominance) >= dom_thresh:
+                score += dom_pen
+                penalties.append({"factor": "btc_dominance", "value": snap.btc_dominance, "delta": dom_pen})
+    except Exception as e:
+        logger.debug(f"ctx penalty btc_dominance skipped: {e}")
+
+    # DXY дневное изменение
+    try:
+        dxy_thr = float(os.getenv("CTX_DXY_DELTA_THRESH", "0.5"))
+        dxy_pen = float(os.getenv("CTX_DXY_PENALTY", "-0.05"))
+        if snap.dxy_change_1d is not None and float(snap.dxy_change_1d) >= dxy_thr:
+            score += dxy_pen
+            penalties.append({"factor": "dxy_change_1d", "value": snap.dxy_change_1d, "delta": dxy_pen})
+    except Exception as e:
+        logger.debug(f"ctx penalty dxy skipped: {e}")
+
+    # Fear & Greed
+    try:
+        fng_over = float(os.getenv("CTX_FNG_OVERHEATED", "75"))
+        fng_under = float(os.getenv("CTX_FNG_UNDERSHOOT", "25"))
+        fng_pen = float(os.getenv("CTX_FNG_PENALTY", "-0.05"))
+        fng_bonus = float(os.getenv("CTX_FNG_BONUS", "0.03"))
+        if snap.fear_greed is not None:
+            fng = float(snap.fear_greed)
+            if fng >= fng_over:
+                score += fng_pen
+                penalties.append({"factor": "fear_greed_overheated", "value": fng, "delta": fng_pen})
+            elif fng <= fng_under:
+                score += fng_bonus
+                penalties.append({"factor": "fear_greed_undershoot", "value": fng, "delta": fng_bonus})
+    except Exception as e:
+        logger.debug(f"ctx penalty fng skipped: {e}")
+
+    score = _clamp(score, clamp_min, clamp_max)
+    return score, {"enabled": True, "applied": penalties, "clamp": [clamp_min, clamp_max]}
 
 # ----------------------- Public: aggregate_features -----------------------
 
@@ -132,9 +199,9 @@ def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> D
     Возвращает:
         {
           "symbol", "timeframe", "timestamp",
-          "indicators": {...}, "rule_score", "ai_score",
+          "indicators": {...}, "rule_score", "rule_score_penalized", "ai_score",
           "data_quality": {...},
-          "context": {"market_condition": "..."}
+          "context": {"market_condition": "...", "snapshot": {...}, "penalties": {...}}
         }
     """
     symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
@@ -183,16 +250,39 @@ def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> D
         logger.warning(f"⚠️ Rule score failed: {e}")
         rule = 0.5
 
-    # 5) AI-score (фолбэк, бот потом сам «сфьюзит» rule+ai)
+    # 5) Подтягиваем «реальный» контекст
+    try:
+        snap = build_context_snapshot(cfg, exchange, symbol, timeframe="15m")
+    except Exception as e:
+        logger.warning(f"⚠️ Context snapshot failed: {e}")
+        snap = None
+
+    # 6) Применяем мягкие штрафы/бонусы контекста
+    penalties_info: Dict[str, Any] = {"enabled": False, "applied": []}
+    rule_penalized = rule
+    if snap is not None:
+        rule_penalized, penalties_info = _apply_context_penalties(symbol, rule, snap)
+
+    # 7) AI-score (фолбэк — бот потом сам «сфьюзит» rule+ai)
     ai_score = float(getattr(cfg, "AI_FAILOVER_SCORE", 0.55))
 
-    # 6) Качество данных
+    # 8) Качество данных
     data_quality = {
         "primary_candles": int(len(dfs["15m"])),
         "timeframes_ok": tf_ok,
         "timeframes_failed": tf_failed,
-        "indicators_count": 3,  # rsi, macd_hist, atr (+ema/vol не считаем в этот счётчик)
+        "indicators_count": 5,  # rsi, macd_hist, ema-кроссы, atr, volume_ratio
     }
+
+    # 9) Ответ
+    ctx_payload: Dict[str, Any] = {"market_condition": mkt_cond}
+    if snap is not None:
+        ctx_payload["snapshot"] = {
+            "btc_dominance": getattr(snap, "btc_dominance", None),
+            "dxy_change_1d": getattr(snap, "dxy_change_1d", None),
+            "fear_greed": getattr(snap, "fear_greed", None),
+        }
+        ctx_payload["penalties"] = penalties_info
 
     out = {
         "symbol": symbol,
@@ -200,10 +290,14 @@ def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> D
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         "indicators": ind15,
         "rule_score": float(rule),
+        "rule_score_penalized": float(rule_penalized),
         "ai_score": float(ai_score),
         "data_quality": data_quality,
-        "context": {"market_condition": mkt_cond},
+        "context": ctx_payload,
     }
 
-    logger.info(f"✅ Features aggregated: rule={rule:.3f}, ai={ai_score:.3f}, ind={data_quality['indicators_count']}")
+    logger.info(
+        f"✅ Features aggregated: rule={rule:.3f} -> penalized={rule_penalized:.3f}, ai={ai_score:.3f}, "
+        f"ind={data_quality['indicators_count']}"
+    )
     return out
