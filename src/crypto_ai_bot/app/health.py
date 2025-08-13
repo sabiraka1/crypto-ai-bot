@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from crypto_ai_bot.config.settings import Settings
 from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
-from crypto_ai_bot.context import ContextSnapshot
+from crypto_ai_bot.context.snapshot import ContextSnapshot
 
 logger = logging.getLogger(__name__)
 
