@@ -334,14 +334,14 @@ class TradingBot:
         elif not isinstance(fused_val, (int, float)):
             fused_val = 0.0
     
-    logger.debug(
-        "🎯 signal: rule=%.3f pen=%.3f ai=%.3f fused=%.3f ctx=%s",
-        float(payload.get("rule_score", 0.0)),
-        float(payload.get("rule_penalized", payload.get("rule_score", 0.0))),
-        float(payload.get("ai_score", 0.0)),
-        float(fused_val),
-        payload.get("context", {}).get("market_condition", "SIDEWAYS"),
-    )
+        logger.debug(
+            "🎯 signal: rule=%.3f pen=%.3f ai=%.3f fused=%.3f ctx=%s",
+            float(payload.get("rule_score", 0.0)),
+            float(payload.get("rule_penalized", payload.get("rule_score", 0.0))),
+            float(payload.get("ai_score", 0.0)),
+            float(fused_val),
+            payload.get("context", {}).get("market_condition", "SIDEWAYS"),
+        )
 
     def _on_paper_trade(self, payload: Dict[str, Any]) -> None:
         logger.info("📄 paper_trade: %s", payload)
