@@ -13,7 +13,7 @@ from crypto_ai_bot.trading.risk_manager import RiskManager
 from crypto_ai_bot.trading.bot import TradingBot, Deps
 
 from crypto_ai_bot.app.health import router as health_router, build_status_router
-from crypto_ai_bot.app.metrics import router as metrics_router
+from crypto_ai_bot.core.metrics import router as metrics_router
 from crypto_ai_bot.telegram.bot import router as telegram_router
 
 logger = logging.getLogger(__name__)
