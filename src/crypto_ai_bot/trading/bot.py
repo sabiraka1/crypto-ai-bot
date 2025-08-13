@@ -28,6 +28,13 @@ from crypto_ai_bot.trading.exchange_client import ExchangeClient
 from crypto_ai_bot.trading.position_manager import PositionManager
 from crypto_ai_bot.trading.risk_manager import RiskManager
 
+# Метрики (graceful-fallback — если prometheus_client не установлен, это no-op)
+from crypto_ai_bot.core.metrics import (
+    TRADING_LOOPS, SIGNALS_TOTAL, ENTRY_ATTEMPTS,
+    POSITIONS_OPENED, POSITIONS_CLOSED, POSITIONS_OPEN_GAUGE,
+    LAST_SCORE, ATR_PCT, DECISION_LATENCY,
+)
+
 # (оставляем для фоллбэков/совместимости — можно удалить, если не используете)
 from crypto_ai_bot.analysis.scoring_engine import ScoringEngine  # noqa: F401
 from crypto_ai_bot.analysis.technical_indicators import get_unified_atr
@@ -219,6 +226,7 @@ class TradingBot:
         # Первое выравнивание — до ближайшей границы ТФ
         self._sleep_until_next_bar()
         while self._running:
+            TRADING_LOOPS.inc()  # ← счётчик итераций цикла
             try:
                 self._cycle()
             except Exception as e:
@@ -266,8 +274,10 @@ class TradingBot:
                 logger.debug(f"⏩ Same candle {candle_id}, skipping")
                 return
 
-            # 5) Анализ → сигнал → вход
+            # 5) Анализ → сигнал → вход (таймим end-to-end)
+            t0 = time.perf_counter()
             self._analyze_and_decide(df, last_price, atr_val)
+            DECISION_LATENCY.observe(time.perf_counter() - t0)
 
             # 6) Запомнить обработанную свечу
             self._last_candle_id = candle_id
@@ -301,9 +311,7 @@ class TradingBot:
             ai_score = self._predict_ai_score(df)
 
             # 1) Сбор фич (15m/1h/4h, индикаторы, контекст summary)
-            #    Контекст передаём как dict (или сюда можно подставить реальный ContextSnapshot)
             feats = aggregate_features(self.cfg, self.exchange, ctx={})
-
             if "error" in feats:
                 logger.warning(f"⚠️ Aggregator returned error: {feats.get('error')}")
                 return
@@ -350,8 +358,16 @@ class TradingBot:
             feats["confidence"] = fusion.confidence
             feats["conflict_detected"] = bool(fusion.conflict_detected)
 
-            # 4) Логи и событие «сигнал»
+            # 4) Логи/метрики и событие «сигнал»
             market_condition = _mk_condition_from_indicators(ind)
+            # gauge: последний скор и ATR% (если можем посчитать)
+            try: LAST_SCORE.set(max(0.0, min(1.0, fused_score)))
+            except: pass
+            try:
+                if atr_val and price:
+                    ATR_PCT.set(float(atr_val) / float(price) * 100.0)
+            except: pass
+
             self._log_market_info(fused_score, float(feats["ai_score"]), atr_val, {"market_condition": market_condition})
             self._bus_emit(EV_SIGNAL, {
                 "symbol": self.symbol,
@@ -392,6 +408,7 @@ class TradingBot:
                     "decision_factors": decision.get("decision_factors"),
                 },
             }
+            ENTRY_ATTEMPTS.inc()  # ← фиксируем попытку входа
             self._bus_emit(EV_ENTRY_ATTEMPT, payload)
 
             if hasattr(self.positions, "open"):
@@ -456,17 +473,22 @@ class TradingBot:
             )
             self._last_info_log_ts = now
 
-    # ── Event handlers (заглушки) ────────────────────────────────────────────
+    # ── Event handlers (с метриками) ─────────────────────────────────────────
     def _on_new_candle(self, data: dict):
         logger.debug(f"📊 New candle: {data.get('symbol')} @ {data.get('price')}")
 
     def _on_signal_generated(self, data: dict):
+        SIGNALS_TOTAL.inc()
         logger.debug(f"🎯 Signal emitted: score={data.get('buy_score')}, ai={data.get('ai_score')}")
 
     def _on_position_opened(self, data: dict):
+        POSITIONS_OPENED.inc()
+        POSITIONS_OPEN_GAUGE.inc()
         logger.info(f"📥 Position opened: {data}")
 
     def _on_position_closed(self, data: dict):
+        POSITIONS_CLOSED.inc()
+        POSITIONS_OPEN_GAUGE.dec()
         logger.info(f"📤 Position closed: {data}")
 
     def _on_risk_alert(self, data: dict):
