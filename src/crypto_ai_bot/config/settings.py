@@ -182,7 +182,9 @@ class Settings:
             errors.append("RISK_ATR_METHOD must be 'ewm' or 'sma'")
         if not (0.0 < self.MIN_POSITION_SIZE):
             errors.append("MIN_POSITION_SIZE must be > 0")
-        if not (0.0 < self.MIN_STOP_PCT < self.MAX_STOP_PCT <= 1.0):
+        min_stop = getenv_float("MIN_STOP_PCT", 0.005)
+        max_stop = getenv_float("MAX_STOP_PCT", 0.05)
+        if not (0.0 < min_stop < max_stop <= 1.0):
             errors.append("Invalid SL boundaries: MIN_STOP_PCT..MAX_STOP_PCT")
         # Вебхук
         if self.ENABLE_WEBHOOK and not (self.PUBLIC_URL and self.WEBHOOK_SECRET):
