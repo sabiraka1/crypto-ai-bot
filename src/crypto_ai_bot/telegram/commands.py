@@ -2,6 +2,7 @@ import os
 import logging
 import time
 from typing import Optional, Callable, List
+from crypto_ai_bot.core.events import EventBus
 
 import pandas as pd
 
@@ -450,12 +451,10 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
 
         from crypto_ai_bot.trading.position_manager import PositionManager as SimplePositionManager
         pm = SimplePositionManager(
-            exchange_client,
-            state_manager,
+            exchange=exchange_client,
+            state=state_manager,
             settings=CFG,
-            events=None,
-            notify_entry_func=test_notify_entry,
-            notify_close_func=test_notify_close,
+            vents=EventBus()  # или None
         )
 
         result = pm.open_long(
@@ -521,12 +520,10 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient, c
 
         from crypto_ai_bot.trading.position_manager import PositionManager as SimplePositionManager
         pm = SimplePositionManager(
-            exchange_client,
-            state_manager,
+            exchange=exchange_client,
+            state=state_manager,
             settings=CFG,
-            events=None,
-            notify_entry_func=None,
-            notify_close_func=test_notify_close,
+            events=EventBus()  # или None если не используется
         )
 
         result = pm.close_all(symbol, exit_price=last_price, reason="manual_test_sell")

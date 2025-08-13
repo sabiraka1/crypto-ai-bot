@@ -206,7 +206,7 @@ class TradingBot:
     def _tick(self) -> None:
         with self._loop_lock:
             # 1) Контекст
-            ctx: ContextSnapshot = build_context_snapshot(self.cfg)
+            ctx: ContextSnapshot = build_context_snapshot(self.cfg, self.exchange, self.symbol)
 
             # 2) Фичи/индикаторы/скоры (15m + 1h + 4h)
             timeframes = ["15m", "1h", "4h"]
