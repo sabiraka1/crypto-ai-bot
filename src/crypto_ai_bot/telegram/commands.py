@@ -12,7 +12,13 @@ from crypto_ai_bot.utils.csv_handler import CSVHandler
 from crypto_ai_bot.config.settings import Settings
 
 from .api_utils import send_message, send_photo, ADMIN_CHAT_IDS
-from .charts import generate_price_chart
+
+# Мягкий импорт графиков: сервис поднимется даже если matplotlib не установлен
+try:
+    from .charts import generate_price_chart, CHARTS_READY
+except Exception:
+    generate_price_chart = None
+    CHARTS_READY = False
 
 # ── Конфигурация ─────────────────────────────────────────────────────────────
 CFG = Settings.load()
@@ -107,7 +113,10 @@ def _ohlcv_to_df(ohlcv) -> pd.DataFrame:
     df = pd.DataFrame(ohlcv, columns=cols)
     df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
     df.set_index("time", inplace=True)
-    return df
+    # приводим к числам по возможности
+    for c in ("open", "high", "low", "close", "volume"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.dropna()
 
 
 # ==== Commands ===============================================================
@@ -385,16 +394,22 @@ def cmd_test(symbol: str = None, timeframe: str = None, chat_id: str = None):
         else:
             lines.append("\n⏳ Сигнал: WAIT")
 
-        chart_path = generate_price_chart(df, symbol, "test_chart.png")
+        # График: мягкий фолбэк, если matplotlib не установлен
+        chart_path = None
+        if generate_price_chart and CHARTS_READY and not df.empty:
+            try:
+                chart_path = generate_price_chart(df, title=f"{symbol} ({timeframe})")
+            except Exception as e:
+                logging.warning(f"chart generation failed: {e}")
+
+        # Отправка
+        send_message("\n".join(lines), chat_id)
         if chart_path:
-            send_message("\n".join(lines), chat_id)
             send_photo(chart_path, caption=f"График {symbol} | ATR: {atr_value:.4f}", chat_id=chat_id)
             try:
                 os.remove(chart_path)
             except Exception:
                 pass
-        else:
-            send_message("\n".join(lines), chat_id)
 
     except Exception as e:
         logging.exception("cmd_test error")
