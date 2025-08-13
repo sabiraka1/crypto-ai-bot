@@ -454,7 +454,7 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
             exchange=exchange_client,
             state=state_manager,
             settings=CFG,
-            vents=EventBus()  # или None
+            events=EventBus()  # или None
         )
 
         result = pm.open_long(

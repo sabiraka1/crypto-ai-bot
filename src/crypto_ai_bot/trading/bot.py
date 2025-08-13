@@ -216,6 +216,7 @@ class TradingBot:
                 timeframes=timeframes,
                 limit=int(os.getenv("INDICATOR_LOOKBACK", "200")),
                 context=ctx,
+                cfg=self.cfg,  # ← добавить эту строку
                 use_context_penalties=bool(int(os.getenv("USE_CONTEXT_PENALTIES", "1")))
             )
 
