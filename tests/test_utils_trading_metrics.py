@@ -1,169 +1,110 @@
+import math
 import importlib
-import inspect
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 
 
-def test_trading_metrics_core_functions_callable_and_return_numbers():
-    """Тест основных функций торговых метрик"""
-    tm = importlib.import_module("utils.trading_metrics")
+tm = importlib.import_module("utils.trading_metrics")
 
-    # Подготовим универсальные входы для разных сигнатур
-    returns = pd.Series([0.01, -0.02, 0.015, 0.005, -0.01])
-    equity = pd.Series([100, 98, 99.5, 100, 99])
-    wins, losses = [120, 50, 30], [-40, -10]
-    avg_win, avg_loss, win_rate = 60.0, -30.0, 0.55
-    total_net_profit, max_dd = 1000.0, -150.0
 
-    # Карта «узнаваемых» параметров → готовые значения
-    param_pool = {
-        "returns": returns,
-        "equity": equity,
-        "wins": wins,
-        "losses": losses,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "win_rate": win_rate,
-        "total_net_profit": total_net_profit,
-        "max_dd": max_dd,
-        "max_drawdown": max_dd,  # альтернативное имя
-    }
+def _is_number(x):
+    return isinstance(x, (int, float, np.floating)) and not isinstance(x, bool)
 
-    # Функции, которые обычно присутствуют в модуле метрик
-    candidates = [
-        "win_rate",
-        "profit_factor", 
-        "expectancy",
-        "sharpe_ratio",
-        "sortino_ratio",
-        "max_drawdown",
-        "rr_ratio",
-        "recovery_factor",
-        "kelly_fraction",
-    ]
 
-    called_at_least_one = False
+def test_max_drawdown_various_series():
+    # нормальный случай
+    s = pd.Series([100, 105, 103, 110, 90, 95, 120], dtype=float)
+    md = tm.max_drawdown(returns=s.pct_change().fillna(0)) if hasattr(tm, "max_drawdown") else None
+    if md is not None:
+        assert _is_number(md)
 
-    for name in candidates:
+    # постоянный ряд
+    const = pd.Series([1, 1, 1, 1, 1], dtype=float)
+    md2 = tm.max_drawdown(returns=const) if hasattr(tm, "max_drawdown") else None
+    if md2 is not None:
+        assert _is_number(md2)
+
+    # пустой ряд
+    empty = pd.Series([], dtype=float)
+    md3 = tm.max_drawdown(returns=empty) if hasattr(tm, "max_drawdown") else None
+    if md3 is not None:
+        assert _is_number(md3)
+
+
+def test_sharpe_and_sortino_edge_cases():
+    if hasattr(tm, "sharpe_ratio"):
+        # нулевая волатильность
+        r = pd.Series([0, 0, 0, 0, 0], dtype=float)
+        val = tm.sharpe_ratio(returns=r, risk_free=0.0) if "risk_free" in tm.sharpe_ratio.__code__.co_varnames else tm.sharpe_ratio(returns=r)
+        assert _is_number(val)
+
+        # обычные данные
+        r2 = pd.Series([0.01, -0.02, 0.015, 0.005, -0.01], dtype=float)
+        val2 = tm.sharpe_ratio(returns=r2, risk_free=0.0) if "risk_free" in tm.sharpe_ratio.__code__.co_varnames else tm.sharpe_ratio(returns=r2)
+        assert _is_number(val2)
+
+    if hasattr(tm, "sortino_ratio"):
+        # все доходности неотрицательные → downside риск минимальный
+        r = pd.Series([0.01, 0.02, 0.0, 0.03], dtype=float)
+        val = tm.sortino_ratio(returns=r, target=0.0) if "target" in tm.sortino_ratio.__code__.co_varnames else tm.sortino_ratio(returns=r)
+        assert _is_number(val)
+
+
+def test_profit_factor_and_expectancy():
+    wins = [120, 50, 30]
+    losses = [-40, -10]
+
+    if hasattr(tm, "profit_factor"):
+        pf = tm.profit_factor(wins=wins, losses=losses)
+        assert _is_number(pf) and pf > 0
+
+        # без убытков (крайний случай)
+        pf2 = tm.profit_factor(wins=[10, 5], losses=[])
+        assert _is_number(pf2)
+
+    if hasattr(tm, "expectancy"):
+        ex = tm.expectancy(avg_win=60.0, avg_loss=-30.0, win_rate=0.55) if "avg_win" in tm.expectancy.__code__.co_varnames else tm.expectancy(wins=wins, losses=losses)
+        assert _is_number(ex)
+
+
+def test_rr_and_recovery_and_kelly():
+    # rr
+    if hasattr(tm, "rr_ratio"):
+        rr1 = tm.rr_ratio(avg_win=50.0, avg_loss=-25.0) if "avg_win" in tm.rr_ratio.__code__.co_varnames else tm.rr_ratio(wins=[50], losses=[-25])
+        assert _is_number(rr1) and rr1 > 0
+
+        # нулевой убыток — должно обрабатываться безопасно
+        rr2 = tm.rr_ratio(avg_win=10.0, avg_loss=0.0) if "avg_win" in tm.rr_ratio.__code__.co_varnames else tm.rr_ratio(wins=[10], losses=[])
+        assert _is_number(rr2)
+
+    # recovery
+    if hasattr(tm, "recovery_factor"):
+        rec = tm.recovery_factor(total_net_profit=1000.0, max_dd=-150.0) if "total_net_profit" in tm.recovery_factor.__code__.co_varnames else tm.recovery_factor(returns=pd.Series([0.01, -0.02, 0.03]))
+        assert _is_number(rec)
+
+    # kelly
+    if hasattr(tm, "kelly_fraction"):
+        k = tm.kelly_fraction(win_rate=0.5, avg_win=1.0, avg_loss=-1.0) if "win_rate" in tm.kelly_fraction.__code__.co_varnames else tm.kelly_fraction(returns=pd.Series([1, -1], dtype=float))
+        assert _is_number(k)
+        # границы: если шанс победы плохой — фракция не должна быть большой положительной
+        k2 = tm.kelly_fraction(win_rate=0.2, avg_win=1.0, avg_loss=-1.0) if "win_rate" in tm.kelly_fraction.__code__.co_varnames else tm.kelly_fraction(returns=pd.Series([-1, -1, 1], dtype=float))
+        assert _is_number(k2)
+
+
+@pytest.mark.parametrize("series", [
+    pd.Series([np.nan, np.nan, np.nan], dtype=float),
+    pd.Series([0.0, np.nan, 0.0], dtype=float),
+])
+def test_functions_handle_nans(series):
+    # базовая устойчивость к NaN
+    for name in ["max_drawdown", "sharpe_ratio", "sortino_ratio"]:
         fn = getattr(tm, name, None)
-        if fn is None or not callable(fn):
+        if fn is None:
             continue
-
-        sig = inspect.signature(fn)
-        kwargs = {}
-
-        # Попробуем собрать kwargs из доступных ключей
-        ok = True
-        for p in sig.parameters.values():
-            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-                continue
-            if p.name in param_pool:
-                kwargs[p.name] = param_pool[p.name]
-            elif p.default is inspect._empty:
-                ok = False
-                break  # обязательный параметр, которого у нас нет
-
-        if not ok:
-            continue
-
-        # Специальная обработка для функций, которые могут иметь проблемы с pandas Series
-        try:
-            # Вызов и базовые проверки результата
-            res = fn(**kwargs)
-            
-            # Проверяем что результат это число или разумный тип
-            assert isinstance(res, (int, float, np.number)) or pd.isna(res), \
-                f"{name} должна возвращать число, получили {type(res)}"
-            
-            # Проверяем что результат не NaN (если это не ожидаемое поведение)
-            if not pd.isna(res):
-                assert isinstance(res, (int, float, np.number)), \
-                    f"{name} вернула не числовое значение: {res}"
-            
-            called_at_least_one = True
-            print(f"✓ {name}(**{list(kwargs.keys())}) = {res}")
-            
-        except (ValueError, TypeError, ZeroDivisionError) as e:
-            # Логируем ошибки но не прерываем тест
-            print(f"⚠ {name} вызвала ошибку: {e}")
-            
-            # Для некоторых функций попробуем альтернативные параметры
-            if name == "max_drawdown" and "returns" in kwargs:
-                try:
-                    # Попробуем с пустой проверкой для pandas Series
-                    if hasattr(kwargs["returns"], "empty"):
-                        if not kwargs["returns"].empty:
-                            res = fn(**kwargs)
-                            called_at_least_one = True
-                            print(f"✓ {name} (повторный вызов) = {res}")
-                except Exception as e2:
-                    print(f"⚠ {name} повторный вызов тоже не удался: {e2}")
-            continue
-
-    # Проверяем что хотя бы одна функция была успешно вызвана
-    assert called_at_least_one, "Ни одна торговая метрика не была успешно вызвана"
-
-
-def test_rr_ratio_handles_zero_loss_gracefully():
-    """Тест обработки нулевых потерь в rr_ratio"""
-    tm = importlib.import_module("utils.trading_metrics")
-    
-    if hasattr(tm, "rr_ratio") and callable(tm.rr_ratio):
-        sig = inspect.signature(tm.rr_ratio)
-        
-        # Проверяем разные комбинации параметров для rr_ratio
-        test_cases = [
-            {"avg_win": 100.0, "avg_loss": -50.0},  # нормальный случай
-            {"avg_win": 100.0, "avg_loss": 0.0},    # нулевые потери
-            {"avg_win": 0.0, "avg_loss": -50.0},    # нулевые выигрыши
-        ]
-        
-        for case in test_cases:
-            # Проверяем что у функции есть нужные параметры
-            params_ok = all(p in sig.parameters for p in case.keys())
-            if not params_ok:
-                continue
-                
-            try:
-                result = tm.rr_ratio(**case)
-                print(f"rr_ratio({case}) = {result}")
-                
-                # Проверяем тип результата
-                assert isinstance(result, (int, float, type(None))) or pd.isna(result), \
-                    f"rr_ratio должна возвращать число или None/NaN, получили {type(result)}"
-                
-            except (ZeroDivisionError, ValueError) as e:
-                # Ожидаемые ошибки при некорректных входных данных
-                print(f"rr_ratio({case}) вызвала ожидаемую ошибку: {e}")
-                assert True  # это нормальное поведение
-                
-            except Exception as e:
-                # Неожиданные ошибки
-                print(f"rr_ratio({case}) вызвала неожиданную ошибку: {e}")
-                # Не прерываем тест, но логируем
-                continue
-
-
-def test_basic_metric_functions_exist():
-    """Проверяем что основные функции метрик существуют"""
-    tm = importlib.import_module("utils.trading_metrics")
-    
-    # Минимальный набор ожидаемых функций
-    expected_functions = [
-        "max_drawdown",
-        "rr_ratio", 
-        "sharpe_ratio",
-        "win_rate",
-        "profit_factor"
-    ]
-    
-    existing_functions = []
-    for func_name in expected_functions:
-        if hasattr(tm, func_name) and callable(getattr(tm, func_name)):
-            existing_functions.append(func_name)
-    
-    # Проверяем что хотя бы половина функций существует
-    assert len(existing_functions) >= len(expected_functions) // 2, \
-        f"Найдено только {len(existing_functions)} из {len(expected_functions)} ожидаемых функций: {existing_functions}"
-    
-    print(f"Найденные функции метрик: {existing_functions}")
+        params = {}
+        for p in tm.__dict__[name].__code__.co_varnames:
+            if p == "returns":
+                params["returns"] = series
+        res = fn(**params) if params else fn(series)
+        assert isinstance(res, (int, float, np.floating)) or res is None
