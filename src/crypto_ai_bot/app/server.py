@@ -16,14 +16,25 @@ from crypto_ai_bot.app.health import router as health_router, build_status_route
 
 logger = logging.getLogger(__name__)
 
+
 def build_deps() -> Deps:
     cfg = Settings.load()
     events = EventBus()
-    exchange = ExchangeClient(cfg)
+
+    # ExchangeClient может быть с аргументом cfg или без аргументов — поддержим оба варианта.
+    try:
+        exchange = ExchangeClient(cfg)  # новый вариант
+    except TypeError:
+        exchange = ExchangeClient()     # старый вариант без аргументов
+    except Exception as e:
+        logger.warning(f"ExchangeClient init with cfg failed: {e}; falling back to no-arg")
+        exchange = ExchangeClient()
+
     state = StateManager(cfg)
     risk = RiskManager(cfg)
     positions = PositionManager(exchange=exchange, state=state, settings=cfg, events=events)
     return Deps(settings=cfg, exchange=exchange, state=state, risk=risk, positions=positions, events=events)
+
 
 def create_app() -> FastAPI:
     logging.getLogger().setLevel(logging.INFO)
@@ -45,5 +56,6 @@ def create_app() -> FastAPI:
         bot.stop()
 
     return app
+
 
 app = create_app()
