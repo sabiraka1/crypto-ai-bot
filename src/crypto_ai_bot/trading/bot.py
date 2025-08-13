@@ -220,7 +220,7 @@ class TradingBot:
                 use_context_penalties=bool(int(os.getenv("USE_CONTEXT_PENALTIES", "1")))
             )
 
-            if not validate_features(features):
+            if not validate_features(self.cfg, self.state, features):
                 logger.warning("⚠️ Invalid features, skip")
                 incr_counter("features_invalid_total", 1)
                 return

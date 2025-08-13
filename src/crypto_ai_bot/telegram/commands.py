@@ -437,40 +437,35 @@ def cmd_testbuy(state_manager: StateManager, exchange_client: ExchangeClient,
         last_price = float(df["close"].iloc[-1]) if not df.empty else None
         atr_val = _atr(df)
 
-        def test_notify_entry(*_args, **_kwargs):
+        # Симулируем открытие позиции через state напрямую
+        if last_price:
+            qty = amount / last_price
+            state_manager.state.update({
+                "in_position": True,
+                "position_side": "long",
+                "entry_price": last_price,
+                "entry_time": time.time(),
+                "qty": qty,
+                "qty_base": qty,
+                "qty_usd": amount,
+                "symbol": symbol,
+                "paper": True,
+                "sl_atr": last_price * 0.98,  # -2% стоп-лосс
+                "tp1_atr": last_price * 1.02,  # +2% тейк-профит
+                "buy_score": 1.0,
+                "ai_score": 1.0
+            })
+            
+            # Отправляем уведомление
             lines = [
-                f"📈 TEST BUY {symbol} @ {last_price:.2f}" if last_price else f"📈 TEST BUY {symbol}",
+                f"📈 TEST BUY {symbol} @ {last_price:.2f}",
                 f"Сумма: ${amount:.2f}",
                 f"🔵 ATR: {atr_val:.4f} (UNIFIED)",
                 "Mode: PAPER TRADING",
             ]
             send_message("\n".join(lines), chat_id)
-
-        def test_notify_close(*_args, **_kwargs):
-            send_message("🧪 TEST позиция закрыта", chat_id)
-
-        from crypto_ai_bot.trading.position_manager import PositionManager as SimplePositionManager
-        pm = SimplePositionManager(
-            exchange=exchange_client,
-            state=state_manager,
-            settings=CFG,
-            events=EventBus()  # или None
-        )
-
-        result = pm.open_long(
-            symbol=symbol,
-            amount_usd=amount,
-            entry_price=last_price or 0.0,
-            atr=atr_val or 0.0,
-            buy_score=1.0,
-            ai_score=1.0,
-            amount_frac=1.0,
-            market_condition="test",
-            pattern="test_pattern",
-        )
-
-        if result is None:
-            send_message("❌ Тестовая покупка не выполнена. Проверьте логи.", chat_id)
+        else:
+            send_message("❌ Тестовая покупка не выполнена. Не удалось получить цену.", chat_id)
 
     except Exception as e:
         logging.exception("cmd_testbuy error")
@@ -506,29 +501,35 @@ def cmd_testsell(state_manager: StateManager, exchange_client: ExchangeClient, c
             send_message("❌ Размер позиции равен нулю", chat_id)
             return
 
-        def test_notify_close(*_args, **_kwargs):
-            pnl_pct = (last_price - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
-            pnl_abs = (last_price - entry_price) * qty_base_stored if entry_price > 0 else 0.0
-            pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
-            lines = [
-                f"{pnl_emoji} TEST SELL {symbol} @ {last_price:.2f}",
-                f"Entry: {entry_price:.2f}",
-                f"PnL: {pnl_pct:+.2f}% (${pnl_abs:+.2f})",
-                f"Size: ${qty_usd:.2f}",
-            ]
-            send_message("\n".join(lines), chat_id)
-
-        from crypto_ai_bot.trading.position_manager import PositionManager as SimplePositionManager
-        pm = SimplePositionManager(
-            exchange=exchange_client,
-            state=state_manager,
-            settings=CFG,
-            events=EventBus()  # или None если не используется
-        )
-
-        result = pm.close_all(symbol, exit_price=last_price, reason="manual_test_sell")
-        if result is None:
-            send_message("❌ Тестовая продажа не выполнена", chat_id)
+        # Симулируем закрытие позиции
+        pnl_abs = (last_price - entry_price) * qty_base_stored
+        pnl_pct = ((last_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+        
+        # Очищаем состояние
+        state_manager.state.update({
+            "in_position": False,
+            "position_side": None,
+            "entry_price": 0,
+            "qty": 0,
+            "qty_base": 0,
+            "qty_usd": 0,
+            "symbol": None,
+            "paper": False,
+            "sl_atr": 0,
+            "tp1_atr": 0,
+            "buy_score": 0,
+            "ai_score": 0
+        })
+        
+        # Отправляем уведомление
+        pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+        lines = [
+            f"{pnl_emoji} TEST SELL {symbol} @ {last_price:.2f}",
+            f"Entry: {entry_price:.2f}",
+            f"PnL: {pnl_pct:+.2f}% (${pnl_abs:+.2f})",
+            f"Size: ${qty_usd:.2f}",
+        ]
+        send_message("\n".join(lines), chat_id)
 
     except Exception as e:
         logging.exception("cmd_testsell error")
