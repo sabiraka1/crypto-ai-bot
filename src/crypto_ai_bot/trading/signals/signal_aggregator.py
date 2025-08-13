@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Sequence
 from datetime import datetime, timezone
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from crypto_ai_bot.context.snapshot import build_context_snapshot
 
 logger = logging.getLogger(__name__)
+
 
 # ----------------------- Helpers -----------------------
 
@@ -26,18 +27,22 @@ def _ohlcv_to_df(ohlcv: List[list]) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.dropna()
 
+
 def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
+
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     up = np.where(delta > 0, delta, 0.0)
     down = np.where(delta < 0, -delta, 0.0)
-    roll_up = pd.Series(up, index=series.index).ewm(alpha=1/period, adjust=False).mean()
-    roll_down = pd.Series(down, index=series.index).ewm(alpha=1/period, adjust=False).mean()
+    roll_up = pd.Series(up, index=series.index).ewm(alpha=1 / period, adjust=False).mean()
+    roll_down = pd.Series(down, index=series.index).ewm(alpha=1 / period, adjust=False).mean()
     rs = roll_up / (roll_down.replace(0, np.nan))
     rsi = 100 - (100 / (1 + rs))
+    # избегаем FutureWarning у pandas:
     return rsi.bfill().fillna(50.0)
+
 
 def _macd_hist(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
     ema_fast = _ema(series, fast)
@@ -46,17 +51,23 @@ def _macd_hist(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 
     signal_line = _ema(macd_line, signal)
     return (macd_line - signal_line)
 
+
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     prev_close = df["close"].shift(1)
-    tr = pd.concat([
-        (df["high"] - df["low"]),
-        (df["high"] - prev_close).abs(),
-        (df["low"] - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/period, adjust=False).mean()
+    tr = pd.concat(
+        [
+            (df["high"] - df["low"]),
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(x)))
+
 
 # ----------------------- Indicators & Scoring -----------------------
 
@@ -93,8 +104,9 @@ def _compute_indicators_15m(df15: pd.DataFrame) -> Dict[str, Any]:
 
     return out
 
+
 def _compute_trend_4h(df4h: pd.DataFrame) -> Optional[bool]:
-    """bull=True, bear=False, None=неопределённо"""
+    """bull=True, bear=False, None=неопределённо."""
     if df4h.empty:
         return None
     ema20_4h = _ema(df4h["close"], 20).iloc[-1]
@@ -102,6 +114,7 @@ def _compute_trend_4h(df4h: pd.DataFrame) -> Optional[bool]:
     if np.isnan(ema20_4h) or np.isnan(ema50_4h):
         return None
     return bool(ema20_4h > ema50_4h)
+
 
 def _market_condition(ind_15m: Dict[str, Any], trend_4h: Optional[bool]) -> str:
     if trend_4h is True:
@@ -114,8 +127,9 @@ def _market_condition(ind_15m: Dict[str, Any], trend_4h: Optional[bool]) -> str:
         return "bear_15m"
     return "SIDEWAYS"
 
+
 def _rule_score(ind: Dict[str, Any]) -> float:
-    """Весовая модель без AI: 0..1"""
+    """Простая весовая модель без AI: 0..1"""
     score = 0.0
     score += 0.20 * (1.0 if ind.get("rsi") is not None and 30 < ind["rsi"] < 70 else 0.0)
     score += 0.20 * (1.0 if ind.get("macd_hist", 0) > 0 else 0.0)
@@ -123,8 +137,10 @@ def _rule_score(ind: Dict[str, Any]) -> float:
     score += 0.15 * (1.0 if ind.get("ema20", 0) > ind.get("ema50", 0) else 0.0)
     vr = ind.get("volume_ratio")
     if vr is not None and np.isfinite(vr):
-        score += 0.15 * _clamp(vr / 2.0, 0.0, 1.0)  # 2×среднего → +0.15
+        # 2× среднего объёма → +0.15
+        score += 0.15 * _clamp(vr / 2.0, 0.0, 1.0)
     return _clamp(score)
+
 
 # ----------------------- Context penalties -----------------------
 
@@ -133,22 +149,27 @@ def _is_alt_symbol(symbol: str) -> bool:
     s = (symbol or "").upper()
     return not (s.startswith("BTC/") or s.endswith("/BTC"))
 
+
 def _apply_context_penalties(
     symbol: str,
     base_score: float,
     snap: Any,  # ContextSnapshot
 ) -> Tuple[float, Dict[str, Any]]:
-    """Применяет мягкие штрафы/бонусы по ENV. Возвращает (скор_после, детали)."""
+    """
+    Применяет мягкие штрафы/бонусы по ENV.
+    Возвращает (скор_после, детали).
+    """
+    # флаг: можно отключить пенальти кодом при желании
     if not int(os.getenv("USE_CONTEXT_PENALTIES", "0")):
         return base_score, {"enabled": False, "applied": []}
 
     clamp_min = float(os.getenv("CTX_SCORE_CLAMP_MIN", "0.0"))
     clamp_max = float(os.getenv("CTX_SCORE_CLAMP_MAX", "1.0"))
 
-    # BTC Dominance (штраф только для альтов — если включено)
     penalties = []
     score = base_score
 
+    # BTC Dominance (штраф только для альтов — если включено)
     try:
         alts_only = int(os.getenv("CTX_BTC_DOM_ALTS_ONLY", "1")) == 1
         dom_thresh = float(os.getenv("CTX_BTC_DOM_THRESH", "52.0"))
@@ -192,21 +213,49 @@ def _apply_context_penalties(
     score = _clamp(score, clamp_min, clamp_max)
     return score, {"enabled": True, "applied": penalties, "clamp": [clamp_min, clamp_max]}
 
-# ----------------------- Public: aggregate_features -----------------------
 
-def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+# ----------------------- Public API (back-compat signature) -----------------------
+
+def aggregate_features(
+    cfg,
+    exchange,
+    # старые параметры — оставлены для совместимости со старыми вызовами:
+    symbol: str = "BTC/USDT",
+    timeframe: Optional[str] = None,  # игнорируем, у нас мульти-TF
+    timeframes: Optional[Sequence[str]] = None,
+    limit: int = 200,
+    settings: Any = None,
+    use_context_penalties: Optional[bool] = None,
+    snapshot: Any = None,
+    **kwargs,
+) -> Dict[str, Any]:
     """
-    Возвращает:
-        {
-          "symbol", "timeframe", "timestamp",
-          "indicators": {...}, "rule_score", "rule_score_penalized", "ai_score",
-          "data_quality": {...},
-          "context": {"market_condition": "...", "snapshot": {...}, "penalties": {...}}
-        }
+    Возвращает единый пакет фич:
+    {
+      "symbol", "timeframe", "timestamp",
+      "indicators": {...}, "rule_score", "rule_score_penalized", "ai_score",
+      "data_quality": {...}, "context": {...},
+      # и совместимые поля:
+      "scores": {"rule", "ai", "total_hint"},
+      "market": {"condition", "atr_pct"},
+      "data": {...}
+    }
     """
-    symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
-    tfs = ["15m", "1h", "4h"]
-    limit = int(getattr(cfg, "AGGREGATOR_LIMIT", 200))
+
+    # приоритет: явные аргументы -> cfg -> дефолт
+    symbol = symbol or getattr(cfg, "SYMBOL", "BTC/USDT")
+
+    # поддержка старого аргумента timeframe/timeframes
+    if timeframes is None:
+        timeframes = getattr(cfg, "AGGREGATOR_TIMEFRAMES", None)
+    tfs = list(timeframes) if timeframes else ["15m", "1h", "4h"]
+
+    if not limit:
+        limit = int(getattr(cfg, "AGGREGATOR_LIMIT", 200))
+
+    # Перекрыть флаг USE_CONTEXT_PENALTIES можно аргументом функции
+    if use_context_penalties is not None:
+        os.environ["USE_CONTEXT_PENALTIES"] = "1" if use_context_penalties else "0"
 
     logger.info(f"🎯 Aggregating features for {symbol} ({tfs}, limit={limit})")
 
@@ -250,20 +299,21 @@ def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> D
         logger.warning(f"⚠️ Rule score failed: {e}")
         rule = 0.5
 
-    # 5) Подтягиваем «реальный» контекст
-    try:
-        snap = build_context_snapshot(cfg, exchange, symbol, timeframe="15m")
-    except Exception as e:
-        logger.warning(f"⚠️ Context snapshot failed: {e}")
-        snap = None
+    # 5) Реальный контекст (если снапшот не прокинут аргументом — соберём сами)
+    if snapshot is None:
+        try:
+            snapshot = build_context_snapshot(cfg, exchange, symbol, timeframe="15m")
+        except Exception as e:
+            logger.warning(f"⚠️ Context snapshot failed: {e}")
+            snapshot = None
 
-    # 6) Применяем мягкие штрафы/бонусы контекста
+    # 6) Мягкие штрафы/бонусы контекста
     penalties_info: Dict[str, Any] = {"enabled": False, "applied": []}
     rule_penalized = rule
-    if snap is not None:
-        rule_penalized, penalties_info = _apply_context_penalties(symbol, rule, snap)
+    if snapshot is not None:
+        rule_penalized, penalties_info = _apply_context_penalties(symbol, rule, snapshot)
 
-    # 7) AI-score (фолбэк — бот потом сам «сфьюзит» rule+ai)
+    # 7) AI-score (fall-back, если модель не инициализировалась)
     ai_score = float(getattr(cfg, "AI_FAILOVER_SCORE", 0.55))
 
     # 8) Качество данных
@@ -274,17 +324,17 @@ def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> D
         "indicators_count": 5,  # rsi, macd_hist, ema-кроссы, atr, volume_ratio
     }
 
-    # 9) Ответ
+    # 9) Пакуем ответ + совместимые поля для /status
     ctx_payload: Dict[str, Any] = {"market_condition": mkt_cond}
-    if snap is not None:
+    if snapshot is not None:
         ctx_payload["snapshot"] = {
-            "btc_dominance": getattr(snap, "btc_dominance", None),
-            "dxy_change_1d": getattr(snap, "dxy_change_1d", None),
-            "fear_greed": getattr(snap, "fear_greed", None),
+            "btc_dominance": getattr(snapshot, "btc_dominance", None),
+            "dxy_change_1d": getattr(snapshot, "dxy_change_1d", None),
+            "fear_greed": getattr(snapshot, "fear_greed", None),
         }
         ctx_payload["penalties"] = penalties_info
 
-    out = {
+    out: Dict[str, Any] = {
         "symbol": symbol,
         "timeframe": "15m",
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -294,10 +344,21 @@ def aggregate_features(cfg, exchange, ctx: Optional[Dict[str, Any]] = None) -> D
         "ai_score": float(ai_score),
         "data_quality": data_quality,
         "context": ctx_payload,
+        # Совместимые поля, чтобы старый /status ничего не ломал:
+        "scores": {
+            "rule": float(rule),
+            "ai": float(ai_score),
+            "total_hint": float(rule_penalized),
+        },
+        "market": {
+            "condition": mkt_cond,
+            "atr_pct": ind15.get("atr_pct"),
+        },
+        "data": data_quality,
     }
 
     logger.info(
-        f"✅ Features aggregated: rule={rule:.3f} -> penalized={rule_penalized:.3f}, ai={ai_score:.3f}, "
-        f"ind={data_quality['indicators_count']}"
+        f"✅ Features aggregated: rule={rule:.3f} -> penalized={rule_penalized:.3f}, "
+        f"ai={ai_score:.3f}, ind={data_quality['indicators_count']}"
     )
     return out
