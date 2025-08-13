@@ -277,7 +277,7 @@ def _validate_technical_conditions(cfg: Settings, feats: Dict[str, Any]) -> List
         # Твоя расширенная проверка индикаторов
         ind = feats.get("indicators", {})
         required = getattr(cfg, "REQUIRED_INDICATORS",
-                          ["price","rsi","atr","volume","volume_sma","ema20","ema50"])
+                          ["price","rsi","atr","ema20","ema50"])
         missing = [k for k in required if k not in ind]
         if missing:
             reasons.append(f"missing_indicators:{','.join(missing)}")
