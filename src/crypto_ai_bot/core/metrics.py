@@ -111,3 +111,31 @@ def push_context_metrics(
     except Exception:
         # метрики — best effort; не блокируем цикл
         pass
+
+# ---- FastAPI router for /metrics -------------------------------------------
+try:
+    from fastapi import APIRouter, Response
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # type: ignore
+    except Exception:
+        generate_latest = None
+        CONTENT_TYPE_LATEST = 'text/plain; version=0.0.4; charset=utf-8'
+
+    # Если в этом модуле ещё нет router — создадим
+    router  # type: ignore  # probe
+except NameError:
+    try:
+        router = APIRouter()
+    except Exception:
+        router = None  # FastAPI недоступен (например, при оффлайн-скриптах)
+
+if 'APIRouter' in globals() and router is not None:
+    @router.get("/metrics")
+    def metrics():
+        """Отдаёт Prometheus-метрики; при отсутствии prometheus_client — минимальный текст."""
+        if 'generate_latest' in globals() and generate_latest is not None \
+           and 'PROM_ENABLED' in globals() and PROM_ENABLED:
+            return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        # Fallback plain text, чтобы эндпойнт жил даже без prometheus_client
+        body = "app_up 1\napp_info{service=\"crypto-ai-bot\",version=\"1.0\"} 1\n"
+        return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
