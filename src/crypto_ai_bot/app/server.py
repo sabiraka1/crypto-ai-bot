@@ -13,6 +13,8 @@ from crypto_ai_bot.trading.risk_manager import RiskManager
 from crypto_ai_bot.trading.bot import TradingBot, Deps
 
 from crypto_ai_bot.app.health import router as health_router, build_status_router
+from crypto_ai_bot.app.metrics import router as metrics_router
+from crypto_ai_bot.telegram.bot import router as telegram_router
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +44,12 @@ def create_app() -> FastAPI:
     bot = TradingBot(deps)
 
     app = FastAPI(title="crypto-ai-bot", version="1.0")
-    app.include_router(health_router)
-    app.include_router(build_status_router(bot, deps))
+
+    # Routers
+    app.include_router(health_router, prefix="/health", tags=["health"])
+    app.include_router(build_status_router(bot, deps), tags=["status"])
+    app.include_router(metrics_router, tags=["metrics"])
+    app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 
     @app.on_event("startup")
     async def _startup():
