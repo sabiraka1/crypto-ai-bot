@@ -258,8 +258,9 @@ class TradingBot:
             self.events.emit("signal_generated", signal_payload)
 
             # 5) Решение о входе (лонг)
+            features['score'] = fused_score
             features['fused_score'] = fused_score
-            decision = decide_entry(self.cfg, self.risk, features, fused_score)
+            decision = decide_entry(self.cfg, self.state, self.risk, features, fused_score)
             if not decision or not isinstance(decision, dict):
                 logger.debug("⏭ No entry decision this cycle")
                 set_gauge("last_decision_score", fused_score)
