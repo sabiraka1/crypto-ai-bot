@@ -34,7 +34,7 @@ def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     roll_down = pd.Series(down, index=series.index).ewm(alpha=1/period, adjust=False).mean()
     rs = roll_up / (roll_down.replace(0, np.nan))
     rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(method="bfill").fillna(50.0)
+    return rsi.bfill().fillna(50.0)
 
 def _macd_hist(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
     ema_fast = _ema(series, fast)
