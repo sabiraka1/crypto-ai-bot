@@ -1,14 +1,18 @@
 # src/crypto_ai_bot/trading/signals/signal_aggregator.py
 """
-🎯 Signal Aggregator - Сбор и агрегация торговых сигналов
-Расширенная версия: true ATR (Wilder), EMA9/21/20/50, MACD(12,26,9), Bollinger(20,2),
-breakout_high_20, volume_ratio, мультифрейм-тренды (1h/4h) и компактный контекст.
+🎯 Signal Aggregator — сбор и агрегация торговых сигналов
+Фичи: true ATR (Wilder) с опцией UNIFIED ATR, EMA9/21/20/50, MACD(12,26,9),
+Bollinger(20,2), breakout_high_20, volume_ratio, мультифрейм (15m/1h/4h),
+контекстные штрафы/бонусы по BTC.D/DXY/Fear&Greed/market_condition.
 """
+
+from __future__ import annotations
 
 import logging
 from typing import Dict, Any, List, Optional
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 from crypto_ai_bot.config.settings import Settings
 from crypto_ai_bot.trading.exchange_client import ExchangeClient
@@ -16,21 +20,25 @@ from crypto_ai_bot.context.snapshot import ContextSnapshot
 
 logger = logging.getLogger(__name__)
 
-# ── Импорты с fallback ───────────────────────────────────────────────────────
+# ── Импорты с безопасным fallback ────────────────────────────────────────────
 try:
-    from crypto_ai_bot.analysis.technical_indicators import compute_indicators
-except Exception:
-    logger.warning("⚠️ compute_indicators not found, using fallback")
-    compute_indicators = None
+    from crypto_ai_bot.analysis.technical_indicators import (
+        calculate_all_indicators as _calc_inds,
+        get_unified_atr as _unified_atr,
+    )
+except Exception as e:
+    _calc_inds = None
+    _unified_atr = None
+    logger.warning(f"signal_aggregator: indicators fallback ({e})")
 
 try:
-    from crypto_ai_bot.analysis.scoring_engine import compute_rule_score as _rule_score
+    # Если есть твой «умный» скоулер — используем его
+    from crypto_ai_bot.trading.signals.score_fusion import fuse_scores as _fuse_scores
 except Exception:
-    logger.warning("⚠️ compute_rule_score not found, using fallback")
-    _rule_score = None
+    _fuse_scores = None
 
 
-# ── Вспомогательное ─────────────────────────────────────────────────────────
+# ── Утилиты ──────────────────────────────────────────────────────────────────
 def _to_df(ohlcv) -> pd.DataFrame:
     if not ohlcv:
         return pd.DataFrame()
@@ -38,7 +46,7 @@ def _to_df(ohlcv) -> pd.DataFrame:
         df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
         df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
         df.set_index("time", inplace=True)
-        for c in ("open","high","low","close","volume"):
+        for c in ("open", "high", "low", "close", "volume"):
             df[c] = pd.to_numeric(df[c], errors="coerce")
         return df.dropna()
     except Exception as e:
@@ -48,25 +56,25 @@ def _to_df(ohlcv) -> pd.DataFrame:
 
 def _fetch_multiframe_data(ex: ExchangeClient, symbol: str,
                            timeframes: List[str], limit: int = 200) -> Dict[str, pd.DataFrame]:
-    data: Dict[str, pd.DataFrame] = {}
+    out: Dict[str, pd.DataFrame] = {}
     failed: List[str] = []
     for tf in timeframes:
         try:
             ohlcv = ex.get_ohlcv(symbol, timeframe=tf, limit=limit)
             df = _to_df(ohlcv)
-            data[tf] = df
+            out[tf] = df
             if df.empty:
                 failed.append(tf)
                 logger.warning(f"⚠️ No {tf} data for {symbol}")
             else:
                 logger.debug(f"✅ {tf}: {len(df)} candles {df.index[0]}→{df.index[-1]}")
         except Exception as e:
-            data[tf] = pd.DataFrame()
+            out[tf] = pd.DataFrame()
             failed.append(tf)
             logger.error(f"❌ Fetch {tf} failed: {e}")
     if failed:
         logger.warning(f"⚠️ Failed timeframes: {failed}")
-    return data
+    return out
 
 
 def _ema(series: pd.Series, span: int) -> pd.Series:
@@ -75,14 +83,11 @@ def _ema(series: pd.Series, span: int) -> pd.Series:
 
 def _wilder_atr(df: pd.DataFrame, period: int = 14) -> float:
     """True ATR (Wilder): TR = max(H-L, |H-Cprev|, |L-Cprev|); ATR = EMA(alpha=1/period)."""
-    if df is None or df.empty: return float("nan")
+    if df is None or df.empty:
+        return float("nan")
     h, l, c = df["high"], df["low"], df["close"]
     c_prev = c.shift(1)
-    tr = pd.concat([
-        (h - l).abs(),
-        (h - c_prev).abs(),
-        (l - c_prev).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat([(h - l).abs(), (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
     alpha = 1.0 / period
     atr = tr.ewm(alpha=alpha, adjust=False).mean()
     val = float(atr.iloc[-1]) if pd.notna(atr.iloc[-1]) else float("nan")
@@ -97,10 +102,11 @@ def _bbands(close: pd.Series, period: int = 20, mult: float = 2.0):
     return mid, up, dn
 
 
+# ── Индикаторы (fallback, если нет analysis.calculate_all_indicators) ────────
 def _compute_basic_indicators(df15: pd.DataFrame,
                               df1h: Optional[pd.DataFrame] = None,
                               df4h: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
-    if df15.empty or len(df15) < 50:
+    if df15 is None or df15.empty or len(df15) < 50:
         return {}
 
     close = df15["close"]; high = df15["high"]; low = df15["low"]; vol = df15["volume"]
@@ -113,21 +119,28 @@ def _compute_basic_indicators(df15: pd.DataFrame,
     sma20 = close.rolling(20).mean().iloc[-1]
 
     # MACD(12,26,9)
-    ema12 = _ema(close, 12)
-    ema26 = _ema(close, 26)
+    ema12 = _ema(close, 12); ema26 = _ema(close, 26)
     macd_line = (ema12 - ema26)
     macd_signal = macd_line.ewm(span=9, adjust=False).mean()
     macd_hist = (macd_line - macd_signal).iloc[-1]
 
-    # RSI(14) — упрощённый (EMA версию можно внедрить позже)
+    # RSI(14) простой
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
-    rsi = float(100 - (100 / (1 + rs))).__float__() if pd.notna(rs.iloc[-1]) else 50.0
+    rsi = float(100 - (100 / (1 + rs))) if pd.notna(rs.iloc[-1]) else 50.0
 
-    # ATR (Wilder)
-    atr = _wilder_atr(df15, 14)
+    # ATR: предпочитаем UNIFIED ATR из analysis, иначе Wilder
+    atr = None
+    try:
+        if _unified_atr:
+            atr = float(_unified_atr(df15, period=14, method="ewm"))
+    except Exception:
+        atr = None
+    if atr is None or np.isnan(atr):
+        atr = _wilder_atr(df15, 14)
+
     price = float(close.iloc[-1])
     atr_pct = (atr / price) * 100 if price > 0 and pd.notna(atr) else float("nan")
 
@@ -140,7 +153,7 @@ def _compute_basic_indicators(df15: pd.DataFrame,
     if len(close) > 1 and pd.notna(bb_dn.iloc[-2]) and pd.notna(bb_dn.iloc[-1]):
         bb_reentry = (close.iloc[-2] < bb_dn.iloc[-2]) and (close.iloc[-1] > bb_dn.iloc[-1])
 
-    # Breakout high 20 (по high предыдущих баров)
+    # Breakout high 20
     if len(high) >= 21:
         prev_high20 = high.shift(1).rolling(20).max().iloc[-1]
         breakout_high_20 = price > prev_high20 if pd.notna(prev_high20) else False
@@ -187,8 +200,7 @@ def _compute_basic_indicators(df15: pd.DataFrame,
         "trend_4h_bull": trend_4h_bull,
     }
     # Чистим None/NaN
-    indicators = {k: v for k, v in indicators.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-    return indicators
+    return {k: v for k, v in indicators.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
 
 
 def _compute_indicators_safe(frames: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
@@ -199,121 +211,155 @@ def _compute_indicators_safe(frames: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
         if df15.empty:
             logger.warning("⚠️ No 15m data for indicators computation")
             return {}
-        if callable(compute_indicators):
+        if callable(_calc_inds):
             try:
-                return compute_indicators(df15, df1h if not df1h.empty else None, df4h if not df4h.empty else None) or {}
+                return _calc_inds(df15, df1h if not df1h.empty else None, df4h if not df4h.empty else None) or {}
             except Exception as e:
-                logger.warning(f"⚠️ compute_indicators failed: {e}, using fallback")
+                logger.warning(f"⚠️ calculate_all_indicators failed: {e}, using fallback")
         return _compute_basic_indicators(df15, df1h if not df1h.empty else None, df4h if not df4h.empty else None)
     except Exception as e:
         logger.error(f"❌ Indicators computation failed: {e}")
         return {}
 
 
+# ── Rule-score ───────────────────────────────────────────────────────────────
 def _simple_rule_score(ind: Dict[str, Any]) -> float:
-    """Простой rule-score по твоим идеям (RSI/MACD/EMA/объём/BB/мультифрейм)."""
-    if not ind: return 0.5
+    """Простой rule-score (RSI/MACD/EMA/объём/BB/мультифрейм)."""
+    if not ind:
+        return 0.5
     score = 0.0
 
-    # RSI зона
     rsi = ind.get("rsi", 50)
-    if rsi < 30: score += 0.20
-    elif 35 <= rsi <= 65: score += 0.15
+    if rsi < 30:
+        score += 0.20
+    elif 35 <= rsi <= 65:
+        score += 0.15
 
-    # MACD импульс
-    if ind.get("macd_hist", 0) > 0: score += 0.20
+    if ind.get("macd_hist", 0) > 0:
+        score += 0.20
 
-    # EMA импульс и тренд
-    if ind.get("ema9", 0) > ind.get("ema21", 0): score += 0.15
-    if ind.get("ema20", 0) > ind.get("ema50", 0): score += 0.15
+    if ind.get("ema9", 0) > ind.get("ema21", 0):
+        score += 0.15
+    if ind.get("ema20", 0) > ind.get("ema50", 0):
+        score += 0.15
 
-    # Объём
     vr = ind.get("volume_ratio", float("nan"))
     if isinstance(vr, (int, float)) and not np.isnan(vr):
         score += min(0.20, 0.10 * vr)
 
-    # BB re-entry
-    if ind.get("bb_reentry"): score += 0.10
+    if ind.get("bb_reentry"):
+        score += 0.10
 
-    # Мультифрейм бонус/штраф
-    if ind.get("trend_4h_bull") is True: score += 0.10
-    if ind.get("trend_4h_bull") is False: score -= 0.10
+    # мультифрейм-бонус/штраф
+    if ind.get("trend_4h_bull") is True:
+        score += 0.10
+    if ind.get("trend_4h_bull") is False:
+        score -= 0.10
 
     return max(0.0, min(1.0, score))
 
 
 def _compute_rule_score_safe(indicators: Dict[str, Any], ctx: ContextSnapshot) -> float:
     try:
-        if callable(_rule_score) and indicators:
-            s = float(_rule_score(indicators, ctx))
-            return max(0.0, min(1.0, s))
+        if callable(_fuse_scores) and indicators:
+            return float(max(0.0, min(1.0, _fuse_scores(indicators))))
         return _simple_rule_score(indicators)
     except Exception as e:
         logger.warning(f"⚠️ Rule score failed: {e}")
         return 0.6
 
 
+# ── Контекст ────────────────────────────────────────────────────────────────
 def _ctx_summary(ctx: ContextSnapshot) -> Dict[str, Any]:
-    """Безопасная сводка контекста (значения могут быть None, это ок)."""
-    def _get(obj, *keys, default=None):
-        cur = obj
-        for k in keys:
-            try:
-                cur = getattr(cur, k) if not isinstance(cur, dict) else cur.get(k)
-            except Exception:
-                return default
-        return cur if cur is not None else default
+    """
+    Безопасная сводка контекста под наши имена полей.
+    Поддерживает как новые (btc_dominance_delta_24h) так и старые (btc_d_delta_24h).
+    """
+    def _get(obj, name: str, default=None):
+        try:
+            v = getattr(obj, name)
+            return v if v is not None else default
+        except Exception:
+            return default
+
+    # возможные имена:
+    btc_dom = (
+        _get(ctx, "btc_dominance_delta_24h") or
+        _get(ctx, "btc_d_delta_24h") or
+        0.0
+    )
+    dxy = (
+        _get(ctx, "dxy_delta_5d") or
+        _get(ctx, "dxy_delta") or
+        0.0
+    )
+    fng = _get(ctx, "fear_greed", None)
+    mc = (_get(ctx, "market_condition", "SIDEWAYS") or "SIDEWAYS").upper()
 
     return {
-        "btc_d_rising": (_get(ctx, "market", "btc_d_delta_24h") or _get(ctx, "btc_d_delta_24h") or 0) > 0,
-        "dxy_rising_fast": (_get(ctx, "market", "dxy_delta_5d") or _get(ctx, "dxy_delta_5d") or 0) > 1.0,
-        "fear_greed": _get(ctx, "market", "fear_greed") or _get(ctx, "fear_greed"),
+        "btc_d_rising": bool(btc_dom > 0.5),   # рост доминации — отриц. для альтов
+        "dxy_rising_fast": bool(dxy > 1.0),    # сильный доллар
+        "fear_greed": fng,
+        "market_condition": mc,
     }
 
 
-def aggregate_features(cfg: Settings, ex: ExchangeClient, ctx: ContextSnapshot) -> Dict[str, Any]:
+# ── Главная функция ─────────────────────────────────────────────────────────
+def aggregate_features(cfg: Settings, ex: ExchangeClient, ctx: Optional[ContextSnapshot]) -> Dict[str, Any]:
+    """
+    Возвращает компактный словарь с индикаторами, скором и summary контекста.
+    cfg, ex — берём из DI; ctx допускает None (подменяется нейтральным).
+    """
     symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
     primary_tf = getattr(cfg, "TIMEFRAME", "15m")
     tfs = getattr(cfg, "ANALYSIS_TIMEFRAMES", [primary_tf, "1h", "4h"])
     limit = int(getattr(cfg, "OHLCV_LIMIT", 200))
 
     logger.info(f"🎯 Aggregating features for {symbol} ({tfs}, limit={limit})")
+    ctx = ctx or ContextSnapshot.neutral()
 
     try:
         frames = _fetch_multiframe_data(ex, symbol, tfs, limit)
         primary_df = frames.get(primary_tf, pd.DataFrame())
         if primary_df.empty:
-            return {"error": "no_primary_data", "symbol": symbol, "timeframe": primary_tf,
-                    "timestamp": pd.Timestamp.now(tz="UTC").isoformat()}
+            return {
+                "error": "no_primary_data",
+                "symbol": symbol,
+                "timeframe": primary_tf,
+                "timestamp": pd.Timestamp.now(tz="UTC").isoformat()
+            }
 
         indicators = _compute_indicators_safe(frames)
-        # Вставляем volume/ratio, если compute_indicators их не дал
+
+        # дозаполним объём/ratio если их нет (нормально для fallback)
         if "volume" not in indicators and not primary_df.empty:
             indicators["volume"] = float(primary_df["volume"].iloc[-1])
         if "volume_sma" not in indicators and not primary_df.empty and len(primary_df) >= 20:
             indicators["volume_sma"] = float(primary_df["volume"].rolling(20).mean().iloc[-1])
-        if "volume_ratio" not in indicators and "volume" in indicators and indicators.get("volume_sma", 0) > 0:
+        if "volume_ratio" not in indicators and indicators.get("volume_sma", 0) > 0:
             indicators["volume_ratio"] = indicators["volume"] / indicators["volume_sma"]
 
-        # Rule score (или fallback)
         rule_score = _compute_rule_score_safe(indicators, ctx)
 
-        # AI score (fallback из конфигурации)
+        # AI score — пока берём failover из конфигурации (если ИИ выключен)
         ai_score = float(getattr(cfg, "AI_FAILOVER_SCORE", 0.5))
 
-        # Контекст (сводка)
-        ctx_sum = _ctx_summary(ctx) if ctx is not None else {}
+        ctx_sum = _ctx_summary(ctx)
 
         result: Dict[str, Any] = {
             "symbol": symbol,
             "timeframe": primary_tf,
             "timestamp": primary_df.index[-1].isoformat(),
-            "rule_score": rule_score,
-            "ai_score": ai_score,
+            "rule_score": float(round(rule_score, 4)),
+            "ai_score": float(round(ai_score, 4)),
             "indicators": indicators,
-            "context": ctx,
+            "context": {
+                "btc_dominance_delta_24h": getattr(ctx, "btc_dominance_delta_24h", None),
+                "dxy_delta_5d": getattr(ctx, "dxy_delta_5d", None),
+                "fear_greed": getattr(ctx, "fear_greed", None),
+                "market_condition": getattr(ctx, "market_condition", "SIDEWAYS"),
+            },
             "context_summary": ctx_sum,
-            "frames": frames,
             "data_quality": {
                 "timeframes_ok": [tf for tf, df in frames.items() if not df.empty],
                 "timeframes_failed": [tf for tf, df in frames.items() if df.empty],
@@ -322,13 +368,20 @@ def aggregate_features(cfg: Settings, ex: ExchangeClient, ctx: ContextSnapshot) 
             },
         }
 
-        logger.info(f"✅ Features aggregated: rule={rule_score:.3f}, ai={ai_score:.3f}, ind={len(indicators)}")
+        logger.info(
+            f"✅ Features aggregated: rule={result['rule_score']:.3f}, "
+            f"ai={result['ai_score']:.3f}, ind={len(indicators)}"
+        )
         return result
 
     except Exception as e:
         logger.error(f"❌ Feature aggregation failed: {e}", exc_info=True)
-        return {"error": "aggregation_failed", "error_details": str(e),
-                "symbol": symbol, "timestamp": pd.Timestamp.now(tz="UTC").isoformat()}
+        return {
+            "error": "aggregation_failed",
+            "error_details": str(e),
+            "symbol": symbol,
+            "timestamp": pd.Timestamp.now(tz="UTC").isoformat()
+        }
 
 
 __all__ = ["aggregate_features"]
