@@ -1,9 +1,12 @@
 # src/crypto_ai_bot/trading/signals/entry_policy.py
 """
-🎯 Entry Policy — умная система входа
+🎯 Entry Policy — умная система входа (long-only)
 - Динамический SL через RiskManager (если доступен df_15m), иначе fallback на ATR-мультипликаторы
 - TP от ATR (или от R:R при отсутствии ATR)
 - Адаптивный порог входа и умное позиционирование (confidence/volatility-aware)
+
+Совместимость:
+- Экспортируем should_enter_long(...) — тонкая обёртка над decide_entry(...)
 """
 
 from __future__ import annotations
@@ -134,7 +137,7 @@ def calculate_adaptive_threshold(cfg: Settings, feats: Dict[str, Any]) -> float:
     if feats.get("conflict_detected") or feats.get("fusion", {}).get("conflict_detected"):
         thr += 0.05
 
-    return max(0.0, min(1.0, thr))
+    return max(0.0, min(1.0, round(thr, 6)))
 
 
 def calculate_intelligent_position_size(cfg: Settings, state: StateManager,
@@ -205,7 +208,7 @@ def _tp_from_atr_or_rr(cfg: Settings, ind: Dict[str, Any], entry_price: float, s
     return None
 
 
-# ── итоговое решение ─────────────────────────────────────────────────────────
+# ── факторы и основное решение ───────────────────────────────────────────────
 def analyze_decision_factors(cfg: Settings, state: StateManager,
                              feats: Dict[str, Any], score: float) -> Dict[str, Any]:
     ind = feats.get("indicators", {})
@@ -328,7 +331,20 @@ def decide_entry(cfg: Settings, state: StateManager, risk: RiskManager,
         return {"enter": False, "reason": f"decision_error:{str(e)}", "score": score}
 
 
+# ── совместимость: ожидаемый TradingBot API ──────────────────────────────────
+def should_enter_long(cfg: Settings, state: StateManager, risk: RiskManager,
+                      feats: Dict[str, Any], score: float) -> Dict[str, Any]:
+    """
+    Backward-compatible обёртка: TradingBot импортирует should_enter_long(...).
+    Возвращаем тот же словарь, что и decide_entry(...), но гарантируем side='buy'.
+    """
+    res = decide_entry(cfg, state, risk, feats, score)
+    if res.get("enter"):
+        res["side"] = "buy"
+    return res
+
+
 __all__ = [
-    "decide_entry", "EntryDecision",
+    "decide_entry", "should_enter_long", "EntryDecision",
     "calculate_adaptive_threshold", "calculate_intelligent_position_size"
 ]
