@@ -231,7 +231,14 @@ class TradingBot:
             rule_penalized: float = float(features.get("rule_score_penalized", rule_score))
 
             # 3) Комбинированный скор (правила + AI)
-            fused_score = fuse_scores(rule_penalized, ai_score_raw)
+            fusion_result = fuse_scores(rule_penalized, ai_score_raw)
+            # Извлекаем числовое значение из результата
+            if hasattr(fusion_result, 'score'):
+                fused_score = float(fusion_result.score)
+            elif isinstance(fusion_result, (int, float)):
+                fused_score = float(fusion_result)
+            else:
+                fused_score = float(rule_penalized)  # fallback
 
             # 4) Отправим событие с готовым сигналом
             signal_payload = {
@@ -251,7 +258,8 @@ class TradingBot:
             self.events.emit("signal_generated", signal_payload)
 
             # 5) Решение о входе (лонг)
-            decision = decide_entry(features, self.cfg, fused_score=fused_score)
+            features['fused_score'] = fused_score
+            decision = decide_entry(features, self.cfg)
             if not decision or not isinstance(decision, dict):
                 logger.debug("⏭ No entry decision this cycle")
                 set_gauge("last_decision_score", fused_score)
@@ -319,14 +327,21 @@ class TradingBot:
         logger.debug("🕯️ new_candle %s %s", payload.get("symbol"), payload.get("timeframe"))
 
     def _on_signal_generated(self, payload: Dict[str, Any]) -> None:
-        logger.debug(
-            "🎯 signal: rule=%.3f pen=%.3f ai=%.3f fused=%.3f ctx=%s",
-            float(payload.get("rule_score", 0.0)),
-            float(payload.get("rule_penalized", payload.get("rule_score", 0.0))),
-            float(payload.get("ai_score", 0.0)),
-            float(payload.get("fused_score", 0.0)),
-            payload.get("context", {}).get("market_condition", "SIDEWAYS"),
-        )
+        # Безопасное извлечение fused_score
+        fused_val = payload.get("fused_score", 0.0)
+        if hasattr(fused_val, 'score'):
+            fused_val = float(fused_val.score)
+        elif not isinstance(fused_val, (int, float)):
+            fused_val = 0.0
+    
+    logger.debug(
+        "🎯 signal: rule=%.3f pen=%.3f ai=%.3f fused=%.3f ctx=%s",
+        float(payload.get("rule_score", 0.0)),
+        float(payload.get("rule_penalized", payload.get("rule_score", 0.0))),
+        float(payload.get("ai_score", 0.0)),
+        float(fused_val),
+        payload.get("context", {}).get("market_condition", "SIDEWAYS"),
+    )
 
     def _on_paper_trade(self, payload: Dict[str, Any]) -> None:
         logger.info("📄 paper_trade: %s", payload)
