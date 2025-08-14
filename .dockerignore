@@ -1,0 +1,21 @@
+# VCS / IDE / System
+.git
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# Python кэш/логи
+__pycache__/
+*.py[cod]
+*.log
+
+# Секреты и локальные окружения
+.env
+*.env
+
+# Тяжёлые/временные артефакты (если есть)
+data/
+logs/
+models/
+*.ipynb
