@@ -23,7 +23,7 @@ except Exception:
     process_update = None  # graceful if telegram module missing
 
 # Import Trading bot
-from crypto_ai_bot.core.bot import get_bot, Settings
+from crypto_ai_bot.core.bot import get_bot`nfrom crypto_ai_bot.core.settings import Settings
 
 # ------------ logging ------------
 logger = logging.getLogger(__name__)
