@@ -7,17 +7,18 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool  # <-- важно: исполняем sync-функцию в пуле
 
 try:
     import ccxt
 except Exception:  # pragma: no cover
     ccxt = None
 
-# Import Telegram update dispatcher from our bot module
+# Import Telegram update dispatcher from our bot module (синхронная функция)
 try:
-    from crypto_ai_bot.telegram.bot import process_update
+    from crypto_ai_bot.telegram.bot import process_update  # sync
 except Exception:
     process_update = None  # graceful if telegram module missing
 
@@ -88,7 +89,6 @@ class ExchangeAdapter:
         params = params or {}
         if "text" not in params:
             import uuid
-
             params["text"] = f"bot-{uuid.uuid4().hex[:12]}"
         return self._ex.create_order(symbol, type_, side, amount, None, params)
 
@@ -192,16 +192,23 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Op
     expected = os.getenv("TELEGRAM_SECRET_TOKEN")
     if expected:
         if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != expected:
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+            raise HTTPException(status_code=403, detail="bad secret")
 
     try:
         payload = await request.json()
     except Exception:
         payload = {}
+
     logger.info(f"[WEBHOOK] keys={list(payload.keys())}")
+
+    # ВАЖНО: process_update — синхронная функция → исполняем в threadpool
     if process_update is not None:
         try:
-            await process_update(payload)
+            result = await run_in_threadpool(process_update, payload)
         except Exception as e:
-            logger.exception(f"process_update error: {e}")
-    return JSONResponse({"ok": True})
+            logger.exception("process_update error: %s", e)
+            result = {"ok": True}
+    else:
+        result = {"ok": True}
+
+    return JSONResponse(result)
