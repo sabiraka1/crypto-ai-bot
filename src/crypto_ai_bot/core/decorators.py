@@ -45,3 +45,4 @@ def log_execution(func: Callable) -> Callable:
             raise
     
     return wrapper
+

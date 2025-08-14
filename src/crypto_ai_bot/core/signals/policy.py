@@ -80,3 +80,4 @@ def decide(features: Dict[str, Any], cfg) -> Dict[str, Any]:
         return {"action": "sell", "reason": "downtrend", "score": mixed}
 
     return {"action": "hold", "reason": "score_low", "score": mixed}
+

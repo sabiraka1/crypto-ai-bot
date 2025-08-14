@@ -24,3 +24,4 @@ def fetch_btc_dominance(timeout: float = 6.0) -> Optional[float]:
     except Exception as e:
         logger.warning(f"BTC.D fetch failed: {e}")
         return None
+

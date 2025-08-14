@@ -500,3 +500,4 @@ def get_cache_manager():
 
 def cached_function(namespace, ttl=None, key_func=None, **set_kwargs):
     return cache.cached(namespace, ttl, key_func=key_func, **set_kwargs)
+

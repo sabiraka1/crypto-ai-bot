@@ -212,3 +212,4 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Op
         result = {"ok": True}
 
     return JSONResponse(result)
+

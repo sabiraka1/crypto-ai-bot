@@ -27,7 +27,7 @@ def test_integration_check_happy_path(monkeypatch):
             "ema": [sum(prices) / len(prices)] if prices else [],
         }
     )
-    _install_stub("analysis.technical_indicators", ti_stub)
+    _install_stub("crypto_ai_bot.core.indicators.unified", ti_stub)
 
     # --- market_analyzer.MarketAnalyzer
     class MarketAnalyzerStub:
@@ -118,3 +118,4 @@ def test_print_integration_report_smoke(capsys):
     out = capsys.readouterr().out
     assert "technical_indicators" in out
     assert "monitoring" in out
+

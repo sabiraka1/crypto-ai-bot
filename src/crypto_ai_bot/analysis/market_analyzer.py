@@ -87,7 +87,7 @@ class MultiTimeframeAnalyzer:
 
         # вњ… РРЎРџР РђР’Р›Р•РќРћ: СѓР±СЂР°РЅРѕ РґСѓР±Р»РёСЂРѕРІР°РЅРёРµ ATR РІС‹Р·РѕРІР°
         try:
-            from analysis.technical_indicators import _atr_series_for_ml
+            from crypto_ai_bot.core.indicators.unified import _atr_series_for_ml
             temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
             atr = _atr_series_for_ml(temp_df, self._atr_period)
             atr_norm = float((atr.iloc[-1] / (abs(close.iloc[-1]) + _EPS)) if atr.notna().any() else 0.0)
@@ -260,3 +260,6 @@ class MultiTimeframeAnalyzer:
             logging.info(f"рџ“Љ Market analyzer updated parameters: {updated}")
         
         return updated
+
+
+

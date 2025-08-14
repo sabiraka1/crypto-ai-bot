@@ -17,3 +17,4 @@ def process_update(payload: Dict[str, Any]) -> None:
         return _legacy_process_update(payload)
     # если легаси отсутствует — тихий no-op
     return None
+

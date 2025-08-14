@@ -64,7 +64,7 @@ class TestScoringEngine:
         assert hasattr(scoring_engine, 'evaluate')
         assert hasattr(scoring_engine, 'position_fraction')
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_evaluate_basic_functionality(self, mock_calc_indicators, scoring_engine, sample_market_df, mock_technical_indicators):
         """РўРµСЃС‚РёСЂСѓРµС‚ Р±Р°Р·РѕРІСѓСЋ С„СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚СЊ evaluate"""
         # РњРѕРєР°РµРј СЂРµР·СѓР»СЊС‚Р°С‚ calculate_all_indicators
@@ -86,7 +86,7 @@ class TestScoringEngine:
         assert 0.0 <= buy_score <= 1.0
         assert 0.0 <= ai_score_result <= 1.0
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_evaluate_with_details(self, mock_calc_indicators, scoring_engine, sample_market_df, mock_technical_indicators):
         """РўРµСЃС‚РёСЂСѓРµС‚ evaluate СЃ РІРѕР·РІСЂР°С‰РµРЅРёРµРј РґРµС‚Р°Р»РµР№"""
         mock_df = sample_market_df.copy()
@@ -115,7 +115,7 @@ class TestScoringEngine:
         assert isinstance(buy_score, (int, float))
         assert 0.0 <= buy_score <= 1.0
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_evaluate_exception_handling(self, mock_calc_indicators, scoring_engine, sample_market_df):
         """РўРµСЃС‚РёСЂСѓРµС‚ РѕР±СЂР°Р±РѕС‚РєСѓ РёСЃРєР»СЋС‡РµРЅРёР№ РІ evaluate"""
         # РњРѕРєР°РµРј РёСЃРєР»СЋС‡РµРЅРёРµ
@@ -165,7 +165,7 @@ class TestScoringEngine:
         assert isinstance(result, (int, float))
         assert not np.isnan(result)
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     @patch('analysis.market_analyzer.MultiTimeframeAnalyzer')
     def test_evaluate_with_market_analyzer(self, mock_analyzer_class, mock_calc_indicators, 
                                          scoring_engine, sample_market_df, mock_technical_indicators):
@@ -201,7 +201,7 @@ class TestScoringEngine:
         # Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј РёСЃС…РѕРґРЅРѕРµ Р·РЅР°С‡РµРЅРёРµ
         scoring_engine.min_score_to_buy = original_value
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_different_ai_scores(self, mock_calc_indicators, scoring_engine, sample_market_df, mock_technical_indicators):
         """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ СЃ СЂР°Р·РЅС‹РјРё AI scores"""
         mock_df = sample_market_df.copy()
@@ -224,7 +224,7 @@ class TestScoringEngine:
             assert 0.0 <= buy_score <= 1.0
             assert 0.0 <= ai_score_result <= 1.0
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_bullish_indicators(self, mock_calc_indicators, scoring_engine, sample_market_df):
         """РўРµСЃС‚РёСЂСѓРµС‚ СЂРµР°РєС†РёСЋ РЅР° Р±С‹С‡СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹"""
         # РЎРѕР·РґР°РµРј СЏРІРЅРѕ Р±С‹С‡СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹
@@ -251,7 +251,7 @@ class TestScoringEngine:
         # Р‘С‹С‡СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹ РґРѕР»Р¶РЅС‹ РґР°РІР°С‚СЊ РІС‹СЃРѕРєРёР№ score
         assert buy_score > 0.5
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_bearish_indicators(self, mock_calc_indicators, scoring_engine, sample_market_df):
         """РўРµСЃС‚РёСЂСѓРµС‚ СЂРµР°РєС†РёСЋ РЅР° РјРµРґРІРµР¶СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹"""
         # РЎРѕР·РґР°РµРј СЏРІРЅРѕ РјРµРґРІРµР¶СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹
@@ -353,7 +353,7 @@ class TestScoringEngineIntegration:
         assert isinstance(result, tuple)
         assert len(result) >= 2
     
-    @patch('analysis.technical_indicators.calculate_all_indicators')
+    @patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators')
     def test_missing_indicators(self, mock_calc_indicators, scoring_engine, sample_market_df):
         """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ РїСЂРё РѕС‚СЃСѓС‚СЃС‚РІРёРё РЅРµРєРѕС‚РѕСЂС‹С… РёРЅРґРёРєР°С‚РѕСЂРѕРІ"""
         # РЎРѕР·РґР°РµРј DataFrame СЃ С‚РѕР»СЊРєРѕ С‡Р°СЃС‚СЊСЋ РёРЅРґРёРєР°С‚РѕСЂРѕРІ
@@ -379,7 +379,7 @@ class TestScoringEngineEdgeCases:
     
     def test_extreme_indicator_values(self, scoring_engine, sample_market_df):
         """РўРµСЃС‚РёСЂСѓРµС‚ СЌРєСЃС‚СЂРµРјР°Р»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ РёРЅРґРёРєР°С‚РѕСЂРѕРІ"""
-        with patch('analysis.technical_indicators.calculate_all_indicators') as mock_calc:
+        with patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators') as mock_calc:
             extreme_df = sample_market_df.copy()
             extreme_df['rsi'] = 150.0  # Р’С‹С€Рµ РЅРѕСЂРјР°Р»СЊРЅРѕРіРѕ РґРёР°РїР°Р·РѕРЅР°
             extreme_df['macd'] = -1000.0  # Р­РєСЃС‚СЂРµРјР°Р»СЊРЅРѕ РЅРёР·РєРѕРµ Р·РЅР°С‡РµРЅРёРµ
@@ -396,7 +396,7 @@ class TestScoringEngineEdgeCases:
     
     def test_all_nan_indicators(self, scoring_engine, sample_market_df):
         """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ РєРѕРіРґР° РІСЃРµ РёРЅРґРёРєР°С‚РѕСЂС‹ NaN"""
-        with patch('analysis.technical_indicators.calculate_all_indicators') as mock_calc:
+        with patch('crypto_ai_bot.core.indicators.unified.calculate_all_indicators') as mock_calc:
             nan_df = sample_market_df.copy()
             nan_df['rsi'] = np.nan
             nan_df['macd'] = np.nan
@@ -430,3 +430,4 @@ class TestScoringEngineEdgeCases:
         
         buy_score = result[0]
         assert 0.0 <= buy_score <= 1.0
+

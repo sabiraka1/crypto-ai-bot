@@ -35,3 +35,4 @@ def validate_features(cfg, features: Dict) -> tuple[bool, list[str]]:
             problems.append("price <= 0")
 
     return (len(problems) == 0), problems
+

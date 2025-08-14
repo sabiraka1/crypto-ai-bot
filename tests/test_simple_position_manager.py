@@ -209,3 +209,4 @@ class TestSimplePositionManager:
             # Р’ SAFE_MODE РґРѕР»Р¶РЅС‹ СЃРѕР·РґР°РІР°С‚СЊСЃСЏ СЃРёРјСѓР»РёСЂРѕРІР°РЅРЅС‹Рµ РѕСЂРґРµСЂР°
             assert result is not None
             assert "paper" in result or "sim" in str(result.get("id", ""))
+

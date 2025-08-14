@@ -128,3 +128,4 @@ def generate_price_chart(prices: Any,
         f.write(png)
 
     return path
+

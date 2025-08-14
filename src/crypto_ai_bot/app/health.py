@@ -106,3 +106,4 @@ def build_status_router(bot, deps) -> APIRouter:
         pass
 
     return r
+

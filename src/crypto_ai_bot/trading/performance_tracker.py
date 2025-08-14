@@ -222,3 +222,4 @@ class RealTimePerformanceTracker:
         metrics_dict["current_drawdown_pct"] = self._calculate_current_drawdown()
         metrics_dict["consecutive_losses"] = self.consecutive_losses
         return check_performance_alerts(metrics_dict, self.alert_thresholds)
+

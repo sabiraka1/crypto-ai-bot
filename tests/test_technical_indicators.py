@@ -69,7 +69,7 @@ class TestTechnicalIndicatorsModule:
     
     def test_calculate_all_indicators_basic(self, sample_ohlcv_data):
         """РўРµСЃС‚ Р±Р°Р·РѕРІРѕР№ С„СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚Рё calculate_all_indicators"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         result = calculate_all_indicators(sample_ohlcv_data)
         
@@ -87,7 +87,7 @@ class TestTechnicalIndicatorsModule:
     
     def test_calculate_all_indicators_preserves_original(self, sample_ohlcv_data):
         """РўРµСЃС‚ С‡С‚Рѕ РёСЃС…РѕРґРЅС‹Рµ РґР°РЅРЅС‹Рµ РЅРµ РјРѕРґРёС„РёС†РёСЂСѓСЋС‚СЃСЏ"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         original_copy = sample_ohlcv_data.copy()
         result = calculate_all_indicators(sample_ohlcv_data)
@@ -101,7 +101,7 @@ class TestTechnicalIndicatorsModule:
     
     def test_calculate_all_indicators_empty_data(self):
         """РўРµСЃС‚ СЃ РїСѓСЃС‚С‹РјРё РґР°РЅРЅС‹РјРё"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         empty_df = pd.DataFrame()
         
@@ -112,7 +112,7 @@ class TestTechnicalIndicatorsModule:
     
     def test_calculate_all_indicators_single_row(self):
         """РўРµСЃС‚ СЃ РѕРґРЅРѕР№ СЃС‚СЂРѕРєРѕР№ РґР°РЅРЅС‹С…"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         single_row = pd.DataFrame({
             'open': [100],
@@ -193,7 +193,7 @@ class TestIndicatorIntegration:
     
     def test_indicators_with_real_data(self):
         """РўРµСЃС‚ СЃ СЂРµР°Р»РёСЃС‚РёС‡РЅС‹РјРё РґР°РЅРЅС‹РјРё"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         # РЎРѕР·РґР°РµРј СЂРµР°Р»РёСЃС‚РёС‡РЅС‹Рµ РґР°РЅРЅС‹Рµ
         dates = pd.date_range('2024-01-01', periods=200, freq='15min')
@@ -233,7 +233,7 @@ class TestIndicatorIntegration:
     
     def test_indicators_with_missing_data(self):
         """РўРµСЃС‚ СЃ РїСЂРѕРїСѓС‰РµРЅРЅС‹РјРё РґР°РЅРЅС‹РјРё"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         # Р”Р°РЅРЅС‹Рµ СЃ NaN Р·РЅР°С‡РµРЅРёСЏРјРё
         df = pd.DataFrame({
@@ -251,7 +251,7 @@ class TestIndicatorIntegration:
     
     def test_indicators_performance(self):
         """РўРµСЃС‚ РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚Рё"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         import time
         
         # Р‘РѕР»СЊС€РѕР№ РґР°С‚Р°СЃРµС‚
@@ -331,7 +331,7 @@ class TestEdgeCases:
     
     def test_extreme_values(self):
         """РўРµСЃС‚ СЃ СЌРєСЃС‚СЂРµРјР°Р»СЊРЅС‹РјРё Р·РЅР°С‡РµРЅРёСЏРјРё"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         extreme_df = pd.DataFrame({
             'open': [1e-10, 1e10, 100, 100],
@@ -352,7 +352,7 @@ class TestEdgeCases:
     
     def test_constant_values(self):
         """РўРµСЃС‚ РєРѕРіРґР° РІСЃРµ Р·РЅР°С‡РµРЅРёСЏ РѕРґРёРЅР°РєРѕРІС‹Рµ"""
-        from analysis.technical_indicators import calculate_all_indicators
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
         
         constant_df = pd.DataFrame({
             'open': [100] * 50,
@@ -375,3 +375,4 @@ class TestEdgeCases:
             atr_values = result['atr'].dropna()
             if len(atr_values) > 0:
                 assert atr_values.mean() < 1.0
+

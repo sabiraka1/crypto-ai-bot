@@ -493,3 +493,4 @@ class TestUnifiedCacheManager:
             full_key = cache._make_full_key("general", f"size_test_{i}")
             entry = cache._data[full_key]
             assert entry.size_bytes > 0
+

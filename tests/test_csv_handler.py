@@ -665,3 +665,4 @@ class TestIntegration:
         daily_stats = csv_handler.get_daily_statistics()
         if daily_stats is not None:
             assert len(daily_stats) <= 30
+

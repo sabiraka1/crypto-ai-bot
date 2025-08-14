@@ -106,3 +106,9 @@ def macd_hist(series, fast: int = 12, slow: int = 26, signal: int = 9):
     _, _, hist = macd(series, fast=fast, slow=slow, signal=signal)
     return hist
 
+def macd_hist(series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """Совместимость со старым API: вернуть только гистограмму MACD."""
+    _, _, hist = macd(series, fast=fast, slow=slow, signal=signal)
+    return hist
+
+

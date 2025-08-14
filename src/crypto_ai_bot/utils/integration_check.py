@@ -8,7 +8,7 @@ def check_integration():
     
     # 1. РџСЂРѕРІРµСЂРєР° technical_indicators
     try:
-        from analysis.technical_indicators import calculate_all_indicators, get_cache_stats
+        from crypto_ai_bot.core.indicators.unified import calculate_all_indicators, get_cache_stats
         import pandas as pd
         
         # РўРµСЃС‚РѕРІС‹Рµ РґР°РЅРЅС‹Рµ
@@ -126,3 +126,6 @@ def print_integration_report():
 
 if __name__ == "__main__":
     print_integration_report()
+
+
+

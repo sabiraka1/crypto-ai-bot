@@ -122,3 +122,4 @@ def aggregate_features(cfg, exchange, symbol: Optional[str] = None, timeframe: O
     rule_score = _compute_rule_score(last_price, ema20, ema50, rsi, macd_hist)
 
     return {"indicators": indicators, "market": market, "rule_score": rule_score}
+

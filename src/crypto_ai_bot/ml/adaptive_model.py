@@ -447,7 +447,7 @@ class AdaptiveMLModel:
 
             # вњ… UNIFIED ATR РРќРўР•Р“Р РђР¦РРЇ
             try:
-                from analysis.technical_indicators import _atr_series_for_ml
+                from crypto_ai_bot.core.indicators.unified import _atr_series_for_ml
                 temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
                 atr = _atr_series_for_ml(temp_df, period)
                 logging.debug(f"рџ¤– ML Model: Using UNIFIED ATR for ADX calculation")
@@ -492,3 +492,6 @@ class AdaptiveMLModel:
             return MarketCondition.SIDEWAYS.value
         except Exception:
             return MarketCondition.SIDEWAYS.value
+
+
+

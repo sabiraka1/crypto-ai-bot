@@ -17,8 +17,8 @@ import numpy as np
 # features & policies (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
-from crypto_ai_bot.trading.signals.signal_validator import validate_features
-from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide
+from crypto_ai_bot.trading.crypto_ai_bot.core.signals.validator import validate_features
+from crypto_ai_bot.trading.crypto_ai_bot.core.signals.policy import decide as policy_decide
 
 # risk pipeline (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.trading import risk as riskmod
@@ -403,3 +403,6 @@ class TradingBot:
 
 def get_bot(exchange: Any, notifier=None, settings: Optional[Settings] = None) -> TradingBot:
     return TradingBot.get_instance(exchange=exchange, notifier=notifier, settings=settings)
+
+
+

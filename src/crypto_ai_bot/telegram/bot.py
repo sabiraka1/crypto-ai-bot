@@ -339,3 +339,4 @@ async def process_update(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     await asyncio.to_thread(_handle_update_sync, payload)
     return {"ok": True}
+

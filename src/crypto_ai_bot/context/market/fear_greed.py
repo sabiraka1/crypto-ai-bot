@@ -21,3 +21,4 @@ def fetch_fear_greed(timeout: float = 6.0) -> Optional[int]:
     except Exception as e:
         logger.warning(f"Fear&Greed fetch failed: {e}")
         return None
+

@@ -104,3 +104,4 @@ def test_suppress_like_decorator():
 
     # РќРµ РґРѕР»Р¶РЅРѕ Р±СЂРѕСЃРёС‚СЊ
     wrapped()
+

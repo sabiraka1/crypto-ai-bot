@@ -124,3 +124,4 @@ def validate_open(cfg, exchange: Any, symbol: str, indicators: Optional[Dict[str
 
     # placeholders for future checks: ATR gates, context penalties, drawdown caps, etc.
     return True, None
+

@@ -830,3 +830,4 @@ class TestPerformance:
         
         # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ РІСЃРµ РєРѕРјР°РЅРґС‹ РІС‹РїРѕР»РЅРёР»РёСЃСЊ
         assert mock_send.call_count == 100
+

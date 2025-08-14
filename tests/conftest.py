@@ -83,3 +83,4 @@ def mock_state():
     state.is_position_active.return_value = False
     state.set.side_effect = lambda *args, **kwargs: None
     return state
+

@@ -608,3 +608,4 @@ def process_command(text: str, state_manager: StateManager, exchange_client: Exc
     except Exception as e:
         logging.exception(f"process_command error: {e}")
         send_message(f"вљ пёЏ РћС€РёР±РєР° РѕР±СЂР°Р±РѕС‚РєРё РєРѕРјР°РЅРґС‹: {e}", chat_id)
+

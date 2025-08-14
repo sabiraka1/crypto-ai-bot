@@ -32,3 +32,4 @@ def decide(cfg, features: Dict, fused: Dict) -> Dict[str, object]:
         return {"action": "sell", "reason": f"entry={entry:.2f} bearish trend", "score": entry}
 
     return {"action": "hold", "reason": f"entry={entry:.2f} not strong enough", "score": entry}
+

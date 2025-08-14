@@ -144,7 +144,7 @@ class TestMultiTimeframeAnalyzer:
         assert isinstance(strength, float)
         assert 0.0 <= strength <= 1.0
     
-    @patch('analysis.technical_indicators._atr_series_for_ml')
+    @patch('crypto_ai_bot.core.indicators.unified._atr_series_for_ml')
     def test_strength_with_unified_atr(self, mock_atr, analyzer, sample_market_data):
         """РўРµСЃС‚РёСЂСѓРµС‚ СЂР°СЃС‡РµС‚ СЃРёР»С‹ СЃ unified ATR"""
         df_1d, _ = sample_market_data
@@ -159,7 +159,7 @@ class TestMultiTimeframeAnalyzer:
         assert 0.0 <= strength <= 1.0
         mock_atr.assert_called_once()
     
-    @patch('analysis.technical_indicators._atr_series_for_ml')
+    @patch('crypto_ai_bot.core.indicators.unified._atr_series_for_ml')
     def test_strength_atr_fallback(self, mock_atr, analyzer, sample_market_data):
         """РўРµСЃС‚РёСЂСѓРµС‚ fallback РїСЂРё РѕС€РёР±РєРµ unified ATR"""
         df_1d, _ = sample_market_data
@@ -400,3 +400,4 @@ class TestEdgeCases:
         # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ Р±РµР· РѕС€РёР±РѕРє
         assert isinstance(condition, MarketCondition)
         assert 0.0 <= confidence <= 1.0
+

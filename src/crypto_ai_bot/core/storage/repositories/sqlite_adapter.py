@@ -252,3 +252,4 @@ class SQLiteStorage:
             self.conn.close()
         except Exception:
             pass
+

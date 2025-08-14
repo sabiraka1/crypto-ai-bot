@@ -70,3 +70,4 @@ def validate(features: Dict[str, Any]) -> Dict[str, Any]:
     fs["market"] = market
 
     return fs
+

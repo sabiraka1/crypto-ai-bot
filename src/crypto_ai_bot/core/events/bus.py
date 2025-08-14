@@ -14,3 +14,4 @@ def publish(event: str, payload: Dict[str, Any]) -> None:
             h(payload)
         except Exception:
             pass
+
