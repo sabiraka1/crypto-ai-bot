@@ -67,20 +67,22 @@ def _macd(close: pd.Series, fast=12, slow=26, signal=9) -> pd.Series:
     return hist
 
 
-def _atr_pct(df: pd.DataFrame, period: int = 14) -> float:
+def _atr_abs(df: pd.DataFrame, period: int = 14) -> float:
+    """ATR в абсолютных единицах цены (не %)."""
     hl = df["high"] - df["low"]
     pc = df["close"].shift(1)
     hc = (df["high"] - pc).abs()
     lc = (df["low"] - pc).abs()
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     atr = tr.rolling(period, min_periods=1).mean().iloc[-1]
-    price = float(df["close"].iloc[-1])
-    return float(atr) / price * 100 if price else 0.0
+    return float(atr)
 
 
 def _rule_score(ema20: float, ema50: float, atr_pct: float) -> float:
+    # простая нормализация тренда: чем дальше 20 от 50, тем сильнее сигнал
+    # 0.5 — нейтрально
     diff = ema20 - ema50
-    scale = max(1e-6, atr_pct / 100.0)
+    scale = max(1e-6, atr_pct / 100.0)  # защита от деления на 0
     raw = math.tanh(diff / (scale * 10))
     score = 0.5 + 0.5 * raw
     return float(max(0.0, min(1.0, score)))
@@ -88,21 +90,22 @@ def _rule_score(ema20: float, ema50: float, atr_pct: float) -> float:
 
 def aggregate_features(cfg, exchange, *, symbol: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, Any]:
     """
-    Возвращает:
-      - indicators: {price, ema20, ema50, rsi, macd_hist, atr_pct}
+    Возвращает словарь с ключами:
+      - indicators: {price, ema20, ema50, rsi, macd_hist, atr, atr_pct}
       - market: {condition}
       - rule_score: float [0..1]
 
-    Всегда без исключений: если OHLCV нет, используем fetch_ticker как fallback.
+    Никогда не бросает исключения — в случае отсутствия OHLCV вернёт минимум на основе тикера.
     """
     try:
         symbol = symbol or getattr(cfg, "SYMBOL", "BTC/USDT")
         timeframe = getattr(cfg, "TIMEFRAME", "15m")
+        period = int(getattr(cfg, "ATR_PERIOD", 14))
         limit = int(limit or getattr(cfg, "AGGREGATOR_LIMIT", getattr(cfg, "OHLCV_LIMIT", 200) or 200))
 
         ohlcv = _fetch_ohlcv_with_retry(exchange, symbol, timeframe, limit)
         if not ohlcv:
-            # Fallback на тикер
+            # Fallback — используем last price из тикера и дефолтные индикаторы
             price = None
             try:
                 t = exchange.fetch_ticker(symbol) or {}
@@ -118,6 +121,7 @@ def aggregate_features(cfg, exchange, *, symbol: Optional[str] = None, limit: Op
                 "ema50": float(price),
                 "rsi": 50.0,
                 "macd_hist": 0.0,
+                "atr": 0.0,
                 "atr_pct": 0.0,
             }
             return {
@@ -134,15 +138,17 @@ def aggregate_features(cfg, exchange, *, symbol: Optional[str] = None, limit: Op
 
         rsi_series = _rsi(df["close"], 14)
         macd_hist_series = _macd(df["close"], 12, 26, 9)
-        atrp = _atr_pct(df, period=int(getattr(cfg, "ATR_PERIOD", 14)))
 
+        atr_abs = _atr_abs(df, period=period)
         price = float(df["close"].iloc[-1])
+        atr_pct = (atr_abs / price * 100.0) if price else 0.0
+
         ema20 = float(ema20_series.iloc[-1])
         ema50 = float(ema50_series.iloc[-1])
         rsi_val = float(rsi_series.iloc[-1])
         macd_hist = float(macd_hist_series.iloc[-1])
 
-        rule = _rule_score(ema20, ema50, atrp)
+        rule = _rule_score(ema20, ema50, atr_pct)
         condition = "bullish" if ema20 >= ema50 else "bearish"
 
         indicators = {
@@ -151,7 +157,8 @@ def aggregate_features(cfg, exchange, *, symbol: Optional[str] = None, limit: Op
             "ema50": ema50,
             "rsi": rsi_val,
             "macd_hist": macd_hist,
-            "atr_pct": atrp,
+            "atr": float(atr_abs),
+            "atr_pct": float(atr_pct),
         }
         return {
             "indicators": indicators,
@@ -159,8 +166,9 @@ def aggregate_features(cfg, exchange, *, symbol: Optional[str] = None, limit: Op
             "rule_score": rule,
         }
     except Exception:
+        # максимально мягкий fallback
         return {
-            "indicators": {"price": 0.0, "ema20": 0.0, "ema50": 0.0, "rsi": 50.0, "macd_hist": 0.0, "atr_pct": 0.0},
+            "indicators": {"price": 0.0, "ema20": 0.0, "ema50": 0.0, "rsi": 50.0, "macd_hist": 0.0, "atr": 0.0, "atr_pct": 0.0},
             "market": {"condition": "unknown"},
             "rule_score": 0.5,
         }
