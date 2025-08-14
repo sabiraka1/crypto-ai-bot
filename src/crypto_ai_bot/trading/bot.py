@@ -17,8 +17,8 @@ import numpy as np
 # features & policies (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
-rom crypto_ai_bot.core.signals.validator import validate_features
-from crypto_ai_bot.core.signals.policy import decide as policy_decide
+from crypto_ai_bot.trading.crypto_ai_bot.core.signals.validator import validate_features
+from crypto_ai_bot.trading.crypto_ai_bot.core.signals.policy import decide as policy_decide
 
 # risk pipeline (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.trading import risk as riskmod
@@ -26,54 +26,6 @@ from crypto_ai_bot.trading import risk as riskmod
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
-@dataclass
-class Settings:
-    SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
-    TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
-    ANALYSIS_INTERVAL: int = int(os.getenv("ANALYSIS_INTERVAL", "15"))
-    ENABLE_TRADING: int = int(os.getenv("ENABLE_TRADING", "1"))
-    SAFE_MODE: int = int(os.getenv("SAFE_MODE", "1"))
-    PAPER_MODE: int = int(os.getenv("PAPER_MODE", "1"))
-    TRADE_AMOUNT: float = float(os.getenv("TRADE_AMOUNT", "10"))
-    MAX_CONCURRENT_POS: int = int(os.getenv("MAX_CONCURRENT_POS", "1"))
-    OHLCV_LIMIT: int = int(os.getenv("OHLCV_LIMIT", "200"))
-    AGGREGATOR_LIMIT: int = int(os.getenv("AGGREGATOR_LIMIT", "200"))
-
-    # Risk gates
-    MAX_SPREAD_BPS: float = float(os.getenv("MAX_SPREAD_BPS", "15"))
-    MIN_24H_VOLUME_USD: float = float(os.getenv("MIN_24H_VOLUME_USD", "1000000"))
-
-    # Scoring
-    AI_ENABLE: int = int(os.getenv("AI_ENABLE", "1"))
-    AI_FAILOVER_SCORE: float = float(os.getenv("AI_FAILOVER_SCORE", "0.55"))
-    AI_MIN_TO_TRADE: float = float(os.getenv("AI_MIN_TO_TRADE", "0.55"))
-    ENFORCE_AI_GATE: int = int(os.getenv("ENFORCE_AI_GATE", "1"))
-    MIN_SCORE_TO_BUY: float = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))
-    RULE_WEIGHT: float = float(os.getenv("RULE_WEIGHT", "0.6"))
-    AI_WEIGHT: float = float(os.getenv("AI_WEIGHT", "0.4"))
-
-    # RSI/ATR
-    RSI_OVERBOUGHT: float = float(os.getenv("RSI_OVERBOUGHT", "70"))
-    RSI_CRITICAL: float = float(os.getenv("RSI_CRITICAL", "90"))
-    ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
-    TRAILING_STOP_ENABLE: int = int(os.getenv("TRAILING_STOP_ENABLE", "1"))
-    TRAILING_STOP_PCT: float = float(os.getenv("TRAILING_STOP_PCT", "0.5"))
-    STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "2.0"))
-    TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "1.5"))
-    RISK_ATR_METHOD: str = os.getenv("RISK_ATR_METHOD", "ewm")
-
-    # Hours
-    TRADING_HOUR_START: int = int(os.getenv("TRADING_HOUR_START", "0"))
-    TRADING_HOUR_END: int = int(os.getenv("TRADING_HOUR_END", "24"))
-
-    # Paper files
-    PAPER_POSITIONS_FILE: str = os.getenv("PAPER_POSITIONS_FILE", "paper_positions.json")
-    PAPER_ORDERS_FILE: str = os.getenv("PAPER_ORDERS_FILE", "paper_orders.csv")
-    PAPER_PNL_FILE: str = os.getenv("PAPER_PNL_FILE", "paper_pnl.csv")
-
-    @classmethod
-    def build(cls) -> "Settings":
-        return cls()
 
 class PaperStore:
     def __init__(self, positions_path: str, orders_csv: str, pnl_csv: str):
@@ -113,6 +65,7 @@ class PaperStore:
 
     def append_pnl(self, pos: dict, exit_price: float):
         import csv
+from crypto_ai_bot.core.settings import Settings
         qty = float(pos.get("qty", 0.0))
         entry = float(pos.get("entry_price", 0.0))
         side = pos.get("side")
@@ -293,7 +246,7 @@ class TradingBot:
                 sl = entry + k1 * atr; tp = entry - k2 * atr
             return float(sl), float(tp)
         sl = entry * (1 - self.cfg.STOP_LOSS_PCT / 100) if side == "buy" else entry * (1 + self.cfg.STOP_LOSS_PCT / 100)
-        tp = entry * (1 + self.cfg.TAKE_PROIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
+        tp = entry * (1 + self.cfg.TAKE_PROFIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
         # fix typo if any
         if not isinstance(tp, float):
             tp = entry * (1 + self.cfg.TAKE_PROFIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
@@ -407,3 +360,39 @@ def get_bot(exchange: Any, notifier=None, settings: Optional[Settings] = None) -
 
 
 
+# === PATCH: robust PaperStore (ensures directories exist) ===
+from pathlib import Path as _PatchPath
+import json as _patch_json, csv as _patch_csv
+
+class PaperStore:
+    """
+    Minimal persistent store for paper trading.
+    Ensures parent directories and files exist before any write.
+    """
+    def __init__(self, positions_path: str, orders_csv: str, pnl_csv: str):
+        self.positions_path = _PatchPath(positions_path)
+        self.orders_csv     = _PatchPath(orders_csv)
+        self.pnl_csv        = _PatchPath(pnl_csv)
+        self._ensure_files()
+
+    def _ensure_files(self):
+        # Ensure directories
+        for p in [self.positions_path, self.orders_csv, self.pnl_csv]:
+            p.parent.mkdir(parents=True, exist_ok=True)
+
+        # Ensure positions JSON
+        if not self.positions_path.exists():
+            self.positions_path.write_text(_patch_json.dumps({"open": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # Ensure orders CSV
+        if not self.orders_csv.exists():
+            with self.orders_csv.open("w", newline="", encoding="utf-8") as f:
+                w = _patch_csv.writer(f)
+                w.writerow(["ts","symbol","side","qty","price","client_tag","type"])
+
+        # Ensure PnL CSV
+        if not self.pnl_csv.exists():
+            with self.pnl_csv.open("w", newline="", encoding="utf-8") as f:
+                w = _patch_csv.writer(f)
+                w.writerow(["ts_open","ts_close","symbol","side","qty","entry_price","exit_price","pnl_abs","pnl_pct"])
+# === /PATCH ===
