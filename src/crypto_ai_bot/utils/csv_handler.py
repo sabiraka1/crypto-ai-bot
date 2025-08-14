@@ -1,4 +1,4 @@
-diff --git a/src/crypto_ai_bot/utils/csv_handler.py b/src/crypto_ai_bot/utils/csv_handler.py
+﻿diff --git a/src/crypto_ai_bot/utils/csv_handler.py b/src/crypto_ai_bot/utils/csv_handler.py
 index 0000000..0000001 100644
 --- a/src/crypto_ai_bot/utils/csv_handler.py
 +++ b/src/crypto_ai_bot/utils/csv_handler.py
@@ -17,8 +17,8 @@ index 0000000..0000001 100644
 +    @classmethod
 +    def get_trade_stats(cls) -> Dict[str, Any]:
 +        """
-+        Быстрый подсчёт статистики по файлу закрытых сделок (без pandas).
-+        Возвращает: {"count", "wins", "losses", "pnl_abs_sum", "last_ts"}.
++        Р‘С‹СЃС‚СЂС‹Р№ РїРѕРґСЃС‡С‘С‚ СЃС‚Р°С‚РёСЃС‚РёРєРё РїРѕ С„Р°Р№Р»Сѓ Р·Р°РєСЂС‹С‚С‹С… СЃРґРµР»РѕРє (Р±РµР· pandas).
++        Р’РѕР·РІСЂР°С‰Р°РµС‚: {"count", "wins", "losses", "pnl_abs_sum", "last_ts"}.
 +        """
 +        cfg = Settings.load()
 +        path = getattr(cfg, "CLOSED_TRADES_CSV", os.path.join("data", "closed_trades.csv"))
@@ -64,7 +64,7 @@ index 0000000..0000001 100644
 +                        elif pnl < 0:
 +                            losses += 1
 +                    else:
-+                        # fall back по знаку процента
++                        # fall back РїРѕ Р·РЅР°РєСѓ РїСЂРѕС†РµРЅС‚Р°
 +                        pct = _to_float(row.get("pnl_pct") or row.get("pnl_percent"))
 +                        if pct is not None:
 +                            if pct > 0:
@@ -72,7 +72,7 @@ index 0000000..0000001 100644
 +                            elif pct < 0:
 +                                losses += 1
 +
-+                    # последний таймштамп
++                    # РїРѕСЃР»РµРґРЅРёР№ С‚Р°Р№РјС€С‚Р°РјРї
 +                    ts = (
 +                        row.get("timestamp")
 +                        or row.get("exit_ts")

@@ -1,11 +1,11 @@
-# src/crypto_ai_bot/utils/envtools.py
+﻿# src/crypto_ai_bot/utils/envtools.py
 import os
 from typing import Set, Tuple
 
 def webhook_secret_candidates() -> Set[str]:
     """
-    Список допустимых секретов вебхука (если заданы оба — принимаем любой).
-    Не меняет поведение, только убирает рассинхрон между WEBHOOK_SECRET и TELEGRAM_SECRET_TOKEN.
+    РЎРїРёСЃРѕРє РґРѕРїСѓСЃС‚РёРјС‹С… СЃРµРєСЂРµС‚РѕРІ РІРµР±С…СѓРєР° (РµСЃР»Рё Р·Р°РґР°РЅС‹ РѕР±Р° вЂ” РїСЂРёРЅРёРјР°РµРј Р»СЋР±РѕР№).
+    РќРµ РјРµРЅСЏРµС‚ РїРѕРІРµРґРµРЅРёРµ, С‚РѕР»СЊРєРѕ СѓР±РёСЂР°РµС‚ СЂР°СЃСЃРёРЅС…СЂРѕРЅ РјРµР¶РґСѓ WEBHOOK_SECRET Рё TELEGRAM_SECRET_TOKEN.
     """
     s1 = (os.getenv("WEBHOOK_SECRET") or "").strip()
     s2 = (os.getenv("TELEGRAM_SECRET_TOKEN") or "").strip()
@@ -13,8 +13,8 @@ def webhook_secret_candidates() -> Set[str]:
 
 def webhook_secret_for_set() -> str:
     """
-    Какой секрет передавать в setWebhook.
-    Предпочитаем WEBHOOK_SECRET, иначе TELEGRAM_SECRET_TOKEN, иначе "".
+    РљР°РєРѕР№ СЃРµРєСЂРµС‚ РїРµСЂРµРґР°РІР°С‚СЊ РІ setWebhook.
+    РџСЂРµРґРїРѕС‡РёС‚Р°РµРј WEBHOOK_SECRET, РёРЅР°С‡Рµ TELEGRAM_SECRET_TOKEN, РёРЅР°С‡Рµ "".
     """
     for name in ("WEBHOOK_SECRET", "TELEGRAM_SECRET_TOKEN"):
         v = (os.getenv(name) or "").strip()
@@ -24,8 +24,8 @@ def webhook_secret_for_set() -> str:
 
 def exchange_keys() -> Tuple[str, str]:
     """
-    Возвращает (api_key, api_secret), читая либо API_KEY/API_SECRET, либо GATE_API_KEY/GATE_API_SECRET.
-    У вас уже идентичные значения — это просто единая точка чтения.
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ (api_key, api_secret), С‡РёС‚Р°СЏ Р»РёР±Рѕ API_KEY/API_SECRET, Р»РёР±Рѕ GATE_API_KEY/GATE_API_SECRET.
+    РЈ РІР°СЃ СѓР¶Рµ РёРґРµРЅС‚РёС‡РЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ вЂ” СЌС‚Рѕ РїСЂРѕСЃС‚Рѕ РµРґРёРЅР°СЏ С‚РѕС‡РєР° С‡С‚РµРЅРёСЏ.
     """
     key = (os.getenv("API_KEY") or os.getenv("GATE_API_KEY") or "").strip()
     sec = (os.getenv("API_SECRET") or os.getenv("GATE_API_SECRET") or "").strip()

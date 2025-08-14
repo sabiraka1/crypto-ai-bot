@@ -1,17 +1,17 @@
-"""
-Проверка корректности интеграции оптимизаций
+﻿"""
+РџСЂРѕРІРµСЂРєР° РєРѕСЂСЂРµРєС‚РЅРѕСЃС‚Рё РёРЅС‚РµРіСЂР°С†РёРё РѕРїС‚РёРјРёР·Р°С†РёР№
 """
 
 def check_integration():
-    """Проверить все интеграции"""
+    """РџСЂРѕРІРµСЂРёС‚СЊ РІСЃРµ РёРЅС‚РµРіСЂР°С†РёРё"""
     results = {}
     
-    # 1. Проверка technical_indicators
+    # 1. РџСЂРѕРІРµСЂРєР° technical_indicators
     try:
         from analysis.technical_indicators import calculate_all_indicators, get_cache_stats
         import pandas as pd
         
-        # Тестовые данные
+        # РўРµСЃС‚РѕРІС‹Рµ РґР°РЅРЅС‹Рµ
         test_df = pd.DataFrame({
             'open': [100, 101, 102],
             'high': [102, 103, 104], 
@@ -20,9 +20,9 @@ def check_integration():
             'volume': [1000, 1100, 1200]
         })
         
-        # Проверяем кэширование
+        # РџСЂРѕРІРµСЂСЏРµРј РєСЌС€РёСЂРѕРІР°РЅРёРµ
         df1 = calculate_all_indicators(test_df, use_cache=True)
-        df2 = calculate_all_indicators(test_df, use_cache=True)  # Должно быть из кэша
+        df2 = calculate_all_indicators(test_df, use_cache=True)  # Р”РѕР»Р¶РЅРѕ Р±С‹С‚СЊ РёР· РєСЌС€Р°
         
         cache_stats = get_cache_stats()
         
@@ -35,12 +35,12 @@ def check_integration():
     except Exception as e:
         results['technical_indicators'] = {'status': 'ERROR', 'error': str(e)}
     
-    # 2. Проверка CSV батчинга
+    # 2. РџСЂРѕРІРµСЂРєР° CSV Р±Р°С‚С‡РёРЅРіР°
     try:
         from utils.csv_handler import CSVHandler, get_csv_system_stats
         CSVHandler.start()
 
-        # Тест записи
+        # РўРµСЃС‚ Р·Р°РїРёСЃРё
         test_signal = {
             'timestamp': '2024-01-01T00:00:00Z',
             'symbol': 'BTC/USDT',
@@ -60,7 +60,7 @@ def check_integration():
     except Exception as e:
         results['csv_handler'] = {'status': 'ERROR', 'error': str(e)}
     
-    # 3. Проверка мониторинга
+    # 3. РџСЂРѕРІРµСЂРєР° РјРѕРЅРёС‚РѕСЂРёРЅРіР°
     try:
         from utils.monitoring import SimpleMonitor, app_monitoring
         
@@ -77,13 +77,13 @@ def check_integration():
     except Exception as e:
         results['monitoring'] = {'status': 'ERROR', 'error': str(e)}
     
-    # 4. Проверка ScoringEngine
+    # 4. РџСЂРѕРІРµСЂРєР° ScoringEngine
     try:
         from analysis.scoring_engine import ScoringEngine
         
         scorer = ScoringEngine()
         
-        # Проверяем что остался только evaluate()
+        # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ РѕСЃС‚Р°Р»СЃСЏ С‚РѕР»СЊРєРѕ evaluate()
         has_evaluate = hasattr(scorer, 'evaluate')
         has_legacy = hasattr(scorer, 'calculate_scores') or hasattr(scorer, 'score')
         
@@ -99,11 +99,11 @@ def check_integration():
     return results
 
 def print_integration_report():
-    """Напечатать отчет об интеграции"""
+    """РќР°РїРµС‡Р°С‚Р°С‚СЊ РѕС‚С‡РµС‚ РѕР± РёРЅС‚РµРіСЂР°С†РёРё"""
     results = check_integration()
     
     print("=" * 60)
-    print("ОТЧЕТ ОБ ИНТЕГРАЦИИ ОПТИМИЗАЦИЙ")
+    print("РћРўР§Р•Рў РћР‘ РРќРўР•Р“Р РђР¦РР РћРџРўРРњРР—РђР¦РР™")
     print("=" * 60)
     
     for component, result in results.items():
@@ -113,15 +113,15 @@ def print_integration_report():
         if status == 'OK':
             for key, value in result.items():
                 if key != 'status':
-                    print(f"  ✅ {key}: {value}")
+                    print(f"  вњ… {key}: {value}")
         else:
-            print(f"  ❌ Error: {result.get('error', 'Unknown error')}")
+            print(f"  вќЊ Error: {result.get('error', 'Unknown error')}")
     
     print("\n" + "=" * 60)
     
-    # Общий статус
+    # РћР±С‰РёР№ СЃС‚Р°С‚СѓСЃ
     all_ok = all(r.get('status') == 'OK' for r in results.values())
-    print(f"ОБЩИЙ СТАТУС: {'✅ ВСЕ РАБОТАЕТ' if all_ok else '❌ ЕСТЬ ПРОБЛЕМЫ'}")
+    print(f"РћР‘Р©РР™ РЎРўРђРўРЈРЎ: {'вњ… Р’РЎР• Р РђР‘РћРўРђР•Рў' if all_ok else 'вќЊ Р•РЎРўР¬ РџР РћР‘Р›Р•РњР«'}")
     print("=" * 60)
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Entry policy: decide buy/sell/hold given features and fused scores.
 Path: src/crypto_ai_bot/signals/entry_policy.py

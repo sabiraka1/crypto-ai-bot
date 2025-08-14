@@ -1,4 +1,4 @@
-# utils/monitoring.py - НОВЫЙ ФАЙЛ
+﻿# utils/monitoring.py - РќРћР’Р«Р™ Р¤РђР™Р›
 
 import os
 import time
@@ -10,12 +10,12 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 
 # =============================================================================
-# УПРОЩЕННАЯ СИСТЕМА МОНИТОРИНГА
+# РЈРџР РћР©Р•РќРќРђРЇ РЎРРЎРўР•РњРђ РњРћРќРРўРћР РРќР“Рђ
 # =============================================================================
 
 @dataclass
 class SystemMetrics:
-    """Метрики системы"""
+    """РњРµС‚СЂРёРєРё СЃРёСЃС‚РµРјС‹"""
     timestamp: float
     memory_mb: float
     cpu_percent: float
@@ -24,17 +24,17 @@ class SystemMetrics:
     uptime_seconds: float
     
     def to_dict(self) -> Dict[str, Any]:
-        """Преобразование в словарь для совместимости с тестами"""
+        """РџСЂРµРѕР±СЂР°Р·РѕРІР°РЅРёРµ РІ СЃР»РѕРІР°СЂСЊ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃ С‚РµСЃС‚Р°РјРё"""
         return asdict(self)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'SystemMetrics':
-        """Создание экземпляра из словаря"""
+        """РЎРѕР·РґР°РЅРёРµ СЌРєР·РµРјРїР»СЏСЂР° РёР· СЃР»РѕРІР°СЂСЏ"""
         return cls(**data)
 
 @dataclass
 class TradingMetrics:
-    """Метрики торговли"""
+    """РњРµС‚СЂРёРєРё С‚РѕСЂРіРѕРІР»Рё"""
     bot_active: bool
     position_active: bool
     last_signal_time: Optional[str]
@@ -43,16 +43,16 @@ class TradingMetrics:
     last_error: Optional[str]
 
 class SimpleMonitor:
-    """Упрощенная система мониторинга без избыточности"""
+    """РЈРїСЂРѕС‰РµРЅРЅР°СЏ СЃРёСЃС‚РµРјР° РјРѕРЅРёС‚РѕСЂРёРЅРіР° Р±РµР· РёР·Р±С‹С‚РѕС‡РЅРѕСЃС‚Рё"""
     
     def __init__(self, check_interval: int = 300):
-        self.check_interval = check_interval  # 5 минут
+        self.check_interval = check_interval  # 5 РјРёРЅСѓС‚
         self._last_check = 0
         self._last_metrics: Optional[SystemMetrics] = None
         self._start_time = time.time()
-        self._alerts_sent = set()  # Для предотвращения спама
+        self._alerts_sent = set()  # Р”Р»СЏ РїСЂРµРґРѕС‚РІСЂР°С‰РµРЅРёСЏ СЃРїР°РјР°
         
-        # Пороги для алертов
+        # РџРѕСЂРѕРіРё РґР»СЏ Р°Р»РµСЂС‚РѕРІ
         self.thresholds = {
             "memory_mb": float(os.getenv("MEMORY_ALERT_MB", "1000")),  # 1GB
             "cpu_percent": float(os.getenv("CPU_ALERT_PCT", "85")),   # 85%
@@ -60,7 +60,7 @@ class SimpleMonitor:
         }
         
     def should_check(self) -> bool:
-        """Нужна ли проверка метрик"""
+        """РќСѓР¶РЅР° Р»Рё РїСЂРѕРІРµСЂРєР° РјРµС‚СЂРёРє"""
         now = time.time()
         if now - self._last_check >= self.check_interval:
             self._last_check = now
@@ -68,16 +68,16 @@ class SimpleMonitor:
         return False
     
     def get_system_metrics(self) -> SystemMetrics:
-        """Получить системные метрики"""
+        """РџРѕР»СѓС‡РёС‚СЊ СЃРёСЃС‚РµРјРЅС‹Рµ РјРµС‚СЂРёРєРё"""
         try:
             process = psutil.Process(os.getpid())
             
-            # Базовые метрики
+            # Р‘Р°Р·РѕРІС‹Рµ РјРµС‚СЂРёРєРё
             memory_mb = process.memory_info().rss / (1024 * 1024)
             cpu_percent = process.cpu_percent(interval=0.1)
             threads_count = process.num_threads()
             
-            # Дисковое пространство (текущая директория)
+            # Р”РёСЃРєРѕРІРѕРµ РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІРѕ (С‚РµРєСѓС‰Р°СЏ РґРёСЂРµРєС‚РѕСЂРёСЏ)
             disk_usage = psutil.disk_usage('.')
             disk_usage_mb = disk_usage.used / (1024 * 1024)
             
@@ -105,7 +105,7 @@ class SimpleMonitor:
             )
     
     def get_trading_metrics(self, trading_bot=None) -> TradingMetrics:
-        """Получить торговые метрики"""
+        """РџРѕР»СѓС‡РёС‚СЊ С‚РѕСЂРіРѕРІС‹Рµ РјРµС‚СЂРёРєРё"""
         try:
             bot_active = trading_bot is not None
             position_active = False
@@ -116,11 +116,11 @@ class SimpleMonitor:
             
             if trading_bot:
                 try:
-                    # Проверяем позицию
+                    # РџСЂРѕРІРµСЂСЏРµРј РїРѕР·РёС†РёСЋ
                     if hasattr(trading_bot, 'state'):
                         position_active = bool(trading_bot.state.get("in_position"))
                         
-                    # Получаем статистику сделок
+                    # РџРѕР»СѓС‡Р°РµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ СЃРґРµР»РѕРє
                     if hasattr(trading_bot, 'pm'):
                         try:
                             from utils.csv_handler import CSVHandler
@@ -129,7 +129,7 @@ class SimpleMonitor:
                         except Exception:
                             pass
                             
-                    # Баланс из exchange client
+                    # Р‘Р°Р»Р°РЅСЃ РёР· exchange client
                     if hasattr(trading_bot, 'exchange'):
                         try:
                             current_balance = trading_bot.exchange.get_balance("USDT")
@@ -157,31 +157,31 @@ class SimpleMonitor:
             )
     
     def check_alerts(self, metrics: SystemMetrics) -> list:
-        """Проверить пороги алертов"""
+        """РџСЂРѕРІРµСЂРёС‚СЊ РїРѕСЂРѕРіРё Р°Р»РµСЂС‚РѕРІ"""
         alerts = []
         
-        # Проверяем память
+        # РџСЂРѕРІРµСЂСЏРµРј РїР°РјСЏС‚СЊ
         if metrics.memory_mb > self.thresholds["memory_mb"]:
             alert_key = f"memory_{int(metrics.memory_mb//100)}"
             if alert_key not in self._alerts_sent:
                 alerts.append(f"High memory usage: {metrics.memory_mb:.1f} MB")
                 self._alerts_sent.add(alert_key)
         
-        # Проверяем CPU
+        # РџСЂРѕРІРµСЂСЏРµРј CPU
         if metrics.cpu_percent > self.thresholds["cpu_percent"]:
             alert_key = f"cpu_{int(metrics.cpu_percent//10)}"
             if alert_key not in self._alerts_sent:
                 alerts.append(f"High CPU usage: {metrics.cpu_percent:.1f}%")
                 self._alerts_sent.add(alert_key)
         
-        # Очищаем старые алерты (каждые 30 минут)
+        # РћС‡РёС‰Р°РµРј СЃС‚Р°СЂС‹Рµ Р°Р»РµСЂС‚С‹ (РєР°Р¶РґС‹Рµ 30 РјРёРЅСѓС‚)
         if len(self._alerts_sent) > 10:
             self._alerts_sent.clear()
         
         return alerts
     
     def get_full_status(self, trading_bot=None) -> Dict[str, Any]:
-        """Полный статус системы"""
+        """РџРѕР»РЅС‹Р№ СЃС‚Р°С‚СѓСЃ СЃРёСЃС‚РµРјС‹"""
         system_metrics = self.get_system_metrics()
         trading_metrics = self.get_trading_metrics(trading_bot)
         alerts = self.check_alerts(system_metrics)
@@ -195,7 +195,7 @@ class SimpleMonitor:
         }
     
     def get_health_check(self) -> Dict[str, Any]:
-        """Быстрая проверка здоровья"""
+        """Р‘С‹СЃС‚СЂР°СЏ РїСЂРѕРІРµСЂРєР° Р·РґРѕСЂРѕРІСЊСЏ"""
         return {
             "ok": True,
             "timestamp": time.time(),
@@ -205,11 +205,11 @@ class SimpleMonitor:
         }
 
 # =============================================================================
-# SMART WATCHDOG - УМНЫЙ СТОРОЖ
+# SMART WATCHDOG - РЈРњРќР«Р™ РЎРўРћР РћР–
 # =============================================================================
 
 class SmartWatchdog:
-    """Умный сторож без избыточных проверок"""
+    """РЈРјРЅС‹Р№ СЃС‚РѕСЂРѕР¶ Р±РµР· РёР·Р±С‹С‚РѕС‡РЅС‹С… РїСЂРѕРІРµСЂРѕРє"""
     
     def __init__(self, check_interval: int = 300):
         self.check_interval = check_interval
@@ -218,10 +218,10 @@ class SmartWatchdog:
         self._restart_attempts = 0
         self._max_restarts = 3
         self._last_restart = 0
-        self._restart_cooldown = 1800  # 30 минут
+        self._restart_cooldown = 1800  # 30 РјРёРЅСѓС‚
         
     def start(self, trading_bot_ref, restart_func):
-        """Запустить сторожа"""
+        """Р—Р°РїСѓСЃС‚РёС‚СЊ СЃС‚РѕСЂРѕР¶Р°"""
         if self._running:
             return
             
@@ -233,16 +233,16 @@ class SmartWatchdog:
             name="SmartWatchdog"
         )
         self._thread.start()
-        logging.info("🐕 Smart watchdog started")
+        logging.info("рџђ• Smart watchdog started")
     
     def stop(self):
-        """Остановить сторожа"""
+        """РћСЃС‚Р°РЅРѕРІРёС‚СЊ СЃС‚РѕСЂРѕР¶Р°"""
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
     
     def _watch_loop(self, trading_bot_ref, restart_func):
-        """Основной цикл сторожа"""
+        """РћСЃРЅРѕРІРЅРѕР№ С†РёРєР» СЃС‚РѕСЂРѕР¶Р°"""
         consecutive_failures = 0
         
         while self._running:
@@ -252,28 +252,28 @@ class SmartWatchdog:
                 if not self._running:
                     break
                 
-                # Проверяем торгового бота
+                # РџСЂРѕРІРµСЂСЏРµРј С‚РѕСЂРіРѕРІРѕРіРѕ Р±РѕС‚Р°
                 bot_ok = self._check_trading_bot(trading_bot_ref)
                 
                 if bot_ok:
                     consecutive_failures = 0
                 else:
                     consecutive_failures += 1
-                    logging.warning(f"🐕 Trading bot check failed #{consecutive_failures}")
+                    logging.warning(f"рџђ• Trading bot check failed #{consecutive_failures}")
                     
-                    # Попытка перезапуска при критических проблемах
+                    # РџРѕРїС‹С‚РєР° РїРµСЂРµР·Р°РїСѓСЃРєР° РїСЂРё РєСЂРёС‚РёС‡РµСЃРєРёС… РїСЂРѕР±Р»РµРјР°С…
                     if consecutive_failures >= 3:
                         self._attempt_restart(restart_func)
                         consecutive_failures = 0
                         
             except Exception as e:
-                logging.error(f"🐕 Watchdog error: {e}")
-                time.sleep(60)  # Пауза при ошибках
+                logging.error(f"рџђ• Watchdog error: {e}")
+                time.sleep(60)  # РџР°СѓР·Р° РїСЂРё РѕС€РёР±РєР°С…
     
     def _check_trading_bot(self, bot_ref) -> bool:
-        """Проверить состояние торгового бота"""
+        """РџСЂРѕРІРµСЂРёС‚СЊ СЃРѕСЃС‚РѕСЏРЅРёРµ С‚РѕСЂРіРѕРІРѕРіРѕ Р±РѕС‚Р°"""
         try:
-            # Проверяем что бот существует
+            # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ Р±РѕС‚ СЃСѓС‰РµСЃС‚РІСѓРµС‚
             if callable(bot_ref):
                 bot = bot_ref()
             else:
@@ -282,7 +282,7 @@ class SmartWatchdog:
             if bot is None:
                 return False
             
-            # Проверяем поток торговли
+            # РџСЂРѕРІРµСЂСЏРµРј РїРѕС‚РѕРє С‚РѕСЂРіРѕРІР»Рё
             trading_threads = [
                 t for t in threading.enumerate() 
                 if t.name == "TradingLoop" and t.is_alive()
@@ -295,73 +295,73 @@ class SmartWatchdog:
             return False
     
     def _attempt_restart(self, restart_func):
-        """Попытка перезапуска"""
+        """РџРѕРїС‹С‚РєР° РїРµСЂРµР·Р°РїСѓСЃРєР°"""
         now = time.time()
         
-        # Проверяем кулдаун и лимит перезапусков
+        # РџСЂРѕРІРµСЂСЏРµРј РєСѓР»РґР°СѓРЅ Рё Р»РёРјРёС‚ РїРµСЂРµР·Р°РїСѓСЃРєРѕРІ
         if (now - self._last_restart < self._restart_cooldown or 
             self._restart_attempts >= self._max_restarts):
-            logging.warning("🐕 Restart skipped: cooldown or max attempts reached")
+            logging.warning("рџђ• Restart skipped: cooldown or max attempts reached")
             return
         
         try:
-            logging.warning("🐕 Attempting to restart trading bot...")
+            logging.warning("рџђ• Attempting to restart trading bot...")
             
-            # Отправляем уведомление
+            # РћС‚РїСЂР°РІР»СЏРµРј СѓРІРµРґРѕРјР»РµРЅРёРµ
             try:
                 from telegram.api_utils import send_message
-                send_message("🔄 Watchdog restarting trading bot due to failures")
+                send_message("рџ”„ Watchdog restarting trading bot due to failures")
             except Exception:
                 pass
             
-            # Вызываем функцию перезапуска
+            # Р’С‹Р·С‹РІР°РµРј С„СѓРЅРєС†РёСЋ РїРµСЂРµР·Р°РїСѓСЃРєР°
             if callable(restart_func):
                 restart_func()
                 
             self._restart_attempts += 1
             self._last_restart = now
             
-            logging.info("🐕 Restart attempt completed")
+            logging.info("рџђ• Restart attempt completed")
             
         except Exception as e:
-            logging.error(f"🐕 Restart failed: {e}")
+            logging.error(f"рџђ• Restart failed: {e}")
 
 # =============================================================================
-# ИНТЕГРАЦИЯ ДЛЯ APP.PY
+# РРќРўР•Р“Р РђР¦РРЇ Р”Р›РЇ APP.PY
 # =============================================================================
 
 class AppMonitoring:
-    """Интеграция мониторинга для app.py"""
+    """РРЅС‚РµРіСЂР°С†РёСЏ РјРѕРЅРёС‚РѕСЂРёРЅРіР° РґР»СЏ app.py"""
     
     def __init__(self):
         self.monitor = SimpleMonitor(check_interval=300)
         self.watchdog = SmartWatchdog(check_interval=300)
         
     def get_health_response(self, trading_bot=None):
-        """Ответ для /health endpoint"""
+        """РћС‚РІРµС‚ РґР»СЏ /health endpoint"""
         if self.monitor.should_check():
             return self.monitor.get_full_status(trading_bot)
         else:
             return self.monitor.get_health_check()
     
     def start_watchdog(self, bot_ref, restart_func):
-        """Запустить сторожа"""
+        """Р—Р°РїСѓСЃС‚РёС‚СЊ СЃС‚РѕСЂРѕР¶Р°"""
         self.watchdog.start(bot_ref, restart_func)
     
     def shutdown(self):
-        """Корректное завершение"""
+        """РљРѕСЂСЂРµРєС‚РЅРѕРµ Р·Р°РІРµСЂС€РµРЅРёРµ"""
         self.watchdog.stop()
-        logging.info("🔧 Monitoring system shutdown")
+        logging.info("рџ”§ Monitoring system shutdown")
 
-# Глобальный экземпляр для app.py
+# Р“Р»РѕР±Р°Р»СЊРЅС‹Р№ СЌРєР·РµРјРїР»СЏСЂ РґР»СЏ app.py
 app_monitoring = AppMonitoring()
 
 # =============================================================================
-# ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СОВМЕСТИМОСТИ С ТЕСТАМИ
+# Р”РћРџРћР›РќРРўР•Р›Р¬РќР«Р• Р¤РЈРќРљР¦РР Р”Р›РЇ РЎРћР’РњР•РЎРўРРњРћРЎРўР РЎ РўР•РЎРўРђРњР
 # =============================================================================
 
 class PerformanceMonitor:
-    """Класс для мониторинга производительности (совместимость с тестами)"""
+    """РљР»Р°СЃСЃ РґР»СЏ РјРѕРЅРёС‚РѕСЂРёРЅРіР° РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚Рё (СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃ С‚РµСЃС‚Р°РјРё)"""
     
     def __init__(self):
         self.start_time = time.time()
@@ -369,19 +369,19 @@ class PerformanceMonitor:
         self.alerts = []
         
     def capture_metrics(self) -> SystemMetrics:
-        """Захват текущих системных метрик"""
+        """Р—Р°С…РІР°С‚ С‚РµРєСѓС‰РёС… СЃРёСЃС‚РµРјРЅС‹С… РјРµС‚СЂРёРє"""
         monitor = SimpleMonitor()
         return monitor.get_system_metrics()
 
 
 def get_system_metrics() -> SystemMetrics:
-    """Получение текущих системных метрик (совместимость с тестами)"""
+    """РџРѕР»СѓС‡РµРЅРёРµ С‚РµРєСѓС‰РёС… СЃРёСЃС‚РµРјРЅС‹С… РјРµС‚СЂРёРє (СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃ С‚РµСЃС‚Р°РјРё)"""
     monitor = SimpleMonitor()
     return monitor.get_system_metrics()
 
 
 def log_system_state(output_file: Optional[str] = None) -> Dict[str, Any]:
-    """Логирование текущего состояния системы"""
+    """Р›РѕРіРёСЂРѕРІР°РЅРёРµ С‚РµРєСѓС‰РµРіРѕ СЃРѕСЃС‚РѕСЏРЅРёСЏ СЃРёСЃС‚РµРјС‹"""
     metrics = get_system_metrics()
     
     log_data = {
@@ -399,13 +399,13 @@ def log_system_state(output_file: Optional[str] = None) -> Dict[str, Any]:
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(log_data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logging.error(f"Ошибка записи лога: {e}")
+            logging.error(f"РћС€РёР±РєР° Р·Р°РїРёСЃРё Р»РѕРіР°: {e}")
     
     return log_data
 
 
 def monitor_performance(duration_seconds: int = 60, interval_seconds: int = 5) -> list:
-    """Мониторинг производительности в течение заданного времени"""
+    """РњРѕРЅРёС‚РѕСЂРёРЅРі РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚Рё РІ С‚РµС‡РµРЅРёРµ Р·Р°РґР°РЅРЅРѕРіРѕ РІСЂРµРјРµРЅРё"""
     metrics_list = []
     monitor = SimpleMonitor()
     
@@ -420,7 +420,7 @@ def monitor_performance(duration_seconds: int = 60, interval_seconds: int = 5) -
 
 
 def check_system_health() -> Dict[str, Any]:
-    """Проверка состояния системы и возвращение рекомендаций"""
+    """РџСЂРѕРІРµСЂРєР° СЃРѕСЃС‚РѕСЏРЅРёСЏ СЃРёСЃС‚РµРјС‹ Рё РІРѕР·РІСЂР°С‰РµРЅРёРµ СЂРµРєРѕРјРµРЅРґР°С†РёР№"""
     metrics = get_system_metrics()
     
     health_status = {
@@ -430,29 +430,29 @@ def check_system_health() -> Dict[str, Any]:
         "metrics": metrics.to_dict()
     }
     
-    # Проверка использования памяти
+    # РџСЂРѕРІРµСЂРєР° РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РїР°РјСЏС‚Рё
     if metrics.memory_mb > 8000:  # > 8GB
-        health_status["warnings"].append("Высокое использование памяти")
-        health_status["recommendations"].append("Рассмотрите возможность увеличения RAM")
+        health_status["warnings"].append("Р’С‹СЃРѕРєРѕРµ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РїР°РјСЏС‚Рё")
+        health_status["recommendations"].append("Р Р°СЃСЃРјРѕС‚СЂРёС‚Рµ РІРѕР·РјРѕР¶РЅРѕСЃС‚СЊ СѓРІРµР»РёС‡РµРЅРёСЏ RAM")
         health_status["overall_status"] = "warning"
     
-    # Проверка CPU
+    # РџСЂРѕРІРµСЂРєР° CPU
     if metrics.cpu_percent > 80:
-        health_status["warnings"].append("Высокая загрузка CPU")
-        health_status["recommendations"].append("Оптимизируйте нагрузку на процессор")
+        health_status["warnings"].append("Р’С‹СЃРѕРєР°СЏ Р·Р°РіСЂСѓР·РєР° CPU")
+        health_status["recommendations"].append("РћРїС‚РёРјРёР·РёСЂСѓР№С‚Рµ РЅР°РіСЂСѓР·РєСѓ РЅР° РїСЂРѕС†РµСЃСЃРѕСЂ")
         health_status["overall_status"] = "warning"
     
-    # Проверка дискового пространства
+    # РџСЂРѕРІРµСЂРєР° РґРёСЃРєРѕРІРѕРіРѕ РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІР°
     if metrics.disk_usage_mb > 50000:  # > 50GB
-        health_status["warnings"].append("Высокое использование диска")
-        health_status["recommendations"].append("Очистите временные файлы")
+        health_status["warnings"].append("Р’С‹СЃРѕРєРѕРµ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РґРёСЃРєР°")
+        health_status["recommendations"].append("РћС‡РёСЃС‚РёС‚Рµ РІСЂРµРјРµРЅРЅС‹Рµ С„Р°Р№Р»С‹")
         health_status["overall_status"] = "warning"
     
     return health_status
 
 
 class ResourceTracker:
-    """Класс для отслеживания использования ресурсов во времени"""
+    """РљР»Р°СЃСЃ РґР»СЏ РѕС‚СЃР»РµР¶РёРІР°РЅРёСЏ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ СЂРµСЃСѓСЂСЃРѕРІ РІРѕ РІСЂРµРјРµРЅРё"""
     
     def __init__(self, max_history: int = 1000):
         self.max_history = max_history
@@ -460,18 +460,18 @@ class ResourceTracker:
         self.lock = threading.Lock()
     
     def record_metrics(self) -> None:
-        """Запись текущих метрик в историю"""
+        """Р—Р°РїРёСЃСЊ С‚РµРєСѓС‰РёС… РјРµС‚СЂРёРє РІ РёСЃС‚РѕСЂРёСЋ"""
         metrics = get_system_metrics()
         
         with self.lock:
             self.history.append(metrics)
             
-            # Ограничиваем размер истории
+            # РћРіСЂР°РЅРёС‡РёРІР°РµРј СЂР°Р·РјРµСЂ РёСЃС‚РѕСЂРёРё
             if len(self.history) > self.max_history:
                 self.history = self.history[-self.max_history:]
     
     def get_average_metrics(self, last_n: Optional[int] = None) -> Optional[SystemMetrics]:
-        """Получение средних метрик за последние N записей"""
+        """РџРѕР»СѓС‡РµРЅРёРµ СЃСЂРµРґРЅРёС… РјРµС‚СЂРёРє Р·Р° РїРѕСЃР»РµРґРЅРёРµ N Р·Р°РїРёСЃРµР№"""
         with self.lock:
             if not self.history:
                 return None
@@ -481,7 +481,7 @@ class ResourceTracker:
             if not data:
                 return None
             
-            # Вычисляем средние значения
+            # Р’С‹С‡РёСЃР»СЏРµРј СЃСЂРµРґРЅРёРµ Р·РЅР°С‡РµРЅРёСЏ
             avg_memory = sum(m.memory_mb for m in data) / len(data)
             avg_cpu = sum(m.cpu_percent for m in data) / len(data)
             avg_threads = sum(m.threads_count for m in data) / len(data)
@@ -498,7 +498,7 @@ class ResourceTracker:
             )
     
     def export_history(self, filename: str) -> bool:
-        """Экспорт истории метрик в файл"""
+        """Р­РєСЃРїРѕСЂС‚ РёСЃС‚РѕСЂРёРё РјРµС‚СЂРёРє РІ С„Р°Р№Р»"""
         try:
             import json
             with self.lock:
@@ -513,23 +513,23 @@ class ResourceTracker:
             
             return True
         except Exception as e:
-            logging.error(f"Ошибка экспорта истории: {e}")
+            logging.error(f"РћС€РёР±РєР° СЌРєСЃРїРѕСЂС‚Р° РёСЃС‚РѕСЂРёРё: {e}")
             return False
 
 
-# Глобальный экземпляр трекера ресурсов
+# Р“Р»РѕР±Р°Р»СЊРЅС‹Р№ СЌРєР·РµРјРїР»СЏСЂ С‚СЂРµРєРµСЂР° СЂРµСЃСѓСЂСЃРѕРІ
 _resource_tracker = ResourceTracker()
 
 
 def start_background_monitoring(interval_seconds: int = 30) -> threading.Thread:
-    """Запуск фонового мониторинга ресурсов"""
+    """Р—Р°РїСѓСЃРє С„РѕРЅРѕРІРѕРіРѕ РјРѕРЅРёС‚РѕСЂРёРЅРіР° СЂРµСЃСѓСЂСЃРѕРІ"""
     def monitoring_loop():
         while True:
             try:
                 _resource_tracker.record_metrics()
                 time.sleep(interval_seconds)
             except Exception as e:
-                logging.error(f"Ошибка в фоновом мониторинге: {e}")
+                logging.error(f"РћС€РёР±РєР° РІ С„РѕРЅРѕРІРѕРј РјРѕРЅРёС‚РѕСЂРёРЅРіРµ: {e}")
                 time.sleep(interval_seconds)
     
     thread = threading.Thread(target=monitoring_loop, daemon=True)
@@ -538,9 +538,9 @@ def start_background_monitoring(interval_seconds: int = 30) -> threading.Thread:
 
 
 def get_resource_summary() -> Dict[str, Any]:
-    """Получение сводки по использованию ресурсов"""
+    """РџРѕР»СѓС‡РµРЅРёРµ СЃРІРѕРґРєРё РїРѕ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЋ СЂРµСЃСѓСЂСЃРѕРІ"""
     current = get_system_metrics()
-    average = _resource_tracker.get_average_metrics(last_n=10)  # последние 10 записей
+    average = _resource_tracker.get_average_metrics(last_n=10)  # РїРѕСЃР»РµРґРЅРёРµ 10 Р·Р°РїРёСЃРµР№
     
     return {
         "current": current.to_dict(),
@@ -550,21 +550,21 @@ def get_resource_summary() -> Dict[str, Any]:
     }
 
 # =============================================================================
-# ЭКСПОРТ И СОВМЕСТИМОСТЬ
+# Р­РљРЎРџРћР Рў Р РЎРћР’РњР•РЎРўРРњРћРЎРўР¬
 # =============================================================================
 
-# Функции для обратной совместимости
+# Р¤СѓРЅРєС†РёРё РґР»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
 def monitor_resources():
-    """Legacy функция - теперь использует SimpleMonitor"""
+    """Legacy С„СѓРЅРєС†РёСЏ - С‚РµРїРµСЂСЊ РёСЃРїРѕР»СЊР·СѓРµС‚ SimpleMonitor"""
     monitor = SimpleMonitor()
     metrics = monitor.get_system_metrics()
     return metrics.cpu_percent, metrics.memory_mb
 
 def send_telegram_alert(message):
-    """Legacy функция отправки алертов"""
+    """Legacy С„СѓРЅРєС†РёСЏ РѕС‚РїСЂР°РІРєРё Р°Р»РµСЂС‚РѕРІ"""
     try:
         from telegram.api_utils import send_message
-        send_message(f"🚨 {message}")
+        send_message(f"рџљЁ {message}")
     except Exception as e:
         logging.error(f"Alert send failed: {e}")
 

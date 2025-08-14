@@ -1,9 +1,9 @@
-# --- psutil stub for tests (put at very top of tests/conftest.py) ---
-# Делает тесты стабильными на CI/Windows без настоящего psutil
+﻿# --- psutil stub for tests (put at very top of tests/conftest.py) ---
+# Р”РµР»Р°РµС‚ С‚РµСЃС‚С‹ СЃС‚Р°Р±РёР»СЊРЅС‹РјРё РЅР° CI/Windows Р±РµР· РЅР°СЃС‚РѕСЏС‰РµРіРѕ psutil
 import sys, types, time
 
 if "psutil" not in sys.modules:
-    # Лёгкая заглушка, которую используют utils/monitoring.py
+    # Р›С‘РіРєР°СЏ Р·Р°РіР»СѓС€РєР°, РєРѕС‚РѕСЂСѓСЋ РёСЃРїРѕР»СЊР·СѓСЋС‚ utils/monitoring.py
     _vmem = types.SimpleNamespace(
         percent=42.0,
         total=16 * 1024**3,
@@ -27,12 +27,12 @@ if "psutil" not in sys.modules:
         sensors_temperatures=lambda: {},
         sensors_battery=lambda: types.SimpleNamespace(percent=77.0, power_plugged=True),
         Process=lambda pid=None: _proc,
-        getloadavg=lambda: (0.1, 0.1, 0.1),  # на случай, если вызывается
+        getloadavg=lambda: (0.1, 0.1, 0.1),  # РЅР° СЃР»СѓС‡Р°Р№, РµСЃР»Рё РІС‹Р·С‹РІР°РµС‚СЃСЏ
     )
     sys.modules["psutil"] = psutil_stub
 # --- end psutil stub ---
 
-"""Настройки тестов для торгового бота."""
+"""РќР°СЃС‚СЂРѕР№РєРё С‚РµСЃС‚РѕРІ РґР»СЏ С‚РѕСЂРіРѕРІРѕРіРѕ Р±РѕС‚Р°."""
 
 import pytest
 import sys
@@ -40,14 +40,14 @@ from pathlib import Path
 from unittest.mock import Mock
 import pandas as pd
 
-# Путь к корню проекта чтобы импорты работали одинаково локально и в CI
+# РџСѓС‚СЊ Рє РєРѕСЂРЅСЋ РїСЂРѕРµРєС‚Р° С‡С‚РѕР±С‹ РёРјРїРѕСЂС‚С‹ СЂР°Р±РѕС‚Р°Р»Рё РѕРґРёРЅР°РєРѕРІРѕ Р»РѕРєР°Р»СЊРЅРѕ Рё РІ CI
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 @pytest.fixture
 def sample_ohlcv():
-    """Мини-набор OHLCV для быстрых тестов"""
+    """РњРёРЅРё-РЅР°Р±РѕСЂ OHLCV РґР»СЏ Р±С‹СЃС‚СЂС‹С… С‚РµСЃС‚РѕРІ"""
     return pd.DataFrame({
         'open': [50000, 50100, 50200, 50150, 50300],
         'high': [50200, 50300, 50400, 50350, 50500],
@@ -58,7 +58,7 @@ def sample_ohlcv():
 
 @pytest.fixture
 def mock_exchange():
-    """Мок биржи для безопасного тестирования"""
+    """РњРѕРє Р±РёСЂР¶Рё РґР»СЏ Р±РµР·РѕРїР°СЃРЅРѕРіРѕ С‚РµСЃС‚РёСЂРѕРІР°РЅРёСЏ"""
     exchange = Mock()
     exchange.get_last_price.return_value = 50000.0
     exchange.fetch_ohlcv.return_value = [
@@ -77,7 +77,7 @@ def mock_exchange():
 
 @pytest.fixture
 def mock_state():
-    """Простой мок StateManager"""
+    """РџСЂРѕСЃС‚РѕР№ РјРѕРє StateManager"""
     state = Mock()
     state.get.return_value = False
     state.is_position_active.return_value = False

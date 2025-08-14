@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Lightweight technical indicators used across the project.
 Path: src/crypto_ai_bot/analysis/indicators.py

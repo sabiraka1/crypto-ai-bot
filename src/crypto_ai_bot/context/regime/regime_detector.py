@@ -1,1 +1,1 @@
-# Market regime detector 
+﻿# Market regime detector 

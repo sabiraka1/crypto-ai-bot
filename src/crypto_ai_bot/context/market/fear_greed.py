@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import json
 import logging
 from typing import Optional
@@ -10,7 +10,7 @@ FNG_API = "https://api.alternative.me/fng/"
 
 def fetch_fear_greed(timeout: float = 6.0) -> Optional[int]:
     """
-    Возвращает Fear & Greed Index (0..100) либо None.
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ Fear & Greed Index (0..100) Р»РёР±Рѕ None.
     """
     try:
         req = Request(FNG_API, headers={"User-Agent": "crypto-ai-bot/1.0"})

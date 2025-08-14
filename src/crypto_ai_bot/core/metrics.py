@@ -1,8 +1,8 @@
-# src/crypto_ai_bot/core/metrics.py
+﻿# src/crypto_ai_bot/core/metrics.py
 from __future__ import annotations
 import time
 
-# ── Fallback: если prometheus_client нет, метрики — no-op ────────────────
+# в”Ђв”Ђ Fallback: РµСЃР»Рё prometheus_client РЅРµС‚, РјРµС‚СЂРёРєРё вЂ” no-op в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 try:
     from prometheus_client import Counter, Gauge, Histogram  # type: ignore
     PROM_ENABLED = True
@@ -20,7 +20,7 @@ except Exception:
     def Gauge(*a, **k): return _NoOp()
     def Histogram(*a, **k): return _NoOp()
 
-# ── Основные счётчики цикла/сделок ────────────────────────────────────────
+# в”Ђв”Ђ РћСЃРЅРѕРІРЅС‹Рµ СЃС‡С‘С‚С‡РёРєРё С†РёРєР»Р°/СЃРґРµР»РѕРє в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 TRADING_LOOPS        = Counter("trading_loops_total", "Trading loop iterations")
 SIGNALS_TOTAL        = Counter("signals_generated_total", "Signals generated")
 ENTRY_ATTEMPTS       = Counter("entry_attempts_total", "Entry attempts")
@@ -40,7 +40,7 @@ DECISION_LATENCY     = Histogram(
     buckets=(0.01, 0.05, 0.1, 0.2, 0.5, 1, 2)
 )
 
-# ── Новые метрики: скор, контекст, флаги ──────────────────────────────────
+# в”Ђв”Ђ РќРѕРІС‹Рµ РјРµС‚СЂРёРєРё: СЃРєРѕСЂ, РєРѕРЅС‚РµРєСЃС‚, С„Р»Р°РіРё в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 RULE_SCORE             = Gauge("rule_score", "Raw rule score (0..1)")
 RULE_SCORE_PENALIZED   = Gauge("rule_score_penalized", "Rule score after context penalties (0..1)")
 
@@ -50,10 +50,10 @@ FEAR_GREED_INDEX       = Gauge("fear_greed_index", "Fear & Greed Index (0..100)"
 
 CONTEXT_LAST_UPDATE_TS = Gauge("context_last_update_ts", "Context snapshot last update time (unix)")
 
-# Лейбловая метрика-флаг: factor ∈ {btc_dominance, dxy_change_1d, fear_greed_overheated, fear_greed_undershoot}
+# Р›РµР№Р±Р»РѕРІР°СЏ РјРµС‚СЂРёРєР°-С„Р»Р°Рі: factor в€€ {btc_dominance, dxy_change_1d, fear_greed_overheated, fear_greed_undershoot}
 CONTEXT_FLAG = Gauge("context_flag", "Context factor state (0/1)", ["factor"])
 
-# Список «базовых» флагов, которые будем обнулять перед установкой активных
+# РЎРїРёСЃРѕРє В«Р±Р°Р·РѕРІС‹С…В» С„Р»Р°РіРѕРІ, РєРѕС‚РѕСЂС‹Рµ Р±СѓРґРµРј РѕР±РЅСѓР»СЏС‚СЊ РїРµСЂРµРґ СѓСЃС‚Р°РЅРѕРІРєРѕР№ Р°РєС‚РёРІРЅС‹С…
 KNOWN_CONTEXT_FLAGS = (
     "btc_dominance",
     "dxy_change_1d",
@@ -62,7 +62,7 @@ KNOWN_CONTEXT_FLAGS = (
 )
 
 def reset_context_flags() -> None:
-    """Сбрасывает все известные контекстные флаги в 0 (удобно перед обновлением)."""
+    """РЎР±СЂР°СЃС‹РІР°РµС‚ РІСЃРµ РёР·РІРµСЃС‚РЅС‹Рµ РєРѕРЅС‚РµРєСЃС‚РЅС‹Рµ С„Р»Р°РіРё РІ 0 (СѓРґРѕР±РЅРѕ РїРµСЂРµРґ РѕР±РЅРѕРІР»РµРЅРёРµРј)."""
     for name in KNOWN_CONTEXT_FLAGS:
         CONTEXT_FLAG.labels(factor=name).set(0)
 
@@ -74,8 +74,8 @@ def push_context_metrics(
     penalties: dict | None,   # {"enabled": bool, "applied": [ {"factor": str, "value": x, "delta": y}, ... ]}
 ) -> None:
     """
-    Обновляет все новые метрики /metrics по результатам агрегатора.
-    Безопасно к None: если чего-то нет — ставим нейтральные значения.
+    РћР±РЅРѕРІР»СЏРµС‚ РІСЃРµ РЅРѕРІС‹Рµ РјРµС‚СЂРёРєРё /metrics РїРѕ СЂРµР·СѓР»СЊС‚Р°С‚Р°Рј Р°РіСЂРµРіР°С‚РѕСЂР°.
+    Р‘РµР·РѕРїР°СЃРЅРѕ Рє None: РµСЃР»Рё С‡РµРіРѕ-С‚Рѕ РЅРµС‚ вЂ” СЃС‚Р°РІРёРј РЅРµР№С‚СЂР°Р»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ.
     """
     try:
         # rule scores
@@ -94,7 +94,7 @@ def push_context_metrics(
             except Exception:
                 CONTEXT_LAST_UPDATE_TS.set(time.time())
         else:
-            # если снапшота нет — выставляем «нейтральные нули»
+            # РµСЃР»Рё СЃРЅР°РїС€РѕС‚Р° РЅРµС‚ вЂ” РІС‹СЃС‚Р°РІР»СЏРµРј В«РЅРµР№С‚СЂР°Р»СЊРЅС‹Рµ РЅСѓР»РёВ»
             BTC_DOMINANCE_PCT.set(0.0)
             DXY_CHANGE_1D_PCT.set(0.0)
             FEAR_GREED_INDEX.set(0.0)
@@ -105,11 +105,11 @@ def push_context_metrics(
         if penalties and penalties.get("enabled"):
             for item in penalties.get("applied", []) or []:
                 factor = str(item.get("factor", "")).strip() or "unknown"
-                # ставим 1 только на активные факторы
+                # СЃС‚Р°РІРёРј 1 С‚РѕР»СЊРєРѕ РЅР° Р°РєС‚РёРІРЅС‹Рµ С„Р°РєС‚РѕСЂС‹
                 CONTEXT_FLAG.labels(factor=factor).set(1)
 
     except Exception:
-        # метрики — best effort; не блокируем цикл
+        # РјРµС‚СЂРёРєРё вЂ” best effort; РЅРµ Р±Р»РѕРєРёСЂСѓРµРј С†РёРєР»
         pass
 
 # ---- FastAPI router for /metrics -------------------------------------------
@@ -121,21 +121,21 @@ try:
         generate_latest = None
         CONTENT_TYPE_LATEST = 'text/plain; version=0.0.4; charset=utf-8'
 
-    # Если в этом модуле ещё нет router — создадим
+    # Р•СЃР»Рё РІ СЌС‚РѕРј РјРѕРґСѓР»Рµ РµС‰С‘ РЅРµС‚ router вЂ” СЃРѕР·РґР°РґРёРј
     router  # type: ignore  # probe
 except NameError:
     try:
         router = APIRouter()
     except Exception:
-        router = None  # FastAPI недоступен (например, при оффлайн-скриптах)
+        router = None  # FastAPI РЅРµРґРѕСЃС‚СѓРїРµРЅ (РЅР°РїСЂРёРјРµСЂ, РїСЂРё РѕС„С„Р»Р°Р№РЅ-СЃРєСЂРёРїС‚Р°С…)
 
 if 'APIRouter' in globals() and router is not None:
     @router.get("/metrics")
     def metrics():
-        """Отдаёт Prometheus-метрики; при отсутствии prometheus_client — минимальный текст."""
+        """РћС‚РґР°С‘С‚ Prometheus-РјРµС‚СЂРёРєРё; РїСЂРё РѕС‚СЃСѓС‚СЃС‚РІРёРё prometheus_client вЂ” РјРёРЅРёРјР°Р»СЊРЅС‹Р№ С‚РµРєСЃС‚."""
         if 'generate_latest' in globals() and generate_latest is not None \
            and 'PROM_ENABLED' in globals() and PROM_ENABLED:
             return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-        # Fallback plain text, чтобы эндпойнт жил даже без prometheus_client
+        # Fallback plain text, С‡С‚РѕР±С‹ СЌРЅРґРїРѕР№РЅС‚ Р¶РёР» РґР°Р¶Рµ Р±РµР· prometheus_client
         body = "app_up 1\napp_info{service=\"crypto-ai-bot\",version=\"1.0\"} 1\n"
         return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")

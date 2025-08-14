@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import csv
 import pandas as pd
@@ -8,13 +8,13 @@ from dataclasses import dataclass, asdict
 from collections import deque
 from enum import Enum
 
-# === Импорт RiskManager ===
+# === РРјРїРѕСЂС‚ RiskManager ===
 try:
     from trading.risk_manager import RiskManager
 except ImportError:
     RiskManager = None
 
-# === Импорт Trading Metrics ===
+# === РРјРїРѕСЂС‚ Trading Metrics ===
 from utils.trading_metrics import calculate_all_metrics, check_performance_alerts
 
 LOGS_DIR = "logs"
@@ -93,9 +93,9 @@ class RealTimePerformanceTracker:
 
         self.risk_manager = RiskManager() if RiskManager else None
 
-        logging.info("📊 Performance tracker initialized with extended metrics")
+        logging.info("рџ“Љ Performance tracker initialized with extended metrics")
 
-    # === Добавление результата сделки ===
+    # === Р”РѕР±Р°РІР»РµРЅРёРµ СЂРµР·СѓР»СЊС‚Р°С‚Р° СЃРґРµР»РєРё ===
     def add_trade_result(self, trade: TradeResult) -> None:
         self.trades_history.append(trade)
 
@@ -112,7 +112,7 @@ class RealTimePerformanceTracker:
         if self.auto_save_csv:
             self._save_trade_to_csv(trade)
 
-        # Проверка алертов
+        # РџСЂРѕРІРµСЂРєР° Р°Р»РµСЂС‚РѕРІ
         alerts = self.check_performance_alerts()
         if alerts:
             self._log_alerts(alerts)
@@ -121,7 +121,7 @@ class RealTimePerformanceTracker:
                 if should_pause:
                     self.risk_manager.pause_trading(reason)
 
-    # === Расчет текущих метрик ===
+    # === Р Р°СЃС‡РµС‚ С‚РµРєСѓС‰РёС… РјРµС‚СЂРёРє ===
     def get_current_metrics(self, force_recalculate: bool = False) -> PerformanceMetrics:
         if (
             not force_recalculate
@@ -136,7 +136,7 @@ class RealTimePerformanceTracker:
 
         trades_df = pd.DataFrame([asdict(trade) for trade in self.trades_history])
 
-        # Вызываем централизованный расчет метрик
+        # Р’С‹Р·С‹РІР°РµРј С†РµРЅС‚СЂР°Р»РёР·РѕРІР°РЅРЅС‹Р№ СЂР°СЃС‡РµС‚ РјРµС‚СЂРёРє
         all_metrics = calculate_all_metrics(trades_df)
 
         metrics = PerformanceMetrics(
@@ -163,11 +163,11 @@ class RealTimePerformanceTracker:
         self._cache_timestamp = datetime.now()
         return metrics
 
-    # === Телеграм отчёт ===
+    # === РўРµР»РµРіСЂР°Рј РѕС‚С‡С‘С‚ ===
     def get_telegram_report(self) -> str:
         metrics = self.get_current_metrics()
         return (
-            f"📊 *Performance Summary*\n"
+            f"рџ“Љ *Performance Summary*\n"
             f"Trades: {metrics.total_trades}\n"
             f"Win Rate: {metrics.win_rate:.1%}\n"
             f"Total PnL: {metrics.total_pnl_pct:.2f}%\n"
@@ -178,7 +178,7 @@ class RealTimePerformanceTracker:
             f"Last Updated: {metrics.last_updated.strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
-    # === Проверка авто-паузы ===
+    # === РџСЂРѕРІРµСЂРєР° Р°РІС‚Рѕ-РїР°СѓР·С‹ ===
     def should_pause_trading(self) -> Tuple[bool, str]:
         alerts = self.check_performance_alerts()
         critical_alerts = [PerformanceAlert.HIGH_DRAWDOWN.value, PerformanceAlert.CONSECUTIVE_LOSSES.value]
@@ -191,7 +191,7 @@ class RealTimePerformanceTracker:
             return True, f"Multiple performance issues: {alerts}"
         return False, ""
 
-    # === Сохранение сделки в CSV ===
+    # === РЎРѕС…СЂР°РЅРµРЅРёРµ СЃРґРµР»РєРё РІ CSV ===
     def _save_trade_to_csv(self, trade: TradeResult):
         file_exists = os.path.isfile(PERFORMANCE_CSV)
         with open(PERFORMANCE_CSV, mode="a", newline="") as file:
@@ -200,23 +200,23 @@ class RealTimePerformanceTracker:
                 writer.writeheader()
             writer.writerow(asdict(trade))
 
-    # === Текущая просадка ===
+    # === РўРµРєСѓС‰Р°СЏ РїСЂРѕСЃР°РґРєР° ===
     def _calculate_current_drawdown(self) -> float:
         if self.peak_balance == 0:
             return 0.0
         return (self.peak_balance - self.current_balance) / abs(self.peak_balance)
 
-    # === Пустые метрики ===
+    # === РџСѓСЃС‚С‹Рµ РјРµС‚СЂРёРєРё ===
     def _empty_metrics(self) -> PerformanceMetrics:
         return PerformanceMetrics(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, datetime.now())
 
-    # === Логирование алертов ===
+    # === Р›РѕРіРёСЂРѕРІР°РЅРёРµ Р°Р»РµСЂС‚РѕРІ ===
     def _log_alerts(self, alerts: List[str]):
         for alert in alerts:
-            logging.warning(f"⚠️ Performance Alert: {alert}")
+            logging.warning(f"вљ пёЏ Performance Alert: {alert}")
 
-    # === Проверка алертов ===
+    # === РџСЂРѕРІРµСЂРєР° Р°Р»РµСЂС‚РѕРІ ===
     def check_performance_alerts(self) -> List[str]:
         metrics_dict = calculate_all_metrics(pd.DataFrame([asdict(trade) for trade in self.trades_history]))
         metrics_dict["current_drawdown_pct"] = self._calculate_current_drawdown()

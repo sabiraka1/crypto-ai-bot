@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import csv
 import io
 import logging
@@ -11,7 +11,7 @@ STOOQ_DXY_DAILY = "https://stooq.com/q/d/l/?s=dxy&i=d"
 
 def fetch_dxy_last_and_prev(timeout: float = 6.0) -> Optional[Tuple[float, float]]:
     """
-    Возвращает (last, prev) по DXY (ежедневные свечи Stooq).
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ (last, prev) РїРѕ DXY (РµР¶РµРґРЅРµРІРЅС‹Рµ СЃРІРµС‡Рё Stooq).
     """
     try:
         req = Request(STOOQ_DXY_DAILY, headers={"User-Agent": "crypto-ai-bot/1.0"})
@@ -28,7 +28,7 @@ def fetch_dxy_last_and_prev(timeout: float = 6.0) -> Optional[Tuple[float, float
         return None
 
 def dxy_change_pct_1d(timeout: float = 6.0) -> Optional[float]:
-    """Изменение DXY за 1 день, в % (например, +0.45)."""
+    """РР·РјРµРЅРµРЅРёРµ DXY Р·Р° 1 РґРµРЅСЊ, РІ % (РЅР°РїСЂРёРјРµСЂ, +0.45)."""
     lp = fetch_dxy_last_and_prev(timeout)
     if not lp:
         return None

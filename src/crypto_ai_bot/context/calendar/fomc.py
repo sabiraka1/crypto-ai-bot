@@ -1,11 +1,11 @@
-# fomc.py - FOMC events tracker
+﻿# fomc.py - FOMC events tracker
 """
-📅 FOMC Events Tracker - отслеживание событий Федеральной резервной системы
+рџ“… FOMC Events Tracker - РѕС‚СЃР»РµР¶РёРІР°РЅРёРµ СЃРѕР±С‹С‚РёР№ Р¤РµРґРµСЂР°Р»СЊРЅРѕР№ СЂРµР·РµСЂРІРЅРѕР№ СЃРёСЃС‚РµРјС‹
 
-Интеграция с crypto_ai_bot:
-- Автоматическое планирование embargo windows
-- Уведомления в Telegram перед событиями
-- Влияние на score fusion (снижение весов перед событиями)
+РРЅС‚РµРіСЂР°С†РёСЏ СЃ crypto_ai_bot:
+- РђРІС‚РѕРјР°С‚РёС‡РµСЃРєРѕРµ РїР»Р°РЅРёСЂРѕРІР°РЅРёРµ embargo windows
+- РЈРІРµРґРѕРјР»РµРЅРёСЏ РІ Telegram РїРµСЂРµРґ СЃРѕР±С‹С‚РёСЏРјРё
+- Р’Р»РёСЏРЅРёРµ РЅР° score fusion (СЃРЅРёР¶РµРЅРёРµ РІРµСЃРѕРІ РїРµСЂРµРґ СЃРѕР±С‹С‚РёСЏРјРё)
 """
 
 from __future__ import annotations
@@ -19,18 +19,18 @@ logger = logging.getLogger(__name__)
 
 
 class FOMCEventType(Enum):
-    """Типы событий FOMC"""
-    RATE_DECISION = "rate_decision"          # Решение по ставке
-    PRESS_CONFERENCE = "press_conference"     # Пресс-конференция Powell
-    MINUTES_RELEASE = "minutes_release"       # Выход протоколов
-    SPEECH = "speech"                        # Выступления членов ФРС
-    BEIGE_BOOK = "beige_book"               # Бежевая книга
-    ECONOMIC_PROJECTIONS = "economic_projections"  # Экономические прогнозы
+    """РўРёРїС‹ СЃРѕР±С‹С‚РёР№ FOMC"""
+    RATE_DECISION = "rate_decision"          # Р РµС€РµРЅРёРµ РїРѕ СЃС‚Р°РІРєРµ
+    PRESS_CONFERENCE = "press_conference"     # РџСЂРµСЃСЃ-РєРѕРЅС„РµСЂРµРЅС†РёСЏ Powell
+    MINUTES_RELEASE = "minutes_release"       # Р’С‹С…РѕРґ РїСЂРѕС‚РѕРєРѕР»РѕРІ
+    SPEECH = "speech"                        # Р’С‹СЃС‚СѓРїР»РµРЅРёСЏ С‡Р»РµРЅРѕРІ Р¤Р РЎ
+    BEIGE_BOOK = "beige_book"               # Р‘РµР¶РµРІР°СЏ РєРЅРёРіР°
+    ECONOMIC_PROJECTIONS = "economic_projections"  # Р­РєРѕРЅРѕРјРёС‡РµСЃРєРёРµ РїСЂРѕРіРЅРѕР·С‹
 
 
 @dataclass
 class FOMCEvent:
-    """Событие FOMC"""
+    """РЎРѕР±С‹С‚РёРµ FOMC"""
     datetime: datetime
     event_type: FOMCEventType
     title: str
@@ -41,24 +41,24 @@ class FOMCEvent:
     previous_rate: Optional[float] = None
     
     def time_until_event(self, timestamp: Optional[datetime] = None) -> float:
-        """Минуты до события"""
+        """РњРёРЅСѓС‚С‹ РґРѕ СЃРѕР±С‹С‚РёСЏ"""
         now = timestamp or datetime.now(timezone.utc)
         return (self.datetime - now).total_seconds() / 60.0
     
     def is_upcoming(self, hours_ahead: int = 24) -> bool:
-        """Проверка, предстоит ли событие в ближайшие N часов"""
+        """РџСЂРѕРІРµСЂРєР°, РїСЂРµРґСЃС‚РѕРёС‚ Р»Рё СЃРѕР±С‹С‚РёРµ РІ Р±Р»РёР¶Р°Р№С€РёРµ N С‡Р°СЃРѕРІ"""
         return 0 <= self.time_until_event() <= hours_ahead * 60
 
 
 class FOMCTracker:
     """
-    Трекер событий FOMC с интеграцией в торговую систему
+    РўСЂРµРєРµСЂ СЃРѕР±С‹С‚РёР№ FOMC СЃ РёРЅС‚РµРіСЂР°С†РёРµР№ РІ С‚РѕСЂРіРѕРІСѓСЋ СЃРёСЃС‚РµРјСѓ
     
-    Возможности:
-    - Статический календарь + динамическое обновление
-    - Автоматические embargo windows
-    - Уведомления перед событиями
-    - Влияние на торговые решения
+    Р’РѕР·РјРѕР¶РЅРѕСЃС‚Рё:
+    - РЎС‚Р°С‚РёС‡РµСЃРєРёР№ РєР°Р»РµРЅРґР°СЂСЊ + РґРёРЅР°РјРёС‡РµСЃРєРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ
+    - РђРІС‚РѕРјР°С‚РёС‡РµСЃРєРёРµ embargo windows
+    - РЈРІРµРґРѕРјР»РµРЅРёСЏ РїРµСЂРµРґ СЃРѕР±С‹С‚РёСЏРјРё
+    - Р’Р»РёСЏРЅРёРµ РЅР° С‚РѕСЂРіРѕРІС‹Рµ СЂРµС€РµРЅРёСЏ
     """
     
     def __init__(self, settings: Optional[Any] = None, embargo_manager=None, notifier=None):
@@ -66,23 +66,23 @@ class FOMCTracker:
         self.embargo_manager = embargo_manager
         self.notifier = notifier
         
-        # Настройки
+        # РќР°СЃС‚СЂРѕР№РєРё
         self.enable_fomc_tracking = getattr(settings, "ENABLE_FOMC_TRACKING", True)
         self.notification_hours_ahead = getattr(settings, "FOMC_NOTIFICATION_HOURS", [24, 4, 1])
         self.impact_score_reduction = getattr(settings, "FOMC_SCORE_REDUCTION", 0.15)
         
-        # События
+        # РЎРѕР±С‹С‚РёСЏ
         self.events: List[FOMCEvent] = []
-        self.notified_events: set = set()  # Избежать дублирования уведомлений
+        self.notified_events: set = set()  # РР·Р±РµР¶Р°С‚СЊ РґСѓР±Р»РёСЂРѕРІР°РЅРёСЏ СѓРІРµРґРѕРјР»РµРЅРёР№
         
-        # Загружаем статический календарь
+        # Р—Р°РіСЂСѓР¶Р°РµРј СЃС‚Р°С‚РёС‡РµСЃРєРёР№ РєР°Р»РµРЅРґР°СЂСЊ
         self._load_fomc_calendar_2025()
         
-        logger.info(f"📅 FOMC Tracker initialized: {len(self.events)} events loaded")
+        logger.info(f"рџ“… FOMC Tracker initialized: {len(self.events)} events loaded")
     
-    # === Основной API ===
+    # === РћСЃРЅРѕРІРЅРѕР№ API ===
     def get_next_event(self, event_types: Optional[List[FOMCEventType]] = None) -> Optional[FOMCEvent]:
-        """Получить следующее событие FOMC"""
+        """РџРѕР»СѓС‡РёС‚СЊ СЃР»РµРґСѓСЋС‰РµРµ СЃРѕР±С‹С‚РёРµ FOMC"""
         now = datetime.now(timezone.utc)
         upcoming = [e for e in self.events if e.datetime > now]
         
@@ -92,13 +92,13 @@ class FOMCTracker:
         return min(upcoming, key=lambda x: x.datetime) if upcoming else None
     
     def get_upcoming_events(self, hours_ahead: int = 48) -> List[FOMCEvent]:
-        """Получить события в ближайшие N часов"""
+        """РџРѕР»СѓС‡РёС‚СЊ СЃРѕР±С‹С‚РёСЏ РІ Р±Р»РёР¶Р°Р№С€РёРµ N С‡Р°СЃРѕРІ"""
         return [e for e in self.events if e.is_upcoming(hours_ahead)]
     
     def is_fomc_impact_period(self, timestamp: Optional[datetime] = None,
                              hours_before: int = 4, hours_after: int = 2) -> Tuple[bool, Optional[FOMCEvent]]:
         """
-        Проверка периода влияния FOMC на рынки
+        РџСЂРѕРІРµСЂРєР° РїРµСЂРёРѕРґР° РІР»РёСЏРЅРёСЏ FOMC РЅР° СЂС‹РЅРєРё
         
         Returns:
             (is_impact_period, closest_event)
@@ -117,7 +117,7 @@ class FOMCTracker:
     def get_score_adjustment(self, base_score: float, 
                            timestamp: Optional[datetime] = None) -> Tuple[float, str]:
         """
-        Корректировка торговых скоров перед FOMC событиями
+        РљРѕСЂСЂРµРєС‚РёСЂРѕРІРєР° С‚РѕСЂРіРѕРІС‹С… СЃРєРѕСЂРѕРІ РїРµСЂРµРґ FOMC СЃРѕР±С‹С‚РёСЏРјРё
         
         Returns:
             (adjusted_score, reason)
@@ -127,7 +127,7 @@ class FOMCTracker:
         if not is_impact or not event:
             return base_score, "no_fomc_impact"
             
-        # Снижаем score в зависимости от важности события
+        # РЎРЅРёР¶Р°РµРј score РІ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё РѕС‚ РІР°Р¶РЅРѕСЃС‚Рё СЃРѕР±С‹С‚РёСЏ
         impact_multipliers = {
             "LOW": 0.95,
             "MEDIUM": 0.90,
@@ -140,18 +140,18 @@ class FOMCTracker:
         
         reason = f"fomc_{event.event_type.value}_{event.impact_level.lower()}"
         
-        logger.info(f"📅 FOMC score adjustment: {base_score:.3f} → {adjusted:.3f} ({reason})")
+        logger.info(f"рџ“… FOMC score adjustment: {base_score:.3f} в†’ {adjusted:.3f} ({reason})")
         return adjusted, reason
     
-    # === Интеграция с системой ===
+    # === РРЅС‚РµРіСЂР°С†РёСЏ СЃ СЃРёСЃС‚РµРјРѕР№ ===
     def process_notifications(self):
-        """Обработка уведомлений о предстоящих событиях"""
+        """РћР±СЂР°Р±РѕС‚РєР° СѓРІРµРґРѕРјР»РµРЅРёР№ Рѕ РїСЂРµРґСЃС‚РѕСЏС‰РёС… СЃРѕР±С‹С‚РёСЏС…"""
         if not self.notifier:
             return
             
         for hours in self.notification_hours_ahead:
             upcoming = [e for e in self.events 
-                       if 0 <= e.time_until_event() <= hours * 60 + 5]  # +5 мин погрешность
+                       if 0 <= e.time_until_event() <= hours * 60 + 5]  # +5 РјРёРЅ РїРѕРіСЂРµС€РЅРѕСЃС‚СЊ
             
             for event in upcoming:
                 event_key = f"{event.datetime.isoformat()}_{hours}h"
@@ -161,7 +161,7 @@ class FOMCTracker:
                     self.notified_events.add(event_key)
     
     def schedule_embargo_windows(self):
-        """Планирование торговых ограничений"""
+        """РџР»Р°РЅРёСЂРѕРІР°РЅРёРµ С‚РѕСЂРіРѕРІС‹С… РѕРіСЂР°РЅРёС‡РµРЅРёР№"""
         if not self.embargo_manager:
             return
             
@@ -170,32 +170,32 @@ class FOMCTracker:
                                                FOMCEventType.PRESS_CONFERENCE]]
         
         for event in high_impact_events:
-            if event.time_until_event() > 0:  # Только будущие события
+            if event.time_until_event() > 0:  # РўРѕР»СЊРєРѕ Р±СѓРґСѓС‰РёРµ СЃРѕР±С‹С‚РёСЏ
                 self.embargo_manager.schedule_fomc_embargo(
                     event.datetime, 
                     f"{event.title} ({event.impact_level})"
                 )
     
-    # === Статический календарь ===
+    # === РЎС‚Р°С‚РёС‡РµСЃРєРёР№ РєР°Р»РµРЅРґР°СЂСЊ ===
     def _load_fomc_calendar_2025(self):
-        """Загрузка известных дат FOMC на 2025 год"""
-        # Официальные даты заседаний FOMC 2025
+        """Р—Р°РіСЂСѓР·РєР° РёР·РІРµСЃС‚РЅС‹С… РґР°С‚ FOMC РЅР° 2025 РіРѕРґ"""
+        # РћС„РёС†РёР°Р»СЊРЅС‹Рµ РґР°С‚С‹ Р·Р°СЃРµРґР°РЅРёР№ FOMC 2025
         fomc_meetings_2025 = [
-            # Формат: (дата, время_утc, ожидаемая_ставка)
-            ("2025-01-29", "19:00", None),  # Январь
-            ("2025-03-19", "19:00", None),  # Март  
-            ("2025-04-30", "19:00", None),  # Апрель
-            ("2025-06-11", "19:00", None),  # Июнь
-            ("2025-07-30", "19:00", None),  # Июль
-            ("2025-09-17", "19:00", None),  # Сентябрь
-            ("2025-11-05", "19:00", None),  # Ноябрь
-            ("2025-12-17", "19:00", None),  # Декабрь
+            # Р¤РѕСЂРјР°С‚: (РґР°С‚Р°, РІСЂРµРјСЏ_СѓС‚c, РѕР¶РёРґР°РµРјР°СЏ_СЃС‚Р°РІРєР°)
+            ("2025-01-29", "19:00", None),  # РЇРЅРІР°СЂСЊ
+            ("2025-03-19", "19:00", None),  # РњР°СЂС‚  
+            ("2025-04-30", "19:00", None),  # РђРїСЂРµР»СЊ
+            ("2025-06-11", "19:00", None),  # РСЋРЅСЊ
+            ("2025-07-30", "19:00", None),  # РСЋР»СЊ
+            ("2025-09-17", "19:00", None),  # РЎРµРЅС‚СЏР±СЂСЊ
+            ("2025-11-05", "19:00", None),  # РќРѕСЏР±СЂСЊ
+            ("2025-12-17", "19:00", None),  # Р”РµРєР°Р±СЂСЊ
         ]
         
         for date_str, time_str, expected_rate in fomc_meetings_2025:
             dt = datetime.fromisoformat(f"{date_str}T{time_str}+00:00")
             
-            # Решение по ставке
+            # Р РµС€РµРЅРёРµ РїРѕ СЃС‚Р°РІРєРµ
             self.events.append(FOMCEvent(
                 datetime=dt,
                 event_type=FOMCEventType.RATE_DECISION,
@@ -205,8 +205,8 @@ class FOMCTracker:
                 expected_rate=expected_rate
             ))
             
-            # Пресс-конференция (только на избранных заседаниях)
-            if dt.month in [1, 3, 6, 9, 12]:  # Квартальные заседания
+            # РџСЂРµСЃСЃ-РєРѕРЅС„РµСЂРµРЅС†РёСЏ (С‚РѕР»СЊРєРѕ РЅР° РёР·Р±СЂР°РЅРЅС‹С… Р·Р°СЃРµРґР°РЅРёСЏС…)
+            if dt.month in [1, 3, 6, 9, 12]:  # РљРІР°СЂС‚Р°Р»СЊРЅС‹Рµ Р·Р°СЃРµРґР°РЅРёСЏ
                 self.events.append(FOMCEvent(
                     datetime=dt + timedelta(minutes=30),
                     event_type=FOMCEventType.PRESS_CONFERENCE,
@@ -216,7 +216,7 @@ class FOMCTracker:
                     speaker="Jerome Powell"
                 ))
         
-        # Протоколы заседаний (выходят через 3 недели)
+        # РџСЂРѕС‚РѕРєРѕР»С‹ Р·Р°СЃРµРґР°РЅРёР№ (РІС‹С…РѕРґСЏС‚ С‡РµСЂРµР· 3 РЅРµРґРµР»Рё)
         for event in self.events:
             if event.event_type == FOMCEventType.RATE_DECISION:
                 minutes_date = event.datetime + timedelta(weeks=3)
@@ -228,12 +228,12 @@ class FOMCTracker:
                     impact_level="MEDIUM"
                 ))
         
-        # Сортируем по времени
+        # РЎРѕСЂС‚РёСЂСѓРµРј РїРѕ РІСЂРµРјРµРЅРё
         self.events.sort(key=lambda x: x.datetime)
     
     def add_custom_event(self, datetime: datetime, event_type: FOMCEventType,
                         title: str, impact_level: str = "MEDIUM"):
-        """Добавление кастомного события"""
+        """Р”РѕР±Р°РІР»РµРЅРёРµ РєР°СЃС‚РѕРјРЅРѕРіРѕ СЃРѕР±С‹С‚РёСЏ"""
         event = FOMCEvent(
             datetime=datetime,
             event_type=event_type,
@@ -244,15 +244,15 @@ class FOMCTracker:
         
         self.events.append(event)
         self.events.sort(key=lambda x: x.datetime)
-        logger.info(f"📅 Added custom FOMC event: {title}")
+        logger.info(f"рџ“… Added custom FOMC event: {title}")
     
-    # === Вспомогательные методы ===
+    # === Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ РјРµС‚РѕРґС‹ ===
     def _send_fomc_notification(self, event: FOMCEvent, hours_ahead: int):
-        """Отправка уведомления о событии"""
+        """РћС‚РїСЂР°РІРєР° СѓРІРµРґРѕРјР»РµРЅРёСЏ Рѕ СЃРѕР±С‹С‚РёРё"""
         try:
             time_str = event.datetime.strftime("%Y-%m-%d %H:%M UTC")
             message = (
-                f"📅 FOMC Alert ({hours_ahead}h ahead)\n"
+                f"рџ“… FOMC Alert ({hours_ahead}h ahead)\n"
                 f"Event: {event.title}\n"
                 f"Time: {time_str}\n"
                 f"Impact: {event.impact_level}\n"
@@ -263,13 +263,13 @@ class FOMCTracker:
                 message += f"\nSpeaker: {event.speaker}"
                 
             self.notifier(message)
-            logger.info(f"📅 FOMC notification sent: {event.title}")
+            logger.info(f"рџ“… FOMC notification sent: {event.title}")
             
         except Exception as e:
-            logger.error(f"❌ FOMC notification failed: {e}")
+            logger.error(f"вќЊ FOMC notification failed: {e}")
     
     def get_status_summary(self) -> Dict[str, Any]:
-        """Статистика для мониторинга"""
+        """РЎС‚Р°С‚РёСЃС‚РёРєР° РґР»СЏ РјРѕРЅРёС‚РѕСЂРёРЅРіР°"""
         next_event = self.get_next_event()
         upcoming = self.get_upcoming_events(48)
         is_impact, impact_event = self.is_fomc_impact_period()
@@ -293,16 +293,16 @@ class FOMCTracker:
         }
 
 
-# === Интеграция с Score Fusion ===
+# === РРЅС‚РµРіСЂР°С†РёСЏ СЃ Score Fusion ===
 def integrate_with_score_fusion():
     """
-    Пример интеграции с системой scoring
+    РџСЂРёРјРµСЂ РёРЅС‚РµРіСЂР°С†РёРё СЃ СЃРёСЃС‚РµРјРѕР№ scoring
     """
-    # В score_fusion.py можно добавить:
+    # Р’ score_fusion.py РјРѕР¶РЅРѕ РґРѕР±Р°РІРёС‚СЊ:
     
     def apply_fomc_adjustment(rule_score: float, ai_score: float, 
                              fomc_tracker) -> Tuple[float, float, str]:
-        """Применение FOMC корректировок к скорам"""
+        """РџСЂРёРјРµРЅРµРЅРёРµ FOMC РєРѕСЂСЂРµРєС‚РёСЂРѕРІРѕРє Рє СЃРєРѕСЂР°Рј"""
         rule_adj, reason1 = fomc_tracker.get_score_adjustment(rule_score)
         ai_adj, reason2 = fomc_tracker.get_score_adjustment(ai_score) 
         

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Signal validation helpers.
 Path: src/crypto_ai_bot/signals/signal_validator.py

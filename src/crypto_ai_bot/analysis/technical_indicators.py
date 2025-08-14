@@ -1,14 +1,14 @@
-
+﻿
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 # crypto_ai_bot/analysis/technical_indicators.py
 # ----------------------------------------------
-# Единый источник истины для индикаторов:
-# - calculate_all_indicators(df): возвращает DataFrame c RSI, MACD histogram, ATR, EMA(9/21/20/50), volume_ratio
-# - get_unified_atr(df, period=14, method='ema'|'sma'): расчёт ATR
-# - IndicatorCalculator: быстрые EMA/RSI/MACD-блоки (используются в aggregator)
-# Ожидается, что входной df имеет колонки: open, high, low, close, volume и индекс времени (UTC).
+# Р•РґРёРЅС‹Р№ РёСЃС‚РѕС‡РЅРёРє РёСЃС‚РёРЅС‹ РґР»СЏ РёРЅРґРёРєР°С‚РѕСЂРѕРІ:
+# - calculate_all_indicators(df): РІРѕР·РІСЂР°С‰Р°РµС‚ DataFrame c RSI, MACD histogram, ATR, EMA(9/21/20/50), volume_ratio
+# - get_unified_atr(df, period=14, method='ema'|'sma'): СЂР°СЃС‡С‘С‚ ATR
+# - IndicatorCalculator: Р±С‹СЃС‚СЂС‹Рµ EMA/RSI/MACD-Р±Р»РѕРєРё (РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ РІ aggregator)
+# РћР¶РёРґР°РµС‚СЃСЏ, С‡С‚Рѕ РІС…РѕРґРЅРѕР№ df РёРјРµРµС‚ РєРѕР»РѕРЅРєРё: open, high, low, close, volume Рё РёРЅРґРµРєСЃ РІСЂРµРјРµРЅРё (UTC).
 
 import os
 from typing import Dict, Iterable, Optional
@@ -54,7 +54,7 @@ def _true_range(df: pd.DataFrame) -> pd.Series:
 
 
 def get_unified_atr(df: pd.DataFrame, period: int = 14, method: str = None) -> pd.Series:
-    # Возвращает ряд ATR. method задаётся ENV RISK_ATR_METHOD (ema|sma), по умолчанию EMA.
+    # Р’РѕР·РІСЂР°С‰Р°РµС‚ СЂСЏРґ ATR. method Р·Р°РґР°С‘С‚СЃСЏ ENV RISK_ATR_METHOD (ema|sma), РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ EMA.
     if df is None or df.empty:
         return pd.Series(dtype="float64")
     m = (method or os.getenv("RISK_ATR_METHOD") or "ema").lower()
@@ -67,13 +67,13 @@ def get_unified_atr(df: pd.DataFrame, period: int = 14, method: str = None) -> p
 
 
 def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.DataFrame:
-    # Строит единый набор индикаторов и возвращает копию исходного df с новыми колонками.
+    # РЎС‚СЂРѕРёС‚ РµРґРёРЅС‹Р№ РЅР°Р±РѕСЂ РёРЅРґРёРєР°С‚РѕСЂРѕРІ Рё РІРѕР·РІСЂР°С‰Р°РµС‚ РєРѕРїРёСЋ РёСЃС…РѕРґРЅРѕРіРѕ df СЃ РЅРѕРІС‹РјРё РєРѕР»РѕРЅРєР°РјРё.
     if df is None or df.empty:
         return pd.DataFrame(columns=["open","high","low","close","volume","rsi","macd_hist","ema9","ema21","ema20","ema50","atr","volume_ratio"])
 
     out = df.copy()
 
-    # Базовые индикаторы
+    # Р‘Р°Р·РѕРІС‹Рµ РёРЅРґРёРєР°С‚РѕСЂС‹
     out["rsi"] = _rsi(out["close"], 14)
     out["macd_hist"] = _macd_hist(out["close"])
     out["ema9"]  = _ema(out["close"], 9)
@@ -84,7 +84,7 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
     # ATR
     out["atr"] = get_unified_atr(out, period=14)
 
-    # Объёмная активность: отношение текущего объёма к SMA(20) объёма
+    # РћР±СЉС‘РјРЅР°СЏ Р°РєС‚РёРІРЅРѕСЃС‚СЊ: РѕС‚РЅРѕС€РµРЅРёРµ С‚РµРєСѓС‰РµРіРѕ РѕР±СЉС‘РјР° Рє SMA(20) РѕР±СЉС‘РјР°
     vol_mean = _sma(out["volume"].astype("float64"), 20)
     with np.errstate(divide="ignore", invalid="ignore"):
         out["volume_ratio"] = (out["volume"] / vol_mean).replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -93,7 +93,7 @@ def calculate_all_indicators(df: pd.DataFrame, use_cache: bool = True) -> pd.Dat
 
 
 class IndicatorCalculator:
-    # Вспомогательный класс для быстрых EMA/RSI/MACD расчётов (серии на вход/выход).
+    # Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Р№ РєР»Р°СЃСЃ РґР»СЏ Р±С‹СЃС‚СЂС‹С… EMA/RSI/MACD СЂР°СЃС‡С‘С‚РѕРІ (СЃРµСЂРёРё РЅР° РІС…РѕРґ/РІС‹С…РѕРґ).
     def calculate_emas(self, series: pd.Series, periods: Iterable[int]) -> Dict[int, pd.Series]:
         out: Dict[int, pd.Series] = {}
         s = series.astype("float64")

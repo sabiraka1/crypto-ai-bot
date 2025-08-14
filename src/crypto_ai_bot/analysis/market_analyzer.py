@@ -1,4 +1,4 @@
-# analysis/market_analyzer.py
+﻿# analysis/market_analyzer.py
 
 import logging
 from typing import Tuple
@@ -12,13 +12,13 @@ _EPS = 1e-12
 
 
 class MultiTimeframeAnalyzer:
-    """✅ ИСПРАВЛЕНО: Анализ рынка на двух ТФ (1D и 4H) с unified ATR системой."""
+    """вњ… РРЎРџР РђР’Р›Р•РќРћ: РђРЅР°Р»РёР· СЂС‹РЅРєР° РЅР° РґРІСѓС… РўР¤ (1D Рё 4H) СЃ unified ATR СЃРёСЃС‚РµРјРѕР№."""
 
     def __init__(self):
-        # веса ТФ
+        # РІРµСЃР° РўР¤
         self._w_daily = 0.6
         self._w_h4 = 0.4
-        # параметры
+        # РїР°СЂР°РјРµС‚СЂС‹
         self._ema_fast = 20
         self._ema_slow = 50
         self._momentum_lookback = 20
@@ -39,7 +39,7 @@ class MultiTimeframeAnalyzer:
             condition = self._classify(combined_trend, combined_strength)
             confidence = float(np.clip(abs(combined_trend) * combined_strength, 0.0, 1.0))
 
-            logging.info(f"📊 Market Analysis: {condition.value}, Confidence: {confidence:.2f}")
+            logging.info(f"рџ“Љ Market Analysis: {condition.value}, Confidence: {confidence:.2f}")
             return condition, confidence
         except Exception as e:
             logging.exception(f"Market analysis failed: {e}")
@@ -47,7 +47,7 @@ class MultiTimeframeAnalyzer:
 
     # ---------- internals ----------
     def _trend(self, df: pd.DataFrame) -> float:
-        """Направление тренда в [-1..1]. Устойчиво к коротким сериям."""
+        """РќР°РїСЂР°РІР»РµРЅРёРµ С‚СЂРµРЅРґР° РІ [-1..1]. РЈСЃС‚РѕР№С‡РёРІРѕ Рє РєРѕСЂРѕС‚РєРёРј СЃРµСЂРёСЏРј."""
         if df is None or df.empty or "close" not in df or "volume" not in df:
             return 0.0
 
@@ -72,7 +72,7 @@ class MultiTimeframeAnalyzer:
         return float(np.clip(trend, -1.0, 1.0))
 
     def _strength(self, df: pd.DataFrame) -> float:
-        """✅ ИСПРАВЛЕНО: Сила тренда с unified ATR (убрано дублирование)."""
+        """вњ… РРЎРџР РђР’Р›Р•РќРћ: РЎРёР»Р° С‚СЂРµРЅРґР° СЃ unified ATR (СѓР±СЂР°РЅРѕ РґСѓР±Р»РёСЂРѕРІР°РЅРёРµ)."""
         if df is None or df.empty or "close" not in df or "high" not in df or "low" not in df:
             return 0.5
 
@@ -80,34 +80,34 @@ class MultiTimeframeAnalyzer:
         high = df["high"].astype("float64")
         low = df["low"].astype("float64")
 
-        # волатильность доходностей
+        # РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚СЊ РґРѕС…РѕРґРЅРѕСЃС‚РµР№
         ret = close.pct_change().dropna()
         vol = float(ret.rolling(window=min(self._vol_window, max(5, len(ret)))).std().iloc[-1]) if len(ret) >= 5 else float(ret.std() or 0.0)
         vol = max(0.0, vol)
 
-        # ✅ ИСПРАВЛЕНО: убрано дублирование ATR вызова
+        # вњ… РРЎРџР РђР’Р›Р•РќРћ: СѓР±СЂР°РЅРѕ РґСѓР±Р»РёСЂРѕРІР°РЅРёРµ ATR РІС‹Р·РѕРІР°
         try:
             from analysis.technical_indicators import _atr_series_for_ml
             temp_df = pd.DataFrame({'high': high, 'low': low, 'close': close})
             atr = _atr_series_for_ml(temp_df, self._atr_period)
             atr_norm = float((atr.iloc[-1] / (abs(close.iloc[-1]) + _EPS)) if atr.notna().any() else 0.0)
-            logging.debug(f"📊 Market Analyzer: Using UNIFIED ATR for strength calculation: {atr.iloc[-1]:.6f}")
+            logging.debug(f"рџ“Љ Market Analyzer: Using UNIFIED ATR for strength calculation: {atr.iloc[-1]:.6f}")
         except Exception as e:
-            logging.warning(f"📊 Market Analyzer: UNIFIED ATR failed, using fallback: {e}")
-            # Fallback к простому расчету
+            logging.warning(f"рџ“Љ Market Analyzer: UNIFIED ATR failed, using fallback: {e}")
+            # Fallback Рє РїСЂРѕСЃС‚РѕРјСѓ СЂР°СЃС‡РµС‚Сѓ
             atr_simple = (high - low).mean()
             atr_norm = float(atr_simple / (abs(close.iloc[-1]) + _EPS)) if pd.notna(atr_simple) else 0.02
 
-        # сглажённая метрика силы: ниже vol/atr_norm -> выше сила
-        # параметры подобраны, чтобы диапазон был ~[0.2..0.9] для реальных рынков
+        # СЃРіР»Р°Р¶С‘РЅРЅР°СЏ РјРµС‚СЂРёРєР° СЃРёР»С‹: РЅРёР¶Рµ vol/atr_norm -> РІС‹С€Рµ СЃРёР»Р°
+        # РїР°СЂР°РјРµС‚СЂС‹ РїРѕРґРѕР±СЂР°РЅС‹, С‡С‚РѕР±С‹ РґРёР°РїР°Р·РѕРЅ Р±С‹Р» ~[0.2..0.9] РґР»СЏ СЂРµР°Р»СЊРЅС‹С… СЂС‹РЅРєРѕРІ
         strength = 1.0 / (1.0 + 120.0 * vol + 15.0 * atr_norm)
         
-        logging.debug(f"📊 Market strength calculation: vol={vol:.4f}, atr_norm={atr_norm:.4f}, strength={strength:.3f}")
+        logging.debug(f"рџ“Љ Market strength calculation: vol={vol:.4f}, atr_norm={atr_norm:.4f}, strength={strength:.3f}")
         
         return float(np.clip(strength, 0.0, 1.0))
 
     def _classify(self, trend: float, strength: float) -> MarketCondition:
-        """Классификация рыночного состояния"""
+        """РљР»Р°СЃСЃРёС„РёРєР°С†РёСЏ СЂС‹РЅРѕС‡РЅРѕРіРѕ СЃРѕСЃС‚РѕСЏРЅРёСЏ"""
         if trend > 0.10 and strength > 0.70:
             return MarketCondition.STRONG_BULL
         if trend > 0.05 and strength > 0.50:
@@ -119,25 +119,25 @@ class MultiTimeframeAnalyzer:
         return MarketCondition.SIDEWAYS
 
     # =========================================================================
-    # ✅ НОВЫЕ ДИАГНОСТИЧЕСКИЕ МЕТОДЫ
+    # вњ… РќРћР’Р«Р• Р”РРђР“РќРћРЎРўРР§Р•РЎРљРР• РњР•РўРћР”Р«
     # =========================================================================
 
     def get_diagnostics(self, df_1d: pd.DataFrame, df_4h: pd.DataFrame) -> dict:
-        """✅ НОВОЕ: Диагностика анализа рынка"""
+        """вњ… РќРћР’РћР•: Р”РёР°РіРЅРѕСЃС‚РёРєР° Р°РЅР°Р»РёР·Р° СЂС‹РЅРєР°"""
         try:
-            # Тренды по таймфреймам
+            # РўСЂРµРЅРґС‹ РїРѕ С‚Р°Р№РјС„СЂРµР№РјР°Рј
             trend_1d = self._trend(df_1d)
             trend_4h = self._trend(df_4h)
             
-            # Силы по таймфреймам
+            # РЎРёР»С‹ РїРѕ С‚Р°Р№РјС„СЂРµР№РјР°Рј
             strength_1d = self._strength(df_1d)
             strength_4h = self._strength(df_4h)
             
-            # Комбинированные значения
+            # РљРѕРјР±РёРЅРёСЂРѕРІР°РЅРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
             combined_trend = float(self._w_daily * trend_1d + self._w_h4 * trend_4h)
             combined_strength = float(self._w_daily * strength_1d + self._w_h4 * strength_4h)
             
-            # Финальная классификация
+            # Р¤РёРЅР°Р»СЊРЅР°СЏ РєР»Р°СЃСЃРёС„РёРєР°С†РёСЏ
             condition = self._classify(combined_trend, combined_strength)
             confidence = float(np.clip(abs(combined_trend) * combined_strength, 0.0, 1.0))
             
@@ -166,15 +166,15 @@ class MultiTimeframeAnalyzer:
             }
             
         except Exception as e:
-            logging.error(f"📊 Market analyzer diagnostics failed: {e}")
+            logging.error(f"рџ“Љ Market analyzer diagnostics failed: {e}")
             return {"error": str(e)}
 
     def validate_data_quality(self, df_1d: pd.DataFrame, df_4h: pd.DataFrame) -> dict:
-        """✅ НОВОЕ: Валидация качества данных"""
+        """вњ… РќРћР’РћР•: Р’Р°Р»РёРґР°С†РёСЏ РєР°С‡РµСЃС‚РІР° РґР°РЅРЅС‹С…"""
         issues = []
         warnings = []
         
-        # Проверка 1D данных
+        # РџСЂРѕРІРµСЂРєР° 1D РґР°РЅРЅС‹С…
         if df_1d is None or df_1d.empty:
             issues.append("1D DataFrame is empty or None")
         else:
@@ -186,11 +186,11 @@ class MultiTimeframeAnalyzer:
             if len(df_1d) < self._momentum_lookback:
                 warnings.append(f"1D data has only {len(df_1d)} rows, need >= {self._momentum_lookback}")
             
-            # Проверка на NaN
+            # РџСЂРѕРІРµСЂРєР° РЅР° NaN
             if df_1d.isnull().any().any():
                 warnings.append("1D data contains NaN values")
         
-        # Проверка 4H данных
+        # РџСЂРѕРІРµСЂРєР° 4H РґР°РЅРЅС‹С…
         if df_4h is None or df_4h.empty:
             issues.append("4H DataFrame is empty or None")
         else:
@@ -202,7 +202,7 @@ class MultiTimeframeAnalyzer:
             if len(df_4h) < self._momentum_lookback:
                 warnings.append(f"4H data has only {len(df_4h)} rows, need >= {self._momentum_lookback}")
                 
-            # Проверка на NaN
+            # РџСЂРѕРІРµСЂРєР° РЅР° NaN
             if df_4h.isnull().any().any():
                 warnings.append("4H data contains NaN values")
         
@@ -218,7 +218,7 @@ class MultiTimeframeAnalyzer:
         }
 
     def get_configuration(self) -> dict:
-        """✅ НОВОЕ: Получение текущей конфигурации анализатора"""
+        """вњ… РќРћР’РћР•: РџРѕР»СѓС‡РµРЅРёРµ С‚РµРєСѓС‰РµР№ РєРѕРЅС„РёРіСѓСЂР°С†РёРё Р°РЅР°Р»РёР·Р°С‚РѕСЂР°"""
         return {
             "timeframe_weights": {
                 "daily": self._w_daily,
@@ -242,7 +242,7 @@ class MultiTimeframeAnalyzer:
         }
 
     def update_configuration(self, **kwargs):
-        """✅ НОВОЕ: Обновление параметров анализатора"""
+        """вњ… РќРћР’РћР•: РћР±РЅРѕРІР»РµРЅРёРµ РїР°СЂР°РјРµС‚СЂРѕРІ Р°РЅР°Р»РёР·Р°С‚РѕСЂР°"""
         valid_params = {
             'w_daily', 'w_h4', 'ema_fast', 'ema_slow', 
             'momentum_lookback', 'vol_window', 'atr_period'
@@ -257,6 +257,6 @@ class MultiTimeframeAnalyzer:
                     updated.append(param)
                     
         if updated:
-            logging.info(f"📊 Market analyzer updated parameters: {updated}")
+            logging.info(f"рџ“Љ Market analyzer updated parameters: {updated}")
         
         return updated

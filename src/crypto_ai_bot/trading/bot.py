@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -14,13 +14,13 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-# features & policies (fixed import path – no fallbacks)
-from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
+# features & policies (fixed import path вЂ“ no fallbacks)
+from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
 from crypto_ai_bot.trading.signals.signal_validator import validate_features
 from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide
 
-# risk pipeline (fixed import path – no fallbacks)
+# risk pipeline (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.trading import risk as riskmod
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class TradingBot:
             TradingBot._running = True
         self._loop_thread = threading.Thread(target=self._loop, name="trading-loop", daemon=True)
         self._loop_thread.start()
-        logger.info("✅ Trading loop started")
+        logger.info("вњ… Trading loop started")
 
     def stop(self):
         with TradingBot._instance_lock:
@@ -162,16 +162,16 @@ class TradingBot:
             try:
                 hour = datetime.now(timezone.utc).hour
                 if not (int(self.cfg.TRADING_HOUR_START) <= hour < int(self.cfg.TRADING_HOUR_END)):
-                    self._notify(f"⏸ Outside trading hours UTC {self.cfg.TRADING_HOUR_START}-{self.cfg.TRADING_HOUR_END}")
+                    self._notify(f"вЏё Outside trading hours UTC {self.cfg.TRADING_HOUR_START}-{self.cfg.TRADING_HOUR_END}")
                 else:
                     self._tick()
             except Exception as e:
                 logger.exception(f"tick failed: {e}")
-                self._notify(f"⚠️ Tick failed: {e}")
+                self._notify(f"вљ пёЏ Tick failed: {e}")
             now = time.time()
             sleep_for = interval_sec - (now % interval_sec)
             time.sleep(max(5, min(sleep_for, interval_sec)))
-        logger.info("🛑 Trading loop stopped")
+        logger.info("рџ›‘ Trading loop stopped")
 
     # ---------------------- iteration ----------------------
     def _tick(self):
@@ -182,13 +182,13 @@ class TradingBot:
 
         ok, problems = validate_features(self.cfg, feat)
         if not ok:
-            self._notify("❌ Feature validation: " + "; ".join(problems)); return
+            self._notify("вќЊ Feature validation: " + "; ".join(problems)); return
 
         ind = feat.get("indicators", {})
         price = float(ind.get("price") or 0.0)
         atr   = float(ind.get("atr") or 0.0)
 
-        # AI score: если модели нет, берём failover из cfg
+        # AI score: РµСЃР»Рё РјРѕРґРµР»Рё РЅРµС‚, Р±РµСЂС‘Рј failover РёР· cfg
         ai_score = float(getattr(self.cfg, "AI_FAILOVER_SCORE", 0.55))
         fused = fuse_scores(self.cfg, float(feat.get("rule_score_penalized", feat.get("rule_score", 0.5))), ai_score)
 
@@ -197,7 +197,7 @@ class TradingBot:
         reason = str(decision.get("reason", ""))
         score  = float(decision.get("score") or 0.0)
 
-        self._notify(f"ℹ️ {symbol} | action={action} score={score:.2f} | {reason}")
+        self._notify(f"в„№пёЏ {symbol} | action={action} score={score:.2f} | {reason}")
 
         if not self._can_open_new():
             return
@@ -217,14 +217,14 @@ class TradingBot:
         if riskmod is not None:
             ok, reason = riskmod.validate_open(self.cfg, self.exchange, self.cfg.SYMBOL)
             if not ok:
-                self._notify(f"⛔ Order blocked: {reason}")
+                self._notify(f"в›” Order blocked: {reason}")
                 return
 
         symbol = self.cfg.SYMBOL
         qty = self._quote_to_base(self.cfg.TRADE_AMOUNT, price)
         order_ok = self._create_market_order(symbol, side, qty, price)
         if not order_ok:
-            self._notify(f"❌ Не удалось открыть позицию {side} {symbol}")
+            self._notify(f"вќЊ РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ РїРѕР·РёС†РёСЋ {side} {symbol}")
             return
 
         sl, tp = self._compute_sl_tp(price, atr, side)
@@ -233,7 +233,7 @@ class TradingBot:
             "opened_at": datetime.now(timezone.utc).isoformat(), "sl": sl, "tp": tp,
             "trailing_max": price if side == "buy" else None, "status": "open",
         }
-        self._notify(f"✅ Открыта позиция: {side} {symbol} qty={qty:.8f} @ {price:.2f} | SL={sl and f'{sl:.2f}'} TP={tp and f'{tp:.2f}'}")
+        self._notify(f"вњ… РћС‚РєСЂС‹С‚Р° РїРѕР·РёС†РёСЏ: {side} {symbol} qty={qty:.8f} @ {price:.2f} | SL={sl and f'{sl:.2f}'} TP={tp and f'{tp:.2f}'}")
 
         if int(self.cfg.PAPER_MODE) == 1:
             open_list = self.paper.load_positions(); open_list.append(self.position); self.paper.save_positions(open_list)
@@ -264,12 +264,12 @@ class TradingBot:
 
         order_ok = self._create_market_order(symbol, side, pos["qty"], exit_price, order_type="close")
         if not order_ok:
-            self._notify(f"❌ Не удалось закрыть позицию {symbol} ({reason})"); return
+            self._notify(f"вќЊ РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РєСЂС‹С‚СЊ РїРѕР·РёС†РёСЋ {symbol} ({reason})"); return
 
         qty = float(pos["qty"]); entry = float(pos["entry_price"])
         pnl_abs = (exit_price - entry) * qty if pos["side"] == "buy" else (entry - exit_price) * qty
         pnl_pct = (exit_price / entry - 1.0) * (100 if pos["side"] == "buy" else -100) if entry > 0 else 0.0
-        self._notify(f"🧾 Закрыта позиция {symbol} по {reason}: exit={exit_price:.2f}, pnl={pnl_abs:.4f} ({pnl_pct:.2f}%)")
+        self._notify(f"рџ§ѕ Р—Р°РєСЂС‹С‚Р° РїРѕР·РёС†РёСЏ {symbol} РїРѕ {reason}: exit={exit_price:.2f}, pnl={pnl_abs:.4f} ({pnl_pct:.2f}%)")
 
         if int(self.cfg.PAPER_MODE) == 1:
             self.paper.append_pnl(pos, exit_price)

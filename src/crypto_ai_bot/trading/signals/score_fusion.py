@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Score fusion: combine rule-based score and (optional) AI score.
 Path: src/crypto_ai_bot/signals/score_fusion.py

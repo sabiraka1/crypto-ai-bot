@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 import sys
 import types
 import time
@@ -6,7 +6,7 @@ from dataclasses import asdict
 
 
 def _make_fake_csv_handler(monkeypatch, count=7):
-    # Подменяем модуль utils.csv_handler (только то, что нужно monitoring)
+    # РџРѕРґРјРµРЅСЏРµРј РјРѕРґСѓР»СЊ utils.csv_handler (С‚РѕР»СЊРєРѕ С‚Рѕ, С‡С‚Рѕ РЅСѓР¶РЅРѕ monitoring)
     fake = types.ModuleType("utils.csv_handler")
     class CSVHandler:
         @staticmethod
@@ -19,11 +19,11 @@ def _make_fake_csv_handler(monkeypatch, count=7):
 def test_alert_thresholds_and_dedup(monkeypatch):
     mon = importlib.import_module("utils.monitoring")
     m = mon.SimpleMonitor(check_interval=0)
-    # занижаем пороги, чтобы алерты сработали
+    # Р·Р°РЅРёР¶Р°РµРј РїРѕСЂРѕРіРё, С‡С‚РѕР±С‹ Р°Р»РµСЂС‚С‹ СЃСЂР°Р±РѕС‚Р°Р»Рё
     m.thresholds["memory_mb"] = 10.0
     m.thresholds["cpu_percent"] = 5.0
 
-    # первое срабатывание — 2 алерта
+    # РїРµСЂРІРѕРµ СЃСЂР°Р±Р°С‚С‹РІР°РЅРёРµ вЂ” 2 Р°Р»РµСЂС‚Р°
     metrics = mon.SystemMetrics(
         timestamp=time.time(),
         memory_mb=500.0,
@@ -36,14 +36,14 @@ def test_alert_thresholds_and_dedup(monkeypatch):
     assert any("High memory" in a for a in alerts1)
     assert any("High CPU" in a for a in alerts1)
 
-    # повтор — должны задедуплироваться, алертов не прибавится
+    # РїРѕРІС‚РѕСЂ вЂ” РґРѕР»Р¶РЅС‹ Р·Р°РґРµРґСѓРїР»РёСЂРѕРІР°С‚СЊСЃСЏ, Р°Р»РµСЂС‚РѕРІ РЅРµ РїСЂРёР±Р°РІРёС‚СЃСЏ
     alerts2 = m.check_alerts(metrics)
     assert alerts2 == []
 
-    # наполняем сэт, чтобы сработал авто-reset (>10)
+    # РЅР°РїРѕР»РЅСЏРµРј СЃСЌС‚, С‡С‚РѕР±С‹ СЃСЂР°Р±РѕС‚Р°Р» Р°РІС‚Рѕ-reset (>10)
     m._alerts_sent = {f"k{i}" for i in range(12)}
     _ = m.check_alerts(metrics)
-    # после вызова множество очищается (по коду, когда >10)
+    # РїРѕСЃР»Рµ РІС‹Р·РѕРІР° РјРЅРѕР¶РµСЃС‚РІРѕ РѕС‡РёС‰Р°РµС‚СЃСЏ (РїРѕ РєРѕРґСѓ, РєРѕРіРґР° >10)
     assert len(m._alerts_sent) == 0
 
 
@@ -58,7 +58,7 @@ def test_get_full_status_with_trading_bot(monkeypatch):
             self.exchange = types.SimpleNamespace(get_balance=lambda sym: 1234.56)
 
     m = mon.SimpleMonitor(check_interval=0)
-    # установим предыдущее измерение, чтобы health_check показывал memory_mb
+    # СѓСЃС‚Р°РЅРѕРІРёРј РїСЂРµРґС‹РґСѓС‰РµРµ РёР·РјРµСЂРµРЅРёРµ, С‡С‚РѕР±С‹ health_check РїРѕРєР°Р·С‹РІР°Р» memory_mb
     m._last_metrics = mon.SystemMetrics(time.time(), 42.0, 1.0, 5, 100.0, 10.0)
 
     status = m.get_full_status(Bot())
@@ -76,14 +76,14 @@ def test_get_full_status_with_trading_bot(monkeypatch):
 def test_should_check_throttle(monkeypatch):
     mon = importlib.import_module("utils.monitoring")
     m = mon.SimpleMonitor(check_interval=10)
-    # имитируем время
+    # РёРјРёС‚РёСЂСѓРµРј РІСЂРµРјСЏ
     base = time.time()
     monkeypatch.setattr(time, "time", lambda: base)
 
-    assert m.should_check() is True   # первый проход
-    assert m.should_check() is False  # слишком быстро
+    assert m.should_check() is True   # РїРµСЂРІС‹Р№ РїСЂРѕС…РѕРґ
+    assert m.should_check() is False  # СЃР»РёС€РєРѕРј Р±С‹СЃС‚СЂРѕ
 
-    # прошло 10 секунд
+    # РїСЂРѕС€Р»Рѕ 10 СЃРµРєСѓРЅРґ
     monkeypatch.setattr(time, "time", lambda: base + 10.01)
     assert m.should_check() is True
 
@@ -92,7 +92,7 @@ def test_watchdog_start_stop_does_not_crash(monkeypatch):
     mon = importlib.import_module("utils.monitoring")
     wd = mon.SmartWatchdog(check_interval=0)
 
-    # заглушки
+    # Р·Р°РіР»СѓС€РєРё
     restart_calls = {"n": 0}
     def restart():
         restart_calls["n"] += 1
@@ -100,7 +100,7 @@ def test_watchdog_start_stop_does_not_crash(monkeypatch):
     class DummyBot:
         pass
 
-    # старт/стоп потоков без зависаний
+    # СЃС‚Р°СЂС‚/СЃС‚РѕРї РїРѕС‚РѕРєРѕРІ Р±РµР· Р·Р°РІРёСЃР°РЅРёР№
     wd.start(DummyBot(), restart)
     wd.stop()
-    # никаких строгих ассертов по количеству рестартов, важно что не падает и корректно останавливается
+    # РЅРёРєР°РєРёС… СЃС‚СЂРѕРіРёС… Р°СЃСЃРµСЂС‚РѕРІ РїРѕ РєРѕР»РёС‡РµСЃС‚РІСѓ СЂРµСЃС‚Р°СЂС‚РѕРІ, РІР°Р¶РЅРѕ С‡С‚Рѕ РЅРµ РїР°РґР°РµС‚ Рё РєРѕСЂСЂРµРєС‚РЅРѕ РѕСЃС‚Р°РЅР°РІР»РёРІР°РµС‚СЃСЏ

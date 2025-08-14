@@ -1,4 +1,4 @@
-# src/crypto_ai_bot/app/health.py
+﻿# src/crypto_ai_bot/app/health.py
 from __future__ import annotations
 
 import logging
@@ -7,13 +7,13 @@ from typing import Any, Dict
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
-from crypto_ai_bot.config.settings import Settings
-from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
+from crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.context.snapshot import ContextSnapshot
 
 logger = logging.getLogger(__name__)
 
-# --- базовые health чекеры ---------------------------------------------------
+# --- Р±Р°Р·РѕРІС‹Рµ health С‡РµРєРµСЂС‹ ---------------------------------------------------
 router = APIRouter()
 
 @router.get("/health/live")
@@ -25,13 +25,13 @@ def ready() -> Dict[str, str]:
     return {"status": "ready"}
 
 
-# --- полноценный /status -----------------------------------------------------
+# --- РїРѕР»РЅРѕС†РµРЅРЅС‹Р№ /status -----------------------------------------------------
 def build_status_router(bot, deps) -> APIRouter:
     """
-    /status теперь сочетает:
-      1) текущее состояние из StateManager (как было у тебя)
-      2) краткую рыночную сводку из агрегатора (rule-score, ATR%, режим)
-    Ничего не ломаем: прежние поля остаются.
+    /status С‚РµРїРµСЂСЊ СЃРѕС‡РµС‚Р°РµС‚:
+      1) С‚РµРєСѓС‰РµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ РёР· StateManager (РєР°Рє Р±С‹Р»Рѕ Сѓ С‚РµР±СЏ)
+      2) РєСЂР°С‚РєСѓСЋ СЂС‹РЅРѕС‡РЅСѓСЋ СЃРІРѕРґРєСѓ РёР· Р°РіСЂРµРіР°С‚РѕСЂР° (rule-score, ATR%, СЂРµР¶РёРј)
+    РќРёС‡РµРіРѕ РЅРµ Р»РѕРјР°РµРј: РїСЂРµР¶РЅРёРµ РїРѕР»СЏ РѕСЃС‚Р°СЋС‚СЃСЏ.
     """
     r = APIRouter()
 
@@ -39,7 +39,7 @@ def build_status_router(bot, deps) -> APIRouter:
     def status():
         cfg: Settings = deps.settings
 
-        # 1) состояние (как у тебя раньше)
+        # 1) СЃРѕСЃС‚РѕСЏРЅРёРµ (РєР°Рє Сѓ С‚РµР±СЏ СЂР°РЅСЊС€Рµ)
         st = getattr(deps.state, "state", {}) or {}
         base = {
             "running": True,
@@ -55,9 +55,9 @@ def build_status_router(bot, deps) -> APIRouter:
             "last_manage_check": st.get("last_manage_check"),
         }
 
-        # 2) рыночная сводка (безопасно: если что-то пойдёт не так — просто вернём base)
+        # 2) СЂС‹РЅРѕС‡РЅР°СЏ СЃРІРѕРґРєР° (Р±РµР·РѕРїР°СЃРЅРѕ: РµСЃР»Рё С‡С‚Рѕ-С‚Рѕ РїРѕР№РґС‘С‚ РЅРµ С‚Р°Рє вЂ” РїСЂРѕСЃС‚Рѕ РІРµСЂРЅС‘Рј base)
         try:
-            snap = ContextSnapshot.neutral()  # сюда позже подставим реальный контекст
+            snap = ContextSnapshot.neutral()  # СЃСЋРґР° РїРѕР·Р¶Рµ РїРѕРґСЃС‚Р°РІРёРј СЂРµР°Р»СЊРЅС‹Р№ РєРѕРЅС‚РµРєСЃС‚
             feat = aggregate_features(cfg, deps.exchange, snap)
 
             if "error" not in feat:
@@ -69,7 +69,7 @@ def build_status_router(bot, deps) -> APIRouter:
                 scores = {
                     "rule": feat.get("rule_score"),
                     "ai": feat.get("ai_score"),
-                    "total_hint": feat.get("rule_score"),  # пока rule — основной
+                    "total_hint": feat.get("rule_score"),  # РїРѕРєР° rule вЂ” РѕСЃРЅРѕРІРЅРѕР№
                 }
                 dataq = {
                     "primary_candles": feat.get("data_quality", {}).get("primary_candles"),
@@ -91,7 +91,7 @@ def build_status_router(bot, deps) -> APIRouter:
 
         return JSONResponse(base)
 
-    # --- /metrics: Prometheus если установлен, иначе оставляем как есть -------
+    # --- /metrics: Prometheus РµСЃР»Рё СѓСЃС‚Р°РЅРѕРІР»РµРЅ, РёРЅР°С‡Рµ РѕСЃС‚Р°РІР»СЏРµРј РєР°Рє РµСЃС‚СЊ -------
     try:
         from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest  # type: ignore
 
@@ -101,8 +101,8 @@ def build_status_router(bot, deps) -> APIRouter:
             return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
     except Exception:
-        # если prometheus_client не установлен — этот роутер не добавляем,
-        # твой JSON-фолбэк останется доступным в другом месте (как сейчас)
+        # РµСЃР»Рё prometheus_client РЅРµ СѓСЃС‚Р°РЅРѕРІР»РµРЅ вЂ” СЌС‚РѕС‚ СЂРѕСѓС‚РµСЂ РЅРµ РґРѕР±Р°РІР»СЏРµРј,
+        # С‚РІРѕР№ JSON-С„РѕР»Р±СЌРє РѕСЃС‚Р°РЅРµС‚СЃСЏ РґРѕСЃС‚СѓРїРЅС‹Рј РІ РґСЂСѓРіРѕРј РјРµСЃС‚Рµ (РєР°Рє СЃРµР№С‡Р°СЃ)
         pass
 
     return r

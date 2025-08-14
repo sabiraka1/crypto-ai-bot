@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Risk checks and validation pipeline for opening/closing orders.
 Lightweight, no heavy deps. Works with a ccxt-like exchange.
@@ -86,7 +86,7 @@ def check_spread(cfg, exchange: Any, symbol: str) -> Tuple[bool, Optional[str]]:
     t = _get_ticker(exchange, symbol)
     bps = _spread_bps(t)
     if bps is None:
-        return True, None  # can't compute → don't block
+        return True, None  # can't compute в†’ don't block
     if bps > limit_bps:
         return False, f"spread {bps:.1f}bps > limit {limit_bps:.1f}bps"
     return True, None
@@ -99,7 +99,7 @@ def check_volume_24h(cfg, exchange: Any, symbol: str) -> Tuple[bool, Optional[st
     t = _get_ticker(exchange, symbol)
     qv = _quote_volume_usd(t)
     if qv is None:
-        return True, None  # can't compute → don't block
+        return True, None  # can't compute в†’ don't block
     if qv < min_usd:
         return False, f"24h quote volume {qv:.0f} < min {min_usd:.0f}"
     return True, None
@@ -108,7 +108,7 @@ def check_volume_24h(cfg, exchange: Any, symbol: str) -> Tuple[bool, Optional[st
 def validate_open(cfg, exchange: Any, symbol: str, indicators: Optional[Dict[str, float]] = None) -> Tuple[bool, Optional[str]]:
     """
     High-level gate before opening a position.
-    Order: hours → spread → liquidity (stop on first failure).
+    Order: hours в†’ spread в†’ liquidity (stop on first failure).
     """
     ok, reason = check_trading_hours(cfg)
     if not ok:

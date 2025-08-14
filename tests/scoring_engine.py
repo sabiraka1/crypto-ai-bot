@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 import pandas as pd
 import numpy as np
 from unittest.mock import Mock, patch, MagicMock
@@ -7,12 +7,12 @@ from analysis.scoring_engine import ScoringEngine
 
 @pytest.fixture
 def sample_market_df():
-    """Создает образец рыночных данных для тестирования"""
+    """РЎРѕР·РґР°РµС‚ РѕР±СЂР°Р·РµС† СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С… РґР»СЏ С‚РµСЃС‚РёСЂРѕРІР°РЅРёСЏ"""
     dates = pd.date_range('2024-01-01', periods=100, freq='15min')
     
-    # Создаем реалистичные OHLCV данные
+    # РЎРѕР·РґР°РµРј СЂРµР°Р»РёСЃС‚РёС‡РЅС‹Рµ OHLCV РґР°РЅРЅС‹Рµ
     base_price = 50000
-    trend = np.linspace(0, 0.05, 100)  # 5% рост
+    trend = np.linspace(0, 0.05, 100)  # 5% СЂРѕСЃС‚
     noise = np.random.normal(0, 0.001, 100)
     
     prices = base_price * (1 + trend + noise)
@@ -30,13 +30,13 @@ def sample_market_df():
 
 @pytest.fixture
 def scoring_engine():
-    """Создает экземпляр scoring engine"""
+    """РЎРѕР·РґР°РµС‚ СЌРєР·РµРјРїР»СЏСЂ scoring engine"""
     return ScoringEngine()
 
 
 @pytest.fixture
 def mock_technical_indicators():
-    """Мокает технические индикаторы"""
+    """РњРѕРєР°РµС‚ С‚РµС…РЅРёС‡РµСЃРєРёРµ РёРЅРґРёРєР°С‚РѕСЂС‹"""
     return {
         'rsi': 65.0,
         'macd': 0.5,
@@ -59,24 +59,24 @@ def mock_technical_indicators():
 class TestScoringEngine:
     
     def test_scoring_engine_initialization(self, scoring_engine):
-        """Тестирует инициализацию scoring engine"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ РёРЅРёС†РёР°Р»РёР·Р°С†РёСЋ scoring engine"""
         assert hasattr(scoring_engine, 'min_score_to_buy')
         assert hasattr(scoring_engine, 'evaluate')
         assert hasattr(scoring_engine, 'position_fraction')
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_evaluate_basic_functionality(self, mock_calc_indicators, scoring_engine, sample_market_df, mock_technical_indicators):
-        """Тестирует базовую функциональность evaluate"""
-        # Мокаем результат calculate_all_indicators
+        """РўРµСЃС‚РёСЂСѓРµС‚ Р±Р°Р·РѕРІСѓСЋ С„СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚СЊ evaluate"""
+        # РњРѕРєР°РµРј СЂРµР·СѓР»СЊС‚Р°С‚ calculate_all_indicators
         mock_df = sample_market_df.copy()
         for key, value in mock_technical_indicators.items():
             mock_df[key] = value
         mock_calc_indicators.return_value = mock_df
         
-        # Вызываем evaluate
+        # Р’С‹Р·С‹РІР°РµРј evaluate
         result = scoring_engine.evaluate(sample_market_df, ai_score=0.7)
         
-        # Проверяем результат
+        # РџСЂРѕРІРµСЂСЏРµРј СЂРµР·СѓР»СЊС‚Р°С‚
         assert isinstance(result, tuple)
         assert len(result) >= 2
         
@@ -88,7 +88,7 @@ class TestScoringEngine:
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_evaluate_with_details(self, mock_calc_indicators, scoring_engine, sample_market_df, mock_technical_indicators):
-        """Тестирует evaluate с возвращением деталей"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ evaluate СЃ РІРѕР·РІСЂР°С‰РµРЅРёРµРј РґРµС‚Р°Р»РµР№"""
         mock_df = sample_market_df.copy()
         for key, value in mock_technical_indicators.items():
             mock_df[key] = value
@@ -100,16 +100,16 @@ class TestScoringEngine:
             buy_score, ai_score_result, details = result
             assert isinstance(details, dict)
         else:
-            # Если детали не возвращаются, это тоже валидно
+            # Р•СЃР»Рё РґРµС‚Р°Р»Рё РЅРµ РІРѕР·РІСЂР°С‰Р°СЋС‚СЃСЏ, СЌС‚Рѕ С‚РѕР¶Рµ РІР°Р»РёРґРЅРѕ
             assert len(result) == 2
     
     def test_evaluate_empty_dataframe(self, scoring_engine):
-        """Тестирует поведение с пустым DataFrame"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ СЃ РїСѓСЃС‚С‹Рј DataFrame"""
         empty_df = pd.DataFrame()
         
         result = scoring_engine.evaluate(empty_df, ai_score=0.5)
         
-        # Должен вернуть дефолтные значения без ошибок
+        # Р”РѕР»Р¶РµРЅ РІРµСЂРЅСѓС‚СЊ РґРµС„РѕР»С‚РЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ Р±РµР· РѕС€РёР±РѕРє
         assert isinstance(result, tuple)
         buy_score = result[0]
         assert isinstance(buy_score, (int, float))
@@ -117,20 +117,20 @@ class TestScoringEngine:
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_evaluate_exception_handling(self, mock_calc_indicators, scoring_engine, sample_market_df):
-        """Тестирует обработку исключений в evaluate"""
-        # Мокаем исключение
+        """РўРµСЃС‚РёСЂСѓРµС‚ РѕР±СЂР°Р±РѕС‚РєСѓ РёСЃРєР»СЋС‡РµРЅРёР№ РІ evaluate"""
+        # РњРѕРєР°РµРј РёСЃРєР»СЋС‡РµРЅРёРµ
         mock_calc_indicators.side_effect = Exception("Calculation failed")
         
         result = scoring_engine.evaluate(sample_market_df, ai_score=0.5)
         
-        # Должен обработать исключение и вернуть результат
+        # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ РёСЃРєР»СЋС‡РµРЅРёРµ Рё РІРµСЂРЅСѓС‚СЊ СЂРµР·СѓР»СЊС‚Р°С‚
         assert isinstance(result, tuple)
         buy_score = result[0]
         assert isinstance(buy_score, (int, float))
     
     def test_position_fraction_basic(self, scoring_engine):
-        """Тестирует базовую функциональность position_fraction"""
-        # Тестируем разные значения AI score
+        """РўРµСЃС‚РёСЂСѓРµС‚ Р±Р°Р·РѕРІСѓСЋ С„СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚СЊ position_fraction"""
+        # РўРµСЃС‚РёСЂСѓРµРј СЂР°Р·РЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ AI score
         test_scores = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0]
         
         for score in test_scores:
@@ -139,25 +139,25 @@ class TestScoringEngine:
             assert isinstance(fraction, (int, float))
             assert 0.0 <= fraction <= 1.0
             
-            # Чем выше AI score, тем больше должна быть фракция
+            # Р§РµРј РІС‹С€Рµ AI score, С‚РµРј Р±РѕР»СЊС€Рµ РґРѕР»Р¶РЅР° Р±С‹С‚СЊ С„СЂР°РєС†РёСЏ
             if score >= 0.5:
                 assert fraction > 0.0
     
     def test_position_fraction_progression(self, scoring_engine):
-        """Тестирует что position_fraction монотонно возрастает"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ С‡С‚Рѕ position_fraction РјРѕРЅРѕС‚РѕРЅРЅРѕ РІРѕР·СЂР°СЃС‚Р°РµС‚"""
         scores = [0.1, 0.3, 0.5, 0.7, 0.9]
         fractions = [scoring_engine.position_fraction(score) for score in scores]
         
-        # Проверяем монотонность (не строгую, допускаем равенство)
+        # РџСЂРѕРІРµСЂСЏРµРј РјРѕРЅРѕС‚РѕРЅРЅРѕСЃС‚СЊ (РЅРµ СЃС‚СЂРѕРіСѓСЋ, РґРѕРїСѓСЃРєР°РµРј СЂР°РІРµРЅСЃС‚РІРѕ)
         for i in range(1, len(fractions)):
             assert fractions[i] >= fractions[i-1], f"Fraction decreased: {fractions[i-1]} -> {fractions[i]}"
     
     def test_position_fraction_edge_cases(self, scoring_engine):
-        """Тестирует граничные случаи для position_fraction"""
-        # Отрицательные значения
+        """РўРµСЃС‚РёСЂСѓРµС‚ РіСЂР°РЅРёС‡РЅС‹Рµ СЃР»СѓС‡Р°Рё РґР»СЏ position_fraction"""
+        # РћС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
         assert scoring_engine.position_fraction(-0.5) >= 0.0
         
-        # Значения больше 1
+        # Р—РЅР°С‡РµРЅРёСЏ Р±РѕР»СЊС€Рµ 1
         assert scoring_engine.position_fraction(1.5) <= 1.0
         
         # NaN
@@ -169,14 +169,14 @@ class TestScoringEngine:
     @patch('analysis.market_analyzer.MultiTimeframeAnalyzer')
     def test_evaluate_with_market_analyzer(self, mock_analyzer_class, mock_calc_indicators, 
                                          scoring_engine, sample_market_df, mock_technical_indicators):
-        """Тестирует интеграцию с market analyzer"""
-        # Мокаем технические индикаторы
+        """РўРµСЃС‚РёСЂСѓРµС‚ РёРЅС‚РµРіСЂР°С†РёСЋ СЃ market analyzer"""
+        # РњРѕРєР°РµРј С‚РµС…РЅРёС‡РµСЃРєРёРµ РёРЅРґРёРєР°С‚РѕСЂС‹
         mock_df = sample_market_df.copy()
         for key, value in mock_technical_indicators.items():
             mock_df[key] = value
         mock_calc_indicators.return_value = mock_df
         
-        # Мокаем market analyzer
+        # РњРѕРєР°РµРј market analyzer
         mock_analyzer = Mock()
         mock_analyzer.analyze_market_condition.return_value = ("bull", 0.8)
         mock_analyzer_class.return_value = mock_analyzer
@@ -187,23 +187,23 @@ class TestScoringEngine:
         assert len(result) >= 2
     
     def test_min_score_to_buy_property(self, scoring_engine):
-        """Тестирует свойство min_score_to_buy"""
-        # Проверяем что свойство существует
+        """РўРµСЃС‚РёСЂСѓРµС‚ СЃРІРѕР№СЃС‚РІРѕ min_score_to_buy"""
+        # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ СЃРІРѕР№СЃС‚РІРѕ СЃСѓС‰РµСЃС‚РІСѓРµС‚
         assert hasattr(scoring_engine, 'min_score_to_buy')
         
-        # Проверяем что можно устанавливать значение
+        # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ РјРѕР¶РЅРѕ СѓСЃС‚Р°РЅР°РІР»РёРІР°С‚СЊ Р·РЅР°С‡РµРЅРёРµ
         original_value = getattr(scoring_engine, 'min_score_to_buy', 0.5)
         scoring_engine.min_score_to_buy = 0.7
         
-        # Проверяем что значение изменилось
+        # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ Р·РЅР°С‡РµРЅРёРµ РёР·РјРµРЅРёР»РѕСЃСЊ
         assert getattr(scoring_engine, 'min_score_to_buy', 0.5) == 0.7
         
-        # Восстанавливаем исходное значение
+        # Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј РёСЃС…РѕРґРЅРѕРµ Р·РЅР°С‡РµРЅРёРµ
         scoring_engine.min_score_to_buy = original_value
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_different_ai_scores(self, mock_calc_indicators, scoring_engine, sample_market_df, mock_technical_indicators):
-        """Тестирует поведение с разными AI scores"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ СЃ СЂР°Р·РЅС‹РјРё AI scores"""
         mock_df = sample_market_df.copy()
         for key, value in mock_technical_indicators.items():
             mock_df[key] = value
@@ -216,7 +216,7 @@ class TestScoringEngine:
             result = scoring_engine.evaluate(sample_market_df, ai_score=ai_score)
             results.append(result)
         
-        # Все результаты должны быть валидными
+        # Р’СЃРµ СЂРµР·СѓР»СЊС‚Р°С‚С‹ РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ РІР°Р»РёРґРЅС‹РјРё
         for result in results:
             assert isinstance(result, tuple)
             assert len(result) >= 2
@@ -226,18 +226,18 @@ class TestScoringEngine:
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_bullish_indicators(self, mock_calc_indicators, scoring_engine, sample_market_df):
-        """Тестирует реакцию на бычьи индикаторы"""
-        # Создаем явно бычьи индикаторы
+        """РўРµСЃС‚РёСЂСѓРµС‚ СЂРµР°РєС†РёСЋ РЅР° Р±С‹С‡СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹"""
+        # РЎРѕР·РґР°РµРј СЏРІРЅРѕ Р±С‹С‡СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹
         bullish_indicators = {
-            'rsi': 65.0,  # Умеренно перекупленность
-            'macd': 1.0,  # Положительный MACD
+            'rsi': 65.0,  # РЈРјРµСЂРµРЅРЅРѕ РїРµСЂРµРєСѓРїР»РµРЅРЅРѕСЃС‚СЊ
+            'macd': 1.0,  # РџРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Р№ MACD
             'macd_signal': 0.5,
-            'macd_hist': 0.5,  # Растущий histogram
+            'macd_hist': 0.5,  # Р Р°СЃС‚СѓС‰РёР№ histogram
             'ema_20': 50200.0,  # EMA20 > EMA50
             'ema_50': 50000.0,
-            'stoch_k': 75.0,  # Высокий но не экстремальный Stochastic
-            'adx': 30.0,  # Сильный тренд
-            'volume_ratio': 1.5  # Высокий объем
+            'stoch_k': 75.0,  # Р’С‹СЃРѕРєРёР№ РЅРѕ РЅРµ СЌРєСЃС‚СЂРµРјР°Р»СЊРЅС‹Р№ Stochastic
+            'adx': 30.0,  # РЎРёР»СЊРЅС‹Р№ С‚СЂРµРЅРґ
+            'volume_ratio': 1.5  # Р’С‹СЃРѕРєРёР№ РѕР±СЉРµРј
         }
         
         mock_df = sample_market_df.copy()
@@ -248,23 +248,23 @@ class TestScoringEngine:
         result = scoring_engine.evaluate(sample_market_df, ai_score=0.8)
         buy_score = result[0]
         
-        # Бычьи индикаторы должны давать высокий score
+        # Р‘С‹С‡СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹ РґРѕР»Р¶РЅС‹ РґР°РІР°С‚СЊ РІС‹СЃРѕРєРёР№ score
         assert buy_score > 0.5
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_bearish_indicators(self, mock_calc_indicators, scoring_engine, sample_market_df):
-        """Тестирует реакцию на медвежьи индикаторы"""
-        # Создаем явно медвежьи индикаторы
+        """РўРµСЃС‚РёСЂСѓРµС‚ СЂРµР°РєС†РёСЋ РЅР° РјРµРґРІРµР¶СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹"""
+        # РЎРѕР·РґР°РµРј СЏРІРЅРѕ РјРµРґРІРµР¶СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹
         bearish_indicators = {
-            'rsi': 25.0,  # Перепроданность
-            'macd': -1.0,  # Отрицательный MACD
+            'rsi': 25.0,  # РџРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚СЊ
+            'macd': -1.0,  # РћС‚СЂРёС†Р°С‚РµР»СЊРЅС‹Р№ MACD
             'macd_signal': -0.5,
-            'macd_hist': -0.5,  # Падающий histogram
+            'macd_hist': -0.5,  # РџР°РґР°СЋС‰РёР№ histogram
             'ema_20': 49800.0,  # EMA20 < EMA50
             'ema_50': 50000.0,
-            'stoch_k': 20.0,  # Низкий Stochastic
-            'adx': 35.0,  # Сильный тренд (но медвежий)
-            'volume_ratio': 0.8  # Низкий объем
+            'stoch_k': 20.0,  # РќРёР·РєРёР№ Stochastic
+            'adx': 35.0,  # РЎРёР»СЊРЅС‹Р№ С‚СЂРµРЅРґ (РЅРѕ РјРµРґРІРµР¶РёР№)
+            'volume_ratio': 0.8  # РќРёР·РєРёР№ РѕР±СЉРµРј
         }
         
         mock_df = sample_market_df.copy()
@@ -275,19 +275,19 @@ class TestScoringEngine:
         result = scoring_engine.evaluate(sample_market_df, ai_score=0.3)
         buy_score = result[0]
         
-        # Медвежьи индикаторы должны давать низкий score
+        # РњРµРґРІРµР¶СЊРё РёРЅРґРёРєР°С‚РѕСЂС‹ РґРѕР»Р¶РЅС‹ РґР°РІР°С‚СЊ РЅРёР·РєРёР№ score
         assert buy_score < 0.5
 
 
 class TestScoringEngineIntegration:
-    """Интеграционные тесты для scoring engine"""
+    """РРЅС‚РµРіСЂР°С†РёРѕРЅРЅС‹Рµ С‚РµСЃС‚С‹ РґР»СЏ scoring engine"""
     
     def test_real_market_data_simulation(self, scoring_engine):
-        """Тестирует с симуляцией реальных рыночных данных"""
-        # Создаем более реалистичные данные
+        """РўРµСЃС‚РёСЂСѓРµС‚ СЃ СЃРёРјСѓР»СЏС†РёРµР№ СЂРµР°Р»СЊРЅС‹С… СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С…"""
+        # РЎРѕР·РґР°РµРј Р±РѕР»РµРµ СЂРµР°Р»РёСЃС‚РёС‡РЅС‹Рµ РґР°РЅРЅС‹Рµ
         dates = pd.date_range('2024-01-01', periods=200, freq='15min')
         
-        # Симулируем разные рыночные условия
+        # РЎРёРјСѓР»РёСЂСѓРµРј СЂР°Р·РЅС‹Рµ СЂС‹РЅРѕС‡РЅС‹Рµ СѓСЃР»РѕРІРёСЏ
         conditions = ['uptrend', 'downtrend', 'sideways']
         
         for condition in conditions:
@@ -312,7 +312,7 @@ class TestScoringEngineIntegration:
                 'volume': np.random.uniform(100, 1000, 200)
             }, index=dates)
             
-            # Тестируем что evaluate работает без ошибок
+            # РўРµСЃС‚РёСЂСѓРµРј С‡С‚Рѕ evaluate СЂР°Р±РѕС‚Р°РµС‚ Р±РµР· РѕС€РёР±РѕРє
             try:
                 result = scoring_engine.evaluate(df, ai_score=0.6)
                 assert isinstance(result, tuple)
@@ -325,8 +325,8 @@ class TestScoringEngineIntegration:
                 pytest.fail(f"Scoring failed for {condition} market: {e}")
     
     def test_performance_with_large_dataset(self, scoring_engine):
-        """Тестирует производительность с большим датасетом"""
-        # Создаем большой датасет
+        """РўРµСЃС‚РёСЂСѓРµС‚ РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚СЊ СЃ Р±РѕР»СЊС€РёРј РґР°С‚Р°СЃРµС‚РѕРј"""
+        # РЎРѕР·РґР°РµРј Р±РѕР»СЊС€РѕР№ РґР°С‚Р°СЃРµС‚
         dates = pd.date_range('2024-01-01', periods=1000, freq='1min')
         prices = 50000 + np.cumsum(np.random.normal(0, 10, 1000))
         
@@ -346,27 +346,27 @@ class TestScoringEngineIntegration:
         end_time = time.time()
         execution_time = end_time - start_time
         
-        # Проверяем что выполнилось за разумное время (< 5 секунд)
+        # РџСЂРѕРІРµСЂСЏРµРј С‡С‚Рѕ РІС‹РїРѕР»РЅРёР»РѕСЃСЊ Р·Р° СЂР°Р·СѓРјРЅРѕРµ РІСЂРµРјСЏ (< 5 СЃРµРєСѓРЅРґ)
         assert execution_time < 5.0, f"Execution took too long: {execution_time:.2f}s"
         
-        # Проверяем корректность результата
+        # РџСЂРѕРІРµСЂСЏРµРј РєРѕСЂСЂРµРєС‚РЅРѕСЃС‚СЊ СЂРµР·СѓР»СЊС‚Р°С‚Р°
         assert isinstance(result, tuple)
         assert len(result) >= 2
     
     @patch('analysis.technical_indicators.calculate_all_indicators')
     def test_missing_indicators(self, mock_calc_indicators, scoring_engine, sample_market_df):
-        """Тестирует поведение при отсутствии некоторых индикаторов"""
-        # Создаем DataFrame с только частью индикаторов
+        """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ РїСЂРё РѕС‚СЃСѓС‚СЃС‚РІРёРё РЅРµРєРѕС‚РѕСЂС‹С… РёРЅРґРёРєР°С‚РѕСЂРѕРІ"""
+        # РЎРѕР·РґР°РµРј DataFrame СЃ С‚РѕР»СЊРєРѕ С‡Р°СЃС‚СЊСЋ РёРЅРґРёРєР°С‚РѕСЂРѕРІ
         incomplete_df = sample_market_df.copy()
         incomplete_df['rsi'] = 50.0
         incomplete_df['macd'] = 0.0
-        # Остальные индикаторы отсутствуют
+        # РћСЃС‚Р°Р»СЊРЅС‹Рµ РёРЅРґРёРєР°С‚РѕСЂС‹ РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‚
         
         mock_calc_indicators.return_value = incomplete_df
         
         result = scoring_engine.evaluate(sample_market_df, ai_score=0.6)
         
-        # Должен обработать отсутствующие индикаторы без ошибок
+        # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‰РёРµ РёРЅРґРёРєР°С‚РѕСЂС‹ Р±РµР· РѕС€РёР±РѕРє
         assert isinstance(result, tuple)
         assert len(result) >= 2
         
@@ -375,27 +375,27 @@ class TestScoringEngineIntegration:
 
 
 class TestScoringEngineEdgeCases:
-    """Тесты граничных случаев"""
+    """РўРµСЃС‚С‹ РіСЂР°РЅРёС‡РЅС‹С… СЃР»СѓС‡Р°РµРІ"""
     
     def test_extreme_indicator_values(self, scoring_engine, sample_market_df):
-        """Тестирует экстремальные значения индикаторов"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ СЌРєСЃС‚СЂРµРјР°Р»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ РёРЅРґРёРєР°С‚РѕСЂРѕРІ"""
         with patch('analysis.technical_indicators.calculate_all_indicators') as mock_calc:
             extreme_df = sample_market_df.copy()
-            extreme_df['rsi'] = 150.0  # Выше нормального диапазона
-            extreme_df['macd'] = -1000.0  # Экстремально низкое значение
-            extreme_df['adx'] = 200.0  # Выше нормального диапазона
+            extreme_df['rsi'] = 150.0  # Р’С‹С€Рµ РЅРѕСЂРјР°Р»СЊРЅРѕРіРѕ РґРёР°РїР°Р·РѕРЅР°
+            extreme_df['macd'] = -1000.0  # Р­РєСЃС‚СЂРµРјР°Р»СЊРЅРѕ РЅРёР·РєРѕРµ Р·РЅР°С‡РµРЅРёРµ
+            extreme_df['adx'] = 200.0  # Р’С‹С€Рµ РЅРѕСЂРјР°Р»СЊРЅРѕРіРѕ РґРёР°РїР°Р·РѕРЅР°
             
             mock_calc.return_value = extreme_df
             
             result = scoring_engine.evaluate(sample_market_df, ai_score=0.5)
             
-            # Должен обработать экстремальные значения
+            # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ СЌРєСЃС‚СЂРµРјР°Р»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ
             assert isinstance(result, tuple)
             buy_score = result[0]
             assert 0.0 <= buy_score <= 1.0
     
     def test_all_nan_indicators(self, scoring_engine, sample_market_df):
-        """Тестирует поведение когда все индикаторы NaN"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ РїРѕРІРµРґРµРЅРёРµ РєРѕРіРґР° РІСЃРµ РёРЅРґРёРєР°С‚РѕСЂС‹ NaN"""
         with patch('analysis.technical_indicators.calculate_all_indicators') as mock_calc:
             nan_df = sample_market_df.copy()
             nan_df['rsi'] = np.nan
@@ -407,14 +407,14 @@ class TestScoringEngineEdgeCases:
             
             result = scoring_engine.evaluate(sample_market_df, ai_score=0.5)
             
-            # Должен обработать NaN значения
+            # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ NaN Р·РЅР°С‡РµРЅРёСЏ
             assert isinstance(result, tuple)
             buy_score = result[0]
             assert 0.0 <= buy_score <= 1.0
             assert not np.isnan(buy_score)
     
     def test_single_candle_data(self, scoring_engine):
-        """Тестирует данные с одной свечой"""
+        """РўРµСЃС‚РёСЂСѓРµС‚ РґР°РЅРЅС‹Рµ СЃ РѕРґРЅРѕР№ СЃРІРµС‡РѕР№"""
         single_candle = pd.DataFrame({
             'open': [50000],
             'high': [50100],

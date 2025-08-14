@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import json
 import logging
 from typing import Optional
@@ -10,8 +10,8 @@ COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
 
 def fetch_btc_dominance(timeout: float = 6.0) -> Optional[float]:
     """
-    Возвращает BTC Dominance в процентах (например, 52.1), либо None при ошибке.
-    Источник: Coingecko /global (без ключа).
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ BTC Dominance РІ РїСЂРѕС†РµРЅС‚Р°С… (РЅР°РїСЂРёРјРµСЂ, 52.1), Р»РёР±Рѕ None РїСЂРё РѕС€РёР±РєРµ.
+    РСЃС‚РѕС‡РЅРёРє: Coingecko /global (Р±РµР· РєР»СЋС‡Р°).
     """
     try:
         req = Request(COINGECKO_GLOBAL, headers={"User-Agent": "crypto-ai-bot/1.0"})

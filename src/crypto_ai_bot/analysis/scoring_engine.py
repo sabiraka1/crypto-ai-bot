@@ -1,4 +1,4 @@
-import os
+﻿import os
 import math
 import numpy as np
 import pandas as pd
@@ -7,26 +7,26 @@ from typing import Tuple, Dict, Any, Optional
 
 class ScoringEngine:
     """
-    ✅ ИСПРАВЛЕНО: Единый движок скоринга с унифицированным API:
-    - Buy Score (нормирован в [0..1]): MACD (до 2 баллов) + RSI (1 балл) → raw 0..3 → /3
-    - AI Score: подаётся извне (0..1), если нет — дефолт 0.50
-    - Порог входа задаётся через .env MIN_SCORE_TO_BUY (по умолчанию 0.65, так как now [0..1])
-    - Размер позиции определяется по AI Score (дискретная сетка по умолчанию; опционально линейно)
+    вњ… РРЎРџР РђР’Р›Р•РќРћ: Р•РґРёРЅС‹Р№ РґРІРёР¶РѕРє СЃРєРѕСЂРёРЅРіР° СЃ СѓРЅРёС„РёС†РёСЂРѕРІР°РЅРЅС‹Рј API:
+    - Buy Score (РЅРѕСЂРјРёСЂРѕРІР°РЅ РІ [0..1]): MACD (РґРѕ 2 Р±Р°Р»Р»РѕРІ) + RSI (1 Р±Р°Р»Р») в†’ raw 0..3 в†’ /3
+    - AI Score: РїРѕРґР°С‘С‚СЃСЏ РёР·РІРЅРµ (0..1), РµСЃР»Рё РЅРµС‚ вЂ” РґРµС„РѕР»С‚ 0.50
+    - РџРѕСЂРѕРі РІС…РѕРґР° Р·Р°РґР°С‘С‚СЃСЏ С‡РµСЂРµР· .env MIN_SCORE_TO_BUY (РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ 0.65, С‚Р°Рє РєР°Рє now [0..1])
+    - Р Р°Р·РјРµСЂ РїРѕР·РёС†РёРё РѕРїСЂРµРґРµР»СЏРµС‚СЃСЏ РїРѕ AI Score (РґРёСЃРєСЂРµС‚РЅР°СЏ СЃРµС‚РєР° РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ; РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ Р»РёРЅРµР№РЅРѕ)
     """
 
     def __init__(self, min_score_to_buy: Optional[float] = None):
-        # порог в нормализованной шкале [0..1]
+        # РїРѕСЂРѕРі РІ РЅРѕСЂРјР°Р»РёР·РѕРІР°РЅРЅРѕР№ С€РєР°Р»Рµ [0..1]
         self.min_score_to_buy = (
             float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))
             if min_score_to_buy is None
             else float(min_score_to_buy)
         )
-        # режим и параметры сайзинга
+        # СЂРµР¶РёРј Рё РїР°СЂР°РјРµС‚СЂС‹ СЃР°Р№Р·РёРЅРіР°
         self.pos_mode = (os.getenv("AI_POSITION_MODE", "step").strip().lower() or "step")
-        self.pos_min = float(os.getenv("POSITION_MIN_FRACTION", "0.30"))  # для linear
-        self.pos_max = float(os.getenv("POSITION_MAX_FRACTION", "1.00"))  # для linear
+        self.pos_min = float(os.getenv("POSITION_MIN_FRACTION", "0.30"))  # РґР»СЏ linear
+        self.pos_max = float(os.getenv("POSITION_MAX_FRACTION", "1.00"))  # РґР»СЏ linear
 
-    # ---------- публичный API (унифицированный) ----------
+    # ---------- РїСѓР±Р»РёС‡РЅС‹Р№ API (СѓРЅРёС„РёС†РёСЂРѕРІР°РЅРЅС‹Р№) ----------
 
     def evaluate(
         self,
@@ -34,11 +34,11 @@ class ScoringEngine:
         ai_score: Optional[float] = None
     ) -> Tuple[float, float, Dict[str, Any]]:
         """
-        ✅ ОСНОВНОЙ МЕТОД: Возвращает:
-        - buy_score_norm (float в [0..1])
+        вњ… РћРЎРќРћР’РќРћР™ РњР•РўРћР”: Р’РѕР·РІСЂР°С‰Р°РµС‚:
+        - buy_score_norm (float РІ [0..1])
         - ai_score (float 0..1)
-        - details (dict)  -> пригодно для телеграм-уведомлений и логов
-        Ожидается df с колонкой 'close' и индексом по времени.
+        - details (dict)  -> РїСЂРёРіРѕРґРЅРѕ РґР»СЏ С‚РµР»РµРіСЂР°Рј-СѓРІРµРґРѕРјР»РµРЅРёР№ Рё Р»РѕРіРѕРІ
+        РћР¶РёРґР°РµС‚СЃСЏ df СЃ РєРѕР»РѕРЅРєРѕР№ 'close' Рё РёРЅРґРµРєСЃРѕРј РїРѕ РІСЂРµРјРµРЅРё.
         """
         if df is None or df.empty or "close" not in df.columns:
             return 0.0, float(ai_score or 0.5), {
@@ -61,7 +61,7 @@ class ScoringEngine:
                 buy_raw += 1.0
             if macd_growing:
                 buy_raw += 1.0
-        # --- RSI (здоровая зона 45..65) ---
+        # --- RSI (Р·РґРѕСЂРѕРІР°СЏ Р·РѕРЅР° 45..65) ---
         if rsi_val is not None and 45 <= rsi_val <= 65:
             buy_raw += 1.0
 
@@ -83,24 +83,24 @@ class ScoringEngine:
             "buy_score_norm": buy_norm,
             "min_score_to_buy": self.min_score_to_buy,
             "market_condition": self._guess_market_condition(df),
-            "pattern": ""  # Заглушка для совместимости
+            "pattern": ""  # Р—Р°РіР»СѓС€РєР° РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
         }
 
         return buy_norm, ai, details
 
     def position_fraction(self, ai_score: float) -> float:
         """
-        Размер позиции на основе AI Score.
+        Р Р°Р·РјРµСЂ РїРѕР·РёС†РёРё РЅР° РѕСЃРЅРѕРІРµ AI Score.
 
-        Режимы:
-        - step (по умолчанию):
+        Р РµР¶РёРјС‹:
+        - step (РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ):
             >= 0.70 -> 1.00 (100%)
             0.60..0.70 -> 0.90 (90%)
             0.50..0.60 -> 0.60 (60%)
-            < 0.50 -> 0.00 (не входим)
-        - linear (включить через AI_POSITION_MODE=linear):
-            линейная шкала в [POSITION_MIN_FRACTION..POSITION_MAX_FRACTION]
-            при ai_score=0.0 -> min, ai_score=1.0 -> max
+            < 0.50 -> 0.00 (РЅРµ РІС…РѕРґРёРј)
+        - linear (РІРєР»СЋС‡РёС‚СЊ С‡РµСЂРµР· AI_POSITION_MODE=linear):
+            Р»РёРЅРµР№РЅР°СЏ С€РєР°Р»Р° РІ [POSITION_MIN_FRACTION..POSITION_MAX_FRACTION]
+            РїСЂРё ai_score=0.0 -> min, ai_score=1.0 -> max
         """
         ai = float(ai_score or 0.0)
         ai = max(0.0, min(1.0, ai))
@@ -112,7 +112,7 @@ class ScoringEngine:
                 mn, mx = mx, mn
             return mn + (mx - mn) * ai
 
-        # step mode (дефолт)
+        # step mode (РґРµС„РѕР»С‚)
         if ai >= 0.70:
             return 1.00
         if ai >= 0.60:
@@ -121,7 +121,7 @@ class ScoringEngine:
             return 0.60
         return 0.00
 
-    # ---------- служебные методы ----------
+    # ---------- СЃР»СѓР¶РµР±РЅС‹Рµ РјРµС‚РѕРґС‹ ----------
 
     def _rsi(self, close: pd.Series, period: int = 14) -> Optional[float]:
         if close is None or len(close) < period + 1:
@@ -148,8 +148,8 @@ class ScoringEngine:
         signal: int = 9
     ) -> Tuple[Optional[float], bool]:
         """
-        Возвращает (histogram_last, is_growing)
-        hist>0 даёт 1 балл, рост hist (последний > предыдущего) даёт ещё 1 балл.
+        Р’РѕР·РІСЂР°С‰Р°РµС‚ (histogram_last, is_growing)
+        hist>0 РґР°С‘С‚ 1 Р±Р°Р»Р», СЂРѕСЃС‚ hist (РїРѕСЃР»РµРґРЅРёР№ > РїСЂРµРґС‹РґСѓС‰РµРіРѕ) РґР°С‘С‚ РµС‰С‘ 1 Р±Р°Р»Р».
         """
         if close is None or len(close) < slow + signal + 2:
             return None, False
@@ -169,7 +169,7 @@ class ScoringEngine:
         return last, is_growing
 
     def _guess_market_condition(self, df: pd.DataFrame) -> str:
-        """Простая оценка рыночных условий для совместимости"""
+        """РџСЂРѕСЃС‚Р°СЏ РѕС†РµРЅРєР° СЂС‹РЅРѕС‡РЅС‹С… СѓСЃР»РѕРІРёР№ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё"""
         try:
             if df.empty or len(df) < 50:
                 return "sideways"
@@ -181,21 +181,21 @@ class ScoringEngine:
             if np.isnan(ema_20) or np.isnan(ema_50):
                 return "sideways"
                 
-            if ema_20 > ema_50 * 1.005:  # 0.5% выше
+            if ema_20 > ema_50 * 1.005:  # 0.5% РІС‹С€Рµ
                 return "bull"
-            elif ema_20 < ema_50 * 0.995:  # 0.5% ниже
+            elif ema_20 < ema_50 * 0.995:  # 0.5% РЅРёР¶Рµ
                 return "bear"
             else:
                 return "sideways"
         except Exception:
             return "sideways"
 
-    # ---- ✅ ИСПРАВЛЕНО: Обратная совместимость с унифицированными методами ----
+    # ---- вњ… РРЎРџР РђР’Р›Р•РќРћ: РћР±СЂР°С‚РЅР°СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃ СѓРЅРёС„РёС†РёСЂРѕРІР°РЅРЅС‹РјРё РјРµС‚РѕРґР°РјРё ----
     
     def score(self, df, ai_score=None):
-        """Совместимость: возвращает (buy_score_norm, ai_score, details)."""
+        """РЎРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ: РІРѕР·РІСЂР°С‰Р°РµС‚ (buy_score_norm, ai_score, details)."""
         return self.evaluate(df, ai_score=ai_score)
 
     def calculate_scores(self, df, ai_score=None):
-        """Унифицированная точка входа. Возвращает (buy_score_norm, ai_score, details)."""
+        """РЈРЅРёС„РёС†РёСЂРѕРІР°РЅРЅР°СЏ С‚РѕС‡РєР° РІС…РѕРґР°. Р’РѕР·РІСЂР°С‰Р°РµС‚ (buy_score_norm, ai_score, details)."""
         return self.evaluate(df, ai_score=ai_score)

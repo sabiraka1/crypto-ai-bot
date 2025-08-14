@@ -1,490 +1,341 @@
+﻿
 # -*- coding: utf-8 -*-
 """
-Telegram command layer (webhook-friendly), curated and production-oriented.
-
+Telegram Bot (Phase 4)
 Path: src/crypto_ai_bot/telegram/bot.py
-"""
 
+- Р‘РµР· os.getenv: РІСЃС‘ С‡РµСЂРµР· Settings.build()
+- РљРѕРјР°РЅРґС‹: /start /help /status [/symbol] [/tf], /chart [/symbol] [/tf],
+           /test [/symbol] [/tf], /testbuy <amt>, /testsell <amt>,
+           /config, /version, /ping, /errors
+- РРЅРґРёРєР°С‚РѕСЂС‹/СЂРµС€РµРЅРёРµ: core.signals.aggregator + validator + policy
+- Р‘РµР· Р»РѕРєР°Р»СЊРЅС‹С… СЂР°СЃС‡С‘С‚РѕРІ РёРЅРґРёРєР°С‚РѕСЂРѕРІ
+- РЎРѕРІРјРµСЃС‚РёРј СЃ server.py webhook-СЂРѕСѓС‚РѕРј: export async def process_update(payload)
+"""
 from __future__ import annotations
 
 import io
 import os
-import time
-import json
-import math
-import textwrap
-from typing import Any, Dict, List, Optional, Tuple
+import re
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
 import requests
-
-# графики
+import ccxt
+import pandas as pd
 import matplotlib
-matplotlib.use("Agg")  # безопасный backend для Railway
+matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 
-import numpy as np
-import pandas as pd
+from crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.core.signals.aggregator import aggregate_features
+from crypto_ai_bot.core.signals.validator import validate
+from crypto_ai_bot.core.signals.policy import decide
 
-# ccxt для данных/тикеров
+# РѕРїС†РёРѕРЅР°Р»СЊРЅР°СЏ РёРЅС‚РµРіСЂР°С†РёСЏ СЃРѕ СЃС‚Р°СЂС‹Рј Р±РѕС‚РѕРј (РµСЃР»Рё РµСЃС‚СЊ)
 try:
-    import ccxt
+    from crypto_ai_bot.trading.bot import get_bot as legacy_get_bot
 except Exception:
-    ccxt = None  # будем аккуратно проверять
+    legacy_get_bot = None
 
-# Трейдинговый движок
-try:
-    from crypto_ai_bot.trading.bot import get_bot, Settings
-except Exception:
-    from crypto_ai_bot.trading.bot import get_bot, Settings  # type: ignore
+logger = logging.getLogger(__name__)
+logger.setLevel(getattr(logging, Settings.build().LOG_LEVEL.upper(), logging.INFO))
 
-# Агрегатор признаков
-try:
-    from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
-except Exception:
-    aggregate_features = None
 
-START_TS = time.time()
+# --------------------------- Telegram API ---------------------------
+@dataclass
+class TgCtx:
+    token: str
+    api_base: str
+    admin_ids: Tuple[int, ...]
 
-def _bot_token() -> str:
-    token = os.getenv("BOT_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("BOT_TOKEN is not set")
-    return token
 
-def _tg_api(method: str) -> str:
-    return f"https://api.telegram.org/bot{_bot_token()}/{method}"
+def _build_tg() -> TgCtx:
+    cfg = Settings.build()
+    token = cfg.BOT_TOKEN or ""
+    base = f"https://api.telegram.org/bot{token}"
+    admins: Tuple[int, ...] = tuple(int(x) for x in (cfg.ADMIN_CHAT_IDS or "").replace(";", ",").split(",") if x.strip().isdigit())
+    return TgCtx(token=token, api_base=base, admin_ids=admins)
 
-def _send_message(chat_id: int | str, text: str, *, parse_mode: str = "HTML", disable_web_page_preview: bool = True) -> None:
+
+def tg_request(method: str, data: Dict[str, Any], files: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    ctx = _build_tg()
+    if not ctx.token:
+        raise RuntimeError("BOT_TOKEN is empty in Settings")
+    url = f"{ctx.api_base}/{method}"
     try:
-        requests.post(_tg_api("sendMessage"), json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": disable_web_page_preview,
-        }, timeout=12)
-    except Exception:
-        pass
+        if files:
+            resp = requests.post(url, data=data, files=files, timeout=15)
+        else:
+            resp = requests.post(url, json=data, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.exception("tg_request failed: %s %s", method, e)
+        return {"ok": False, "error": str(e)}
 
-def _send_photo(chat_id: int | str, png_bytes: bytes, caption: str = "") -> None:
-    try:
-        files = {"photo": ("chart.png", png_bytes, "image/png")}
-        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-        requests.post(_tg_api("sendPhoto"), files=files, data=data, timeout=20)
-    except Exception:
-        pass
 
-# ======================= Exchange / data helpers =======================
+def send_text(chat_id: int, text: str, parse_mode: str = "HTML") -> None:
+    tg_request("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True})
 
-_EXCHANGE: Optional[Any] = None
 
-def _ensure_exchange():
-    global _EXCHANGE
-    if _EXCHANGE is not None:
-        return _EXCHANGE
-    if ccxt is None:
-        return None
-    name = os.getenv("EXCHANGE_NAME", "gateio")
-    cls = getattr(ccxt, name, None)
-    if cls is None:
-        return None
-    api_key = os.getenv("API_KEY") or os.getenv("GATE_API_KEY") or ""
-    api_secret = os.getenv("API_SECRET") or os.getenv("GATE_API_SECRET") or ""
+def send_photo(chat_id: int, png_bytes: bytes, caption: str = "") -> None:
+    files = {"photo": ("chart.png", png_bytes, "image/png")}
+    tg_request("sendPhoto", {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}, files=files)
+
+
+# --------------------------- Exchange ---------------------------
+def build_exchange(cfg: Settings):
+    name = (cfg.EXCHANGE_NAME or "gateio").lower()
+    klass = getattr(ccxt, name)
     params = {}
-    if api_key and api_secret:
-        params["apiKey"] = api_key
-        params["secret"] = api_secret
+    key = (cfg.API_KEY or cfg.GATE_API_KEY or "").strip()
+    sec = (cfg.API_SECRET or cfg.GATE_API_SECRET or "").strip()
+    if key and sec:
+        params["apiKey"] = key
+        params["secret"] = sec
+    ex = klass(params)
+    ex.enableRateLimit = True
+    # РЅРµРєРѕС‚РѕСЂС‹Рµ Р±РёСЂР¶Рё С‚СЂРµР±СѓСЋС‚ РЅР°СЃС‚СЂРѕР№РєРё
+    if hasattr(ex, "options"):
+        ex.options["defaultType"] = ex.options.get("defaultType", "spot")
+    return ex
+
+
+# --------------------------- Helpers ---------------------------
+def parse_args(txt: str) -> Tuple[Optional[str], Optional[str], Optional[float]]:
+    # РїРѕРґРґРµСЂР¶РёРј: /status BTC/USDT 15m   РёР»Рё /testbuy 10
+    parts = txt.strip().split()
+    sym = None
+    tf = None
+    amt = None
+    for p in parts[1:]:  # РїСЂРѕРїСѓСЃРєР°РµРј СЃР°РјСѓ РєРѕРјР°РЅРґСѓ
+        u = p.strip()
+        if re.match(r"^\d+(m|h|d)$", u, re.I):
+            tf = u
+        elif re.match(r"^[A-Z0-9]+[/-][A-Z0-9]+$", u, re.I):
+            sym = u.replace("-", "/").upper()
+        elif re.match(r"^\d+(\.\d+)?$", u):
+            try:
+                amt = float(u)
+            except Exception:
+                pass
+    return sym, tf, amt
+
+
+def fmt_indicators(ind: Dict[str, Any]) -> str:
+    return (f"Р¦РµРЅР°: <b>{ind['price']:.2f}</b>\n"
+            f"EMA20/EMA50: <b>{ind['ema20']:.2f}</b> / <b>{ind['ema50']:.2f}</b>\n"
+            f"RSI: <b>{ind['rsi']:.1f}</b> | MACD(hist): <b>{ind['macd_hist']:.4f}</b>\n"
+            f"ATR%%: <b>{ind['atr_pct']:.2f}</b>")
+
+
+def make_chart(df: pd.DataFrame, ema20: pd.Series, ema50: pd.Series, title: str) -> bytes:
+    fig, ax = plt.subplots(figsize=(7, 3.2), dpi=150)
+    ax.plot(df["ts"], df["close"], label="Close", linewidth=1.2)
+    ax.plot(df["ts"], ema20, label="EMA20", linewidth=1.0)
+    ax.plot(df["ts"], ema50, label="EMA50", linewidth=1.0)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.autofmt_xdate()
+    buf = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def build_ohlcv_df(ex, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
     try:
-        _EXCHANGE = cls(params)
-        _EXCHANGE.userAgents = {'http': 'crypto-ai-bot/1.0'}
-        _EXCHANGE.timeout = 10000
-    except Exception:
-        _EXCHANGE = None
-    return _EXCHANGE
+        raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if not raw:
+            return None
+        df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"]).astype(float)
+        return df
+    except Exception as e:
+        logger.warning("fetch_ohlcv failed: %s", e)
+        return None
 
-def _get_cfg():
-    try:
-        return Settings.build()
-    except Exception:
-        class _Dummy: pass
-        return _Dummy()
 
-def _fmt_dur(sec: float) -> str:
-    sec = int(sec)
-    m, s = divmod(sec, 60)
-    h, m = divmod(m, 60)
-    d, h = divmod(h, 24)
-    parts = []
-    if d: parts.append(f"{d}d")
-    if h: parts.append(f"{h}h")
-    if m: parts.append(f"{m}m")
-    if s and not parts: parts.append(f"{s}s")
-    return " ".join(parts) or "0s"
+# --------------------------- Command Handlers ---------------------------
+def cmd_help() -> str:
+    return (
+        "<b>РЎРїСЂР°РІРєР° РїРѕ РєРѕРјР°РЅРґР°Рј</b>\n\n"
+        "РћСЃРЅРѕРІРЅС‹Рµ:\n"
+        "/start вЂ” РїСЂРёРІРµС‚СЃС‚РІРёРµ\n"
+        "/status [SYMBOL] [TF] вЂ” РєСЂР°С‚РєРёР№ СЃС‚Р°С‚СѓСЃ Рё СЂРµРєРѕРјРµРЅРґР°С†РёСЏ\n"
+        "/chart [SYMBOL] [TF] вЂ” РіСЂР°С„РёРє С†РµРЅС‹ + EMA\n"
+        "/test [SYMBOL] [TF] вЂ” Р°РЅР°Р»РёР· (РєР°Рє /status)\n"
+        "/testbuy <amt> вЂ” С‚РµСЃС‚РѕРІР°СЏ РїРѕРєСѓРїРєР° (paper)\n"
+        "/testsell <amt> вЂ” С‚РµСЃС‚РѕРІР°СЏ РїСЂРѕРґР°Р¶Р° (paper)\n"
+        "\nРЎР»СѓР¶РµР±РЅС‹Рµ:\n"
+        "/config вЂ” С‚РµРєСѓС‰РёРµ РєР»СЋС‡РµРІС‹Рµ РЅР°СЃС‚СЂРѕР№РєРё\n"
+        "/version вЂ” РІРµСЂСЃРёСЏ\n"
+        "/ping вЂ” РїСЂРѕРІРµСЂРєР° Р±РѕС‚Р°\n"
+        "/errors вЂ” РїРѕСЃР»РµРґРЅРёРµ РѕС€РёР±РєРё (РµСЃР»Рё СЃРµСЂРІРµСЂ РёС… Р»РѕРіРёСЂСѓРµС‚)\n"
+        "\nРџСЂРёРјРµСЂС‹:\n"
+        "/status BTC/USDT 15m\n"
+        "/chart BTC/USDT 1h\n"
+        "/testbuy 10"
+    )
 
-# ======================= Charts =======================
 
-def _plot_price_chart(df: pd.DataFrame, *, title: str = "Price") -> bytes:
-    fig = plt.figure(figsize=(8.5, 4.2), dpi=120)
-    ax = fig.add_subplot(111)
-    ax.plot(df["time"], df["close"], label="Close")
+def cmd_config(cfg: Settings) -> str:
+    return (
+        "<b>Config (Settings)</b>\n"
+        f"SYMBOL={cfg.SYMBOL} TIMEFRAME={cfg.TIMEFRAME}\n"
+        f"TRADE_AMOUNT={cfg.TRADE_AMOUNT}\n"
+        f"ENABLE_TRADING={'1' if cfg.ENABLE_TRADING else '0'} SAFE_MODE={'1' if cfg.SAFE_MODE else '0'} PAPER_MODE={'1' if cfg.PAPER_MODE else '0'}\n"
+        f"AI_MIN_TO_TRADE={cfg.AI_MIN_TO_TRADE} MIN_SCORE_TO_BUY={cfg.MIN_SCORE_TO_BUY}\n"
+        f"USE_CONTEXT_PENALTIES={'1' if cfg.USE_CONTEXT_PENALTIES else '0'}"
+    )
+
+
+def do_status(chat_id: int, text: str) -> None:
+    cfg = Settings.build()
+    sym, tf, _ = parse_args(text)
+    sym = (sym or cfg.SYMBOL).replace("-", "/").upper()
+    tf = tf or cfg.TIMEFRAME
+
+    ex = build_exchange(cfg)
+    fs = aggregate_features(cfg, ex, sym, tf, cfg.AGGREGATOR_LIMIT)
+    fs = validate(fs)
+    dec = decide(fs, cfg)
+
+    ind = fs["indicators"]
+    market = fs.get("market", {})
+    msg = (
+        f"\U0001F4C8 <b>{sym}</b> @ <b>{tf}</b>\n"
+        f"{fmt_indicators(ind)}\n"
+        f"Р С‹РЅРѕРє: <b>{market.get('condition','?')}</b>\n"
+        f"Р РµС€РµРЅРёРµ: <b>{dec['action']}</b> (score={dec['score']:.2f}, {dec['reason']})"
+    )
+    send_text(chat_id, msg)
+
+
+def do_chart(chat_id: int, text: str) -> None:
+    cfg = Settings.build()
+    sym, tf, _ = parse_args(text)
+    sym = (sym or cfg.SYMBOL).replace("-", "/").upper()
+    tf = tf or cfg.TIMEFRAME
+
+    ex = build_exchange(cfg)
+    df = build_ohlcv_df(ex, sym, tf, max(cfg.OHLCV_LIMIT, 120))
+    if df is None or len(df) < 5:
+        send_text(chat_id, "РќРµС‚ РґР°РЅРЅС‹С… РґР»СЏ РіСЂР°С„РёРєР°.")
+        return
+
+    # ema20/ema50 С‚РѕР»СЊРєРѕ РґР»СЏ РіСЂР°С„РёРєР°
     ema20 = df["close"].ewm(span=20, adjust=False).mean()
     ema50 = df["close"].ewm(span=50, adjust=False).mean()
-    ax.plot(df["time"], ema20, label="EMA20")
-    ax.plot(df["time"], ema50, label="EMA50")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.25)
-    ax.legend(loc="upper left", fontsize=8)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    return buf.getvalue()
+    png = make_chart(df, ema20, ema50, f"{sym} {tf}")
 
-def _plot_rsi(df: pd.DataFrame) -> bytes:
-    close = df["close"].to_numpy()
-    diff = np.diff(close, prepend=close[0])
-    gain = np.clip(diff, 0, None)
-    loss = np.clip(-diff, 0, None)
-    period = 14
-    def _sma(x, n):
-        s = pd.Series(x).rolling(n, min_periods=1).mean().to_numpy()
-        return s
-    avg_gain = _sma(gain, period)
-    avg_loss = _sma(loss, period)
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.inf), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    send_photo(chat_id, png, caption=f"{sym} {tf}")
 
-    fig = plt.figure(figsize=(8.5, 2.5), dpi=120)
-    ax = fig.add_subplot(111)
-    ax.plot(df["time"], rsi, label="RSI(14)")
-    ax.axhline(70, linestyle="--", linewidth=1)
-    ax.axhline(30, linestyle="--", linewidth=1)
-    ax.grid(True, alpha=0.25)
-    ax.set_ylim(0, 100)
-    ax.legend(loc="upper left", fontsize=8)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    return buf.getvalue()
 
-def _help_text() -> str:
-    return textwrap.dedent("""\
-        <b>Команды бота</b>
+def do_test(chat_id: int, text: str) -> None:
+    # alias РЅР° status СЃ РєРѕСЂРѕС‚РєРёРј РѕС‚РІРµС‚РѕРј
+    cfg = Settings.build()
+    sym, tf, _ = parse_args(text)
+    sym = (sym or cfg.SYMBOL).replace("-", "/").upper()
+    tf = tf or cfg.TIMEFRAME
+    ex = build_exchange(cfg)
+    fs = aggregate_features(cfg, ex, sym, tf, cfg.AGGREGATOR_LIMIT)
+    fs = validate(fs)
+    dec = decide(fs, cfg)
+    ind = fs["indicators"]
+    send_text(chat_id, f"<b>{sym}</b> {tf} | score={dec['score']:.2f} в†’ <b>{dec['action']}</b>\nRSI={ind['rsi']:.1f} ATR%={ind['atr_pct']:.2f}")
 
-        <b>Основные</b>
-        /status — краткий обзор: цена, индикаторы, позиция
-        /chart [SYMBOL] [TF] — график цены + EMA20/50 (напр. /chart BTC/USDT 15m)
-        /profit — сводка PnL, /profit_chart — график PnL
-        /orders — последние ордера, /positions — открытые позиции
-        /close — закрыть текущую позицию
-        /testbuy &lt;USDT&gt; — тестовая покупка (paper/live в зависимости от cfg)
-        /testsell &lt;USDT&gt; — тестовая продажа
 
-        <b>Риск и настройки</b>
-        /risk — активные гейты и факты с рынка (спред/объём/часы)
-        /limits — торговые лимиты и ключевые пороги
-        /config — текущий конфиг (символ, TF, режимы)
-        /version — версия, /ping — аптайм и готовность
-
-        <b>Сервис</b>
-        /setwebhook — установить вебхук, /getwebhook — проверить, /delwebhook — удалить
-    """).strip()
-
-def _fmt_indicators(features: Dict) -> str:
-    ind = features.get("indicators") or {}
-    mkt = features.get("market") or {}
-    price = ind.get("price")
-    rs = features.get("rule_score")
-    ai = os.getenv("AI_FAILOVER_SCORE", "0.55")
-    atr_pct = ind.get("atr_pct")
-    cond = mkt.get("condition", "neutral")
-    return f"ℹ️ <b>{price:.2f}</b> | rule={rs:.2f} | ai={ai} | ATR%≈{atr_pct:.2f} | <i>{cond}</i>"
-
-def _load_orders_csv(path: str, limit: int = 10) -> List[List[str]]:
-    if not os.path.exists(path):
-        return []
-    import csv
-    rows = []
-    with open(path, "r", encoding="utf-8") as f:
-        for row in csv.reader(f):
-            rows.append(row)
-    return rows[-limit:]
-
-def _load_positions_json(path: str) -> List[Dict]:
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data.get("open", [])
-    except Exception:
-        return []
-
-def _cmd_ping(chat_id: int, *_):
-    uptime = _fmt_dur(time.time() - START_TS)
-    _send_message(chat_id, f"✅ Online • uptime <b>{uptime}</b>")
-
-def _cmd_help(chat_id: int, *_):
-    _send_message(chat_id, _help_text())
-
-def _cmd_version(chat_id: int, *_):
-    _send_message(chat_id, "version: <b>1.0.0</b>")
-
-def _cmd_config(chat_id: int, *_):
-    cfg = _get_cfg()
-    info = (
-        f"SYMBOL={getattr(cfg,'SYMBOL','BTC/USDT')} TIMEFRAME={getattr(cfg,'TIMEFRAME','15m')}\n"
-        f"ENABLE_TRADING={getattr(cfg,'ENABLE_TRADING',1)} SAFE_MODE={getattr(cfg,'SAFE_MODE',1)} PAPER_MODE={getattr(cfg,'PAPER_MODE',1)}\n"
-        f"AI_MIN_TO_TRADE={getattr(cfg,'AI_MIN_TO_TRADE',0.55)} MIN_SCORE_TO_BUY={getattr(cfg,'MIN_SCORE_TO_BUY',0.65)}\n"
-        f"USE_CONTEXT_PENALTIES={getattr(cfg,'USE_CONTEXT_PENALTIES',0)} CTX_CLAMP=[{getattr(cfg,'CTX_SCORE_CLAMP_MIN',0.0)},{getattr(cfg,'CTX_SCORE_CLAMP_MAX',1.0)}]"
-    )
-    _send_message(chat_id, f"<b>Config (Settings)</b>\n<code>{info}</code>")
-
-def _cmd_status(chat_id: int, args: List[str]):
-    cfg = _get_cfg()
-    symbol = args[0] if args else getattr(cfg, "SYMBOL", "BTC/USDT")
-    tf = args[1] if len(args) > 1 else getattr(cfg, "TIMEFRAME", "15m")
-
-    ex = _ensure_exchange()
-    if aggregate_features is None or ex is None:
-        _send_message(chat_id, "❌ Не могу получить данные (нет биржи/агрегатора)")
-        return
-
-    feat = aggregate_features(cfg, ex, symbol=symbol, limit=int(getattr(cfg,"AGGREGATOR_LIMIT",200)))
-    if isinstance(feat, dict) and "error" in feat:
-        _send_message(chat_id, "❌ Нет данных для анализа")
-        return
-
-    text = f"💬 <b>{symbol} {tf}</b>\n" + _fmt_indicators(feat)
-    pos_list = _load_positions_json(getattr(cfg,"PAPER_POSITIONS_FILE","paper_positions.json"))
-    pos_emoji = "•".join("🟢" if (p.get('side')=='buy') else "🔴" for p in pos_list) or "—"
-    text += f"\nПозиции: {pos_emoji} @ {feat.get('indicators',{}).get('price'):.2f}"
-    _send_message(chat_id, text)
-
-def _cmd_chart(chat_id: int, args: List[str]):
-    cfg = _get_cfg()
-    symbol = args[0] if args else getattr(cfg, "SYMBOL", "BTC/USDT")
-    tf = args[1] if len(args) > 1 else getattr(cfg, "TIMEFRAME", "15m")
-    ex = _ensure_exchange()
-    if ex is None:
-        _send_message(chat_id, "❌ Биржа недоступна")
-        return
-    try:
-        ohlcv = ex.fetch_ohlcv(symbol, timeframe=tf, limit=200) or []
-        if not ohlcv:
-            _send_message(chat_id, "❌ Нет данных для графика"); return
-        df = pd.DataFrame(ohlcv, columns=["ts","open","high","low","close","volume"])
-        df["time"] = pd.to_datetime(df["ts"], unit="ms")
-        img1 = _plot_price_chart(df, title=f"{symbol} {tf}")
-        _send_photo(chat_id, img1, caption=f"{symbol} {tf}")
-    except Exception:
-        _send_message(chat_id, "❌ Не удалось построить график")
-
-def _cmd_profit(chat_id: int, *_):
-    cfg = _get_cfg()
-    pnl_csv = getattr(cfg, "PAPER_PNL_FILE", "paper_pnl.csv")
-    if not os.path.exists(pnl_csv):
-        _send_message(chat_id, "PnL: пока нет данных"); return
-    import csv
-    rows = []
-    with open(pnl_csv, "r", encoding="utf-8") as f:
-        for row in csv.reader(f):
-            rows.append(row)
-    if len(rows) <= 1:
-        _send_message(chat_id, "PnL: пока нет данных"); return
-    header, body = rows[0], rows[1:]
-    idx_abs = header.index("pnl_abs") if "pnl_abs" in header else -1
-    idx_pct = header.index("pnl_pct") if "pnl_pct" in header else -1
-    s_abs = sum(float(r[idx_abs]) for r in body if idx_abs >= 0)
-    s_pct = sum(float(r[idx_pct]) for r in body if idx_pct >= 0)
-    _send_message(chat_id, f"PnL: <b>{s_abs:.2f} USD</b> (sum pct ≈ {s_pct:.2f}%)")
-
-def _cmd_profit_chart(chat_id: int, *_):
-    cfg = _get_cfg()
-    pnl_csv = getattr(cfg, "PAPER_PNL_FILE", "paper_pnl.csv")
-    if not os.path.exists(pnl_csv):
-        _send_message(chat_id, "Нет данных для графика"); return
-    try:
-        df = pd.read_csv(pnl_csv)
-        if df.empty:
-            _send_message(chat_id, "Нет данных для графика"); return
-        df["t"] = pd.to_datetime(df["ts_close"])
-        df["cum"] = df["pnl_abs"].cumsum()
-        fig = plt.figure(figsize=(8.5, 3.2), dpi=120)
-        ax = fig.add_subplot(111)
-        ax.plot(df["t"], df["cum"], label="Cum PnL")
-        ax.grid(True, alpha=0.25); ax.legend(loc="upper left", fontsize=8)
-        fig.tight_layout()
-        buf = io.BytesIO(); fig.savefig(buf, format="png"); plt.close(fig)
-        _send_photo(chat_id, buf.getvalue(), caption="График суммарного PnL")
-    except Exception:
-        _send_message(chat_id, "❌ Не удалось построить график PnL")
-
-def _cmd_orders(chat_id: int, *_):
-    cfg = _get_cfg()
-    rows = _load_orders_csv(getattr(cfg,"PAPER_ORDERS_FILE","paper_orders.csv"), limit=10)
-    if len(rows) <= 1:
-        _send_message(chat_id, "Ордеров пока нет"); return
-    header, body = rows[0], rows[1:]
-    msg = ["<b>Последние ордера</b>"]
-    for r in body[-10:]:
+def do_test_order(chat_id: int, text: str, side: str) -> None:
+    cfg = Settings.build()
+    _, _, amt = parse_args(text)
+    amt = float(amt or cfg.TRADE_AMOUNT)
+    # РџС‹С‚Р°РµРјСЃСЏ РґРµСЂРЅСѓС‚СЊ Р»РµРіР°СЃРё-Р±РѕС‚ РґР»СЏ paper-РѕСЂРґРµСЂРѕРІ
+    if legacy_get_bot is not None:
         try:
-            ts, sym, side, qty, price, tag, typ = r
-            msg.append(f"• {ts} {sym} {side} {qty}@{price} <code>{typ}</code>")
-        except Exception:
-            continue
-    _send_message(chat_id, "\n".join(msg))
+            ex = build_exchange(cfg)
+            bot = legacy_get_bot(exchange=ex, notifier=lambda m: send_text(chat_id, m), settings=cfg)
+            # Сѓ СЂР°Р·РЅС‹С… СЂРµР°Р»РёР·Р°С†РёР№ РјРѕРіСѓС‚ Р±С‹С‚СЊ СЂР°Р·РЅС‹Рµ РјРµС‚РѕРґС‹ вЂ” РїСЂРѕР±СѓРµРј РІР°СЂРёР°РЅС‚С‹
+            if side == "buy":
+                for meth in ("paper_market_buy", "paper_buy", "test_buy", "market_buy"):
+                    if hasattr(bot, meth):
+                        getattr(bot, meth)(amount=amt)
+                        send_text(chat_id, f"\u2705 РўРµСЃС‚РѕРІР°СЏ РїРѕРєСѓРїРєР° {amt}")
+                        return
+            else:
+                for meth in ("paper_market_sell", "paper_sell", "test_sell", "market_sell"):
+                    if hasattr(bot, meth):
+                        getattr(bot, meth)(amount=amt)
+                        send_text(chat_id, f"\u2705 РўРµСЃС‚РѕРІР°СЏ РїСЂРѕРґР°Р¶Р° {amt}")
+                        return
+        except Exception as e:
+            logger.warning("legacy test order failed: %s", e)
+    # fallback вЂ” РїСЂРѕСЃС‚Рѕ РёРјРёС‚Р°С†РёСЏ
+    send_text(chat_id, f"\u2705 Р—Р°РїСЂРѕСЃ РїСЂРёРЅСЏС‚: С‚РµСЃС‚РѕРІР°СЏ {('РїРѕРєСѓРїРєР°' if side=='buy' else 'РїСЂРѕРґР°Р¶Р°')} {amt} (paper)")
 
-def _cmd_positions(chat_id: int, *_):
-    cfg = _get_cfg()
-    pos = _load_positions_json(getattr(cfg,"PAPER_POSITIONS_FILE","paper_positions.json"))
-    if not pos:
-        _send_message(chat_id, "Позиций нет"); return
-    msg = ["<b>Открытые позиции</b>"]
-    for p in pos:
-        msg.append(f"• {p.get('symbol')} {p.get('side')} {p.get('qty')} @ {p.get('entry_price')}")
-    _send_message(chat_id, "\n".join(msg))
 
-def _cmd_close(chat_id: int, *_):
-    ex = _ensure_exchange()
-    bot = get_bot(exchange=ex, notifier=None, settings=_get_cfg())
-    res = bot.request_close_position(source="telegram")
-    text = res.get("message","ok") if isinstance(res, dict) else "ok"
-    _send_message(chat_id, text)
+# --------------------------- Webhook entry ---------------------------
+def _extract_message(payload: Dict[str, Any]) -> Tuple[Optional[int], Optional[str]]:
+    msg = None
+    if "message" in payload:
+        msg = payload["message"]
+    elif "edited_message" in payload:
+        msg = payload["edited_message"]
+    elif "channel_post" in payload:
+        msg = payload["channel_post"]
 
-def _cmd_test_order(chat_id: int, args: List[str], side: str):
-    if not args:
-        _send_message(chat_id, f"Использование: /test{side} &lt;USDT&gt;"); return
-    try:
-        amount = float(args[0])
-    except Exception:
-        _send_message(chat_id, "Сумма должна быть числом"); return
-    ex = _ensure_exchange()
-    bot = get_bot(exchange=ex, notifier=None, settings=_get_cfg())
-    res = bot.request_market_order(side, amount, source="telegram")
-    text = res.get("message","ok") if isinstance(res, dict) else "ok"
-    _send_message(chat_id, text)
+    if not msg:
+        return None, None
 
-def _cmd_risk(chat_id: int, *_):
-    cfg = _get_cfg()
-    ex = _ensure_exchange()
-    parts = [ "<b>Risk (гейты)</b>" ]
-    parts.append(f"• MAX_SPREAD_BPS={getattr(cfg,'MAX_SPREAD_BPS',15)}")
-    parts.append(f"• MIN_24H_VOLUME_USD={getattr(cfg,'MIN_24H_VOLUME_USD',1_000_000)}")
-    parts.append(f"• HOURS={getattr(cfg,'TRADING_HOUR_START',0)}–{getattr(cfg,'TRADING_HOUR_END',24)} UTC")
-    try:
-        symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
-        spread_bps = None
-        if ex and hasattr(ex, "fetch_order_book"):
-            ob = ex.fetch_order_book(symbol, limit=5) or {}
-            bid = float((ob.get("bids") or [[0]])[0][0])
-            ask = float((ob.get("asks") or [[0]])[0][0])
-            if bid and ask:
-                spread_bps = (ask - bid) / ((ask + bid) / 2.0) * 10000.0
-        if spread_bps is not None:
-            parts.append(f"• Текущий спред ≈ {spread_bps:.1f} bps")
-        if ex and hasattr(ex, "fetch_ticker"):
-            t = ex.fetch_ticker(symbol) or {}
-            vol = float(t.get("quoteVolume") or 0.0)
-            if vol:
-                parts.append(f"• 24h объём ≈ {vol:,.0f} USD")
-    except Exception:
-        pass
-    _send_message(chat_id, "\n".join(parts))
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+    text = msg.get("text") or ""
+    return chat_id, text
 
-def _cmd_limits(chat_id: int, *_):
-    cfg = _get_cfg()
-    parts = [
-        "<b>Лимиты</b>",
-        f"• TRADE_AMOUNT={getattr(cfg,'TRADE_AMOUNT',10)} USDT | MAX_CONCURRENT_POS={getattr(cfg,'MAX_CONCURRENT_POS',1)}",
-        f"• SL={getattr(cfg,'STOP_LOSS_PCT',2.0)}%  TP={getattr(cfg,'TAKE_PROFIT_PCT',1.5)}%  TRAILING={getattr(cfg,'TRAILING_STOP_ENABLE',1)} @ {getattr(cfg,'TRAILING_STOP_PCT',0.5)}%",
-        f"• MIN_SCORE_TO_BUY={getattr(cfg,'MIN_SCORE_TO_BUY',0.65)}  AI_MIN={getattr(cfg,'AI_MIN_TO_TRADE',0.55)}  GATE={getattr(cfg,'ENFORCE_AI_GATE',1)}",
-        f"• ATR_PERIOD={getattr(cfg,'ATR_PERIOD',14)}  ATR_METHOD={getattr(cfg,'RISK_ATR_METHOD','ewm')}",
-    ]
-    _send_message(chat_id, "\n".join(parts))
 
-def _cmd_setwebhook(chat_id: int, *_):
-    url = os.getenv("PUBLIC_URL", "").rstrip("/") + "/telegram/webhook"
-    secret = os.getenv("TELEGRAM_SECRET_TOKEN", "")
-    data = {"url": url}
-    if secret:
-        data["secret_token"] = secret
-    try:
-        r = requests.post(_tg_api("setWebhook"), json=data, timeout=15).json()
-    except Exception as e:
-        r = {"ok": False, "error": str(e)}
-    _send_message(chat_id, f"setWebhook → <code>{r}</code>")
+def _route_command(chat_id: int, text: str) -> None:
+    t = (text or "").strip()
+    low = t.lower()
+    if low.startswith("/start"):
+        send_text(chat_id, "РџСЂРёРІРµС‚! РЇ Р±РѕС‚ С‚РѕСЂРіРѕРІРѕР№ СЃРёСЃС‚РµРјС‹. РќР°Р±РµСЂРё /help РґР»СЏ СЃРїСЂР°РІРєРё.")
+    elif low.startswith("/help"):
+        send_text(chat_id, cmd_help())
+    elif low.startswith("/status"):
+        do_status(chat_id, t)
+    elif low.startswith("/chart"):
+        do_chart(chat_id, t)
+    elif low.startswith("/testbuy"):
+        do_test_order(chat_id, t, "buy")
+    elif low.startswith("/testsell"):
+        do_test_order(chat_id, t, "sell")
+    elif low.startswith("/test"):
+        do_test(chat_id, t)
+    elif low.startswith("/config"):
+        send_text(chat_id, cmd_config(Settings.build()))
+    elif low.startswith("/version"):
+        send_text(chat_id, "version: 1.0.0")
+    elif low.startswith("/ping"):
+        send_text(chat_id, "pong")
+    elif low.startswith("/errors"):
+        send_text(chat_id, "Р›РѕРі-С„Р°Р№Р» РµС‰С‘ РЅРµ СЃРѕР·РґР°РЅ РёР»Рё РЅРµРґРѕСЃС‚СѓРїРµРЅ")
+    else:
+        send_text(chat_id, "РќРµРёР·РІРµСЃС‚РЅР°СЏ РєРѕРјР°РЅРґР°. /help вЂ” СЃРїРёСЃРѕРє РєРѕРјР°РЅРґ")
 
-def _cmd_getwebhook(chat_id: int, *_):
-    try:
-        r = requests.get(_tg_api("getWebhookInfo"), timeout=15).json()
-    except Exception as e:
-        r = {"ok": False, "error": str(e)}
-    _send_message(chat_id, f"<code>{r}</code>")
 
-def _cmd_delwebhook(chat_id: int, *_):
-    try:
-        r = requests.post(_tg_api("deleteWebhook"), json={}, timeout=15).json()
-    except Exception as e:
-        r = {"ok": False, "error": str(e)}
-    _send_message(chat_id, f"deleteWebhook → <code>{r}</code>")
+def _handle_update_sync(payload: Dict[str, Any]) -> None:
+    chat_id, text = _extract_message(payload)
+    if not chat_id:
+        return
+    _route_command(chat_id, text or "")
 
-def _parse(text: str) -> Tuple[str, List[str]]:
-    text = (text or "").strip()
-    if not text.startswith("/"):
-        return "", []
-    parts = text.split()
-    cmd = parts[0].lower()
-    args = parts[1:]
-    return cmd, args
 
-def process_update(payload: Dict[str, Any]) -> None:
-    try:
-        message = payload.get("message") or payload.get("channel_post") or {}
-        chat = message.get("chat") or {}
-        chat_id = chat.get("id")
-        text = message.get("text", "")
-        if not chat_id or not text:
-            return
-
-        cmd, args = _parse(text)
-        if cmd in ("/start", "/help"):
-            _cmd_help(chat_id); return
-        if cmd == "/ping":
-            _cmd_ping(chat_id); return
-        if cmd == "/version":
-            _cmd_version(chat_id); return
-        if cmd == "/config":
-            _cmd_config(chat_id); return
-        if cmd == "/status":
-            _cmd_status(chat_id, args); return
-        if cmd == "/chart":
-            _cmd_chart(chat_id, args); return
-        if cmd == "/profit":
-            _cmd_profit(chat_id); return
-        if cmd == "/profit_chart":
-            _cmd_profit_chart(chat_id); return
-        if cmd == "/orders":
-            _cmd_orders(chat_id); return
-        if cmd == "/positions":
-            _cmd_positions(chat_id); return
-        if cmd == "/close":
-            _cmd_close(chat_id); return
-        if cmd == "/testbuy":
-            _cmd_test_order(chat_id, args, "buy"); return
-        if cmd == "/testsell":
-            _cmd_test_order(chat_id, args, "sell"); return
-        if cmd == "/risk":
-            _cmd_risk(chat_id); return
-        if cmd == "/limits":
-            _cmd_limits(chat_id); return
-        if cmd == "/setwebhook":
-            _cmd_setwebhook(chat_id); return
-        if cmd == "/getwebhook":
-            _cmd_getwebhook(chat_id); return
-        if cmd == "/delwebhook":
-            _cmd_delwebhook(chat_id); return
-
-        _send_message(chat_id, "Неизвестная команда.\n\n" + _help_text())
-    except Exception:
-        pass
+async def process_update(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Р’С…РѕРґ РёР· FastAPI webhook-СЂРѕСѓС‚Р° (server.py).
+    FastAPI РѕР¶РёРґР°РµС‚ РєРѕСЂСѓС‚РёРЅСѓ вЂ” РІС‹РїРѕР»РЅСЏРµРј СЃРёРЅС…СЂРѕРЅРЅСѓСЋ С‡Р°СЃС‚СЊ РІ РїСѓР»Рµ.
+    """
+    await asyncio.to_thread(_handle_update_sync, payload)
+    return {"ok": True}

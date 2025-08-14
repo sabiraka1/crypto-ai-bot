@@ -1,11 +1,11 @@
-import importlib
+﻿import importlib
 import sys
 from types import SimpleNamespace
 import time
 
 
 def _install_stub(module_name: str, obj):
-    """Удобный помощник: засунуть заглушку в sys.modules по пути вида 'a.b.c'."""
+    """РЈРґРѕР±РЅС‹Р№ РїРѕРјРѕС‰РЅРёРє: Р·Р°СЃСѓРЅСѓС‚СЊ Р·Р°РіР»СѓС€РєСѓ РІ sys.modules РїРѕ РїСѓС‚Рё РІРёРґР° 'a.b.c'."""
     parts = module_name.split(".")
     base = ""
     for i, p in enumerate(parts):
@@ -17,8 +17,8 @@ def _install_stub(module_name: str, obj):
 
 def test_integration_check_happy_path(monkeypatch):
     """
-    Эмулируем наличие analysis.* и utils.monitoring так, чтобы check_integration() прошёл по веткам OK.
-    Это покрывает сразу несколько блоков в utils/integration_check.py.
+    Р­РјСѓР»РёСЂСѓРµРј РЅР°Р»РёС‡РёРµ analysis.* Рё utils.monitoring С‚Р°Рє, С‡С‚РѕР±С‹ check_integration() РїСЂРѕС€С‘Р» РїРѕ РІРµС‚РєР°Рј OK.
+    Р­С‚Рѕ РїРѕРєСЂС‹РІР°РµС‚ СЃСЂР°Р·Сѓ РЅРµСЃРєРѕР»СЊРєРѕ Р±Р»РѕРєРѕРІ РІ utils/integration_check.py.
     """
     # --- technical_indicators.calculate_all_indicators
     ti_stub = SimpleNamespace(
@@ -45,7 +45,7 @@ def test_integration_check_happy_path(monkeypatch):
 
     # --- scoring_engine.ScoringEngine
     class ScoringEngineStub:
-        # оставляем только evaluate (чтоб unified_interface == True)
+        # РѕСЃС‚Р°РІР»СЏРµРј С‚РѕР»СЊРєРѕ evaluate (С‡С‚РѕР± unified_interface == True)
         def evaluate(self, *args, **kwargs):
             return {"buy": 0.0, "sell": 0.0}
 
@@ -74,21 +74,21 @@ def test_integration_check_happy_path(monkeypatch):
     res = ic.check_integration()
 
     assert isinstance(res, dict)
-    # технические индикаторы
+    # С‚РµС…РЅРёС‡РµСЃРєРёРµ РёРЅРґРёРєР°С‚РѕСЂС‹
     assert res.get("technical_indicators", {}).get("status") == "OK"
-    # мониторинг
+    # РјРѕРЅРёС‚РѕСЂРёРЅРі
     assert res.get("monitoring", {}).get("status") == "OK"
     assert res["monitoring"]["metrics_working"] is True
     assert res["monitoring"]["health_working"] is True
-    # скоринг (проверяем unified_interface)
+    # СЃРєРѕСЂРёРЅРі (РїСЂРѕРІРµСЂСЏРµРј unified_interface)
     assert res.get("scoring_engine", {}).get("status") == "OK"
     assert res["scoring_engine"]["unified_interface"] is True
 
 
 def test_integration_check_errors_when_modules_missing(monkeypatch):
     """
-    Проверяем ветки ошибок: убираем analysis.* и monitoring из sys.modules
-    и убеждаемся, что check_integration() возвращает статус ERROR по этим пунктам.
+    РџСЂРѕРІРµСЂСЏРµРј РІРµС‚РєРё РѕС€РёР±РѕРє: СѓР±РёСЂР°РµРј analysis.* Рё monitoring РёР· sys.modules
+    Рё СѓР±РµР¶РґР°РµРјСЃСЏ, С‡С‚Рѕ check_integration() РІРѕР·РІСЂР°С‰Р°РµС‚ СЃС‚Р°С‚СѓСЃ ERROR РїРѕ СЌС‚РёРј РїСѓРЅРєС‚Р°Рј.
     """
     for k in list(sys.modules.keys()):
         if k.startswith("analysis.") or k == "utils.monitoring":
@@ -97,7 +97,7 @@ def test_integration_check_errors_when_modules_missing(monkeypatch):
     ic = importlib.import_module("utils.integration_check")
     res = ic.check_integration()
 
-    # Как минимум эти ключи должны присутствовать и иметь статус ERROR
+    # РљР°Рє РјРёРЅРёРјСѓРј СЌС‚Рё РєР»СЋС‡Рё РґРѕР»Р¶РЅС‹ РїСЂРёСЃСѓС‚СЃС‚РІРѕРІР°С‚СЊ Рё РёРјРµС‚СЊ СЃС‚Р°С‚СѓСЃ ERROR
     assert "technical_indicators" in res
     assert "monitoring" in res
     assert res["technical_indicators"]["status"] in ("ERROR", "SKIPPED", "WARNING")
@@ -106,10 +106,10 @@ def test_integration_check_errors_when_modules_missing(monkeypatch):
 
 def test_print_integration_report_smoke(capsys):
     """
-    Быстрая дымовая проверка удобного принтера отчёта — не ломает stdout.
+    Р‘С‹СЃС‚СЂР°СЏ РґС‹РјРѕРІР°СЏ РїСЂРѕРІРµСЂРєР° СѓРґРѕР±РЅРѕРіРѕ РїСЂРёРЅС‚РµСЂР° РѕС‚С‡С‘С‚Р° вЂ” РЅРµ Р»РѕРјР°РµС‚ stdout.
     """
     ic = importlib.import_module("utils.integration_check")
-    # подставим минимальный результат
+    # РїРѕРґСЃС‚Р°РІРёРј РјРёРЅРёРјР°Р»СЊРЅС‹Р№ СЂРµР·СѓР»СЊС‚Р°С‚
     sample = {
         "technical_indicators": {"status": "OK"},
         "monitoring": {"status": "ERROR", "error": "missing"},

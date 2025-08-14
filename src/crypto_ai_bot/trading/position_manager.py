@@ -1,13 +1,13 @@
-# src/crypto_ai_bot/trading/position_manager.py
+﻿# src/crypto_ai_bot/trading/position_manager.py
 """
-💼 PositionManager — лёгкий продакшн-менеджер позиций (лонг-только)
-Совместим с TradingBot: .open(ctx), .manage(price, atr), .close_all(price, reason)
+рџ’ј PositionManager вЂ” Р»С‘РіРєРёР№ РїСЂРѕРґР°РєС€РЅ-РјРµРЅРµРґР¶РµСЂ РїРѕР·РёС†РёР№ (Р»РѕРЅРі-С‚РѕР»СЊРєРѕ)
+РЎРѕРІРјРµСЃС‚РёРј СЃ TradingBot: .open(ctx), .manage(price, atr), .close_all(price, reason)
 
-Особенности:
-- SAFE_MODE симулирует сделки, но проходит полный цикл состояния/логов.
-- Округление qty/цены через ExchangeClient.*precision/round_* (если доступны).
-- Частичный выход на TP1, перенос SL в безубыток, простой трейлинг.
-- События через EventBus (если передан в конструкторе).
+РћСЃРѕР±РµРЅРЅРѕСЃС‚Рё:
+- SAFE_MODE СЃРёРјСѓР»РёСЂСѓРµС‚ СЃРґРµР»РєРё, РЅРѕ РїСЂРѕС…РѕРґРёС‚ РїРѕР»РЅС‹Р№ С†РёРєР» СЃРѕСЃС‚РѕСЏРЅРёСЏ/Р»РѕРіРѕРІ.
+- РћРєСЂСѓРіР»РµРЅРёРµ qty/С†РµРЅС‹ С‡РµСЂРµР· ExchangeClient.*precision/round_* (РµСЃР»Рё РґРѕСЃС‚СѓРїРЅС‹).
+- Р§Р°СЃС‚РёС‡РЅС‹Р№ РІС‹С…РѕРґ РЅР° TP1, РїРµСЂРµРЅРѕСЃ SL РІ Р±РµР·СѓР±С‹С‚РѕРє, РїСЂРѕСЃС‚РѕР№ С‚СЂРµР№Р»РёРЅРі.
+- РЎРѕР±С‹С‚РёСЏ С‡РµСЂРµР· EventBus (РµСЃР»Рё РїРµСЂРµРґР°РЅ РІ РєРѕРЅСЃС‚СЂСѓРєС‚РѕСЂРµ).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any
 from crypto_ai_bot.core.state_manager import StateManager
 from crypto_ai_bot.core.events import EventBus
 from crypto_ai_bot.trading.exchange_client import ExchangeClient, APIException
-from crypto_ai_bot.config.settings import Settings
+from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.utils.csv_handler import CSVHandler
 
 logger = logging.getLogger(__name__)
@@ -46,9 +46,9 @@ class PositionSnapshot:
 
 class PositionManager:
     """
-    Минималистичный менеджер позиций под новый конвейер:
-      - open(ctx)     — открытие по входному решению энтри-полиси
-      - manage(price) — сопровождение (SL/TP/partial/trailing)
+    РњРёРЅРёРјР°Р»РёСЃС‚РёС‡РЅС‹Р№ РјРµРЅРµРґР¶РµСЂ РїРѕР·РёС†РёР№ РїРѕРґ РЅРѕРІС‹Р№ РєРѕРЅРІРµР№РµСЂ:
+      - open(ctx)     вЂ” РѕС‚РєСЂС‹С‚РёРµ РїРѕ РІС…РѕРґРЅРѕРјСѓ СЂРµС€РµРЅРёСЋ СЌРЅС‚СЂРё-РїРѕР»РёСЃРё
+      - manage(price) вЂ” СЃРѕРїСЂРѕРІРѕР¶РґРµРЅРёРµ (SL/TP/partial/trailing)
       - close_all(price, reason)
     """
 
@@ -64,9 +64,9 @@ class PositionManager:
         self.settings = settings
         self.events = events
         self._lock = threading.RLock()
-        logger.info("💼 PositionManager initialized")
+        logger.info("рџ’ј PositionManager initialized")
 
-    # ── helpers ──────────────────────────────────────────────────────────────
+    # в”Ђв”Ђ helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     def _is_active(self) -> bool:
         st = getattr(self.state, "state", {}) or {}
         return bool(st.get("in_position") or st.get("opening"))
@@ -116,17 +116,17 @@ class PositionManager:
             pass
         return 0.0
 
-    # ── public API ───────────────────────────────────────────────────────────
+    # в”Ђв”Ђ public API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     def open(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        ctx ожидает:
+        ctx РѕР¶РёРґР°РµС‚:
           symbol, side='buy', size_usd, entry_price, stop_loss, take_profit,
           buy_score, ai_score, confidence, details{...}
         """
         with self._lock:
             try:
                 if self._is_active():
-                    logger.warning("Position already active/opening — skip open()")
+                    logger.warning("Position already active/opening вЂ” skip open()")
                     return None
 
                 symbol = ctx.get("symbol") or getattr(self.settings, "SYMBOL", "BTC/USDT")
@@ -145,13 +145,13 @@ class PositionManager:
                 qty_base = size_usd / entry_price
                 qty_base = self._round_amount(symbol, qty_base)
 
-                # округление SL/TP под шаг цены (если задан)
+                # РѕРєСЂСѓРіР»РµРЅРёРµ SL/TP РїРѕРґ С€Р°Рі С†РµРЅС‹ (РµСЃР»Рё Р·Р°РґР°РЅ)
                 stop_loss = ctx.get("stop_loss")
                 take_profit = ctx.get("take_profit")
                 if stop_loss:  stop_loss  = self._round_price(symbol, float(stop_loss))
                 if take_profit: take_profit = self._round_price(symbol, float(take_profit))
 
-                # помечаем состояние "opening"
+                # РїРѕРјРµС‡Р°РµРј СЃРѕСЃС‚РѕСЏРЅРёРµ "opening"
                 self.state.set("opening", True)
 
                 order_result: Optional[Dict[str, Any]] = None
@@ -168,9 +168,9 @@ class PositionManager:
                         "status": "closed",
                         "paper": True,
                     }
-                    logger.info(f"📄 PAPER BUY {symbol} {qty_base:.8f} @ {entry_price:.6f} (${size_usd:.2f})")
+                    logger.info(f"рџ“„ PAPER BUY {symbol} {qty_base:.8f} @ {entry_price:.6f} (${size_usd:.2f})")
                 else:
-                    # реальная торговля
+                    # СЂРµР°Р»СЊРЅР°СЏ С‚РѕСЂРіРѕРІР»СЏ
                     if hasattr(self.exchange, "create_market_buy_order"):
                         order_result = self.exchange.create_market_buy_order(symbol, qty_base)
                     else:
@@ -178,7 +178,7 @@ class PositionManager:
                     if not order_result:
                         raise APIException("Order execution failed")
 
-                # обновляем state позицию
+                # РѕР±РЅРѕРІР»СЏРµРј state РїРѕР·РёС†РёСЋ
                 pos = {
                     "in_position": True,
                     "opening": False,
@@ -187,8 +187,8 @@ class PositionManager:
                     "qty_base": qty_base,
                     "qty_usd": qty_base * entry_price,
                     "sl_atr": float(stop_loss) if stop_loss else None,
-                    "tp1_atr": float(take_profit) if take_profit else None,   # TP1 = заявленный TP
-                    "tp2_atr": float(take_profit) if take_profit else None,   # можно держать одинаковым, если нет второй цели
+                    "tp1_atr": float(take_profit) if take_profit else None,   # TP1 = Р·Р°СЏРІР»РµРЅРЅС‹Р№ TP
+                    "tp2_atr": float(take_profit) if take_profit else None,   # РјРѕР¶РЅРѕ РґРµСЂР¶Р°С‚СЊ РѕРґРёРЅР°РєРѕРІС‹Рј, РµСЃР»Рё РЅРµС‚ РІС‚РѕСЂРѕР№ С†РµР»Рё
                     "partial_taken": False,
                     "trailing_on": bool(getattr(self.settings, "TRAILING_STOP_ENABLE", False)),
                     "entry_ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -201,10 +201,10 @@ class PositionManager:
                 for k, v in pos.items():
                     self.state.set(k, v)
 
-                # событие
+                # СЃРѕР±С‹С‚РёРµ
                 self._emit("position_opened", {**ctx, **pos})
 
-                logger.info(f"✅ Position opened: {symbol} qty={qty_base:.8f} @ {entry_price:.6f}")
+                logger.info(f"вњ… Position opened: {symbol} qty={qty_base:.8f} @ {entry_price:.6f}")
                 return order_result
 
             except APIException as e:
@@ -217,7 +217,7 @@ class PositionManager:
                 return None
 
     def manage(self, price: float, atr: float = 0.0) -> None:
-        """Проверка SL/TP/частичного выхода + трейлинг (если включен)."""
+        """РџСЂРѕРІРµСЂРєР° SL/TP/С‡Р°СЃС‚РёС‡РЅРѕРіРѕ РІС‹С…РѕРґР° + С‚СЂРµР№Р»РёРЅРі (РµСЃР»Рё РІРєР»СЋС‡РµРЅ)."""
         with self._lock:
             if not self._is_active():
                 return
@@ -234,41 +234,41 @@ class PositionManager:
                     logger.error("Invalid position state (entry/qty)")
                     return
 
-                # стоп
+                # СЃС‚РѕРї
                 if sl and price <= float(sl):
-                    logger.info(f"🔴 Stop Loss hit: {price:.6f} <= {float(sl):.6f}")
+                    logger.info(f"рџ”ґ Stop Loss hit: {price:.6f} <= {float(sl):.6f}")
                     self.close_all(price, "stop_loss")
                     return
 
-                # TP1 — частичный
+                # TP1 вЂ” С‡Р°СЃС‚РёС‡РЅС‹Р№
                 if not partial_taken and tp1 and price >= float(tp1):
-                    logger.info(f"🟢 Take Profit 1 hit: {price:.6f} >= {float(tp1):.6f}")
+                    logger.info(f"рџџў Take Profit 1 hit: {price:.6f} >= {float(tp1):.6f}")
                     self._partial_close(price, fraction=0.5, reason="take_profit_1")
                     self.state.set("partial_taken", True)
-                    # перенос SL к безубытку или чуть выше
+                    # РїРµСЂРµРЅРѕСЃ SL Рє Р±РµР·СѓР±С‹С‚РєСѓ РёР»Рё С‡СѓС‚СЊ РІС‹С€Рµ
                     if getattr(self.settings, "TRAILING_STOP_ENABLE", False):
                         new_sl = max(entry_price * 1.001, float(sl or 0))
                         self.state.set("sl_atr", new_sl)
-                        logger.info(f"🔄 Move SL to breakeven: {new_sl:.6f}")
+                        logger.info(f"рџ”„ Move SL to breakeven: {new_sl:.6f}")
 
-                # TP2 — полный выход
+                # TP2 вЂ” РїРѕР»РЅС‹Р№ РІС‹С…РѕРґ
                 if self.state.get("partial_taken", False) and tp2 and price >= float(tp2):
-                    logger.info(f"🟢 Take Profit 2 hit: {price:.6f} >= {float(tp2):.6f}")
+                    logger.info(f"рџџў Take Profit 2 hit: {price:.6f} >= {float(tp2):.6f}")
                     self.close_all(price, "take_profit_2")
                     return
 
-                # Простой трейлинг (после частичного выхода)
+                # РџСЂРѕСЃС‚РѕР№ С‚СЂРµР№Р»РёРЅРі (РїРѕСЃР»Рµ С‡Р°СЃС‚РёС‡РЅРѕРіРѕ РІС‹С…РѕРґР°)
                 if getattr(self.settings, "TRAILING_STOP_ENABLE", False) and self.state.get("partial_taken", False):
                     self._update_trailing_stop(price, entry_price)
 
-                # отметка manage
+                # РѕС‚РјРµС‚РєР° manage
                 self.state.set("last_manage_check", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
 
             except Exception as e:
                 logger.exception(f"manage() failed: {e}")
 
     def close_all(self, price: float, reason: str) -> Optional[Dict[str, Any]]:
-        """Полное закрытие позиции по рыночной цене."""
+        """РџРѕР»РЅРѕРµ Р·Р°РєСЂС‹С‚РёРµ РїРѕР·РёС†РёРё РїРѕ СЂС‹РЅРѕС‡РЅРѕР№ С†РµРЅРµ."""
         with self._lock:
             if not self._is_active():
                 logger.warning("No active position to close")
@@ -299,7 +299,7 @@ class PositionManager:
                         "status": "closed",
                         "paper": True,
                     }
-                    logger.info(f"📄 PAPER SELL {symbol} {qty_base:.8f} @ {price:.6f}")
+                    logger.info(f"рџ“„ PAPER SELL {symbol} {qty_base:.8f} @ {price:.6f}")
                 else:
                     qty_to_sell = self._round_amount(symbol, qty_base)
                     min_amt = self._market_min_amount(symbol)
@@ -325,7 +325,7 @@ class PositionManager:
                     except Exception:
                         pass
 
-                # лог сделки
+                # Р»РѕРі СЃРґРµР»РєРё
                 try:
                     CSVHandler.log_close_trade({
                         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -345,7 +345,7 @@ class PositionManager:
                 except Exception as e:
                     logger.error(f"Failed to log CSV close: {e}")
 
-                # событие
+                # СЃРѕР±С‹С‚РёРµ
                 self._emit("position_closed", {
                     "symbol": symbol,
                     "exit_price": price,
@@ -354,18 +354,18 @@ class PositionManager:
                     "pnl_abs": pnl_abs,
                 })
 
-                # сброс state
+                # СЃР±СЂРѕСЃ state
                 self.state.reset_position()
                 self.state.start_cooldown()
 
-                logger.info(f"✅ Position closed: {symbol} @ {price:.6f} | PnL {pnl_pct:.2f}% | {reason}")
+                logger.info(f"вњ… Position closed: {symbol} @ {price:.6f} | PnL {pnl_pct:.2f}% | {reason}")
                 return order_result
 
             except Exception as e:
                 logger.exception(f"close_all() failed: {e}")
                 return None
 
-    # ── internals ────────────────────────────────────────────────────────────
+    # в”Ђв”Ђ internals в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     def _partial_close(self, price: float, fraction: float, reason: str) -> None:
         symbol = self.state.get("symbol")
         qty_base = float(self.state.get("qty_base") or 0.0)
@@ -374,7 +374,7 @@ class PositionManager:
         qty_to_sell = qty_base * float(fraction)
 
         if bool(getattr(self.settings, "SAFE_MODE", True)):
-            logger.info(f"📄 PAPER PARTIAL CLOSE {fraction*100:.0f}% @ {price:.6f}")
+            logger.info(f"рџ“„ PAPER PARTIAL CLOSE {fraction*100:.0f}% @ {price:.6f}")
             remaining = qty_base - qty_to_sell
             self.state.set("qty_base", remaining)
             self.state.set("qty_usd", remaining * price)
@@ -391,7 +391,7 @@ class PositionManager:
             remaining = max(0.0, qty_base - qty_to_sell)
             self.state.set("qty_base", remaining)
             self.state.set("qty_usd", remaining * price)
-            logger.info(f"📊 Partial close: {fraction*100:.0f}% @ {price:.6f} | {reason}")
+            logger.info(f"рџ“Љ Partial close: {fraction*100:.0f}% @ {price:.6f} | {reason}")
         except Exception as e:
             logger.error(f"Partial close failed: {e}")
 
@@ -401,9 +401,9 @@ class PositionManager:
         new_sl = current_price * (1 - trailing_pct)
         if new_sl > cur_sl:
             self.state.set("sl_atr", new_sl)
-            logger.info(f"🔄 Trailing SL: {cur_sl:.6f} → {new_sl:.6f}")
+            logger.info(f"рџ”„ Trailing SL: {cur_sl:.6f} в†’ {new_sl:.6f}")
 
-    # ── diagnostics ──────────────────────────────────────────────────────────
+    # в”Ђв”Ђ diagnostics в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     def get_position_summary(self) -> Dict[str, Any]:
         if not self._is_active():
             return {"active": False}

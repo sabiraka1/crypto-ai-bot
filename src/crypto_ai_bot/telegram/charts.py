@@ -1,9 +1,9 @@
-# src/crypto_ai_bot/telegram/charts.py
+﻿# src/crypto_ai_bot/telegram/charts.py
 
-# Безголовый рендер графиков для серверов (Railway)
+# Р‘РµР·РіРѕР»РѕРІС‹Р№ СЂРµРЅРґРµСЂ РіСЂР°С„РёРєРѕРІ РґР»СЏ СЃРµСЂРІРµСЂРѕРІ (Railway)
 try:
     import matplotlib
-    matplotlib.use("Agg")  # важный момент: headless backend
+    matplotlib.use("Agg")  # РІР°Р¶РЅС‹Р№ РјРѕРјРµРЅС‚: headless backend
     import matplotlib.pyplot as plt
 except Exception as e:
     plt = None
@@ -16,7 +16,7 @@ import os
 import tempfile
 from typing import Optional, Iterable, Any
 
-# Опциональные зависимости (не обязательны для импорта модуля)
+# РћРїС†РёРѕРЅР°Р»СЊРЅС‹Рµ Р·Р°РІРёСЃРёРјРѕСЃС‚Рё (РЅРµ РѕР±СЏР·Р°С‚РµР»СЊРЅС‹ РґР»СЏ РёРјРїРѕСЂС‚Р° РјРѕРґСѓР»СЏ)
 try:
     import pandas as pd  # type: ignore
 except Exception:  # pragma: no cover
@@ -27,21 +27,21 @@ try:
 except Exception:  # pragma: no cover
     np = None  # noqa: N816
 
-# Флаг готовности графиков (для мягких фолбэков в командах)
+# Р¤Р»Р°Рі РіРѕС‚РѕРІРЅРѕСЃС‚Рё РіСЂР°С„РёРєРѕРІ (РґР»СЏ РјСЏРіРєРёС… С„РѕР»Р±СЌРєРѕРІ РІ РєРѕРјР°РЅРґР°С…)
 CHARTS_READY = plt is not None
 
 
 def _to_series(prices: Any) -> Iterable[float]:
     """
-    Приводит вход к одномерной последовательности float.
-    Поддерживает: list/tuple/np.array/pd.Series/pd.DataFrame (берём колонку 'close' если есть).
+    РџСЂРёРІРѕРґРёС‚ РІС…РѕРґ Рє РѕРґРЅРѕРјРµСЂРЅРѕР№ РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕСЃС‚Рё float.
+    РџРѕРґРґРµСЂР¶РёРІР°РµС‚: list/tuple/np.array/pd.Series/pd.DataFrame (Р±РµСЂС‘Рј РєРѕР»РѕРЅРєСѓ 'close' РµСЃР»Рё РµСЃС‚СЊ).
     """
     # pandas DataFrame
     if pd is not None and isinstance(prices, pd.DataFrame):
         if "close" in prices.columns:
             series = prices["close"].astype(float).tolist()
         else:
-            # берём первую числовую колонку
+            # Р±РµСЂС‘Рј РїРµСЂРІСѓСЋ С‡РёСЃР»РѕРІСѓСЋ РєРѕР»РѕРЅРєСѓ
             for c in prices.columns:
                 try:
                     series = prices[c].astype(float).tolist()
@@ -63,13 +63,13 @@ def _to_series(prices: Any) -> Iterable[float]:
     if np is not None and isinstance(prices, np.ndarray):
         return prices.astype(float).tolist()
 
-    # обычные python-последовательности
+    # РѕР±С‹С‡РЅС‹Рµ python-РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕСЃС‚Рё
     if isinstance(prices, (list, tuple)):
         return [float(x) for x in prices]
 
-    # неизвестный тип
+    # РЅРµРёР·РІРµСЃС‚РЅС‹Р№ С‚РёРї
     try:
-        return list(prices)  # последняя попытка
+        return list(prices)  # РїРѕСЃР»РµРґРЅСЏСЏ РїРѕРїС‹С‚РєР°
     except Exception:
         return []
 
@@ -79,13 +79,13 @@ def generate_price_chart_png(prices: Any,
                              width: int = 800,
                              height: int = 400) -> bytes:
     """
-    Генерирует PNG-картинку цен и возвращает raw bytes.
-    Если matplotlib отсутствует — бросаем аккуратную ошибку.
+    Р“РµРЅРµСЂРёСЂСѓРµС‚ PNG-РєР°СЂС‚РёРЅРєСѓ С†РµРЅ Рё РІРѕР·РІСЂР°С‰Р°РµС‚ raw bytes.
+    Р•СЃР»Рё matplotlib РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚ вЂ” Р±СЂРѕСЃР°РµРј Р°РєРєСѓСЂР°С‚РЅСѓСЋ РѕС€РёР±РєСѓ.
     """
     if plt is None:
         raise RuntimeError(
-            f"matplotlib недоступен: {_charts_import_error}. "
-            f"Установи зависимости (matplotlib, pillow) и задеплой заново."
+            f"matplotlib РЅРµРґРѕСЃС‚СѓРїРµРЅ: {_charts_import_error}. "
+            f"РЈСЃС‚Р°РЅРѕРІРё Р·Р°РІРёСЃРёРјРѕСЃС‚Рё (matplotlib, pillow) Рё Р·Р°РґРµРїР»РѕР№ Р·Р°РЅРѕРІРѕ."
         )
 
     series = _to_series(prices)
@@ -109,9 +109,9 @@ def generate_price_chart(prices: Any,
                          width: int = 800,
                          height: int = 400) -> Optional[str]:
     """
-    Совместимая обёртка: строит график и сохраняет PNG в файл.
-    Возвращает путь к файлу (или None, если matplotlib недоступен).
-    Если outfile не задан — создаёт временный файл и возвращает его путь.
+    РЎРѕРІРјРµСЃС‚РёРјР°СЏ РѕР±С‘СЂС‚РєР°: СЃС‚СЂРѕРёС‚ РіСЂР°С„РёРє Рё СЃРѕС…СЂР°РЅСЏРµС‚ PNG РІ С„Р°Р№Р».
+    Р’РѕР·РІСЂР°С‰Р°РµС‚ РїСѓС‚СЊ Рє С„Р°Р№Р»Сѓ (РёР»Рё None, РµСЃР»Рё matplotlib РЅРµРґРѕСЃС‚СѓРїРµРЅ).
+    Р•СЃР»Рё outfile РЅРµ Р·Р°РґР°РЅ вЂ” СЃРѕР·РґР°С‘С‚ РІСЂРµРјРµРЅРЅС‹Р№ С„Р°Р№Р» Рё РІРѕР·РІСЂР°С‰Р°РµС‚ РµРіРѕ РїСѓС‚СЊ.
     """
     if not CHARTS_READY:
         return None

@@ -1,11 +1,11 @@
-# embargo_windows.py - Система торговых ограничений
+﻿# embargo_windows.py - РЎРёСЃС‚РµРјР° С‚РѕСЂРіРѕРІС‹С… РѕРіСЂР°РЅРёС‡РµРЅРёР№
 """
-🚫 Trading Embargo Windows - управление временными ограничениями торговли
+рџљ« Trading Embargo Windows - СѓРїСЂР°РІР»РµРЅРёРµ РІСЂРµРјРµРЅРЅС‹РјРё РѕРіСЂР°РЅРёС‡РµРЅРёСЏРјРё С‚РѕСЂРіРѕРІР»Рё
 
-Интеграция с существующей архитектурой:
-- Используется в SignalValidator для блокировки сигналов
-- Интегрируется с TradingBot через временные проверки
-- Поддерживает настройки через Settings
+РРЅС‚РµРіСЂР°С†РёСЏ СЃ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµР№ Р°СЂС…РёС‚РµРєС‚СѓСЂРѕР№:
+- РСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ SignalValidator РґР»СЏ Р±Р»РѕРєРёСЂРѕРІРєРё СЃРёРіРЅР°Р»РѕРІ
+- РРЅС‚РµРіСЂРёСЂСѓРµС‚СЃСЏ СЃ TradingBot С‡РµСЂРµР· РІСЂРµРјРµРЅРЅС‹Рµ РїСЂРѕРІРµСЂРєРё
+- РџРѕРґРґРµСЂР¶РёРІР°РµС‚ РЅР°СЃС‚СЂРѕР№РєРё С‡РµСЂРµР· Settings
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmbargoReason(Enum):
-    """Причины торгового эмбарго"""
+    """РџСЂРёС‡РёРЅС‹ С‚РѕСЂРіРѕРІРѕРіРѕ СЌРјР±Р°СЂРіРѕ"""
     FOMC_MEETING = "fomc_meeting"
     ECONOMIC_DATA = "economic_data"
     LOW_LIQUIDITY = "low_liquidity"
@@ -32,38 +32,38 @@ class EmbargoReason(Enum):
 
 @dataclass
 class EmbargoWindow:
-    """Временное окно торгового ограничения"""
+    """Р’СЂРµРјРµРЅРЅРѕРµ РѕРєРЅРѕ С‚РѕСЂРіРѕРІРѕРіРѕ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ"""
     start: datetime
     end: datetime
     reason: EmbargoReason
     description: str
     severity: str = "BLOCK"  # BLOCK, WARN, REDUCE_SIZE
-    affected_symbols: Optional[List[str]] = None  # None = все символы
+    affected_symbols: Optional[List[str]] = None  # None = РІСЃРµ СЃРёРјРІРѕР»С‹
     
     def is_active(self, timestamp: Optional[datetime] = None) -> bool:
-        """Проверка активности окна ограничения"""
+        """РџСЂРѕРІРµСЂРєР° Р°РєС‚РёРІРЅРѕСЃС‚Рё РѕРєРЅР° РѕРіСЂР°РЅРёС‡РµРЅРёСЏ"""
         now = timestamp or datetime.now(timezone.utc)
         return self.start <= now <= self.end
     
     def time_until_start(self, timestamp: Optional[datetime] = None) -> float:
-        """Минуты до начала ограничения"""
+        """РњРёРЅСѓС‚С‹ РґРѕ РЅР°С‡Р°Р»Р° РѕРіСЂР°РЅРёС‡РµРЅРёСЏ"""
         now = timestamp or datetime.now(timezone.utc)
         return (self.start - now).total_seconds() / 60.0
     
     def time_until_end(self, timestamp: Optional[datetime] = None) -> float:
-        """Минуты до окончания ограничения"""
+        """РњРёРЅСѓС‚С‹ РґРѕ РѕРєРѕРЅС‡Р°РЅРёСЏ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ"""
         now = timestamp or datetime.now(timezone.utc)
         return (self.end - now).total_seconds() / 60.0
 
 
 class EmbargoManager:
     """
-    Центральный менеджер торговых ограничений
+    Р¦РµРЅС‚СЂР°Р»СЊРЅС‹Р№ РјРµРЅРµРґР¶РµСЂ С‚РѕСЂРіРѕРІС‹С… РѕРіСЂР°РЅРёС‡РµРЅРёР№
     
-    Интеграция:
-    - В _validate_time_windows() SignalValidator
-    - В TradingBot._tick() для проверки перед анализом
-    - В PositionManager для экстренного закрытия при критических событиях
+    РРЅС‚РµРіСЂР°С†РёСЏ:
+    - Р’ _validate_time_windows() SignalValidator
+    - Р’ TradingBot._tick() РґР»СЏ РїСЂРѕРІРµСЂРєРё РїРµСЂРµРґ Р°РЅР°Р»РёР·РѕРј
+    - Р’ PositionManager РґР»СЏ СЌРєСЃС‚СЂРµРЅРЅРѕРіРѕ Р·Р°РєСЂС‹С‚РёСЏ РїСЂРё РєСЂРёС‚РёС‡РµСЃРєРёС… СЃРѕР±С‹С‚РёСЏС…
     """
     
     def __init__(self, settings: Optional[Any] = None):
@@ -71,34 +71,34 @@ class EmbargoManager:
         self.active_embargos: List[EmbargoWindow] = []
         self.scheduled_embargos: List[EmbargoWindow] = []
         
-        # Настройки из Settings
+        # РќР°СЃС‚СЂРѕР№РєРё РёР· Settings
         self.enable_fomc_embargo = getattr(settings, "ENABLE_FOMC_EMBARGO", True)
         self.enable_weekend_embargo = getattr(settings, "DISABLE_WEEKEND_TRADING", False)
         self.fomc_embargo_minutes = getattr(settings, "FOMC_EMBARGO_MINUTES", 30)
         self.high_volatility_threshold = getattr(settings, "HIGH_VOLATILITY_EMBARGO_THRESHOLD", 8.0)
         
-        logger.info(f"🚫 EmbargoManager initialized: FOMC={self.enable_fomc_embargo}")
+        logger.info(f"рџљ« EmbargoManager initialized: FOMC={self.enable_fomc_embargo}")
     
-    # === Основной API ===
+    # === РћСЃРЅРѕРІРЅРѕР№ API ===
     def check_embargo_status(self, symbol: str = "BTC/USDT", 
                            timestamp: Optional[datetime] = None) -> Tuple[bool, List[str]]:
         """
-        Главная функция проверки торговых ограничений
+        Р“Р»Р°РІРЅР°СЏ С„СѓРЅРєС†РёСЏ РїСЂРѕРІРµСЂРєРё С‚РѕСЂРіРѕРІС‹С… РѕРіСЂР°РЅРёС‡РµРЅРёР№
         
         Returns:
-            (is_embargoed, reasons) - можно ли торговать и причины ограничений
+            (is_embargoed, reasons) - РјРѕР¶РЅРѕ Р»Рё С‚РѕСЂРіРѕРІР°С‚СЊ Рё РїСЂРёС‡РёРЅС‹ РѕРіСЂР°РЅРёС‡РµРЅРёР№
         """
         now = timestamp or datetime.now(timezone.utc)
         reasons = []
         
-        # Проверяем активные ограничения
+        # РџСЂРѕРІРµСЂСЏРµРј Р°РєС‚РёРІРЅС‹Рµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ
         for embargo in self.active_embargos:
             if embargo.is_active(now):
                 if not embargo.affected_symbols or symbol in embargo.affected_symbols:
                     if embargo.severity == "BLOCK":
                         reasons.append(f"{embargo.reason.value}: {embargo.description}")
         
-        # Динамические проверки
+        # Р”РёРЅР°РјРёС‡РµСЃРєРёРµ РїСЂРѕРІРµСЂРєРё
         weekend_reason = self._check_weekend_embargo(now)
         if weekend_reason:
             reasons.append(weekend_reason)
@@ -106,19 +106,19 @@ class EmbargoManager:
         return len(reasons) > 0, reasons
     
     def get_next_embargo(self, symbol: str = "BTC/USDT") -> Optional[EmbargoWindow]:
-        """Получить следующее ближайшее ограничение"""
+        """РџРѕР»СѓС‡РёС‚СЊ СЃР»РµРґСѓСЋС‰РµРµ Р±Р»РёР¶Р°Р№С€РµРµ РѕРіСЂР°РЅРёС‡РµРЅРёРµ"""
         now = datetime.now(timezone.utc)
         upcoming = [e for e in self.scheduled_embargos 
                    if e.start > now and (not e.affected_symbols or symbol in e.affected_symbols)]
         return min(upcoming, key=lambda x: x.start) if upcoming else None
     
-    # === Интеграция с FOMC ===
+    # === РРЅС‚РµРіСЂР°С†РёСЏ СЃ FOMC ===
     def schedule_fomc_embargo(self, fomc_datetime: datetime, description: str = "FOMC Meeting"):
-        """Планирование ограничений вокруг событий FOMC"""
+        """РџР»Р°РЅРёСЂРѕРІР°РЅРёРµ РѕРіСЂР°РЅРёС‡РµРЅРёР№ РІРѕРєСЂСѓРі СЃРѕР±С‹С‚РёР№ FOMC"""
         if not self.enable_fomc_embargo:
             return
             
-        # Ограничение за 30 минут до и 15 минут после
+        # РћРіСЂР°РЅРёС‡РµРЅРёРµ Р·Р° 30 РјРёРЅСѓС‚ РґРѕ Рё 15 РјРёРЅСѓС‚ РїРѕСЃР»Рµ
         start = fomc_datetime - timedelta(minutes=self.fomc_embargo_minutes)
         end = fomc_datetime + timedelta(minutes=15)
         
@@ -131,11 +131,11 @@ class EmbargoManager:
         )
         
         self.scheduled_embargos.append(embargo)
-        logger.info(f"📅 FOMC embargo scheduled: {start} - {end}")
+        logger.info(f"рџ“… FOMC embargo scheduled: {start} - {end}")
     
-    # === Динамические ограничения ===
+    # === Р”РёРЅР°РјРёС‡РµСЃРєРёРµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ ===
     def trigger_volatility_embargo(self, atr_pct: float, duration_minutes: int = 15):
-        """Экстренное ограничение при высокой волатильности"""
+        """Р­РєСЃС‚СЂРµРЅРЅРѕРµ РѕРіСЂР°РЅРёС‡РµРЅРёРµ РїСЂРё РІС‹СЃРѕРєРѕР№ РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚Рё"""
         if atr_pct < self.high_volatility_threshold:
             return
             
@@ -149,10 +149,10 @@ class EmbargoManager:
         )
         
         self.active_embargos.append(embargo)
-        logger.warning(f"🌪️ Volatility embargo triggered: ATR {atr_pct:.2f}%")
+        logger.warning(f"рџЊЄпёЏ Volatility embargo triggered: ATR {atr_pct:.2f}%")
     
     def add_manual_embargo(self, minutes: int, reason: str):
-        """Ручное ограничение торговли"""
+        """Р СѓС‡РЅРѕРµ РѕРіСЂР°РЅРёС‡РµРЅРёРµ С‚РѕСЂРіРѕРІР»Рё"""
         now = datetime.now(timezone.utc)
         embargo = EmbargoWindow(
             start=now,
@@ -163,32 +163,32 @@ class EmbargoManager:
         )
         
         self.active_embargos.append(embargo)
-        logger.warning(f"✋ Manual embargo: {minutes}min - {reason}")
+        logger.warning(f"вњ‹ Manual embargo: {minutes}min - {reason}")
     
-    # === Вспомогательные методы ===
+    # === Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ РјРµС‚РѕРґС‹ ===
     def _check_weekend_embargo(self, timestamp: datetime) -> Optional[str]:
-        """Проверка выходных дней"""
+        """РџСЂРѕРІРµСЂРєР° РІС‹С…РѕРґРЅС‹С… РґРЅРµР№"""
         if not self.enable_weekend_embargo:
             return None
             
-        if timestamp.weekday() >= 5:  # Суббота/Воскресенье
+        if timestamp.weekday() >= 5:  # РЎСѓР±Р±РѕС‚Р°/Р’РѕСЃРєСЂРµСЃРµРЅСЊРµ
             return f"weekend_trading_disabled: {timestamp.strftime('%A')}"
         return None
     
     def cleanup_expired_embargos(self):
-        """Очистка истекших ограничений"""
+        """РћС‡РёСЃС‚РєР° РёСЃС‚РµРєС€РёС… РѕРіСЂР°РЅРёС‡РµРЅРёР№"""
         now = datetime.now(timezone.utc)
         
-        # Удаляем истекшие активные
+        # РЈРґР°Р»СЏРµРј РёСЃС‚РµРєС€РёРµ Р°РєС‚РёРІРЅС‹Рµ
         self.active_embargos = [e for e in self.active_embargos if e.end > now]
         
-        # Перемещаем начавшиеся из scheduled в active
+        # РџРµСЂРµРјРµС‰Р°РµРј РЅР°С‡Р°РІС€РёРµСЃСЏ РёР· scheduled РІ active
         started = [e for e in self.scheduled_embargos if e.start <= now <= e.end]
         self.active_embargos.extend(started)
         self.scheduled_embargos = [e for e in self.scheduled_embargos if e.start > now]
     
     def get_status_summary(self) -> Dict[str, Any]:
-        """Статистика для мониторинга"""
+        """РЎС‚Р°С‚РёСЃС‚РёРєР° РґР»СЏ РјРѕРЅРёС‚РѕСЂРёРЅРіР°"""
         now = datetime.now(timezone.utc)
         return {
             "active_embargos": len(self.active_embargos),
@@ -202,12 +202,12 @@ class EmbargoManager:
         }
 
 
-# === Интеграция с SignalValidator ===
+# === РРЅС‚РµРіСЂР°С†РёСЏ СЃ SignalValidator ===
 def integrate_with_signal_validator():
     """
-    Пример интеграции с существующим SignalValidator
+    РџСЂРёРјРµСЂ РёРЅС‚РµРіСЂР°С†РёРё СЃ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРј SignalValidator
     """
-    # В signal_validator.py добавить:
+    # Р’ signal_validator.py РґРѕР±Р°РІРёС‚СЊ:
     
     def _validate_embargo_windows(cfg, embargo_manager) -> List[str]:
         reasons = []
@@ -217,27 +217,27 @@ def integrate_with_signal_validator():
             
             if is_embargoed:
                 reasons.extend([f"embargo:{r}" for r in embargo_reasons])
-                logger.warning(f"🚫 Trading embargoed: {embargo_reasons}")
+                logger.warning(f"рџљ« Trading embargoed: {embargo_reasons}")
                 
         except Exception as e:
-            logger.error(f"❌ Embargo check failed: {e}")
+            logger.error(f"вќЊ Embargo check failed: {e}")
             
         return reasons
 
 
-# === Интеграция с TradingBot ===
+# === РРЅС‚РµРіСЂР°С†РёСЏ СЃ TradingBot ===
 def integrate_with_trading_bot():
     """
-    Пример интеграции с TradingBot
+    РџСЂРёРјРµСЂ РёРЅС‚РµРіСЂР°С†РёРё СЃ TradingBot
     """
-    # В TradingBot.__init__ добавить:
+    # Р’ TradingBot.__init__ РґРѕР±Р°РІРёС‚СЊ:
     # self.embargo_manager = EmbargoManager(self.cfg)
     
-    # В TradingBot._tick() в начале добавить:
+    # Р’ TradingBot._tick() РІ РЅР°С‡Р°Р»Рµ РґРѕР±Р°РІРёС‚СЊ:
     def _check_embargo_before_trading(self):
         is_embargoed, reasons = self.embargo_manager.check_embargo_status(self.cfg.SYMBOL)
         if is_embargoed:
-            self._notify(f"🚫 Trading embargoed: {', '.join(reasons)}")
+            self._notify(f"рџљ« Trading embargoed: {', '.join(reasons)}")
             return False
         return True
 

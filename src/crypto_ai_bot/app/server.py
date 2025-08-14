@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -9,21 +9,21 @@ from typing import Any, Dict, Optional
 import requests
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
-from starlette.concurrency import run_in_threadpool  # <-- важно: исполняем sync-функцию в пуле
+from starlette.concurrency import run_in_threadpool  # <-- РІР°Р¶РЅРѕ: РёСЃРїРѕР»РЅСЏРµРј sync-С„СѓРЅРєС†РёСЋ РІ РїСѓР»Рµ
 
 try:
     import ccxt
 except Exception:  # pragma: no cover
     ccxt = None
 
-# Import Telegram update dispatcher from our bot module (синхронная функция)
+# Import Telegram update dispatcher from our bot module (СЃРёРЅС…СЂРѕРЅРЅР°СЏ С„СѓРЅРєС†РёСЏ)
 try:
     from crypto_ai_bot.telegram.bot import process_update  # sync
 except Exception:
     process_update = None  # graceful if telegram module missing
 
 # Import Trading bot
-from crypto_ai_bot.trading.bot import get_bot, Settings
+from crypto_ai_bot.core.bot import get_bot, Settings
 
 # ------------ logging ------------
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ def metrics():
 
 @app.get("/telegram/ping")
 def telegram_ping():
-    send_telegram_message("🔔 server ping")
+    send_telegram_message("рџ”” server ping")
     return {"ok": True}
 
 
@@ -201,7 +201,7 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Op
 
     logger.info(f"[WEBHOOK] keys={list(payload.keys())}")
 
-    # ВАЖНО: process_update — синхронная функция → исполняем в threadpool
+    # Р’РђР–РќРћ: process_update вЂ” СЃРёРЅС…СЂРѕРЅРЅР°СЏ С„СѓРЅРєС†РёСЏ в†’ РёСЃРїРѕР»РЅСЏРµРј РІ threadpool
     if process_update is not None:
         try:
             result = await run_in_threadpool(process_update, payload)

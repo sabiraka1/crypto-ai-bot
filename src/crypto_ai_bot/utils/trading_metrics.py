@@ -1,14 +1,14 @@
-# utils/trading_metrics.py
+﻿# utils/trading_metrics.py
 """
 Trading Metrics Utility Module
 ---------------------------------
-Универсальные функции расчёта торговых метрик для risk_manager, performance_tracker и других модулей.
+РЈРЅРёРІРµСЂСЃР°Р»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё СЂР°СЃС‡С‘С‚Р° С‚РѕСЂРіРѕРІС‹С… РјРµС‚СЂРёРє РґР»СЏ risk_manager, performance_tracker Рё РґСЂСѓРіРёС… РјРѕРґСѓР»РµР№.
 
-Рассчитывает:
-- Основные: win rate, profit factor, expectancy
-- Риск: Sharpe, Sortino, Calmar, Max Drawdown
-- Продвинутые: Kelly, R:R, Volatility, Recovery Factor
-- Временные: среднее удержание сделки, сделки в день
+Р Р°СЃСЃС‡РёС‚С‹РІР°РµС‚:
+- РћСЃРЅРѕРІРЅС‹Рµ: win rate, profit factor, expectancy
+- Р РёСЃРє: Sharpe, Sortino, Calmar, Max Drawdown
+- РџСЂРѕРґРІРёРЅСѓС‚С‹Рµ: Kelly, R:R, Volatility, Recovery Factor
+- Р’СЂРµРјРµРЅРЅС‹Рµ: СЃСЂРµРґРЅРµРµ СѓРґРµСЂР¶Р°РЅРёРµ СЃРґРµР»РєРё, СЃРґРµР»РєРё РІ РґРµРЅСЊ
 """
 
 import numpy as np
@@ -18,19 +18,19 @@ from typing import List, Dict, Any, Optional, Union
 
 
 def _is_empty_or_invalid(data) -> bool:
-    """Универсальная проверка на пустоту данных"""
+    """РЈРЅРёРІРµСЂСЃР°Р»СЊРЅР°СЏ РїСЂРѕРІРµСЂРєР° РЅР° РїСѓСЃС‚РѕС‚Сѓ РґР°РЅРЅС‹С…"""
     if data is None:
         return True
     if hasattr(data, 'empty'):  # pandas Series/DataFrame
         return data.empty
-    elif hasattr(data, '__len__'):  # список, tuple и т.д.
+    elif hasattr(data, '__len__'):  # СЃРїРёСЃРѕРє, tuple Рё С‚.Рґ.
         return len(data) == 0
     else:
         return not bool(data)
 
 
 def _to_numpy_array(data: Union[List[float], pd.Series, np.ndarray]) -> np.ndarray:
-    """Преобразование входных данных в numpy array"""
+    """РџСЂРµРѕР±СЂР°Р·РѕРІР°РЅРёРµ РІС…РѕРґРЅС‹С… РґР°РЅРЅС‹С… РІ numpy array"""
     if isinstance(data, pd.Series):
         return data.values
     elif isinstance(data, np.ndarray):
@@ -40,11 +40,11 @@ def _to_numpy_array(data: Union[List[float], pd.Series, np.ndarray]) -> np.ndarr
 
 
 # ==========================
-# БАЗОВЫЕ МЕТРИКИ
+# Р‘РђР—РћР’Р«Р• РњР•РўР РРљР
 # ==========================
 
 def win_rate(pnl_list: Union[List[float], pd.Series]) -> float:
-    """Win Rate — доля прибыльных сделок"""
+    """Win Rate вЂ” РґРѕР»СЏ РїСЂРёР±С‹Р»СЊРЅС‹С… СЃРґРµР»РѕРє"""
     if _is_empty_or_invalid(pnl_list):
         return 0.0
     pnl_arr = _to_numpy_array(pnl_list)
@@ -54,7 +54,7 @@ def win_rate(pnl_list: Union[List[float], pd.Series]) -> float:
 
 
 def avg_win_loss(pnl_list: Union[List[float], pd.Series]) -> tuple[float, float]:
-    """Средний % профита и убытка"""
+    """РЎСЂРµРґРЅРёР№ % РїСЂРѕС„РёС‚Р° Рё СѓР±С‹С‚РєР°"""
     if _is_empty_or_invalid(pnl_list):
         return 0.0, 0.0
     pnl_arr = _to_numpy_array(pnl_list)
@@ -71,7 +71,7 @@ def avg_win_loss(pnl_list: Union[List[float], pd.Series]) -> tuple[float, float]
 
 
 def profit_factor(pnl_list: Union[List[float], pd.Series]) -> float:
-    """Profit Factor = валовая прибыль / валовый убыток"""
+    """Profit Factor = РІР°Р»РѕРІР°СЏ РїСЂРёР±С‹Р»СЊ / РІР°Р»РѕРІС‹Р№ СѓР±С‹С‚РѕРє"""
     if _is_empty_or_invalid(pnl_list):
         return 0.0
     pnl_arr = _to_numpy_array(pnl_list)
@@ -88,12 +88,12 @@ def profit_factor(pnl_list: Union[List[float], pd.Series]) -> float:
 
 
 def expectancy(avg_win: float, avg_loss: float, win_rate_val: float) -> float:
-    """Математическое ожидание сделки"""
+    """РњР°С‚РµРјР°С‚РёС‡РµСЃРєРѕРµ РѕР¶РёРґР°РЅРёРµ СЃРґРµР»РєРё"""
     return (win_rate_val * avg_win) + ((1 - win_rate_val) * avg_loss)
 
 
 # ==========================
-# РИСК-МЕТРИКИ
+# Р РРЎРљ-РњР•РўР РРљР
 # ==========================
 
 def sharpe_ratio(returns: Union[List[float], pd.Series], risk_free_rate: float = 0.02, annual_trades: int = 100) -> float:
@@ -135,8 +135,8 @@ def sortino_ratio(returns: Union[List[float], pd.Series], target_return: float =
 
 
 def max_drawdown(returns: Union[List[float], pd.Series]) -> float:
-    """Максимальная просадка"""
-    # ИСПРАВЛЕНО: корректная проверка на пустоту для pandas Series
+    """РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РїСЂРѕСЃР°РґРєР°"""
+    # РРЎРџР РђР’Р›Р•РќРћ: РєРѕСЂСЂРµРєС‚РЅР°СЏ РїСЂРѕРІРµСЂРєР° РЅР° РїСѓСЃС‚РѕС‚Сѓ РґР»СЏ pandas Series
     if _is_empty_or_invalid(returns):
         return 0.0
     
@@ -144,11 +144,11 @@ def max_drawdown(returns: Union[List[float], pd.Series]) -> float:
     if len(returns_arr) == 0:
         return 0.0
     
-    # Вычисляем кумулятивную доходность
+    # Р’С‹С‡РёСЃР»СЏРµРј РєСѓРјСѓР»СЏС‚РёРІРЅСѓСЋ РґРѕС…РѕРґРЅРѕСЃС‚СЊ
     cum_returns = np.cumsum(returns_arr)
     peak = np.maximum.accumulate(cum_returns)
     
-    # Избегаем деления на ноль
+    # РР·Р±РµРіР°РµРј РґРµР»РµРЅРёСЏ РЅР° РЅРѕР»СЊ
     drawdown = np.where(peak != 0, (cum_returns - peak) / np.abs(peak), 0)
     
     return float(abs(np.min(drawdown)))
@@ -169,12 +169,12 @@ def calmar_ratio(returns: Union[List[float], pd.Series], max_dd: Optional[float]
     if max_dd == 0:
         return float('inf') if np.mean(returns_arr) > 0 else 0.0
     
-    annual_return = float(np.mean(returns_arr) * 252)  # Предполагаем дневные данные
+    annual_return = float(np.mean(returns_arr) * 252)  # РџСЂРµРґРїРѕР»Р°РіР°РµРј РґРЅРµРІРЅС‹Рµ РґР°РЅРЅС‹Рµ
     return annual_return / (max_dd * 100)
 
 
 def volatility(returns: Union[List[float], pd.Series]) -> float:
-    """Стандартное отклонение (волатильность)"""
+    """РЎС‚Р°РЅРґР°СЂС‚РЅРѕРµ РѕС‚РєР»РѕРЅРµРЅРёРµ (РІРѕР»Р°С‚РёР»СЊРЅРѕСЃС‚СЊ)"""
     if _is_empty_or_invalid(returns):
         return 0.0
     returns_arr = _to_numpy_array(returns)
@@ -184,31 +184,31 @@ def volatility(returns: Union[List[float], pd.Series]) -> float:
 
 
 # ==========================
-# ПРОДВИНУТЫЕ МЕТРИКИ
+# РџР РћР”Р’РРќРЈРўР«Р• РњР•РўР РРљР
 # ==========================
 
 def risk_reward_ratio(avg_win: float, avg_loss: float) -> float:
-    """Соотношение R:R (также известно как rr_ratio)"""
+    """РЎРѕРѕС‚РЅРѕС€РµРЅРёРµ R:R (С‚Р°РєР¶Рµ РёР·РІРµСЃС‚РЅРѕ РєР°Рє rr_ratio)"""
     if avg_loss == 0:
         return float('inf') if avg_win > 0 else 0.0
     return float(abs(avg_win / avg_loss))
 
 
-# Добавляем алиас для совместимости с тестами
+# Р”РѕР±Р°РІР»СЏРµРј Р°Р»РёР°СЃ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃ С‚РµСЃС‚Р°РјРё
 def rr_ratio(avg_win: float, avg_loss: float) -> float:
-    """Алиас для risk_reward_ratio"""
+    """РђР»РёР°СЃ РґР»СЏ risk_reward_ratio"""
     return risk_reward_ratio(avg_win, avg_loss)
 
 
 def recovery_factor(total_net_profit: float, max_dd: float) -> float:
-    """Recovery Factor = Общая прибыль / Макс. просадка"""
+    """Recovery Factor = РћР±С‰Р°СЏ РїСЂРёР±С‹Р»СЊ / РњР°РєСЃ. РїСЂРѕСЃР°РґРєР°"""
     if max_dd == 0:
         return float('inf') if total_net_profit > 0 else 0.0
     return float(total_net_profit / abs(max_dd))
 
 
 def kelly_fraction(avg_win: float, avg_loss: float, win_rate_val: float) -> float:
-    """Фракция Келли"""
+    """Р¤СЂР°РєС†РёСЏ РљРµР»Р»Рё"""
     if avg_loss >= 0:
         return 0.0
     
@@ -220,15 +220,15 @@ def kelly_fraction(avg_win: float, avg_loss: float, win_rate_val: float) -> floa
         return 0.0
     
     kelly = (b * p - q) / b
-    return float(max(0.0, min(kelly, 0.25)))  # Ограничиваем до 25%
+    return float(max(0.0, min(kelly, 0.25)))  # РћРіСЂР°РЅРёС‡РёРІР°РµРј РґРѕ 25%
 
 
 # ==========================
-# ВРЕМЕННЫЕ МЕТРИКИ
+# Р’Р Р•РњР•РќРќР«Р• РњР•РўР РРљР
 # ==========================
 
 def avg_hold_time(durations_minutes: Union[List[float], pd.Series]) -> float:
-    """Среднее удержание сделки в часах"""
+    """РЎСЂРµРґРЅРµРµ СѓРґРµСЂР¶Р°РЅРёРµ СЃРґРµР»РєРё РІ С‡Р°СЃР°С…"""
     if _is_empty_or_invalid(durations_minutes):
         return 0.0
     durations_arr = _to_numpy_array(durations_minutes)
@@ -238,7 +238,7 @@ def avg_hold_time(durations_minutes: Union[List[float], pd.Series]) -> float:
 
 
 def trades_per_day(timestamps: Union[List[datetime], pd.Series]) -> float:
-    """Сделок в день"""
+    """РЎРґРµР»РѕРє РІ РґРµРЅСЊ"""
     if _is_empty_or_invalid(timestamps):
         return 0.0
     
@@ -248,7 +248,7 @@ def trades_per_day(timestamps: Union[List[datetime], pd.Series]) -> float:
     if len(timestamps) <= 1:
         return 0.0
     
-    # Конвертируем в datetime если нужно
+    # РљРѕРЅРІРµСЂС‚РёСЂСѓРµРј РІ datetime РµСЃР»Рё РЅСѓР¶РЅРѕ
     datetime_list = []
     for ts in timestamps:
         if isinstance(ts, str):
@@ -263,11 +263,11 @@ def trades_per_day(timestamps: Union[List[datetime], pd.Series]) -> float:
 
 
 # ==========================
-# ДОПОЛНИТЕЛЬНЫЕ МЕТРИКИ ДЛЯ СОВМЕСТИМОСТИ С ТЕСТАМИ
+# Р”РћРџРћР›РќРРўР•Р›Р¬РќР«Р• РњР•РўР РРљР Р”Р›РЇ РЎРћР’РњР•РЎРўРРњРћРЎРўР РЎ РўР•РЎРўРђРњР
 # ==========================
 
 def ulcer_index(equity: Union[pd.Series, List[float]]) -> float:
-    """Индекс Ulcer - мера риска просадки"""
+    """РРЅРґРµРєСЃ Ulcer - РјРµСЂР° СЂРёСЃРєР° РїСЂРѕСЃР°РґРєРё"""
     if _is_empty_or_invalid(equity):
         return 0.0
     
@@ -275,20 +275,20 @@ def ulcer_index(equity: Union[pd.Series, List[float]]) -> float:
     if len(equity_arr) == 0:
         return 0.0
     
-    # Находим максимальное значение на каждой точке
+    # РќР°С…РѕРґРёРј РјР°РєСЃРёРјР°Р»СЊРЅРѕРµ Р·РЅР°С‡РµРЅРёРµ РЅР° РєР°Р¶РґРѕР№ С‚РѕС‡РєРµ
     running_max = np.maximum.accumulate(equity_arr)
     
-    # Вычисляем процентную просадку
+    # Р’С‹С‡РёСЃР»СЏРµРј РїСЂРѕС†РµРЅС‚РЅСѓСЋ РїСЂРѕСЃР°РґРєСѓ
     drawdown_pct = np.where(running_max != 0, 
                            100 * (equity_arr - running_max) / running_max, 
                            0)
     
-    # Ulcer Index = sqrt(mean(drawdown²))
+    # Ulcer Index = sqrt(mean(drawdownВІ))
     return float(np.sqrt(np.mean(drawdown_pct ** 2)))
 
 
 def var_calculation(returns: Union[pd.Series, List[float]], confidence_level: float = 0.05) -> float:
-    """Value at Risk (VaR) - потенциальные потери с заданным уровнем доверия"""
+    """Value at Risk (VaR) - РїРѕС‚РµРЅС†РёР°Р»СЊРЅС‹Рµ РїРѕС‚РµСЂРё СЃ Р·Р°РґР°РЅРЅС‹Рј СѓСЂРѕРІРЅРµРј РґРѕРІРµСЂРёСЏ"""
     if _is_empty_or_invalid(returns):
         return 0.0
     
@@ -300,7 +300,7 @@ def var_calculation(returns: Union[pd.Series, List[float]], confidence_level: fl
 
 
 def cvar_calculation(returns: Union[pd.Series, List[float]], confidence_level: float = 0.05) -> float:
-    """Conditional Value at Risk (CVaR) - ожидаемые потери за VaR"""
+    """Conditional Value at Risk (CVaR) - РѕР¶РёРґР°РµРјС‹Рµ РїРѕС‚РµСЂРё Р·Р° VaR"""
     if _is_empty_or_invalid(returns):
         return 0.0
     
@@ -315,11 +315,11 @@ def cvar_calculation(returns: Union[pd.Series, List[float]], confidence_level: f
 
 
 # ==========================
-# АЛЕРТЫ ПРОИЗВОДИТЕЛЬНОСТИ
+# РђР›Р•Р РўР« РџР РћРР—Р’РћР”РРўР•Р›Р¬РќРћРЎРўР
 # ==========================
 
 def check_performance_alerts(metrics: Dict[str, Any], thresholds: Dict[str, float]) -> List[str]:
-    """Проверка условий для алертов"""
+    """РџСЂРѕРІРµСЂРєР° СѓСЃР»РѕРІРёР№ РґР»СЏ Р°Р»РµСЂС‚РѕРІ"""
     alerts = []
     
     if metrics.get("win_rate", 0) < thresholds.get("low_win_rate", 0.35):
@@ -341,13 +341,13 @@ def check_performance_alerts(metrics: Dict[str, Any], thresholds: Dict[str, floa
 
 
 # ==========================
-# ГЛАВНАЯ ФУНКЦИЯ АНАЛИЗА
+# Р“Р›РђР’РќРђРЇ Р¤РЈРќРљР¦РРЇ РђРќРђР›РР—Рђ
 # ==========================
 
 def calculate_all_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Универсальный расчет всех метрик по DataFrame сделок.
-    Ожидаемые колонки:
+    РЈРЅРёРІРµСЂСЃР°Р»СЊРЅС‹Р№ СЂР°СЃС‡РµС‚ РІСЃРµС… РјРµС‚СЂРёРє РїРѕ DataFrame СЃРґРµР»РѕРє.
+    РћР¶РёРґР°РµРјС‹Рµ РєРѕР»РѕРЅРєРё:
         pnl_pct, pnl_abs, duration_minutes, timestamp
     """
     if trades_df.empty:
@@ -372,22 +372,22 @@ def calculate_all_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
             "last_updated": datetime.now()
         }
 
-    # Проверяем наличие необходимых колонок
+    # РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ РЅРµРѕР±С…РѕРґРёРјС‹С… РєРѕР»РѕРЅРѕРє
     required_cols = ["pnl_pct"]
     for col in required_cols:
         if col not in trades_df.columns:
-            raise ValueError(f"Отсутствует обязательная колонка: {col}")
+            raise ValueError(f"РћС‚СЃСѓС‚СЃС‚РІСѓРµС‚ РѕР±СЏР·Р°С‚РµР»СЊРЅР°СЏ РєРѕР»РѕРЅРєР°: {col}")
 
     pnl_list = trades_df["pnl_pct"].tolist()
     
-    # Обработка опциональных колонок
+    # РћР±СЂР°Р±РѕС‚РєР° РѕРїС†РёРѕРЅР°Р»СЊРЅС‹С… РєРѕР»РѕРЅРѕРє
     durations = trades_df["duration_minutes"].tolist() if "duration_minutes" in trades_df.columns else []
     
     timestamps = []
     if "timestamp" in trades_df.columns:
         timestamps = pd.to_datetime(trades_df["timestamp"]).tolist()
 
-    # Расчет базовых метрик
+    # Р Р°СЃС‡РµС‚ Р±Р°Р·РѕРІС‹С… РјРµС‚СЂРёРє
     avg_win, avg_loss = avg_win_loss(pnl_list)
     max_dd = max_drawdown(pnl_list)
     win_rate_val = win_rate(pnl_list)

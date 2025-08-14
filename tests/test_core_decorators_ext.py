@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 import time
 import inspect
 
@@ -12,15 +12,15 @@ def _find(callables, substr):
 
 def test_retry_like_decorator_behaviour(monkeypatch):
     """
-    Аккуратно ищем в core.decorators ретрай-декоратор и проверяем базовую семантику:
-    функция падает 2 раза и проходит на 3-й.
-    Тест гибкий: если в модуле нет подходящего декоратора — просто скип.
+    РђРєРєСѓСЂР°С‚РЅРѕ РёС‰РµРј РІ core.decorators СЂРµС‚СЂР°Р№-РґРµРєРѕСЂР°С‚РѕСЂ Рё РїСЂРѕРІРµСЂСЏРµРј Р±Р°Р·РѕРІСѓСЋ СЃРµРјР°РЅС‚РёРєСѓ:
+    С„СѓРЅРєС†РёСЏ РїР°РґР°РµС‚ 2 СЂР°Р·Р° Рё РїСЂРѕС…РѕРґРёС‚ РЅР° 3-Р№.
+    РўРµСЃС‚ РіРёР±РєРёР№: РµСЃР»Рё РІ РјРѕРґСѓР»Рµ РЅРµС‚ РїРѕРґС…РѕРґСЏС‰РµРіРѕ РґРµРєРѕСЂР°С‚РѕСЂР° вЂ” РїСЂРѕСЃС‚Рѕ СЃРєРёРї.
     """
     dec = importlib.import_module("core.decorators")
     exported = [n for n, v in dec.__dict__.items() if callable(v)]
     cand_name = _find(exported, "retry") or _find(exported, "backoff")
     if not cand_name:
-        return  # нет подходящих декораторов → пропускаем тест
+        return  # РЅРµС‚ РїРѕРґС…РѕРґСЏС‰РёС… РґРµРєРѕСЂР°С‚РѕСЂРѕРІ в†’ РїСЂРѕРїСѓСЃРєР°РµРј С‚РµСЃС‚
 
     decorator_obj = getattr(dec, cand_name)
 
@@ -32,13 +32,13 @@ def test_retry_like_decorator_behaviour(monkeypatch):
             raise ValueError("boom")
         return "ok"
 
-    # Поддерживаем 2 формы: @retry(...) и @retry без параметров
+    # РџРѕРґРґРµСЂР¶РёРІР°РµРј 2 С„РѕСЂРјС‹: @retry(...) Рё @retry Р±РµР· РїР°СЂР°РјРµС‚СЂРѕРІ
     def _wrap(fn):
         try:
-            # Попробуем как фабрику
+            # РџРѕРїСЂРѕР±СѓРµРј РєР°Рє С„Р°Р±СЂРёРєСѓ
             return decorator_obj(retries=3, delay=0)(fn)
         except TypeError:
-            # Попробуем как прямой декоратор
+            # РџРѕРїСЂРѕР±СѓРµРј РєР°Рє РїСЂСЏРјРѕР№ РґРµРєРѕСЂР°С‚РѕСЂ
             return decorator_obj(fn)
 
     wrapped = _wrap(flaky)
@@ -48,8 +48,8 @@ def test_retry_like_decorator_behaviour(monkeypatch):
 
 def test_timeout_like_decorator(monkeypatch):
     """
-    Ищем таймаут-декоратор и проверяем, что долгий вызов прерывается (или возвращает дефолт).
-    Если декоратора нет — скип.
+    РС‰РµРј С‚Р°Р№РјР°СѓС‚-РґРµРєРѕСЂР°С‚РѕСЂ Рё РїСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ РґРѕР»РіРёР№ РІС‹Р·РѕРІ РїСЂРµСЂС‹РІР°РµС‚СЃСЏ (РёР»Рё РІРѕР·РІСЂР°С‰Р°РµС‚ РґРµС„РѕР»С‚).
+    Р•СЃР»Рё РґРµРєРѕСЂР°С‚РѕСЂР° РЅРµС‚ вЂ” СЃРєРёРї.
     """
     dec = importlib.import_module("core.decorators")
     exported = [n for n, v in dec.__dict__.items() if callable(v)]
@@ -63,10 +63,10 @@ def test_timeout_like_decorator(monkeypatch):
         time.sleep(1.0)
         return "done"
 
-    # форсируем быстрый «таймаут» через monkeypatch
+    # С„РѕСЂСЃРёСЂСѓРµРј Р±С‹СЃС‚СЂС‹Р№ В«С‚Р°Р№РјР°СѓС‚В» С‡РµСЂРµР· monkeypatch
     monkeypatch.setattr(time, "sleep", lambda s: None)
 
-    # поддерживаем форму @timeout(seconds=...)
+    # РїРѕРґРґРµСЂР¶РёРІР°РµРј С„РѕСЂРјСѓ @timeout(seconds=...)
     try:
         wrapped = decorator_obj(seconds=0)(long_op)
     except TypeError:
@@ -75,16 +75,16 @@ def test_timeout_like_decorator(monkeypatch):
     try:
         res = wrapped()
     except Exception:
-        # допустимо, если таймаут реализован через исключение
+        # РґРѕРїСѓСЃС‚РёРјРѕ, РµСЃР»Рё С‚Р°Р№РјР°СѓС‚ СЂРµР°Р»РёР·РѕРІР°РЅ С‡РµСЂРµР· РёСЃРєР»СЋС‡РµРЅРёРµ
         return
-    # или функция может вернуть «дефолт»/None по вашей реализации
+    # РёР»Рё С„СѓРЅРєС†РёСЏ РјРѕР¶РµС‚ РІРµСЂРЅСѓС‚СЊ В«РґРµС„РѕР»С‚В»/None РїРѕ РІР°С€РµР№ СЂРµР°Р»РёР·Р°С†РёРё
     assert res in (None, "done")
 
 
 def test_suppress_like_decorator():
     """
-    Ищем «suppress/ignore»-декоратор, который не роняет выполнение при исключениях.
-    Если нет — скип.
+    РС‰РµРј В«suppress/ignoreВ»-РґРµРєРѕСЂР°С‚РѕСЂ, РєРѕС‚РѕСЂС‹Р№ РЅРµ СЂРѕРЅСЏРµС‚ РІС‹РїРѕР»РЅРµРЅРёРµ РїСЂРё РёСЃРєР»СЋС‡РµРЅРёСЏС….
+    Р•СЃР»Рё РЅРµС‚ вЂ” СЃРєРёРї.
     """
     dec = importlib.import_module("core.decorators")
     exported = [n for n, v in dec.__dict__.items() if callable(v)]
@@ -102,5 +102,5 @@ def test_suppress_like_decorator():
     except TypeError:
         wrapped = decorator_obj()(boom)
 
-    # Не должно бросить
+    # РќРµ РґРѕР»Р¶РЅРѕ Р±СЂРѕСЃРёС‚СЊ
     wrapped()

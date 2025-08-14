@@ -1,8 +1,8 @@
-# src/crypto_ai_bot/telegram/api_utils.py
+﻿# src/crypto_ai_bot/telegram/api_utils.py
 """
-Телеграм-утилиты: безопасная отправка сообщений/фото.
-- Работает через Settings.load()
-- Если токен/чат не заданы — тихо пропускает (не ломает бота)
+РўРµР»РµРіСЂР°Рј-СѓС‚РёР»РёС‚С‹: Р±РµР·РѕРїР°СЃРЅР°СЏ РѕС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёР№/С„РѕС‚Рѕ.
+- Р Р°Р±РѕС‚Р°РµС‚ С‡РµСЂРµР· Settings.load()
+- Р•СЃР»Рё С‚РѕРєРµРЅ/С‡Р°С‚ РЅРµ Р·Р°РґР°РЅС‹ вЂ” С‚РёС…Рѕ РїСЂРѕРїСѓСЃРєР°РµС‚ (РЅРµ Р»РѕРјР°РµС‚ Р±РѕС‚Р°)
 """
 
 from __future__ import annotations
@@ -12,12 +12,12 @@ from typing import Optional, Dict, Any
 
 import requests
 
-from crypto_ai_bot.config.settings import Settings
+from crypto_ai_bot.core.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
-# Экспортируем список админов как константу (для команд/фильтрации)
+# Р­РєСЃРїРѕСЂС‚РёСЂСѓРµРј СЃРїРёСЃРѕРє Р°РґРјРёРЅРѕРІ РєР°Рє РєРѕРЅСЃС‚Р°РЅС‚Сѓ (РґР»СЏ РєРѕРјР°РЅРґ/С„РёР»СЊС‚СЂР°С†РёРё)
 try:
     ADMIN_CHAT_IDS = [str(x) for x in (Settings.load().ADMIN_CHAT_IDS or [])]
 except Exception:
@@ -44,15 +44,15 @@ def send_message(
     disable_notification: bool = True,
     parse_mode: str = "HTML",
 ) -> bool:
-    """Отправляет текстовое сообщение в Telegram. Возвращает True/False."""
+    """РћС‚РїСЂР°РІР»СЏРµС‚ С‚РµРєСЃС‚РѕРІРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ РІ Telegram. Р’РѕР·РІСЂР°С‰Р°РµС‚ True/False."""
     try:
         cfg = Settings.load()
         if not cfg.BOT_TOKEN:
-            logger.debug("Telegram: BOT_TOKEN пуст — пропускаю отправку.")
+            logger.debug("Telegram: BOT_TOKEN РїСѓСЃС‚ вЂ” РїСЂРѕРїСѓСЃРєР°СЋ РѕС‚РїСЂР°РІРєСѓ.")
             return False
         cid = _resolve_chat_id(cfg, chat_id)
         if not cid:
-            logger.debug("Telegram: CHAT_ID не задан — пропускаю отправку.")
+            logger.debug("Telegram: CHAT_ID РЅРµ Р·Р°РґР°РЅ вЂ” РїСЂРѕРїСѓСЃРєР°СЋ РѕС‚РїСЂР°РІРєСѓ.")
             return False
 
         payload: Dict[str, Any] = {
@@ -78,15 +78,15 @@ def send_photo(
     chat_id: Optional[str] = None,
     parse_mode: str = "HTML",
 ) -> bool:
-    """Отправляет локальный файл как фото. Возвращает True/False."""
+    """РћС‚РїСЂР°РІР»СЏРµС‚ Р»РѕРєР°Р»СЊРЅС‹Р№ С„Р°Р№Р» РєР°Рє С„РѕС‚Рѕ. Р’РѕР·РІСЂР°С‰Р°РµС‚ True/False."""
     try:
         cfg = Settings.load()
         if not cfg.BOT_TOKEN:
-            logger.debug("Telegram: BOT_TOKEN пуст — пропускаю отправку фото.")
+            logger.debug("Telegram: BOT_TOKEN РїСѓСЃС‚ вЂ” РїСЂРѕРїСѓСЃРєР°СЋ РѕС‚РїСЂР°РІРєСѓ С„РѕС‚Рѕ.")
             return False
         cid = _resolve_chat_id(cfg, chat_id)
         if not cid:
-            logger.debug("Telegram: CHAT_ID не задан — пропускаю отправку фото.")
+            logger.debug("Telegram: CHAT_ID РЅРµ Р·Р°РґР°РЅ вЂ” РїСЂРѕРїСѓСЃРєР°СЋ РѕС‚РїСЂР°РІРєСѓ С„РѕС‚Рѕ.")
             return False
 
         url = _tg_base_url(cfg) + "/sendPhoto"

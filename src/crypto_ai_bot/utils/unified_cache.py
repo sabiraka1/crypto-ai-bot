@@ -1,5 +1,5 @@
-# utils/unified_cache.py — УНИФИЦИРОВАННЫЙ КЭШ
-# ВАЖНО: публичный API сохранён (get/set/cached) + get_or_set, TTL-хелперы.
+﻿# utils/unified_cache.py вЂ” РЈРќРР¤РР¦РР РћР’РђРќРќР«Р™ РљР­РЁ
+# Р’РђР–РќРћ: РїСѓР±Р»РёС‡РЅС‹Р№ API СЃРѕС…СЂР°РЅС‘РЅ (get/set/cached) + get_or_set, TTL-С…РµР»РїРµСЂС‹.
 
 from __future__ import annotations
 import time, threading, pickle, zlib, sys, os
@@ -9,23 +9,23 @@ from typing import Any, Dict, Optional, Callable, Tuple, List
 from enum import Enum
 
 try:
-    import psutil  # для мониторинга реального RSS (опционально)
+    import psutil  # РґР»СЏ РјРѕРЅРёС‚РѕСЂРёРЅРіР° СЂРµР°Р»СЊРЅРѕРіРѕ RSS (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
 except Exception:  # pragma: no cover
     psutil = None
 
-# ────────────────────────────────────────────────────────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 class CachePolicy(Enum):
     TTL = "ttl"
     LRU = "lru"
-    HYBRID = "hybrid"  # TTL + LRU (сначала TTL, затем LRU)
+    HYBRID = "hybrid"  # TTL + LRU (СЃРЅР°С‡Р°Р»Р° TTL, Р·Р°С‚РµРј LRU)
 
 class CacheNamespace(Enum):
-    OHLCV = "ohlcv"              # свечи
-    PRICES = "prices"            # последние цены
-    INDICATORS = "indicators"    # индикаторы
-    CSV_READS = "csv_reads"      # чтение CSV
-    MARKET_INFO = "market_info"  # инфо рынка/тикеры
-    ML_FEATURES = "ml_features"  # фичи/индикаторы
+    OHLCV = "ohlcv"              # СЃРІРµС‡Рё
+    PRICES = "prices"            # РїРѕСЃР»РµРґРЅРёРµ С†РµРЅС‹
+    INDICATORS = "indicators"    # РёРЅРґРёРєР°С‚РѕСЂС‹
+    CSV_READS = "csv_reads"      # С‡С‚РµРЅРёРµ CSV
+    MARKET_INFO = "market_info"  # РёРЅС„Рѕ СЂС‹РЅРєР°/С‚РёРєРµСЂС‹
+    ML_FEATURES = "ml_features"  # С„РёС‡Рё/РёРЅРґРёРєР°С‚РѕСЂС‹
     ORDER_STATUS = "order_status"
     TELEGRAM = "telegram"
     CHARTS = "charts"
@@ -34,15 +34,15 @@ class CacheNamespace(Enum):
 @dataclass
 class CacheEntry:
     key: str
-    data: Any                   # либо объект, либо ("zlib+pickle", bytes)
+    data: Any                   # Р»РёР±Рѕ РѕР±СЉРµРєС‚, Р»РёР±Рѕ ("zlib+pickle", bytes)
     namespace: str
     created_at: float
     last_accessed: float
     hits: int = 0
     size_bytes: int = 0
     ttl: Optional[float] = None
-    priority: int = 1           # 1..3 (3 — важнее)
-    sticky: bool = False        # нельзя выселять при давлении
+    priority: int = 1           # 1..3 (3 вЂ” РІР°Р¶РЅРµРµ)
+    sticky: bool = False        # РЅРµР»СЊР·СЏ РІС‹СЃРµР»СЏС‚СЊ РїСЂРё РґР°РІР»РµРЅРёРё
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def is_expired(self) -> bool:
@@ -56,14 +56,14 @@ class CacheEntry:
 
 @dataclass
 class NamespaceConfig:
-    ttl: Optional[float] = None               # TTL по умолчанию (сек)
-    max_size: int = 1000                      # лимит записей в ns
-    max_memory_mb: float = 100.0              # лимит памяти для ns
-    policy: CachePolicy = CachePolicy.HYBRID  # политика внутри ns
+    ttl: Optional[float] = None               # TTL РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ (СЃРµРє)
+    max_size: int = 1000                      # Р»РёРјРёС‚ Р·Р°РїРёСЃРµР№ РІ ns
+    max_memory_mb: float = 100.0              # Р»РёРјРёС‚ РїР°РјСЏС‚Рё РґР»СЏ ns
+    policy: CachePolicy = CachePolicy.HYBRID  # РїРѕР»РёС‚РёРєР° РІРЅСѓС‚СЂРё ns
     auto_cleanup: bool = True
-    compress: bool = False                    # хранить в сжатом виде
+    compress: bool = False                    # С…СЂР°РЅРёС‚СЊ РІ СЃР¶Р°С‚РѕРј РІРёРґРµ
 
-# ────────────────────────────────────────────────────────────────────────────
+# в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 class UnifiedCacheManager:
     def __init__(self,
                  namespace_configs: Optional[Dict[CacheNamespace, NamespaceConfig]] = None,
@@ -92,7 +92,7 @@ class UnifiedCacheManager:
         for ns, cfg in effective.items():
             self._ns_cfg[self._ns_key(ns)] = cfg
 
-    # ── Публичный API ──────────────────────────────────────────────────────
+    # в”Ђв”Ђ РџСѓР±Р»РёС‡РЅС‹Р№ API в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     def get(self, key: str, namespace: CacheNamespace | str, default: Any = None) -> Any:
         ns = self._ns_key(namespace)
         full_key = self._make_full_key(ns, key)
@@ -136,11 +136,11 @@ class UnifiedCacheManager:
             )
             full_key = self._make_full_key(ns, key)
             with self._lock:
-                # точечная очистка просроченных
+                # С‚РѕС‡РµС‡РЅР°СЏ РѕС‡РёСЃС‚РєР° РїСЂРѕСЃСЂРѕС‡РµРЅРЅС‹С…
                 self._cleanup_expired_locked(ns)
-                # проверка/эвикция внутри namespace
+                # РїСЂРѕРІРµСЂРєР°/СЌРІРёРєС†РёСЏ РІРЅСѓС‚СЂРё namespace
                 if not self._ensure_ns_capacity_locked(ns, size):
-                    # глобальная эвикция и повторная попытка
+                    # РіР»РѕР±Р°Р»СЊРЅР°СЏ СЌРІРёРєС†РёСЏ Рё РїРѕРІС‚РѕСЂРЅР°СЏ РїРѕРїС‹С‚РєР°
                     self._evict_global_locked(size)
                     if not self._ensure_ns_capacity_locked(ns, size):
                         self._stats["errors"] += 1
@@ -158,10 +158,10 @@ class UnifiedCacheManager:
                             }
                         )
                         return False
-                # запись
+                # Р·Р°РїРёСЃСЊ
                 self._data[full_key] = entry
                 self._stats["sets"] += 1
-                # глобальное давление памяти
+                # РіР»РѕР±Р°Р»СЊРЅРѕРµ РґР°РІР»РµРЅРёРµ РїР°РјСЏС‚Рё
                 self._enforce_global_memory_locked()
                 return True
         except Exception:
@@ -259,7 +259,7 @@ class UnifiedCacheManager:
             return wrapper
         return decorator
 
-    # ── TTL-хелперы (для свечей) ───────────────────────────────────────────
+    # в”Ђв”Ђ TTL-С…РµР»РїРµСЂС‹ (РґР»СЏ СЃРІРµС‡РµР№) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     @staticmethod
     def parse_tf_to_seconds(tf: str) -> int:
         tf = (tf or "").strip().lower()
@@ -275,14 +275,14 @@ class UnifiedCacheManager:
         try:
             return max(1, int(tf))
         except Exception:
-            return 900  # 15m по умолчанию
+            return 900  # 15m РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ
 
     @classmethod
     def ttl_until_next_slot(cls, tf_or_seconds: int | str, drift_sec: int = 10) -> int:
         """
-        Универсальная обёртка:
-        - если передана строка таймфрейма (например, '1m', '1h') — проксирует в ttl_until_next_candle
-        - если передано число секунд — ведёт себя как прежняя реализация
+        РЈРЅРёРІРµСЂСЃР°Р»СЊРЅР°СЏ РѕР±С‘СЂС‚РєР°:
+        - РµСЃР»Рё РїРµСЂРµРґР°РЅР° СЃС‚СЂРѕРєР° С‚Р°Р№РјС„СЂРµР№РјР° (РЅР°РїСЂРёРјРµСЂ, '1m', '1h') вЂ” РїСЂРѕРєСЃРёСЂСѓРµС‚ РІ ttl_until_next_candle
+        - РµСЃР»Рё РїРµСЂРµРґР°РЅРѕ С‡РёСЃР»Рѕ СЃРµРєСѓРЅРґ вЂ” РІРµРґС‘С‚ СЃРµР±СЏ РєР°Рє РїСЂРµР¶РЅСЏСЏ СЂРµР°Р»РёР·Р°С†РёСЏ
         """
         if isinstance(tf_or_seconds, str):
             return cls.ttl_until_next_candle(tf_or_seconds, drift_sec=drift_sec)
@@ -295,7 +295,7 @@ class UnifiedCacheManager:
     def ttl_until_next_candle(cls, tf: str, drift_sec: int = 10) -> int:
         return cls.ttl_until_next_slot(cls.parse_tf_to_seconds(tf), drift_sec=drift_sec)
 
-    # ── Внутренние утилиты ────────────────────────────────────────────────
+    # в”Ђв”Ђ Р’РЅСѓС‚СЂРµРЅРЅРёРµ СѓС‚РёР»РёС‚С‹ в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
     def _ns_key(self, ns: CacheNamespace | str) -> str:
         return ns.value if isinstance(ns, CacheNamespace) else str(ns)
 
@@ -390,7 +390,7 @@ class UnifiedCacheManager:
         try:
             if psutil is not None:
                 rss = psutil.Process(os.getpid()).memory_info().rss
-                limit = int(self.global_max_memory_mb * 1024 * 1024 * 1.10)  # 10% буфер
+                limit = int(self.global_max_memory_mb * 1024 * 1024 * 1.10)  # 10% Р±СѓС„РµСЂ
                 if rss > limit:
                     entries = [(k, e) for k, e in self._data.items() if not e.sticky]
                     cut = max(1, len(entries) // 10)
@@ -428,10 +428,10 @@ class UnifiedCacheManager:
         except Exception:
             return f"{func.__module__}.{func.__qualname__}:{id(args)}:{id(kwargs)}"
 
-# Глобальный синглтон
+# Р“Р»РѕР±Р°Р»СЊРЅС‹Р№ СЃРёРЅРіР»С‚РѕРЅ
 cache = UnifiedCacheManager()
 
-# Алиасы
+# РђР»РёР°СЃС‹
 ttl_until_next_slot = UnifiedCacheManager.ttl_until_next_slot
 ttl_until_next_candle = UnifiedCacheManager.ttl_until_next_candle
 parse_tf_to_seconds = UnifiedCacheManager.parse_tf_to_seconds

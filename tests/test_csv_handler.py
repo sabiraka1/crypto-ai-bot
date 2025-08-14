@@ -1,4 +1,4 @@
-"""Комплексные тесты для модуля работы с CSV файлами."""
+﻿"""РљРѕРјРїР»РµРєСЃРЅС‹Рµ С‚РµСЃС‚С‹ РґР»СЏ РјРѕРґСѓР»СЏ СЂР°Р±РѕС‚С‹ СЃ CSV С„Р°Р№Р»Р°РјРё."""
 
 import pytest
 import pandas as pd
@@ -15,16 +15,16 @@ from utils.csv_handler import CSVHandler
 
 @pytest.fixture
 def temp_dir():
-    """Создает временную директорию для тестов"""
+    """РЎРѕР·РґР°РµС‚ РІСЂРµРјРµРЅРЅСѓСЋ РґРёСЂРµРєС‚РѕСЂРёСЋ РґР»СЏ С‚РµСЃС‚РѕРІ"""
     temp_dir = tempfile.mkdtemp()
     yield temp_dir
-    # Очистка после теста
+    # РћС‡РёСЃС‚РєР° РїРѕСЃР»Рµ С‚РµСЃС‚Р°
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @pytest.fixture
 def csv_handler(temp_dir):
-    """Создает экземпляр CSVHandler с временными файлами"""
+    """РЎРѕР·РґР°РµС‚ СЌРєР·РµРјРїР»СЏСЂ CSVHandler СЃ РІСЂРµРјРµРЅРЅС‹РјРё С„Р°Р№Р»Р°РјРё"""
     trades_file = os.path.join(temp_dir, "test_trades.csv")
     signals_file = os.path.join(temp_dir, "test_signals.csv")
     
@@ -36,7 +36,7 @@ def csv_handler(temp_dir):
 
 @pytest.fixture
 def sample_trade_data():
-    """Создает образец данных сделки"""
+    """РЎРѕР·РґР°РµС‚ РѕР±СЂР°Р·РµС† РґР°РЅРЅС‹С… СЃРґРµР»РєРё"""
     return {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'symbol': 'BTC/USDT',
@@ -55,7 +55,7 @@ def sample_trade_data():
 
 @pytest.fixture
 def sample_signal_data():
-    """Создает образец данных сигнала"""
+    """РЎРѕР·РґР°РµС‚ РѕР±СЂР°Р·РµС† РґР°РЅРЅС‹С… СЃРёРіРЅР°Р»Р°"""
     return {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'symbol': 'BTC/USDT',
@@ -73,24 +73,24 @@ def sample_signal_data():
 
 
 class TestCSVHandlerInitialization:
-    """Тесты инициализации CSVHandler"""
+    """РўРµСЃС‚С‹ РёРЅРёС†РёР°Р»РёР·Р°С†РёРё CSVHandler"""
     
     def test_initialization_creates_files(self, temp_dir):
-        """Тест создания файлов при инициализации"""
+        """РўРµСЃС‚ СЃРѕР·РґР°РЅРёСЏ С„Р°Р№Р»РѕРІ РїСЂРё РёРЅРёС†РёР°Р»РёР·Р°С†РёРё"""
         trades_file = os.path.join(temp_dir, "trades.csv")
         signals_file = os.path.join(temp_dir, "signals.csv")
         
         handler = CSVHandler(trades_file, signals_file)
         
-        # Файлы должны быть созданы
+        # Р¤Р°Р№Р»С‹ РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ СЃРѕР·РґР°РЅС‹
         assert os.path.exists(trades_file)
         assert os.path.exists(signals_file)
     
     def test_initialization_with_existing_files(self, temp_dir):
-        """Тест инициализации с существующими файлами"""
+        """РўРµСЃС‚ РёРЅРёС†РёР°Р»РёР·Р°С†РёРё СЃ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРјРё С„Р°Р№Р»Р°РјРё"""
         trades_file = os.path.join(temp_dir, "existing_trades.csv")
         
-        # Создаем файл с данными
+        # РЎРѕР·РґР°РµРј С„Р°Р№Р» СЃ РґР°РЅРЅС‹РјРё
         existing_data = pd.DataFrame([
             {'timestamp': '2024-01-01', 'symbol': 'BTC/USDT', 'pnl': 100}
         ])
@@ -98,30 +98,30 @@ class TestCSVHandlerInitialization:
         
         handler = CSVHandler(trades_file, os.path.join(temp_dir, "signals.csv"))
         
-        # Существующие данные должны сохраниться
+        # РЎСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ РґР°РЅРЅС‹Рµ РґРѕР»Р¶РЅС‹ СЃРѕС…СЂР°РЅРёС‚СЊСЃСЏ
         trades = handler.get_all_trades()
         assert len(trades) == 1
         assert trades.iloc[0]['symbol'] == 'BTC/USDT'
     
     def test_initialization_with_corrupted_file(self, temp_dir):
-        """Тест инициализации с поврежденным файлом"""
+        """РўРµСЃС‚ РёРЅРёС†РёР°Р»РёР·Р°С†РёРё СЃ РїРѕРІСЂРµР¶РґРµРЅРЅС‹Рј С„Р°Р№Р»РѕРј"""
         trades_file = os.path.join(temp_dir, "corrupted.csv")
         
-        # Создаем поврежденный CSV
+        # РЎРѕР·РґР°РµРј РїРѕРІСЂРµР¶РґРµРЅРЅС‹Р№ CSV
         with open(trades_file, 'w') as f:
             f.write("invalid,csv,content\n")
             f.write("missing,data")
         
-        # Должен обработать gracefully
+        # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ gracefully
         handler = CSVHandler(trades_file, os.path.join(temp_dir, "signals.csv"))
         assert handler is not None
 
 
 class TestTradeLogging:
-    """Тесты логирования сделок"""
+    """РўРµСЃС‚С‹ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ СЃРґРµР»РѕРє"""
     
     def test_log_open_trade(self, csv_handler, sample_trade_data):
-        """Тест логирования открытия сделки"""
+        """РўРµСЃС‚ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ РѕС‚РєСЂС‹С‚РёСЏ СЃРґРµР»РєРё"""
         csv_handler.log_open_trade(sample_trade_data)
         
         trades = csv_handler.get_all_trades()
@@ -130,7 +130,7 @@ class TestTradeLogging:
         assert trades.iloc[0]['side'] == 'buy'
     
     def test_log_close_trade(self, csv_handler, sample_trade_data):
-        """Тест логирования закрытия сделки"""
+        """РўРµСЃС‚ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ Р·Р°РєСЂС‹С‚РёСЏ СЃРґРµР»РєРё"""
         csv_handler.log_close_trade(sample_trade_data)
         
         trades = csv_handler.get_all_trades()
@@ -139,7 +139,7 @@ class TestTradeLogging:
         assert trades.iloc[0]['pnl_pct'] == 2.0
     
     def test_log_multiple_trades(self, csv_handler):
-        """Тест логирования нескольких сделок"""
+        """РўРµСЃС‚ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ РЅРµСЃРєРѕР»СЊРєРёС… СЃРґРµР»РѕРє"""
         trades_data = [
             {'symbol': 'BTC/USDT', 'pnl': 100, 'timestamp': '2024-01-01'},
             {'symbol': 'ETH/USDT', 'pnl': -50, 'timestamp': '2024-01-02'},
@@ -152,19 +152,19 @@ class TestTradeLogging:
         all_trades = csv_handler.get_all_trades()
         assert len(all_trades) == 3
         
-        # Проверяем порядок (должны быть в хронологическом порядке)
+        # РџСЂРѕРІРµСЂСЏРµРј РїРѕСЂСЏРґРѕРє (РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ РІ С…СЂРѕРЅРѕР»РѕРіРёС‡РµСЃРєРѕРј РїРѕСЂСЏРґРєРµ)
         assert all_trades.iloc[0]['symbol'] == 'BTC/USDT'
         assert all_trades.iloc[1]['symbol'] == 'ETH/USDT'
     
     def test_log_trade_with_missing_fields(self, csv_handler):
-        """Тест логирования с отсутствующими полями"""
+        """РўРµСЃС‚ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ СЃ РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‰РёРјРё РїРѕР»СЏРјРё"""
         incomplete_trade = {
             'symbol': 'BTC/USDT',
             'pnl': 100
-            # Отсутствуют другие поля
+            # РћС‚СЃСѓС‚СЃС‚РІСѓСЋС‚ РґСЂСѓРіРёРµ РїРѕР»СЏ
         }
         
-        # Должен обработать без ошибок
+        # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ Р±РµР· РѕС€РёР±РѕРє
         csv_handler.log_close_trade(incomplete_trade)
         
         trades = csv_handler.get_all_trades()
@@ -172,11 +172,11 @@ class TestTradeLogging:
         assert trades.iloc[0]['symbol'] == 'BTC/USDT'
     
     def test_append_trade_to_existing(self, csv_handler, sample_trade_data):
-        """Тест добавления к существующим данным"""
-        # Первая сделка
+        """РўРµСЃС‚ РґРѕР±Р°РІР»РµРЅРёСЏ Рє СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРј РґР°РЅРЅС‹Рј"""
+        # РџРµСЂРІР°СЏ СЃРґРµР»РєР°
         csv_handler.log_close_trade(sample_trade_data)
         
-        # Вторая сделка
+        # Р’С‚РѕСЂР°СЏ СЃРґРµР»РєР°
         second_trade = sample_trade_data.copy()
         second_trade['symbol'] = 'ETH/USDT'
         csv_handler.log_close_trade(second_trade)
@@ -188,10 +188,10 @@ class TestTradeLogging:
 
 
 class TestSignalLogging:
-    """Тесты логирования сигналов"""
+    """РўРµСЃС‚С‹ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ СЃРёРіРЅР°Р»РѕРІ"""
     
     def test_log_signal(self, csv_handler, sample_signal_data):
-        """Тест логирования сигнала"""
+        """РўРµСЃС‚ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ СЃРёРіРЅР°Р»Р°"""
         csv_handler.log_signal(sample_signal_data)
         
         signals = csv_handler.get_all_signals()
@@ -200,7 +200,7 @@ class TestSignalLogging:
         assert signals.iloc[0]['score'] == 0.85
     
     def test_log_signal_with_indicators(self, csv_handler):
-        """Тест логирования сигнала с индикаторами"""
+        """РўРµСЃС‚ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ СЃРёРіРЅР°Р»Р° СЃ РёРЅРґРёРєР°С‚РѕСЂР°РјРё"""
         signal_with_indicators = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'symbol': 'BTC/USDT',
@@ -217,13 +217,13 @@ class TestSignalLogging:
         signals = csv_handler.get_all_signals()
         assert len(signals) == 1
         
-        # Индикаторы должны быть сохранены (как JSON или отдельные колонки)
+        # РРЅРґРёРєР°С‚РѕСЂС‹ РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ СЃРѕС…СЂР°РЅРµРЅС‹ (РєР°Рє JSON РёР»Рё РѕС‚РґРµР»СЊРЅС‹Рµ РєРѕР»РѕРЅРєРё)
         signal_row = signals.iloc[0]
         assert 'indicators' in signal_row or 'rsi' in signal_row
     
     def test_signal_deduplication(self, csv_handler):
-        """Тест дедупликации сигналов"""
-        # Логируем один и тот же сигнал несколько раз
+        """РўРµСЃС‚ РґРµРґСѓРїР»РёРєР°С†РёРё СЃРёРіРЅР°Р»РѕРІ"""
+        # Р›РѕРіРёСЂСѓРµРј РѕРґРёРЅ Рё С‚РѕС‚ Р¶Рµ СЃРёРіРЅР°Р» РЅРµСЃРєРѕР»СЊРєРѕ СЂР°Р·
         signal = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'symbol': 'BTC/USDT',
@@ -234,25 +234,25 @@ class TestSignalLogging:
         csv_handler.log_signal(signal)
         csv_handler.log_signal(signal)
         
-        # Может быть реализована дедупликация
+        # РњРѕР¶РµС‚ Р±С‹С‚СЊ СЂРµР°Р»РёР·РѕРІР°РЅР° РґРµРґСѓРїР»РёРєР°С†РёСЏ
         signals = csv_handler.get_all_signals()
-        # Либо 1 (с дедупликацией), либо 2 (без)
+        # Р›РёР±Рѕ 1 (СЃ РґРµРґСѓРїР»РёРєР°С†РёРµР№), Р»РёР±Рѕ 2 (Р±РµР·)
         assert len(signals) in [1, 2]
 
 
 class TestDataRetrieval:
-    """Тесты получения данных"""
+    """РўРµСЃС‚С‹ РїРѕР»СѓС‡РµРЅРёСЏ РґР°РЅРЅС‹С…"""
     
     def test_get_all_trades_empty(self, csv_handler):
-        """Тест получения сделок из пустого файла"""
+        """РўРµСЃС‚ РїРѕР»СѓС‡РµРЅРёСЏ СЃРґРµР»РѕРє РёР· РїСѓСЃС‚РѕРіРѕ С„Р°Р№Р»Р°"""
         trades = csv_handler.get_all_trades()
         
         assert isinstance(trades, pd.DataFrame)
         assert len(trades) == 0
     
     def test_get_recent_trades(self, csv_handler):
-        """Тест получения последних сделок"""
-        # Добавляем несколько сделок
+        """РўРµСЃС‚ РїРѕР»СѓС‡РµРЅРёСЏ РїРѕСЃР»РµРґРЅРёС… СЃРґРµР»РѕРє"""
+        # Р”РѕР±Р°РІР»СЏРµРј РЅРµСЃРєРѕР»СЊРєРѕ СЃРґРµР»РѕРє
         base_time = datetime.now(timezone.utc)
         for i in range(10):
             trade = {
@@ -262,18 +262,18 @@ class TestDataRetrieval:
             }
             csv_handler.log_close_trade(trade)
         
-        # Получаем последние 5 сделок
+        # РџРѕР»СѓС‡Р°РµРј РїРѕСЃР»РµРґРЅРёРµ 5 СЃРґРµР»РѕРє
         recent = csv_handler.get_recent_trades(n=5)
         assert len(recent) == 5
         
-        # Должны быть отсортированы по времени (последние первые)
-        assert recent.iloc[0]['pnl'] == 0  # Самая последняя
+        # Р”РѕР»Р¶РЅС‹ Р±С‹С‚СЊ РѕС‚СЃРѕСЂС‚РёСЂРѕРІР°РЅС‹ РїРѕ РІСЂРµРјРµРЅРё (РїРѕСЃР»РµРґРЅРёРµ РїРµСЂРІС‹Рµ)
+        assert recent.iloc[0]['pnl'] == 0  # РЎР°РјР°СЏ РїРѕСЃР»РµРґРЅСЏСЏ
     
     def test_get_trades_by_date_range(self, csv_handler):
-        """Тест получения сделок за период"""
+        """РўРµСЃС‚ РїРѕР»СѓС‡РµРЅРёСЏ СЃРґРµР»РѕРє Р·Р° РїРµСЂРёРѕРґ"""
         base_time = datetime.now(timezone.utc)
         
-        # Добавляем сделки за разные дни
+        # Р”РѕР±Р°РІР»СЏРµРј СЃРґРµР»РєРё Р·Р° СЂР°Р·РЅС‹Рµ РґРЅРё
         for i in range(10):
             trade = {
                 'timestamp': (base_time - timedelta(days=i)).isoformat(),
@@ -282,15 +282,15 @@ class TestDataRetrieval:
             }
             csv_handler.log_close_trade(trade)
         
-        # Получаем сделки за последние 3 дня
+        # РџРѕР»СѓС‡Р°РµРј СЃРґРµР»РєРё Р·Р° РїРѕСЃР»РµРґРЅРёРµ 3 РґРЅСЏ
         start_date = base_time - timedelta(days=3)
         end_date = base_time
         
         filtered = csv_handler.get_trades_by_date(start_date, end_date)
-        assert len(filtered) <= 4  # За 3 дня + сегодня
+        assert len(filtered) <= 4  # Р—Р° 3 РґРЅСЏ + СЃРµРіРѕРґРЅСЏ
     
     def test_get_trades_by_symbol(self, csv_handler):
-        """Тест фильтрации сделок по символу"""
+        """РўРµСЃС‚ С„РёР»СЊС‚СЂР°С†РёРё СЃРґРµР»РѕРє РїРѕ СЃРёРјРІРѕР»Сѓ"""
         trades = [
             {'symbol': 'BTC/USDT', 'pnl': 100},
             {'symbol': 'ETH/USDT', 'pnl': 50},
@@ -307,10 +307,10 @@ class TestDataRetrieval:
 
 
 class TestStatistics:
-    """Тесты расчета статистики"""
+    """РўРµСЃС‚С‹ СЂР°СЃС‡РµС‚Р° СЃС‚Р°С‚РёСЃС‚РёРєРё"""
     
     def test_get_trade_stats_basic(self, csv_handler):
-        """Тест базовой статистики сделок"""
+        """РўРµСЃС‚ Р±Р°Р·РѕРІРѕР№ СЃС‚Р°С‚РёСЃС‚РёРєРё СЃРґРµР»РѕРє"""
         trades = [
             {'symbol': 'BTC/USDT', 'pnl_abs': 100, 'pnl_pct': 2.0},
             {'symbol': 'BTC/USDT', 'pnl_abs': -50, 'pnl_pct': -1.0},
@@ -332,7 +332,7 @@ class TestStatistics:
         assert stats['avg_loss'] == -37.5  # (-50 - 25) / 2
     
     def test_get_trade_stats_empty(self, csv_handler):
-        """Тест статистики без сделок"""
+        """РўРµСЃС‚ СЃС‚Р°С‚РёСЃС‚РёРєРё Р±РµР· СЃРґРµР»РѕРє"""
         stats = csv_handler.get_trade_stats()
         
         assert stats['total_trades'] == 0
@@ -340,8 +340,8 @@ class TestStatistics:
         assert stats['total_pnl'] == 0
     
     def test_calculate_sharpe_ratio(self, csv_handler):
-        """Тест расчета коэффициента Шарпа"""
-        # Добавляем сделки с известными результатами
+        """РўРµСЃС‚ СЂР°СЃС‡РµС‚Р° РєРѕСЌС„С„РёС†РёРµРЅС‚Р° РЁР°СЂРїР°"""
+        # Р”РѕР±Р°РІР»СЏРµРј СЃРґРµР»РєРё СЃ РёР·РІРµСЃС‚РЅС‹РјРё СЂРµР·СѓР»СЊС‚Р°С‚Р°РјРё
         returns = [0.02, -0.01, 0.015, 0.005, -0.008, 0.012]
         for i, ret in enumerate(returns):
             trade = {
@@ -353,12 +353,12 @@ class TestStatistics:
         sharpe = csv_handler.calculate_sharpe_ratio()
         
         assert isinstance(sharpe, float)
-        # Sharpe ratio должен быть разумным (-3 до 3 обычно)
+        # Sharpe ratio РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ СЂР°Р·СѓРјРЅС‹Рј (-3 РґРѕ 3 РѕР±С‹С‡РЅРѕ)
         assert -5 < sharpe < 5
     
     def test_calculate_max_drawdown(self, csv_handler):
-        """Тест расчета максимальной просадки"""
-        # Создаем серию с известной просадкой
+        """РўРµСЃС‚ СЂР°СЃС‡РµС‚Р° РјР°РєСЃРёРјР°Р»СЊРЅРѕР№ РїСЂРѕСЃР°РґРєРё"""
+        # РЎРѕР·РґР°РµРј СЃРµСЂРёСЋ СЃ РёР·РІРµСЃС‚РЅРѕР№ РїСЂРѕСЃР°РґРєРѕР№
         equity_curve = [1000, 1100, 1050, 900, 950, 1000, 1100, 1000]
         
         for i, equity in enumerate(equity_curve):
@@ -372,13 +372,13 @@ class TestStatistics:
         
         max_dd = csv_handler.calculate_max_drawdown()
         
-        # Максимальная просадка от 1100 до 900 = 200/1100 = 18.18%
-        assert max_dd < -0.15  # Должна быть отрицательной
-        assert max_dd > -0.25  # Но не слишком большой
+        # РњР°РєСЃРёРјР°Р»СЊРЅР°СЏ РїСЂРѕСЃР°РґРєР° РѕС‚ 1100 РґРѕ 900 = 200/1100 = 18.18%
+        assert max_dd < -0.15  # Р”РѕР»Р¶РЅР° Р±С‹С‚СЊ РѕС‚СЂРёС†Р°С‚РµР»СЊРЅРѕР№
+        assert max_dd > -0.25  # РќРѕ РЅРµ СЃР»РёС€РєРѕРј Р±РѕР»СЊС€РѕР№
     
     def test_get_performance_metrics(self, csv_handler):
-        """Тест получения всех метрик производительности"""
-        # Добавляем разнообразные сделки
+        """РўРµСЃС‚ РїРѕР»СѓС‡РµРЅРёСЏ РІСЃРµС… РјРµС‚СЂРёРє РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚Рё"""
+        # Р”РѕР±Р°РІР»СЏРµРј СЂР°Р·РЅРѕРѕР±СЂР°Р·РЅС‹Рµ СЃРґРµР»РєРё
         np.random.seed(42)
         for i in range(20):
             trade = {
@@ -402,11 +402,11 @@ class TestStatistics:
 
 
 class TestDataExport:
-    """Тесты экспорта данных"""
+    """РўРµСЃС‚С‹ СЌРєСЃРїРѕСЂС‚Р° РґР°РЅРЅС‹С…"""
     
     def test_export_to_excel(self, csv_handler, temp_dir):
-        """Тест экспорта в Excel"""
-        # Добавляем данные
+        """РўРµСЃС‚ СЌРєСЃРїРѕСЂС‚Р° РІ Excel"""
+        # Р”РѕР±Р°РІР»СЏРµРј РґР°РЅРЅС‹Рµ
         for i in range(5):
             csv_handler.log_close_trade({'symbol': 'BTC/USDT', 'pnl': i * 10})
         
@@ -415,13 +415,13 @@ class TestDataExport:
         
         assert os.path.exists(excel_file)
         
-        # Проверяем содержимое
+        # РџСЂРѕРІРµСЂСЏРµРј СЃРѕРґРµСЂР¶РёРјРѕРµ
         df = pd.read_excel(excel_file, sheet_name='Trades')
         assert len(df) == 5
     
     def test_export_summary_report(self, csv_handler, temp_dir):
-        """Тест создания сводного отчета"""
-        # Добавляем данные
+        """РўРµСЃС‚ СЃРѕР·РґР°РЅРёСЏ СЃРІРѕРґРЅРѕРіРѕ РѕС‚С‡РµС‚Р°"""
+        # Р”РѕР±Р°РІР»СЏРµРј РґР°РЅРЅС‹Рµ
         for i in range(10):
             trade = {
                 'timestamp': (datetime.now(timezone.utc) - timedelta(days=i)).isoformat(),
@@ -433,27 +433,27 @@ class TestDataExport:
         report_file = os.path.join(temp_dir, "report.html")
         csv_handler.generate_report(report_file)
         
-        # Отчет должен быть создан
-        assert os.path.exists(report_file) or True  # Может быть не реализовано
+        # РћС‚С‡РµС‚ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ СЃРѕР·РґР°РЅ
+        assert os.path.exists(report_file) or True  # РњРѕР¶РµС‚ Р±С‹С‚СЊ РЅРµ СЂРµР°Р»РёР·РѕРІР°РЅРѕ
     
     def test_backup_data(self, csv_handler, temp_dir):
-        """Тест создания резервной копии"""
-        # Добавляем данные
+        """РўРµСЃС‚ СЃРѕР·РґР°РЅРёСЏ СЂРµР·РµСЂРІРЅРѕР№ РєРѕРїРёРё"""
+        # Р”РѕР±Р°РІР»СЏРµРј РґР°РЅРЅС‹Рµ
         csv_handler.log_close_trade({'symbol': 'BTC/USDT', 'pnl': 100})
         
         backup_dir = os.path.join(temp_dir, "backups")
         csv_handler.backup(backup_dir)
         
-        # Должна быть создана резервная копия
-        assert os.path.exists(backup_dir) or True  # Может быть не реализовано
+        # Р”РѕР»Р¶РЅР° Р±С‹С‚СЊ СЃРѕР·РґР°РЅР° СЂРµР·РµСЂРІРЅР°СЏ РєРѕРїРёСЏ
+        assert os.path.exists(backup_dir) or True  # РњРѕР¶РµС‚ Р±С‹С‚СЊ РЅРµ СЂРµР°Р»РёР·РѕРІР°РЅРѕ
 
 
 class TestDataValidation:
-    """Тесты валидации данных"""
+    """РўРµСЃС‚С‹ РІР°Р»РёРґР°С†РёРё РґР°РЅРЅС‹С…"""
     
     def test_validate_trade_data(self, csv_handler):
-        """Тест валидации данных сделки"""
-        # Валидные данные
+        """РўРµСЃС‚ РІР°Р»РёРґР°С†РёРё РґР°РЅРЅС‹С… СЃРґРµР»РєРё"""
+        # Р’Р°Р»РёРґРЅС‹Рµ РґР°РЅРЅС‹Рµ
         valid_trade = {
             'symbol': 'BTC/USDT',
             'side': 'buy',
@@ -462,12 +462,12 @@ class TestDataValidation:
         }
         
         is_valid = csv_handler.validate_trade_data(valid_trade)
-        assert is_valid is True or is_valid is None  # Может не быть реализовано
+        assert is_valid is True or is_valid is None  # РњРѕР¶РµС‚ РЅРµ Р±С‹С‚СЊ СЂРµР°Р»РёР·РѕРІР°РЅРѕ
         
-        # Невалидные данные
+        # РќРµРІР°Р»РёРґРЅС‹Рµ РґР°РЅРЅС‹Рµ
         invalid_trade = {
             'symbol': 'BTC/USDT',
-            'price': -50000.0,  # Отрицательная цена
+            'price': -50000.0,  # РћС‚СЂРёС†Р°С‚РµР»СЊРЅР°СЏ С†РµРЅР°
             'quantity': 0
         }
         
@@ -475,12 +475,12 @@ class TestDataValidation:
         assert is_valid is False or is_valid is None
     
     def test_clean_corrupted_data(self, csv_handler):
-        """Тест очистки поврежденных данных"""
-        # Добавляем смесь валидных и невалидных данных
+        """РўРµСЃС‚ РѕС‡РёСЃС‚РєРё РїРѕРІСЂРµР¶РґРµРЅРЅС‹С… РґР°РЅРЅС‹С…"""
+        # Р”РѕР±Р°РІР»СЏРµРј СЃРјРµСЃСЊ РІР°Р»РёРґРЅС‹С… Рё РЅРµРІР°Р»РёРґРЅС‹С… РґР°РЅРЅС‹С…
         trades = [
             {'symbol': 'BTC/USDT', 'pnl': 100},
-            {'symbol': None, 'pnl': 50},  # Невалидный symbol
-            {'symbol': 'ETH/USDT', 'pnl': 'invalid'},  # Невалидный pnl
+            {'symbol': None, 'pnl': 50},  # РќРµРІР°Р»РёРґРЅС‹Р№ symbol
+            {'symbol': 'ETH/USDT', 'pnl': 'invalid'},  # РќРµРІР°Р»РёРґРЅС‹Р№ pnl
             {'symbol': 'SOL/USDT', 'pnl': 30}
         ]
         
@@ -490,19 +490,19 @@ class TestDataValidation:
             except:
                 pass
         
-        # Очищаем данные
+        # РћС‡РёС‰Р°РµРј РґР°РЅРЅС‹Рµ
         cleaned = csv_handler.clean_data()
         
-        # Должны остаться только валидные записи
+        # Р”РѕР»Р¶РЅС‹ РѕСЃС‚Р°С‚СЊСЃСЏ С‚РѕР»СЊРєРѕ РІР°Р»РёРґРЅС‹Рµ Р·Р°РїРёСЃРё
         if cleaned is not None:
             assert len(cleaned) <= 4
 
 
 class TestConcurrency:
-    """Тесты конкурентного доступа"""
+    """РўРµСЃС‚С‹ РєРѕРЅРєСѓСЂРµРЅС‚РЅРѕРіРѕ РґРѕСЃС‚СѓРїР°"""
     
     def test_concurrent_writes(self, csv_handler):
-        """Тест одновременной записи"""
+        """РўРµСЃС‚ РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕР№ Р·Р°РїРёСЃРё"""
         import threading
         import time
         
@@ -517,7 +517,7 @@ class TestConcurrency:
                 csv_handler.log_close_trade(trade)
                 time.sleep(0.001)
         
-        # Запускаем несколько потоков
+        # Р—Р°РїСѓСЃРєР°РµРј РЅРµСЃРєРѕР»СЊРєРѕ РїРѕС‚РѕРєРѕРІ
         threads = []
         for i in range(3):
             t = threading.Thread(target=write_trades, args=(i,))
@@ -527,74 +527,74 @@ class TestConcurrency:
         for t in threads:
             t.join()
         
-        # Все записи должны быть сохранены
+        # Р’СЃРµ Р·Р°РїРёСЃРё РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ СЃРѕС…СЂР°РЅРµРЅС‹
         all_trades = csv_handler.get_all_trades()
         assert len(all_trades) == 30
     
     def test_file_locking(self, csv_handler):
-        """Тест блокировки файла при записи"""
-        # Эмулируем блокировку файла
+        """РўРµСЃС‚ Р±Р»РѕРєРёСЂРѕРІРєРё С„Р°Р№Р»Р° РїСЂРё Р·Р°РїРёСЃРё"""
+        # Р­РјСѓР»РёСЂСѓРµРј Р±Р»РѕРєРёСЂРѕРІРєСѓ С„Р°Р№Р»Р°
         with patch('builtins.open', side_effect=PermissionError):
-            # Должен обработать ошибку gracefully
+            # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ РѕС€РёР±РєСѓ gracefully
             try:
                 csv_handler.log_close_trade({'symbol': 'BTC/USDT', 'pnl': 100})
             except PermissionError:
-                pass  # Ожидаемое поведение
+                pass  # РћР¶РёРґР°РµРјРѕРµ РїРѕРІРµРґРµРЅРёРµ
 
 
 class TestErrorHandling:
-    """Тесты обработки ошибок"""
+    """РўРµСЃС‚С‹ РѕР±СЂР°Р±РѕС‚РєРё РѕС€РёР±РѕРє"""
     
     def test_handle_missing_file(self, temp_dir):
-        """Тест обработки отсутствующего файла"""
+        """РўРµСЃС‚ РѕР±СЂР°Р±РѕС‚РєРё РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‰РµРіРѕ С„Р°Р№Р»Р°"""
         non_existent = os.path.join(temp_dir, "non_existent.csv")
         
-        # Удаляем файл если он существует
+        # РЈРґР°Р»СЏРµРј С„Р°Р№Р» РµСЃР»Рё РѕРЅ СЃСѓС‰РµСЃС‚РІСѓРµС‚
         if os.path.exists(non_existent):
             os.remove(non_existent)
         
         handler = CSVHandler(non_existent, os.path.join(temp_dir, "signals.csv"))
         
-        # Должен создать файл
+        # Р”РѕР»Р¶РµРЅ СЃРѕР·РґР°С‚СЊ С„Р°Р№Р»
         trades = handler.get_all_trades()
         assert isinstance(trades, pd.DataFrame)
     
     def test_handle_permission_error(self, temp_dir):
-        """Тест обработки ошибки доступа"""
+        """РўРµСЃС‚ РѕР±СЂР°Р±РѕС‚РєРё РѕС€РёР±РєРё РґРѕСЃС‚СѓРїР°"""
         trades_file = os.path.join(temp_dir, "readonly.csv")
         
-        # Создаем файл
+        # РЎРѕР·РґР°РµРј С„Р°Р№Р»
         open(trades_file, 'w').close()
         
-        # Делаем файл только для чтения (на Unix-системах)
+        # Р”РµР»Р°РµРј С„Р°Р№Р» С‚РѕР»СЊРєРѕ РґР»СЏ С‡С‚РµРЅРёСЏ (РЅР° Unix-СЃРёСЃС‚РµРјР°С…)
         try:
             os.chmod(trades_file, 0o444)
             
             handler = CSVHandler(trades_file, os.path.join(temp_dir, "signals.csv"))
             
-            # Попытка записи должна обработаться
+            # РџРѕРїС‹С‚РєР° Р·Р°РїРёСЃРё РґРѕР»Р¶РЅР° РѕР±СЂР°Р±РѕС‚Р°С‚СЊСЃСЏ
             handler.log_close_trade({'symbol': 'BTC/USDT', 'pnl': 100})
             
         finally:
-            # Восстанавливаем права
+            # Р’РѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј РїСЂР°РІР°
             os.chmod(trades_file, 0o644)
     
     def test_handle_disk_full(self, csv_handler):
-        """Тест обработки переполнения диска"""
+        """РўРµСЃС‚ РѕР±СЂР°Р±РѕС‚РєРё РїРµСЂРµРїРѕР»РЅРµРЅРёСЏ РґРёСЃРєР°"""
         with patch('pandas.DataFrame.to_csv', side_effect=IOError("No space left on device")):
-            # Должен обработать ошибку
+            # Р”РѕР»Р¶РµРЅ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ РѕС€РёР±РєСѓ
             try:
                 csv_handler.log_close_trade({'symbol': 'BTC/USDT', 'pnl': 100})
             except IOError:
-                pass  # Ожидаемое поведение
+                pass  # РћР¶РёРґР°РµРјРѕРµ РїРѕРІРµРґРµРЅРёРµ
 
 
 class TestIntegration:
-    """Интеграционные тесты"""
+    """РРЅС‚РµРіСЂР°С†РёРѕРЅРЅС‹Рµ С‚РµСЃС‚С‹"""
     
     def test_full_trading_cycle(self, csv_handler):
-        """Тест полного цикла торговли"""
-        # 1. Логируем сигнал на покупку
+        """РўРµСЃС‚ РїРѕР»РЅРѕРіРѕ С†РёРєР»Р° С‚РѕСЂРіРѕРІР»Рё"""
+        # 1. Р›РѕРіРёСЂСѓРµРј СЃРёРіРЅР°Р» РЅР° РїРѕРєСѓРїРєСѓ
         buy_signal = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'symbol': 'BTC/USDT',
@@ -604,7 +604,7 @@ class TestIntegration:
         }
         csv_handler.log_signal(buy_signal)
         
-        # 2. Логируем открытие позиции
+        # 2. Р›РѕРіРёСЂСѓРµРј РѕС‚РєСЂС‹С‚РёРµ РїРѕР·РёС†РёРё
         open_trade = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'symbol': 'BTC/USDT',
@@ -614,7 +614,7 @@ class TestIntegration:
         }
         csv_handler.log_open_trade(open_trade)
         
-        # 3. Логируем закрытие позиции
+        # 3. Р›РѕРіРёСЂСѓРµРј Р·Р°РєСЂС‹С‚РёРµ РїРѕР·РёС†РёРё
         close_trade = {
             'timestamp': (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
             'symbol': 'BTC/USDT',
@@ -628,25 +628,25 @@ class TestIntegration:
         }
         csv_handler.log_close_trade(close_trade)
         
-        # 4. Проверяем статистику
+        # 4. РџСЂРѕРІРµСЂСЏРµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ
         stats = csv_handler.get_trade_stats()
         assert stats['total_trades'] >= 1
         assert stats['total_pnl'] == 100.0
         
-        # 5. Проверяем сигналы
+        # 5. РџСЂРѕРІРµСЂСЏРµРј СЃРёРіРЅР°Р»С‹
         signals = csv_handler.get_all_signals()
         assert len(signals) >= 1
     
     def test_performance_over_time(self, csv_handler):
-        """Тест производительности во времени"""
-        # Симулируем месяц торговли
+        """РўРµСЃС‚ РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅРѕСЃС‚Рё РІРѕ РІСЂРµРјРµРЅРё"""
+        # РЎРёРјСѓР»РёСЂСѓРµРј РјРµСЃСЏС† С‚РѕСЂРіРѕРІР»Рё
         base_time = datetime.now(timezone.utc) - timedelta(days=30)
         
         for day in range(30):
-            for trade_num in range(5):  # 5 сделок в день
+            for trade_num in range(5):  # 5 СЃРґРµР»РѕРє РІ РґРµРЅСЊ
                 trade_time = base_time + timedelta(days=day, hours=trade_num*4)
                 
-                # Случайный результат
+                # РЎР»СѓС‡Р°Р№РЅС‹Р№ СЂРµР·СѓР»СЊС‚Р°С‚
                 pnl = np.random.normal(0, 50)
                 
                 trade = {
@@ -657,11 +657,11 @@ class TestIntegration:
                 }
                 csv_handler.log_close_trade(trade)
         
-        # Анализируем результаты
+        # РђРЅР°Р»РёР·РёСЂСѓРµРј СЂРµР·СѓР»СЊС‚Р°С‚С‹
         all_trades = csv_handler.get_all_trades()
-        assert len(all_trades) == 150  # 30 дней * 5 сделок
+        assert len(all_trades) == 150  # 30 РґРЅРµР№ * 5 СЃРґРµР»РѕРє
         
-        # Получаем статистику по дням
+        # РџРѕР»СѓС‡Р°РµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ РїРѕ РґРЅСЏРј
         daily_stats = csv_handler.get_daily_statistics()
         if daily_stats is not None:
             assert len(daily_stats) <= 30

@@ -1,15 +1,15 @@
-
+﻿
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 # crypto_ai_bot/sinyal_skorlayici.py
 # ----------------------------------
-# Простая, но корректная тренировка модели с TimeSeriesSplit (walk-forward).
-# - Загружает OHLCV через ccxt (реальные данные) по SYMBOL/TIMEFRAME/LOOKBACK
-# - Строит признаки из analysis.technical_indicators
-# - Цель: будет ли доходность за горизонтом H > T% до ухода ниже -S% (упрощённая метка)
-# - Модель: LogisticRegression (scikit-learn) + сохранение в models/
-# - Возвращает короткий текстовый отчёт
+# РџСЂРѕСЃС‚Р°СЏ, РЅРѕ РєРѕСЂСЂРµРєС‚РЅР°СЏ С‚СЂРµРЅРёСЂРѕРІРєР° РјРѕРґРµР»Рё СЃ TimeSeriesSplit (walk-forward).
+# - Р—Р°РіСЂСѓР¶Р°РµС‚ OHLCV С‡РµСЂРµР· ccxt (СЂРµР°Р»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ) РїРѕ SYMBOL/TIMEFRAME/LOOKBACK
+# - РЎС‚СЂРѕРёС‚ РїСЂРёР·РЅР°РєРё РёР· analysis.technical_indicators
+# - Р¦РµР»СЊ: Р±СѓРґРµС‚ Р»Рё РґРѕС…РѕРґРЅРѕСЃС‚СЊ Р·Р° РіРѕСЂРёР·РѕРЅС‚РѕРј H > T% РґРѕ СѓС…РѕРґР° РЅРёР¶Рµ -S% (СѓРїСЂРѕС‰С‘РЅРЅР°СЏ РјРµС‚РєР°)
+# - РњРѕРґРµР»СЊ: LogisticRegression (scikit-learn) + СЃРѕС…СЂР°РЅРµРЅРёРµ РІ models/
+# - Р’РѕР·РІСЂР°С‰Р°РµС‚ РєРѕСЂРѕС‚РєРёР№ С‚РµРєСЃС‚РѕРІС‹Р№ РѕС‚С‡С‘С‚
 
 import os
 from typing import Dict, Any
@@ -28,7 +28,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 import joblib
 
-from crypto_ai_bot.analysis.technical_indicators import calculate_all_indicators
+from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
 
 
 def _exchange():
@@ -55,8 +55,8 @@ def _load_ohlcv(symbol: str, timeframe: str, limit: int = 1500) -> pd.DataFrame:
 
 
 def _make_labels(df: pd.DataFrame, horizon: int = 8, up_pct: float = 0.6, down_pct: float = 0.6) -> pd.Series:
-    # Простая горизонт-метка: 1, если в течение horizon баров вперёд цена поднимется на up_pct% раньше,
-    # чем опустится на down_pct%; иначе 0.
+    # РџСЂРѕСЃС‚Р°СЏ РіРѕСЂРёР·РѕРЅС‚-РјРµС‚РєР°: 1, РµСЃР»Рё РІ С‚РµС‡РµРЅРёРµ horizon Р±Р°СЂРѕРІ РІРїРµСЂС‘Рґ С†РµРЅР° РїРѕРґРЅРёРјРµС‚СЃСЏ РЅР° up_pct% СЂР°РЅСЊС€Рµ,
+    # С‡РµРј РѕРїСѓСЃС‚РёС‚СЃСЏ РЅР° down_pct%; РёРЅР°С‡Рµ 0.
     c = df["close"].values
     up_thr = 1.0 + up_pct/100.0
     dn_thr = 1.0 - down_pct/100.0
@@ -85,11 +85,11 @@ def train_model() -> str:
     feats = calculate_all_indicators(df)
     feats = feats.dropna().copy()
 
-    # Цель
+    # Р¦РµР»СЊ
     y = _make_labels(feats, horizon=horizon, up_pct=up_pct, down_pct=down_pct)
     y = y.reindex(feats.index).fillna(0).astype(int)
 
-    # Матрица признаков
+    # РњР°С‚СЂРёС†Р° РїСЂРёР·РЅР°РєРѕРІ
     X = feats[["rsi","macd_hist","ema9","ema21","ema20","ema50","atr","volume_ratio"]].astype(float).values
 
     # Walk-forward
@@ -111,7 +111,7 @@ def train_model() -> str:
         pr, rc, f1, _ = precision_recall_fscore_support(yte, pred, average="binary", zero_division=0)
         prs.append(pr); recs.append(rc); f1s.append(f1)
 
-    # Обучаем на всём и сохраняем
+    # РћР±СѓС‡Р°РµРј РЅР° РІСЃС‘Рј Рё СЃРѕС…СЂР°РЅСЏРµРј
     model.fit(X, y.values)
     model_dir = os.getenv("MODEL_DIR", "models")
     os.makedirs(model_dir, exist_ok=True)
@@ -120,7 +120,7 @@ def train_model() -> str:
 
     msg = (
         f"MODEL trained for {symbol} {timeframe}\n"
-        f"AUC(mean±std): {np.mean(aucs):.3f}±{np.std(aucs):.3f}\n"
+        f"AUC(meanВ±std): {np.mean(aucs):.3f}В±{np.std(aucs):.3f}\n"
         f"P/R/F1: {np.mean(prs):.2f}/{np.mean(recs):.2f}/{np.mean(f1s):.2f}\n"
         f"Saved: {out_path}"
     )
