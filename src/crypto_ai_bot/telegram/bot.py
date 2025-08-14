@@ -1,55 +1,27 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 """
-Telegram Bot module
--------------------
-Расширённый набор команд. Совместим с FastAPI-вебхуком, который вызывает process_update(payload).
-
-Поддерживаются:
-- /start /help /ping /alive /version
-- /config        -> централизованный Settings
-- /status        -> лайв-цена, ATR%, краткое состояние paper-позиции
-- /profit        -> суммарный PnL
-- /profit_chart  -> график PnL (matplotlib Agg)
-- /errors        -> безопасный хвост CSV (on_bad_lines='skip')
-- /orders        -> последние paper-ордера
-- /positions     -> краткое состояние позиции
-- /close         -> запрос движку закрыть позицию
-- /chart [/test] -> график OHLCV+EMA20/50 (ccxt), /test — инфострока
-- /train         -> обучение модели (analysis.sinyal_skorlayici.train_model)
-- /setwebhook /getwebhook /delwebhook -> управление вебхуком (учитывает secret_token)
-- /settrade key=val ...  -> апдейт части Settings на лету (до рестарта)
-- /setrisk  key=val ...  -> то же для риск-параметров
-- /metrics      -> ссылка на HTTP-метрики сервера
+Telegram interface for trading system (production-ready).
+- Чёткие описания команд
+- /status → ТЕКСТ (без графика)
+- /chart  → График (Matplotlib Agg)
+- /testbuy /testsell → тестовые сделки (через движок; фоллбэк — paper-эмуляция)
+- Сервис: /setwebhook /getwebhook /delwebhook /metrics
+- Runtime твики: /settrade /setrisk
+- Ленивая загрузка pandas/matplotlib/ccxt → быстрый старт контейнера
 """
 
+import os
 import io
 import json
-import os
 import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-# Matplotlib 'Agg' для headless-сервера
-import matplotlib
-matplotlib.use("Agg")  # noqa
-import matplotlib.pyplot as plt  # type: ignore
-
+# ---- Hooks в систему (с фоллбэками)
 try:
-    import pandas as pd
-except Exception:  # pragma: no cover
-    pd = None
-
-try:
-    import numpy as np  # noqa
-except Exception:  # pragma: no cover
-    np = None
-
-# Наши модули (с фоллбэками)
-try:
-    from crypto_ai_bot.trading.bot import get_bot, Settings  # централизованный конфиг и синглтон-бот
+    from crypto_ai_bot.trading.bot import get_bot, Settings
 except Exception:
     get_bot = None
     Settings = None
@@ -59,24 +31,29 @@ try:
 except Exception:
     calculate_all_indicators = None
 
-# Опционально: обучение
 try:
     from crypto_ai_bot.analysis.sinyal_skorlayici import train_model as _train_model
 except Exception:
     _train_model = None
 
-# --- ENV ---
+
+# ---- ENV (только для этого модуля; остальное — через Settings в движке)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_IDS = [s.strip() for s in (os.getenv("ADMIN_CHAT_IDS") or "").split(",") if s.strip()]
 PUBLIC_URL = os.getenv("PUBLIC_URL")
 TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
+
+SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
+TIMEFRAME = os.getenv("TIMEFRAME", "15m")
 
 PAPER_ORDERS_FILE = os.getenv("PAPER_ORDERS_FILE", "paper_orders.csv")
 PAPER_POSITIONS_FILE = os.getenv("PAPER_POSITIONS_FILE", "paper_positions.json")
 PAPER_PNL_FILE = os.getenv("PAPER_PNL_FILE", "paper_pnl.csv")
 SIGNALS_CSV = os.getenv("SIGNALS_CSV", "signals_snapshots.csv")
 
-# --- Telegram helpers ---
+
+# ============================= Telegram helpers ============================= #
+
 def _api_url(method: str) -> str:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
@@ -84,95 +61,113 @@ def _api_url(method: str) -> str:
 
 def _post(method: str, data: Dict[str, Any], files: Dict[str, Any] | None = None) -> Dict[str, Any]:
     try:
-        resp = requests.post(_api_url(method), data=data, files=files, timeout=10)
-        return resp.json()
+        r = requests.post(_api_url(method), data=data, files=files, timeout=10)
+        return r.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def send_telegram_message(chat_id: str | int, text: str, parse_mode: Optional[str] = None, disable_web_page_preview: bool = True) -> Dict[str, Any]:
-    data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": disable_web_page_preview}
-    if parse_mode:
-        data["parse_mode"] = parse_mode
+def send_telegram_message(chat_id: int | str, text: str, *, html: bool = True) -> Dict[str, Any]:
+    data = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if html:
+        data["parse_mode"] = "HTML"
     return _post("sendMessage", data)
 
-def send_telegram_photo(chat_id: str | int, image_bytes: bytes, caption: Optional[str] = None) -> Dict[str, Any]:
-    files = {"photo": ("chart.png", image_bytes)}
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption
-    return _post("sendPhoto", data=data, files=files)
+def send_telegram_photo(chat_id: int | str, image_bytes: bytes, caption: Optional[str] = None) -> Dict[str, Any]:
+    return _post("sendPhoto", {"chat_id": chat_id, "caption": caption or ""}, files={"photo": ("chart.png", image_bytes)})
 
-# --- Utils ---
-def _load_df_csv(path: str, n_tail: int = 25) -> Optional["pd.DataFrame"]:
-    if pd is None or not os.path.exists(path):
+
+# ================================ Lazy imports ============================== #
+
+def _lazy_pd():
+    import pandas as pd  # noqa
+    return pd
+
+def _lazy_ccxt():
+    import ccxt  # noqa
+    return ccxt
+
+def _lazy_mpl():
+    import matplotlib  # noqa
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # noqa
+    return plt
+
+
+# ================================ I/O helpers =============================== #
+
+def _load_df_csv(path: str, n_tail: int = 25):
+    if not os.path.exists(path):
         return None
     try:
+        pd = _lazy_pd()
         df = pd.read_csv(path, on_bad_lines="skip")
         return df.tail(n_tail) if n_tail else df
     except Exception:
         return None
 
-def _read_positions_short(path: str) -> str:
-    if not os.path.exists(path):
+def _read_positions() -> Dict[str, Any]:
+    if not os.path.exists(PAPER_POSITIONS_FILE):
+        return {}
+    try:
+        with open(PAPER_POSITIONS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+def _read_positions_short() -> str:
+    pos = _read_positions()
+    if not pos:
         return "Позиций нет"
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not data:
-            return "Позиций нет"
-        side = data.get("side", "-")
-        amt = data.get("amount", 0)
-        entry = data.get("entry_price", 0)
-        return f"Позиция: {side} {amt} @ {entry}"
-    except Exception:
-        return "Позиции: ошибка чтения"
+    return f"Позиция: {pos.get('side','-')} {pos.get('amount',0)} @ {pos.get('entry_price',0)}"
 
-def _build_runtime_cfg_string(cfg) -> str:
+def _write_positions(obj: Dict[str, Any]) -> None:
     try:
-        fields = [
-            ("SYMBOL", cfg.SYMBOL), ("TIMEFRAME", cfg.TIMEFRAME), ("TRADE_AMOUNT", cfg.TRADE_AMOUNT),
-            ("ENABLE_TRADING", cfg.ENABLE_TRADING), ("SAFE_MODE", cfg.SAFE_MODE), ("PAPER_MODE", cfg.PAPER_MODE),
-            ("AI_MIN_TO_TRADE", getattr(cfg, "AI_MIN_TO_TRADE", None)),
-            ("MIN_SCORE_TO_BUY", getattr(cfg, "MIN_SCORE_TO_BUY", None)),
-            ("USE_CONTEXT_PENALTIES", getattr(cfg, "USE_CONTEXT_PENALTIES", None)),
-            ("CTX_CLAMP", f"[{getattr(cfg,'CTX_SCORE_CLAMP_MIN',0.0)},{getattr(cfg,'CTX_SCORE_CLAMP_MAX',1.0)}]"),
-        ]
-        lines = [f"{k}={v}" for k, v in fields if v is not None]
-        return "Config (Settings)\n" + " ".join(lines)
+        with open(PAPER_POSITIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
     except Exception:
-        return "Config: недоступно (ошибка Settings)"
+        pass
 
-# --- Exchange / OHLCV ---
+def _append_csv(path: str, row: Dict[str, Any]) -> None:
+    try:
+        pd = _lazy_pd()
+        import os as _os
+        if _os.path.exists(path):
+            df = pd.read_csv(path, on_bad_lines="skip")
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([row])
+        df.to_csv(path, index=False)
+    except Exception:
+        pass
+
+
+# =============================== Exchange / OHLCV =========================== #
+
 def _get_exchange():
-    # Сначала пробуем реиспользовать exchange из синглтон-бота (rate limit общие)
+    # 1) реюзим exchange у движка (единые лимиты/настройки)
     if get_bot is not None:
         try:
-            bot = get_bot()
-            if bot and getattr(bot, "exchange", None):
-                return bot.exchange
+            b = get_bot()
+            if b and getattr(b, "exchange", None):
+                return b.exchange
         except Exception:
             pass
-    # Фоллбэк: прямой ccxt.gateio из ENV
+    # 2) прямой ccxt.gateio (env)
     try:
-        import ccxt
+        ccxt = _lazy_ccxt()
         key = os.getenv("GATE_API_KEY") or os.getenv("API_KEY")
-        secret = os.getenv("GATE_API_SECRET") or os.getenv("API_SECRET")
-        ex = ccxt.gateio({
-            "apiKey": key, "secret": secret,
-            "enableRateLimit": True, "timeout": 20000, "options": {"defaultType": "spot"}
-        })
-        return ex
+        sec = os.getenv("GATE_API_SECRET") or os.getenv("API_SECRET")
+        return ccxt.gateio({"apiKey": key, "secret": sec, "enableRateLimit": True, "timeout": 20000, "options": {"defaultType": "spot"}})
     except Exception:
         return None
 
-def _fetch_ohlcv(symbol: str, timeframe: str, limit: int = 200) -> Optional["pd.DataFrame"]:
-    if pd is None:
-        return None
+def _fetch_ohlcv(symbol: str, timeframe: str, limit: int = 200):
     ex = _get_exchange()
     if ex is None:
         return None
     try:
         data = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        pd = _lazy_pd()
         df = pd.DataFrame(data, columns=["time","open","high","low","close","volume"])
         df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
         df.set_index("time", inplace=True)
@@ -180,19 +175,34 @@ def _fetch_ohlcv(symbol: str, timeframe: str, limit: int = 200) -> Optional["pd.
     except Exception:
         return None
 
-# --- Charts ---
-def _plot_ohlcv_with_indicators(df: "pd.DataFrame") -> bytes:
-    if pd is None or df is None or df.empty:
-        raise RuntimeError("Нет данных для графика")
-    if calculate_all_indicators is None:
-        raise RuntimeError("Модуль индикаторов недоступен")
+def _fetch_price(symbol: str) -> Optional[float]:
+    ex = _get_exchange()
+    if ex is None:
+        return None
+    try:
+        t = ex.fetch_ticker(symbol)
+        return float(t["last"])
+    except Exception:
+        return None
 
-    feats = calculate_all_indicators(df).dropna().copy()
+
+# ================================= Charts ================================== #
+
+def _plot_ohlcv_with_indicators(df) -> bytes:
+    if df is None or df.empty:
+        raise RuntimeError("Нет данных для графика")
+    plt = _lazy_mpl()
+    feats = df.copy()
+    if calculate_all_indicators is not None:
+        try:
+            feats = calculate_all_indicators(df).dropna()
+        except Exception:
+            pass
 
     fig, ax = plt.subplots(figsize=(10, 5), dpi=140)
     ax.plot(feats.index, feats["close"], label="Close")
-    ax.plot(feats.index, feats["ema20"], label="EMA20")
-    ax.plot(feats.index, feats["ema50"], label="EMA50")
+    if "ema20" in feats.columns: ax.plot(feats.index, feats["ema20"], label="EMA20")
+    if "ema50" in feats.columns: ax.plot(feats.index, feats["ema50"], label="EMA50")
     ax.set_title("OHLCV + EMA(20/50)")
     ax.grid(True, alpha=0.3)
     ax.legend()
@@ -204,65 +214,85 @@ def _plot_ohlcv_with_indicators(df: "pd.DataFrame") -> bytes:
     buf.seek(0)
     return buf.read()
 
-# --- Commands ---
+
+# ================================= Commands ================================= #
+
 def _cmd_help() -> str:
     return (
-        "Справка по командам:\n"
-        "Основные: /start /help /ping /alive /version /config /status /chart\n"
-        "Торговля: /profit /profit_chart /orders /positions /close\n"
-        "Тест/индикаторы: /test [/chart]\n"
-        "ML: /train\n"
-        "Сервис: /errors /setwebhook /getwebhook /delwebhook /settrade /setrisk /metrics\n"
+        "<b>Справка по командам</b>\n"
+        "— <b>/start</b> — приветствие\n"
+        "— <b>/help</b> — эта справка\n"
+        "— <b>/config</b> — текущие настройки (Settings)\n"
+        "— <b>/status</b> — цена, ATR%, позиция (текст)\n"
+        "— <b>/chart</b> [SYMBOL] [TF] — график OHLCV+EMA\n"
+        "— <b>/test</b> [SYMBOL] [TF] — быстрая сводка (без графика)\n"
+        "— <b>/profit</b>, <b>/profit_chart</b> — итоговый PnL и его график (paper)\n"
+        "— <b>/orders</b>, <b>/positions</b>, <b>/close</b> — ордера/позиции/закрытие\n"
+        "— <b>/testbuy</b> &lt;amt&gt;, <b>/testsell</b> &lt;amt&gt; — тестовые сделки\n"
+        "— <b>/train</b> — обучение модели (если модуль доступен)\n"
+        "— <b>/errors</b> — хвост логов/сигналов\n"
+        "— <b>/settrade</b> k=v …, <b>/setrisk</b> k=v … — твики на лету (до рестарта)\n"
+        "— <b>/setwebhook</b> / <b>/getwebhook</b> / <b>/delwebhook</b> — управление вебхуком\n"
+        "— <b>/metrics</b>, <b>/ping</b>, <b>/version</b>\n"
+        "\nПримеры:\n"
+        "• /chart BTC/USDT 15m\n"
+        "• /test BTC/USDT 1h\n"
+        "• /testbuy 10\n"
     )
 
-def _cmd_status() -> str:
-    sym = os.getenv("SYMBOL", "BTC/USDT")
-    tf = os.getenv("TIMEFRAME", "15m")
-
-    pos = _read_positions_short(PAPER_POSITIONS_FILE)
-
-    ex = _get_exchange()
+def _build_cfg_string(cfg) -> str:
     try:
-        price = ex.fetch_ticker(sym)["last"] if ex else None
+        fields = [
+            ("SYMBOL", cfg.SYMBOL), ("TIMEFRAME", cfg.TIMEFRAME), ("TRADE_AMOUNT", cfg.TRADE_AMOUNT),
+            ("ENABLE_TRADING", cfg.ENABLE_TRADING), ("SAFE_MODE", cfg.SAFE_MODE), ("PAPER_MODE", cfg.PAPER_MODE),
+            ("AI_MIN_TO_TRADE", getattr(cfg, "AI_MIN_TO_TRADE", None)),
+            ("MIN_SCORE_TO_BUY", getattr(cfg, "MIN_SCORE_TO_BUY", None)),
+            ("USE_CONTEXT_PENALTIES", getattr(cfg, "USE_CONTEXT_PENALTIES", None)),
+            ("CTX_CLAMP", f"[{getattr(cfg,'CTX_SCORE_CLAMP_MIN',0.0)},{getattr(cfg,'CTX_SCORE_CLAMP_MAX',1.0)}]"),
+        ]
+        return "<b>Config (Settings)</b>\n" + " ".join(f"{k}={v}" for k,v in fields if v is not None)
     except Exception:
-        price = None
+        return "Config: недоступно (ошибка Settings)"
 
-    atr_pct = None
+def _cmd_status() -> str:
+    sym, tf = SYMBOL, TIMEFRAME
+    price = _fetch_price(sym)
+    atrp = None
     try:
-        df = _fetch_ohlcv(sym, tf, limit=100)
+        df = _fetch_ohlcv(sym, tf, limit=120)
         if df is not None and not df.empty and calculate_all_indicators is not None:
-            f = calculate_all_indicators(df).dropna()
-            if not f.empty:
-                atr_pct = (f["atr"].iloc[-1] / f["close"].iloc[-1]) * 100.0
+            feats = calculate_all_indicators(df).dropna()
+            if not feats.empty:
+                atrp = (feats["atr"].iloc[-1] / feats["close"].iloc[-1]) * 100.0
     except Exception:
         pass
-
     parts = []
     if price is not None:
         parts.append(f"ℹ️ {sym} @ {price:,.2f}")
-    if atr_pct is not None:
-        parts.append(f"ATR%≈{atr_pct:.2f}")
-    parts.append(pos)
+    if atrp is not None:
+        parts.append(f"ATR%≈{atrp:.2f}")
+    parts.append(_read_positions_short())
     return " | ".join(parts)
 
 def _cmd_profit() -> str:
     df = _load_df_csv(PAPER_PNL_FILE, n_tail=0)
     if df is None or df.empty:
-        return "Профит: пока нет данных"
+        return "PnL: пока нет данных"
     try:
         pnl = float(df["pnl_usd"].sum())
         n = len(df)
         return f"PnL (paper): {pnl:+.2f} USD, закрытых сделок: {n}"
     except Exception:
-        return "Профит: ошибка чтения"
+        return "PnL: ошибка чтения"
 
 def _cmd_profit_chart() -> Optional[bytes]:
     df = _load_df_csv(PAPER_PNL_FILE, n_tail=0)
     if df is None or df.empty:
         return None
+    plt = _lazy_mpl()
     try:
-        fig, ax = plt.subplots(figsize=(10, 5), dpi=140)
         equity = df["pnl_usd"].cumsum()
+        fig, ax = plt.subplots(figsize=(10, 5), dpi=140)
         ax.plot(equity.index, equity.values, label="Equity (cum PnL)")
         ax.set_title("Equity curve (paper)")
         ax.grid(True, alpha=0.3)
@@ -285,33 +315,46 @@ def _cmd_errors() -> str:
 def _cmd_orders() -> str:
     df = _load_df_csv(PAPER_ORDERS_FILE, n_tail=15)
     if df is None or df.empty:
-        return "Заказы: пока нет"
+        return "Ордеров пока нет"
     cols = [c for c in df.columns][:8]
     return "Последние ордера:\n" + df[cols].to_string(index=False)
 
 def _cmd_positions() -> str:
-    return _read_positions_short(PAPER_POSITIONS_FILE)
+    return _read_positions_short()
 
 def _cmd_close() -> str:
-    if get_bot is None:
-        return "Бот недоступен"
-    try:
-        bot = get_bot()
-        if not bot:
-            return "Бот недоступен"
-        res = bot.request_close_position() if hasattr(bot, "request_close_position") else None
-        return "Запрос на закрытие отправлен" if res is not False else "Не удалось отправить запрос"
-    except Exception:
-        return "Ошибка закрытия позиции"
+    # через движок, если умеет
+    if get_bot is not None:
+        try:
+            bot = get_bot()
+            if bot and hasattr(bot, "request_close_position"):
+                ok = bot.request_close_position()
+                if ok is False:
+                    return "Не удалось отправить запрос на закрытие"
+                return "Запрос на закрытие отправлен"
+        except Exception:
+            pass
+    # фоллбэк: ручная фиксация PnL в paper
+    pos = _read_positions()
+    if not pos:
+        return "Позиции нет"
+    price = _fetch_price(SYMBOL)
+    if price is None:
+        return "Не удалось получить цену"
+    side, amt, entry = pos.get("side"), float(pos.get("amount", 0)), float(pos.get("entry_price", 0))
+    pnl = (price - entry) * amt * (1 if side == "buy" else -1)
+    ts = int(time.time())
+    _append_csv(PAPER_ORDERS_FILE, {"ts": ts, "symbol": SYMBOL, "side": "sell" if side=="buy" else "buy",
+                                    "amount": amt, "price": price, "note": "manual close"})
+    _append_csv(PAPER_PNL_FILE, {"ts": ts, "symbol": SYMBOL, "pnl_usd": pnl})
+    _write_positions({})
+    return f"Закрыто @ {price:.2f}, PnL={pnl:+.2f} USD"
 
 def _cmd_chart(args: List[str]) -> Tuple[Optional[bytes], str]:
-    sym = os.getenv("SYMBOL", "BTC/USDT")
-    tf = os.getenv("TIMEFRAME", "15m")
+    sym, tf = SYMBOL, TIMEFRAME
     if args:
-        if len(args) >= 1:
-            sym = args[0].upper().replace(":", "/")
-        if len(args) >= 2:
-            tf = args[1]
+        if len(args) >= 1: sym = args[0].upper().replace(":", "/")
+        if len(args) >= 2: tf = args[1]
     df = _fetch_ohlcv(sym, tf, limit=200)
     if df is None or df.empty:
         return None, "Нет данных для графика"
@@ -322,81 +365,73 @@ def _cmd_chart(args: List[str]) -> Tuple[Optional[bytes], str]:
         return None, f"Ошибка графика: {e}"
 
 def _cmd_test(args: List[str]) -> str:
-    sym = os.getenv("SYMBOL", "BTC/USDT")
-    tf = os.getenv("TIMEFRAME", "15m")
+    sym, tf = SYMBOL, TIMEFRAME
     if args:
-        if len(args) >= 1:
-            sym = args[0].upper().replace(":", "/")
-        if len(args) >= 2:
-            tf = args[1]
+        if len(args) >= 1: sym = args[0].upper().replace(":", "/")
+        if len(args) >= 2: tf = args[1]
     df = _fetch_ohlcv(sym, tf, limit=120)
     if df is None or df.empty:
         return "Нет данных"
+    ai = os.getenv("AI_MIN_TO_TRADE", "0.55")
+    rule = os.getenv("MIN_SCORE_TO_BUY", "0.65")
+    atrp, last_close = None, float(df["close"].iloc[-1])
     try:
-        feats = calculate_all_indicators(df).dropna() if calculate_all_indicators else df
-        atrp = (feats["atr"].iloc[-1]/feats["close"].iloc[-1])*100.0 if "atr" in feats.columns else None
-        ai = os.getenv("AI_MIN_TO_TRADE", "0.55")
-        rule = os.getenv("MIN_SCORE_TO_BUY", "0.65")
-        parts = [f"ℹ️ {sym} @ {feats['close'].iloc[-1]:,.2f}", f"rule={rule}", f"ai={ai}"]
-        if atrp is not None:
-            parts.append(f"ATR%≈{atrp:.2f}")
-        return " | ".join(parts)
+        if calculate_all_indicators is not None:
+            feats = calculate_all_indicators(df).dropna()
+            if not feats.empty:
+                atrp = (feats["atr"].iloc[-1] / feats["close"].iloc[-1]) * 100.0
     except Exception:
-        return "Ошибка теста"
+        pass
+    parts = [f"ℹ️ {sym} @ {last_close:,.2f}", f"rule={rule}", f"ai={ai}"]
+    if atrp is not None:
+        parts.append(f"ATR%≈{atrp:.2f}")
+    return " | ".join(parts)
 
-def _cmd_train() -> str:
-    if _train_model is None:
-        return "Модуль обучения недоступен"
+def _parse_float(s: str) -> Optional[float]:
     try:
-        msg = _train_model()
-        return msg
-    except Exception as e:
-        return f"Ошибка обучения: {e}"
+        return float(s.replace(",", "."))
+    except Exception:
+        return None
 
-def _cmd_metrics_url() -> str:
-    return f"{PUBLIC_URL}/metrics" if PUBLIC_URL else "Metrics URL неизвестен"
+def _cmd_test_order(side: str, amt_s: str) -> str:
+    amt = _parse_float(amt_s)
+    if not amt or amt <= 0:
+        return "Неверная сумма"
+    # через движок (предпочтительно)
+    if get_bot is not None:
+        try:
+            bot = get_bot()
+            if bot and hasattr(bot, "request_market_order"):
+                ok = bot.request_market_order(side, amt)
+                if ok is False:
+                    return "Не удалось отправить ордер через движок"
+                return f"Тестовый ордер через движок: {side} {amt}"
+        except Exception:
+            pass
+    # фоллбэк: paper-эмуляция
+    price = _fetch_price(SYMBOL)
+    if price is None:
+        return "Не удалось получить цену"
+    ts = int(time.time())
+    _append_csv(PAPER_ORDERS_FILE, {"ts": ts, "symbol": SYMBOL, "side": side, "amount": amt, "price": price, "note": "test"})
+    if side == "buy":
+        _write_positions({"side": "buy", "amount": amt, "entry_price": price, "ts": ts})
+    else:
+        # sell: если есть лонг — закрываем с записью PnL
+        pos = _read_positions()
+        if pos and pos.get("side") == "buy":
+            entry = float(pos.get("entry_price", 0))
+            pnl = (price - entry) * float(pos.get("amount", 0))
+            _append_csv(PAPER_PNL_FILE, {"ts": ts, "symbol": SYMBOL, "pnl_usd": pnl})
+            _write_positions({})
+    return f"Тестовый {side} {amt} @ {price:.2f}"
 
-def _apply_runtime_updates(kind: str, kv_pairs: List[str]) -> str:
-    """
-    kind: 'trade' или 'risk'
-    kv_pairs: ["KEY=VALUE", ...]
-    """
-    if get_bot is None or Settings is None:
-        return "Settings недоступен"
-    bot = get_bot()
-    if not bot:
-        return "Бот недоступен"
-    cfg = getattr(bot, "settings", None)
-    if not cfg:
-        return "Config недоступен"
+def _cmd_metrics() -> str:
+    return f"{PUBLIC_URL}/metrics" if PUBLIC_URL else "Metrics URL не задан"
 
-    changed = []
-    for pair in kv_pairs:
-        if "=" not in pair:
-            continue
-        key, val = pair.split("=", 1)
-        key = key.strip().upper()
-        val = val.strip()
-        # попытка привести тип
-        parsed: Any = val
-        if val.lower() in ("1","true","yes","on"):
-            parsed = 1
-        elif val.lower() in ("0","false","no","off"):
-            parsed = 0
-        else:
-            try:
-                parsed = float(val) if "." in val else int(val)
-            except Exception:
-                pass
-        if hasattr(cfg, key):
-            try:
-                setattr(cfg, key, parsed)
-                changed.append(f"{key}={parsed}")
-            except Exception:
-                pass
-    return "Обновлено (до рестарта): " + (", ".join(changed) if changed else "ничего")
 
-# --- Webhook dispatcher ---
+# ============================= Webhook dispatcher ============================ #
+
 def process_update(update: Dict[str, Any]) -> Dict[str, Any]:
     """
     Принимает Telegram update (dict). Возвращает {"ok": True}.
@@ -411,7 +446,7 @@ def process_update(update: Dict[str, Any]) -> Dict[str, Any]:
 
         # Базовые
         if text.startswith("/start"):
-            send_telegram_message(chat_id, "Привет! Команды: /help /config /status /chart /profit /train /errors /ping /version")
+            send_telegram_message(chat_id, "Привет! Наберите /help, чтобы увидеть список команд.")
             return {"ok": True}
 
         if text.startswith("/help"):
@@ -431,10 +466,10 @@ def process_update(update: Dict[str, Any]) -> Dict[str, Any]:
                 send_telegram_message(chat_id, "Settings недоступен")
             else:
                 cfg = Settings.build()
-                send_telegram_message(chat_id, _build_runtime_cfg_string(cfg))
+                send_telegram_message(chat_id, _build_cfg_string(cfg))
             return {"ok": True}
 
-        # Торговля/статусы
+        # Статус/отчёты
         if text.startswith("/status"):
             send_telegram_message(chat_id, _cmd_status())
             return {"ok": True}
@@ -482,26 +517,53 @@ def process_update(update: Dict[str, Any]) -> Dict[str, Any]:
             return {"ok": True}
 
         # Обучение
-        if text.startswith("/train") or text.startswith("/train_model"):
-            send_telegram_message(chat_id, _cmd_train())
-            return {"ok": True}
-
-        # Метрики
-        if text.startswith("/metrics"):
-            send_telegram_message(chat_id, _cmd_metrics_url())
-            return {"ok": True}
-
-        # Runtime-настройки
-        if text.startswith("/settrade"):
-            args = text.split()[1:]
-            msg = _apply_runtime_updates("trade", args)
+        if text.startswith("/train"):
+            msg = _train_model() if _train_model else "Модуль обучения недоступен"
             send_telegram_message(chat_id, msg)
             return {"ok": True}
 
-        if text.startswith("/setrisk"):
+        # Тестовые сделки
+        if text.startswith("/testbuy"):
+            parts = text.split()
+            send_telegram_message(chat_id, _cmd_test_order("buy", parts[1] if len(parts) > 1 else ""))
+            return {"ok": True}
+
+        if text.startswith("/testsell"):
+            parts = text.split()
+            send_telegram_message(chat_id, _cmd_test_order("sell", parts[1] if len(parts) > 1 else ""))
+            return {"ok": True}
+
+        # Runtime настройки
+        if text.startswith("/settrade") or text.startswith("/setrisk"):
+            kind = "trade" if text.startswith("/settrade") else "risk"
             args = text.split()[1:]
-            msg = _apply_runtime_updates("risk", args)
-            send_telegram_message(chat_id, msg)
+            if get_bot is None or Settings is None:
+                send_telegram_message(chat_id, "Settings недоступен")
+                return {"ok": True}
+            bot = get_bot()
+            if not bot or not getattr(bot, "settings", None):
+                send_telegram_message(chat_id, "Config недоступен")
+                return {"ok": True}
+            cfg = bot.settings
+            changed = []
+            for pair in args:
+                if "=" not in pair: continue
+                k, v = pair.split("=", 1)
+                k = k.strip().upper(); v = v.strip()
+                parsed: Any = v
+                if v.lower() in ("1","true","yes","on"): parsed = 1
+                elif v.lower() in ("0","false","no","off"): parsed = 0
+                else:
+                    try:
+                        parsed = float(v) if "." in v else int(v)
+                    except Exception:
+                        pass
+                if hasattr(cfg, k):
+                    try:
+                        setattr(cfg, k, parsed); changed.append(f"{k}={parsed}")
+                    except Exception:
+                        pass
+            send_telegram_message(chat_id, "Обновлено (до рестарта): " + (", ".join(changed) if changed else "ничего"))
             return {"ok": True}
 
         # Управление вебхуком
@@ -529,8 +591,12 @@ def process_update(update: Dict[str, Any]) -> Dict[str, Any]:
             send_telegram_message(chat_id, f"deleteWebhook → {res}")
             return {"ok": True}
 
+        if text.startswith("/metrics"):
+            send_telegram_message(chat_id, _cmd_metrics())
+            return {"ok": True}
+
         # Unknown
-        send_telegram_message(chat_id, "Unknown. Try /config /alive /ping /version")
+        send_telegram_message(chat_id, "Неизвестная команда. Попробуйте /help")
         return {"ok": True}
 
     except Exception as e:
