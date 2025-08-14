@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -9,25 +8,34 @@ import uuid
 import json
 import threading
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import numpy as np
 
-from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
+# signals aggregator (adjust import if your path differs)
+try:
+    from crypto_ai_bot.signals.signal_aggregator import aggregate_features
+except Exception:
+    from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features  # type: ignore
+
+# risk pipeline
+try:
+    from crypto_ai_bot.trading import risk as riskmod
+except Exception:
+    riskmod = None  # fallback
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
-# ---------------------- Централизованный Settings ----------------------
+# ---------------------- Settings ----------------------
 
 @dataclass
 class Settings:
-    # Основные
     SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
     TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
-    ANALYSIS_INTERVAL: int = int(os.getenv("ANALYSIS_INTERVAL", "15"))  # минут
+    ANALYSIS_INTERVAL: int = int(os.getenv("ANALYSIS_INTERVAL", "15"))
     ENABLE_TRADING: int = int(os.getenv("ENABLE_TRADING", "1"))
     SAFE_MODE: int = int(os.getenv("SAFE_MODE", "1"))
     PAPER_MODE: int = int(os.getenv("PAPER_MODE", "1"))
@@ -36,45 +44,32 @@ class Settings:
     OHLCV_LIMIT: int = int(os.getenv("OHLCV_LIMIT", "200"))
     AGGREGATOR_LIMIT: int = int(os.getenv("AGGREGATOR_LIMIT", "200"))
 
-    # Гейты/скоринг
+    # Risk gates
+    MAX_SPREAD_BPS: float = float(os.getenv("MAX_SPREAD_BPS", "15"))
+    MIN_24H_VOLUME_USD: float = float(os.getenv("MIN_24H_VOLUME_USD", "1000000"))
+
+    # Scoring
     AI_FAILOVER_SCORE: float = float(os.getenv("AI_FAILOVER_SCORE", "0.55"))
     AI_MIN_TO_TRADE: float = float(os.getenv("AI_MIN_TO_TRADE", "0.55"))
     ENFORCE_AI_GATE: int = int(os.getenv("ENFORCE_AI_GATE", "1"))
     MIN_SCORE_TO_BUY: float = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))
 
-    # RSI/выходы
+    # RSI/Exits
     RSI_OVERBOUGHT: float = float(os.getenv("RSI_OVERBOUGHT", "70"))
     RSI_CRITICAL: float = float(os.getenv("RSI_CRITICAL", "90"))
 
-    # ATR/волатильность
+    # ATR/volatility
     ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
     TRAILING_STOP_ENABLE: int = int(os.getenv("TRAILING_STOP_ENABLE", "1"))
     TRAILING_STOP_PCT: float = float(os.getenv("TRAILING_STOP_PCT", "0.5"))
     STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "2.0"))
     TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "1.5"))
 
-    # Контекстные штрафы (опционально)
-    USE_CONTEXT_PENALTIES: int = int(os.getenv("USE_CONTEXT_PENALTIES", "0"))
-    CTX_BTC_DOM_ALTS_ONLY: int = int(os.getenv("CTX_BTC_DOM_ALTS_ONLY", "1"))
-    CTX_BTC_DOM_THRESH: float = float(os.getenv("CTX_BTC_DOM_THRESH", "52.0"))
-    CTX_BTC_DOM_PENALTY: float = float(os.getenv("CTX_BTC_DOM_PENALTY", "-0.05"))
-
-    CTX_DXY_DELTA_THRESH: float = float(os.getenv("CTX_DXY_DELTA_THRESH", "0.5"))
-    CTX_DXY_PENALTY: float = float(os.getenv("CTX_DXY_PENALTY", "-0.05"))
-
-    CTX_FNG_OVERHEATED: float = float(os.getenv("CTX_FNG_OVERHEATED", "75"))
-    CTX_FNG_UNDERSHOOT: float = float(os.getenv("CTX_FNG_UNDERSHOOT", "25"))
-    CTX_FNG_PENALTY: float = float(os.getenv("CTX_FNG_PENALTY", "-0.05"))
-    CTX_FNG_BONUS: float = float(os.getenv("CTX_FNG_BONUS", "0.03"))
-
-    CTX_SCORE_CLAMP_MIN: float = float(os.getenv("CTX_SCORE_CLAMP_MIN", "0.0"))
-    CTX_SCORE_CLAMP_MAX: float = float(os.getenv("CTX_SCORE_CLAMP_MAX", "1.0"))
-
-    # Торговые часы (UTC)
+    # Hours
     TRADING_HOUR_START: int = int(os.getenv("TRADING_HOUR_START", "0"))
     TRADING_HOUR_END: int = int(os.getenv("TRADING_HOUR_END", "24"))
 
-    # Файлы paper-режима
+    # Paper files
     PAPER_POSITIONS_FILE: str = os.getenv("PAPER_POSITIONS_FILE", "paper_positions.json")
     PAPER_ORDERS_FILE: str = os.getenv("PAPER_ORDERS_FILE", "paper_orders.csv")
     PAPER_PNL_FILE: str = os.getenv("PAPER_PNL_FILE", "paper_pnl.csv")
@@ -83,10 +78,7 @@ class Settings:
     def build(cls) -> "Settings":
         return cls()
 
-# ---------------------- Позиция и стор для paper ----------------------
-
-class Position(dict):
-    pass
+# ---------------------- Paper store ----------------------
 
 class PaperStore:
     def __init__(self, positions_path: str, orders_csv: str, pnl_csv: str):
@@ -134,7 +126,7 @@ class PaperStore:
         with open(self.pnl_csv, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow([pos.get("opened_at"), datetime.now(timezone.utc).isoformat(), pos.get("symbol"), side, f"{qty:.8f}", f"{entry:.8f}", f"{exit_price:.8f}", f"{pnl_abs:.8f}", f"{pnl_pct:.4f}"])
 
-# ---------------------- Торговый бот ----------------------
+# ---------------------- Trading bot ----------------------
 
 class TradingBot:
     _instance_lock = threading.Lock()
@@ -170,12 +162,11 @@ class TradingBot:
         if self._loop_thread and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5)
 
-    # ---------------------- цикл ----------------------
+    # ---------------------- main loop ----------------------
     def _loop(self):
         interval_sec = max(60, int(self.cfg.ANALYSIS_INTERVAL) * 60)
         while TradingBot._running:
             try:
-                # торговые часы (UTC)
                 hour = datetime.now(timezone.utc).hour
                 if not (int(self.cfg.TRADING_HOUR_START) <= hour < int(self.cfg.TRADING_HOUR_END)):
                     self._notify(f"⏸ Outside trading hours UTC {self.cfg.TRADING_HOUR_START}-{self.cfg.TRADING_HOUR_END}")
@@ -184,30 +175,28 @@ class TradingBot:
             except Exception as e:
                 logger.exception(f"tick failed: {e}")
                 self._notify(f"⚠️ Tick failed: {e}")
-            # выравнивание по границе
             now = time.time()
             sleep_for = interval_sec - (now % interval_sec)
             time.sleep(max(5, min(sleep_for, interval_sec)))
         logger.info("🛑 Trading loop stopped")
 
-    # ---------------------- итерация ----------------------
+    # ---------------------- one iteration ----------------------
     def _tick(self):
         symbol = self.cfg.SYMBOL
         feat = aggregate_features(self.cfg, self.exchange, symbol=symbol, limit=int(self.cfg.AGGREGATOR_LIMIT))
-        if "error" in feat:
+        if isinstance(feat, dict) and "error" in feat:
             logger.warning(f"aggregate_features error: {feat['error']}"); return
 
-        ind = feat.get("indicators", {})
+        ind = feat.get("indicators", {}) if isinstance(feat, dict) else {}
         price = float(ind.get("price") or 0.0)
         atr = float(ind.get("atr") or 0.0)
-        atr_pct = float(ind.get("atr_pct") or 0.0)
-        rule_score = float(feat.get("rule_score_penalized", feat.get("rule_score", 0.5)))
-        ai_score = float(feat.get("ai_score", self.cfg.AI_FAILOVER_SCORE))
+        atr_pct = float(ind.get("atr_pct") or 0.0) if ind else 0.0
+        rule_score = float(feat.get("rule_score_penalized", feat.get("rule_score", 0.5))) if isinstance(feat, dict) else 0.5
+        ai_score = float(feat.get("ai_score", self.cfg.AI_FAILOVER_SCORE)) if isinstance(feat, dict) else self.cfg.AI_FAILOVER_SCORE
 
-        cond = feat.get("market", {}).get("condition", "neutral")
+        cond = feat.get("market", {}).get("condition", "neutral") if isinstance(feat, dict) else "neutral"
         self._notify(f"ℹ️ {symbol} @ {price:.2f} | rule={rule_score:.2f} ai={ai_score:.2f} | ATR%={atr_pct:.2f} | {cond}")
 
-        # обновить открытую
         if self.position:
             self._maybe_close_position(price, atr)
             if not self.position:
@@ -221,7 +210,7 @@ class TradingBot:
         elif self._is_sell_signal(rule_score, ai_score, ind):
             self._open_position("sell", price, atr)
 
-    # ---------------------- гейты ----------------------
+    # ---------------------- gating ----------------------
     def _can_open_new(self) -> bool:
         if self.position is not None:
             return False
@@ -253,8 +242,15 @@ class TradingBot:
             return False
         return True
 
-    # ---------------------- исполнение ----------------------
+    # ---------------------- execution ----------------------
     def _open_position(self, side: str, price: float, atr: float):
+        # risk gates before opening
+        if riskmod is not None:
+            ok, reason = riskmod.validate_open(self.cfg, self.exchange, self.cfg.SYMBOL)
+            if not ok:
+                self._notify(f"⛔ Order blocked: {reason}")
+                return
+
         symbol = self.cfg.SYMBOL
         qty = self._quote_to_base(self.cfg.TRADE_AMOUNT, price)
         order_ok = self._create_market_order(symbol, side, qty, price)
@@ -277,7 +273,6 @@ class TradingBot:
         if not self.position: return
         pos = self.position
 
-        # трейлинг
         if int(self.cfg.TRAILING_STOP_ENABLE) == 1 and pos.get("side") == "buy":
             pos["trailing_max"] = max(pos.get("trailing_max") or price, price)
 
@@ -314,7 +309,7 @@ class TradingBot:
 
         self.position = None
 
-    # ---------------------- утилиты ----------------------
+    # ---------------------- utils ----------------------
     def _quote_to_base(self, quote_usd: float, price: float) -> float:
         if price <= 0: return 0.0
         amt = math.floor((quote_usd / price) / 1e-6) * 1e-6
@@ -353,12 +348,88 @@ class TradingBot:
             logger.error(f"create_order failed: {e}")
             return False
 
+    # ========= Public API for Telegram =========
+    def request_market_order(self, side: str, amount: float, *, source: str = "telegram") -> dict:
+        side = (side or "").lower()
+        if side not in ("buy", "sell"):
+            return {"ok": False, "message": "side must be buy|sell"}
+        try:
+            amt_quote = float(amount)
+        except Exception:
+            return {"ok": False, "message": "amount must be number"}
+        if amt_quote <= 0:
+            return {"ok": False, "message": "amount > 0 required"}
+        if int(getattr(self.cfg, "ENABLE_TRADING", 1)) != 1:
+            return {"ok": False, "message": "trading disabled"}
+
+        symbol = getattr(self.cfg, "SYMBOL", "BTC/USDT")
+
+        # risk gates (engine-first)
+        if riskmod is not None:
+            ok, reason = riskmod.validate_open(self.cfg, self.exchange, symbol)
+            if not ok:
+                return {"ok": False, "message": f"blocked: {reason}"}
+
+        # price
+        last_price = None
+        try:
+            if hasattr(self.exchange, "fetch_ticker"):
+                t = self.exchange.fetch_ticker(symbol) or {}
+                last_price = float(t.get("last") or t.get("close") or 0)
+        except Exception:
+            last_price = None
+        if not last_price or last_price <= 0:
+            return {"ok": False, "message": "price unavailable"}
+
+        qty = self._quote_to_base(amt_quote, last_price)
+
+        if self.position and ((side == "sell" and self.position.get("side") == "buy") or (side == "buy" and self.position.get("side") == "sell")):
+            self._close_position(last_price, "TG close (opposite side)")
+            return {"ok": True, "message": f"close via opposite side @ {last_price:.2f}"}
+
+        ok = self._create_market_order(symbol, side, qty, last_price, order_type="tg")
+        if not ok:
+            return {"ok": False, "message": "order rejected by adapter"}
+
+        sl, tp = self._compute_sl_tp(last_price, 0.0, side)
+        self.position = {
+            "symbol": symbol, "side": side, "qty": qty, "entry_price": last_price,
+            "opened_at": datetime.now(timezone.utc).isoformat(), "sl": sl, "tp": tp,
+            "trailing_max": last_price if side == "buy" else None, "status": "open",
+        }
+        if int(self.cfg.PAPER_MODE) == 1:
+            open_list = self.paper.load_positions(); open_list.append(self.position); self.paper.save_positions(open_list)
+
+        return {"ok": True, "message": f"{side} {qty:.8f} @ {last_price:.2f}"}
+
+    def request_close_position(self, *, source: str = "telegram") -> dict:
+        symbol = getattr(self.cfg, "SYMBOL", "BTC/USDT")
+        last_price = None
+        try:
+            if hasattr(self.exchange, "fetch_ticker"):
+                t = self.exchange.fetch_ticker(symbol) or {}
+                last_price = float(t.get("last") or t.get("close") or 0)
+        except Exception:
+            last_price = None
+        if not last_price or last_price <= 0:
+            return {"ok": False, "message": "price unavailable"}
+
+        if not self.position and int(getattr(self.cfg, "PAPER_MODE", 1)) == 1:
+            open_list = self.paper.load_positions()
+            if open_list:
+                self.position = open_list[-1]
+
+        if not self.position:
+            return {"ok": False, "message": "no position"}
+
+        self._close_position(last_price, "TG close")
+        return {"ok": True, "message": f"closed @ {last_price:.2f}"}
+
     def _notify(self, text: str):
         try:
             if self.notifier: self.notifier(text)
         except Exception:
             logger.debug("notifier failed", exc_info=True)
 
-# удобная точка входа
 def get_bot(exchange: Any, notifier=None, settings: Optional[Settings] = None) -> TradingBot:
     return TradingBot.get_instance(exchange=exchange, notifier=notifier, settings=settings)
