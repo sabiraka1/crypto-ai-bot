@@ -17,8 +17,8 @@ import numpy as np
 # features & policies (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
-from crypto_ai_bot.trading.crypto_ai_bot.core.signals.validator import validate_features
-from crypto_ai_bot.trading.crypto_ai_bot.core.signals.policy import decide as policy_decide
+rom crypto_ai_bot.core.signals.validator import validate_features
+from crypto_ai_bot.core.signals.policy import decide as policy_decide
 
 # risk pipeline (fixed import path вЂ“ no fallbacks)
 from crypto_ai_bot.trading import risk as riskmod
