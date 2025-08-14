@@ -1,1 +1,1 @@
-web: gunicorn -k uvicorn.workers.UvicornWorker --workers ${WEB_CONCURRENCY:-1} --threads 1 --timeout 90 --graceful-timeout 30 --keep-alive 75 --max-requests 1000 --max-requests-jitter 100 --bind 0.0.0.0:$PORT --chdir src crypto_ai_bot.app.server:app
+ы
