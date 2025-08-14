@@ -14,22 +14,30 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-# signals aggregator (adjust import if your path differs)
+# features
 try:
     from crypto_ai_bot.signals.signal_aggregator import aggregate_features
 except Exception:
     from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features  # type: ignore
+# fusion/validation/policy
+try:
+    from crypto_ai_bot.signals.score_fusion import fuse_scores
+    from crypto_ai_bot.signals.signal_validator import validate_features
+    from crypto_ai_bot.signals.entry_policy import decide as policy_decide
+except Exception:
+    # fallbacks if paths differ
+    from crypto_ai_bot.trading.signals.score_fusion import fuse_scores  # type: ignore
+    from crypto_ai_bot.trading.signals.signal_validator import validate_features  # type: ignore
+    from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide  # type: ignore
 
 # risk pipeline
 try:
     from crypto_ai_bot.trading import risk as riskmod
 except Exception:
-    riskmod = None  # fallback
+    riskmod = None
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
-
-# ---------------------- Settings ----------------------
 
 @dataclass
 class Settings:
@@ -49,21 +57,23 @@ class Settings:
     MIN_24H_VOLUME_USD: float = float(os.getenv("MIN_24H_VOLUME_USD", "1000000"))
 
     # Scoring
+    AI_ENABLE: int = int(os.getenv("AI_ENABLE", "1"))
     AI_FAILOVER_SCORE: float = float(os.getenv("AI_FAILOVER_SCORE", "0.55"))
     AI_MIN_TO_TRADE: float = float(os.getenv("AI_MIN_TO_TRADE", "0.55"))
     ENFORCE_AI_GATE: int = int(os.getenv("ENFORCE_AI_GATE", "1"))
     MIN_SCORE_TO_BUY: float = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))
+    RULE_WEIGHT: float = float(os.getenv("RULE_WEIGHT", "0.6"))
+    AI_WEIGHT: float = float(os.getenv("AI_WEIGHT", "0.4"))
 
-    # RSI/Exits
+    # RSI/ATR
     RSI_OVERBOUGHT: float = float(os.getenv("RSI_OVERBOUGHT", "70"))
     RSI_CRITICAL: float = float(os.getenv("RSI_CRITICAL", "90"))
-
-    # ATR/volatility
     ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
     TRAILING_STOP_ENABLE: int = int(os.getenv("TRAILING_STOP_ENABLE", "1"))
     TRAILING_STOP_PCT: float = float(os.getenv("TRAILING_STOP_PCT", "0.5"))
     STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "2.0"))
     TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "1.5"))
+    RISK_ATR_METHOD: str = os.getenv("RISK_ATR_METHOD", "ewm")
 
     # Hours
     TRADING_HOUR_START: int = int(os.getenv("TRADING_HOUR_START", "0"))
@@ -77,8 +87,6 @@ class Settings:
     @classmethod
     def build(cls) -> "Settings":
         return cls()
-
-# ---------------------- Paper store ----------------------
 
 class PaperStore:
     def __init__(self, positions_path: str, orders_csv: str, pnl_csv: str):
@@ -126,8 +134,6 @@ class PaperStore:
         with open(self.pnl_csv, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow([pos.get("opened_at"), datetime.now(timezone.utc).isoformat(), pos.get("symbol"), side, f"{qty:.8f}", f"{entry:.8f}", f"{exit_price:.8f}", f"{pnl_abs:.8f}", f"{pnl_pct:.4f}"])
 
-# ---------------------- Trading bot ----------------------
-
 class TradingBot:
     _instance_lock = threading.Lock()
     _loop_thread: Optional[threading.Thread] = None
@@ -162,7 +168,7 @@ class TradingBot:
         if self._loop_thread and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5)
 
-    # ---------------------- main loop ----------------------
+    # ---------------------- loop ----------------------
     def _loop(self):
         interval_sec = max(60, int(self.cfg.ANALYSIS_INTERVAL) * 60)
         while TradingBot._running:
@@ -180,37 +186,38 @@ class TradingBot:
             time.sleep(max(5, min(sleep_for, interval_sec)))
         logger.info("🛑 Trading loop stopped")
 
-    # ---------------------- one iteration ----------------------
+    # ---------------------- iteration ----------------------
     def _tick(self):
         symbol = self.cfg.SYMBOL
         feat = aggregate_features(self.cfg, self.exchange, symbol=symbol, limit=int(self.cfg.AGGREGATOR_LIMIT))
         if isinstance(feat, dict) and "error" in feat:
             logger.warning(f"aggregate_features error: {feat['error']}"); return
 
-        ind = feat.get("indicators", {}) if isinstance(feat, dict) else {}
+        ok, problems = validate_features(self.cfg, feat)
+        if not ok:
+            self._notify("❌ Feature validation: " + "; ".join(problems)); return
+
+        ind = feat.get("indicators", {})
         price = float(ind.get("price") or 0.0)
-        atr = float(ind.get("atr") or 0.0)
-        atr_pct = float(ind.get("atr_pct") or 0.0) if ind else 0.0
-        rule_score = float(feat.get("rule_score_penalized", feat.get("rule_score", 0.5))) if isinstance(feat, dict) else 0.5
-        ai_score = float(feat.get("ai_score", self.cfg.AI_FAILOVER_SCORE)) if isinstance(feat, dict) else self.cfg.AI_FAILOVER_SCORE
+        atr   = float(ind.get("atr") or 0.0)
 
-        cond = feat.get("market", {}).get("condition", "neutral") if isinstance(feat, dict) else "neutral"
-        self._notify(f"ℹ️ {symbol} @ {price:.2f} | rule={rule_score:.2f} ai={ai_score:.2f} | ATR%={atr_pct:.2f} | {cond}")
+        # AI score: если модели нет, берём failover из cfg
+        ai_score = float(getattr(self.cfg, "AI_FAILOVER_SCORE", 0.55))
+        fused = fuse_scores(self.cfg, float(feat.get("rule_score_penalized", feat.get("rule_score", 0.5))), ai_score)
 
-        if self.position:
-            self._maybe_close_position(price, atr)
-            if not self.position:
-                return
+        decision = policy_decide(self.cfg, feat, fused)
+        action = decision.get("action")
+        reason = str(decision.get("reason", ""))
+        score  = float(decision.get("score") or 0.0)
+
+        self._notify(f"ℹ️ {symbol} | action={action} score={score:.2f} | {reason}")
 
         if not self._can_open_new():
             return
+        if action in ("buy", "sell"):
+            self._open_position(action, price, atr)
 
-        if self._is_buy_signal(rule_score, ai_score, ind):
-            self._open_position("buy", price, atr)
-        elif self._is_sell_signal(rule_score, ai_score, ind):
-            self._open_position("sell", price, atr)
-
-    # ---------------------- gating ----------------------
+    # ---------------------- gates ----------------------
     def _can_open_new(self) -> bool:
         if self.position is not None:
             return False
@@ -218,33 +225,8 @@ class TradingBot:
             return False
         return True
 
-    def _is_buy_signal(self, rule: float, ai: float, ind: Dict[str, Any]) -> bool:
-        if int(self.cfg.ENFORCE_AI_GATE) == 1 and ai < self.cfg.AI_MIN_TO_TRADE:
-            return False
-        if rule < self.cfg.MIN_SCORE_TO_BUY:
-            return False
-        rsi = ind.get("rsi")
-        if rsi is not None and rsi >= self.cfg.RSI_CRITICAL:
-            return False
-        if (ind.get("ema20") or 0) <= (ind.get("ema50") or 0):
-            return False
-        return True
-
-    def _is_sell_signal(self, rule: float, ai: float, ind: Dict[str, Any]) -> bool:
-        if int(self.cfg.ENFORCE_AI_GATE) == 1 and ai < self.cfg.AI_MIN_TO_TRADE:
-            return False
-        if rule < self.cfg.MIN_SCORE_TO_BUY:
-            return False
-        rsi = ind.get("rsi")
-        if rsi is not None and rsi <= (100 - self.cfg.RSI_CRITICAL):
-            return False
-        if (ind.get("ema20") or 0) >= (ind.get("ema50") or 0):
-            return False
-        return True
-
     # ---------------------- execution ----------------------
     def _open_position(self, side: str, price: float, atr: float):
-        # risk gates before opening
         if riskmod is not None:
             ok, reason = riskmod.validate_open(self.cfg, self.exchange, self.cfg.SYMBOL)
             if not ok:
@@ -324,7 +306,10 @@ class TradingBot:
                 sl = entry + k1 * atr; tp = entry - k2 * atr
             return float(sl), float(tp)
         sl = entry * (1 - self.cfg.STOP_LOSS_PCT / 100) if side == "buy" else entry * (1 + self.cfg.STOP_LOSS_PCT / 100)
-        tp = entry * (1 + self.cfg.TAKE_PROFIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
+        tp = entry * (1 + self.cfg.TAKE_PROIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
+        # fix typo if any
+        if not isinstance(tp, float):
+            tp = entry * (1 + self.cfg.TAKE_PROFIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
         return float(sl), float(tp)
 
     def _create_market_order(self, symbol: str, side: str, qty: float, price_hint: float, order_type: str = "open") -> bool:
@@ -348,7 +333,7 @@ class TradingBot:
             logger.error(f"create_order failed: {e}")
             return False
 
-    # ========= Public API for Telegram =========
+    # ========= Telegram public API =========
     def request_market_order(self, side: str, amount: float, *, source: str = "telegram") -> dict:
         side = (side or "").lower()
         if side not in ("buy", "sell"):
@@ -364,13 +349,11 @@ class TradingBot:
 
         symbol = getattr(self.cfg, "SYMBOL", "BTC/USDT")
 
-        # risk gates (engine-first)
         if riskmod is not None:
             ok, reason = riskmod.validate_open(self.cfg, self.exchange, symbol)
             if not ok:
                 return {"ok": False, "message": f"blocked: {reason}"}
 
-        # price
         last_price = None
         try:
             if hasattr(self.exchange, "fetch_ticker"):
