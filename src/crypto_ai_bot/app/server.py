@@ -6,8 +6,7 @@ import os
 import time
 import logging
 from typing import Any, Dict, Optional
-
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 try:
@@ -15,35 +14,15 @@ try:
 except Exception:
     ccxt = None
 
-# Telegram + Bot
-from crypto_ai_bot.telegram.bot import process_update, send_telegram_message
 from crypto_ai_bot.trading.bot import get_bot, Settings
-
-# --- Minimal Prometheus metrics ---
-try:
-    from prometheus_client import CollectorRegistry, Gauge, generate_latest, CONTENT_TYPE_LATEST
-except Exception:
-    CollectorRegistry = None
-    Gauge = None
-    def generate_latest(reg): return b"metrics_not_available"
-    CONTENT_TYPE_LATEST = "text/plain"
+from crypto_ai_bot.telegram.bot import process_update, send_telegram_message
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 app = FastAPI(title="crypto-ai-bot", version=os.getenv("APP_VERSION", "1.0.0"))
-
-# Prometheus registry
-START_TS = time.time()
-if CollectorRegistry and Gauge:
-    REGISTRY = CollectorRegistry()
-    APP_INFO = Gauge("app_info", "App info", ["version"], registry=REGISTRY)
-    APP_INFO.labels(version=os.getenv("APP_VERSION", "1.0.0")).set(1)
-    UPTIME = Gauge("app_uptime_seconds", "Uptime seconds", registry=REGISTRY)
-else:
-    REGISTRY = None
-    APP_INFO = None
-    UPTIME = None
+_start_time = time.time()
+_bot_started = False
 
 class ExchangeAdapter:
     def __init__(self):
@@ -75,7 +54,6 @@ class ExchangeAdapter:
             params["text"] = f"bot-{uuid.uuid4().hex[:12]}"
         return self._ex.create_order(symbol, type_, side, amount, None, params)
 
-_bot_started = False
 _exchange: Optional[ExchangeAdapter] = None
 
 @app.on_event("startup")
@@ -99,6 +77,16 @@ def health():
 def alive():
     return {"alive": True}
 
+@app.get("/metrics")
+def metrics():
+    uptime = time.time() - _start_time
+    version = app.version
+    payload = (
+        f'app_info{{version="{version}"}} 1\n'
+        f"app_uptime_seconds {uptime:.0f}\n"
+    )
+    return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(req: Request):
     try:
@@ -107,12 +95,3 @@ async def telegram_webhook(req: Request):
         payload = {}
     await process_update(payload)
     return JSONResponse({"ok": True})
-
-@app.get("/metrics")
-def metrics():
-    if REGISTRY and UPTIME:
-        UPTIME.set(time.time() - START_TS)
-        data = generate_latest(REGISTRY)
-        return Response(content=data, media_type=CONTENT_TYPE_LATEST)
-    # Fallback: текст
-    return PlainTextResponse("metrics_not_available")
