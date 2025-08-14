@@ -14,27 +14,14 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-# features
-try:
-    from crypto_ai_bot.signals.signal_aggregator import aggregate_features
-except Exception:
-    from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features  # type: ignore
-# fusion/validation/policy
-try:
-    from crypto_ai_bot.signals.score_fusion import fuse_scores
-    from crypto_ai_bot.signals.signal_validator import validate_features
-    from crypto_ai_bot.signals.entry_policy import decide as policy_decide
-except Exception:
-    # fallbacks if paths differ
-    from crypto_ai_bot.trading.signals.score_fusion import fuse_scores  # type: ignore
-    from crypto_ai_bot.trading.signals.signal_validator import validate_features  # type: ignore
-    from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide  # type: ignore
+# features & policies (fixed import path – no fallbacks)
+from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
+from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
+from crypto_ai_bot.trading.signals.signal_validator import validate_features
+from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide
 
-# risk pipeline
-try:
-    from crypto_ai_bot.trading import risk as riskmod
-except Exception:
-    riskmod = None
+# risk pipeline (fixed import path – no fallbacks)
+from crypto_ai_bot.trading import risk as riskmod
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
