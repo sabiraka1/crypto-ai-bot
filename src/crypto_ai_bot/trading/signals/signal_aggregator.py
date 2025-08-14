@@ -1,6 +1,22 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+"""
+signals/signal_aggregator.py
+---------------------------------
+Упрощённый и унифицированный агрегатор фич без локальных дубликатов индикаторов.
+
+Что изменилось по сравнению с текущей версией:
+- ❌ Убраны локальные реализации EMA/RSI/MACD/ATR.
+- ✅ Все индикаторы/ATR берём из crypto_ai_bot.analysis.technical_indicators
+  (единый кэш, единая формула ATR, согласованность со всем проектом).
+- ♻️ Лёгкая обратная совместимость по структуре ответа aggregate_features().
+- ➕ Дополнительно возвращаем frames['15m'] с DataFrame 15m (не ломает совместимость),
+  чтобы RiskManager мог строить динамический SL без фолбэка.
+
+Файл совместим с TradingBot/entry_policy.
+"""
+
 import os
 import logging
 from typing import Dict, Any, List, Tuple, Optional, Sequence
@@ -10,6 +26,13 @@ import numpy as np
 import pandas as pd
 
 from crypto_ai_bot.context.snapshot import build_context_snapshot
+
+# Индикаторы/ATR из единого модуля
+from crypto_ai_bot.analysis.technical_indicators import (
+    calculate_all_indicators,   # возвращает DataFrame c индикаторами (rsi, macd_hist, ema_*, atr, volume_ratio, ...)
+    get_unified_atr,            # единая функция ATR (для точечных расчётов при необходимости)
+    IndicatorCalculator,        # быстрые EMA/RSI/MACD-блоки (без дубликатов логики)
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,43 +51,6 @@ def _ohlcv_to_df(ohlcv: List[list]) -> pd.DataFrame:
     return df.dropna()
 
 
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = np.where(delta > 0, delta, 0.0)
-    down = np.where(delta < 0, -delta, 0.0)
-    roll_up = pd.Series(up, index=series.index).ewm(alpha=1 / period, adjust=False).mean()
-    roll_down = pd.Series(down, index=series.index).ewm(alpha=1 / period, adjust=False).mean()
-    rs = roll_up / (roll_down.replace(0, np.nan))
-    rsi = 100 - (100 / (1 + rs))
-    # избегаем FutureWarning у pandas:
-    return rsi.bfill().fillna(50.0)
-
-
-def _macd_hist(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
-    ema_fast = _ema(series, fast)
-    ema_slow = _ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = _ema(macd_line, signal)
-    return (macd_line - signal_line)
-
-
-def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    prev_close = df["close"].shift(1)
-    tr = pd.concat(
-        [
-            (df["high"] - df["low"]),
-            (df["high"] - prev_close).abs(),
-            (df["low"] - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return tr.ewm(alpha=1 / period, adjust=False).mean()
-
-
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(x)))
 
@@ -72,48 +58,66 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
 # ----------------------- Indicators & Scoring -----------------------
 
 def _compute_indicators_15m(df15: pd.DataFrame) -> Dict[str, Any]:
-    """Основные индикаторы и derived-метрики на 15m."""
-    if df15.empty:
+    """Основные индикаторы и derived-метрики на 15m (через analysis.*)."""
+    if df15 is None or df15.empty:
         raise ValueError("empty df15")
 
-    close = df15["close"]
-    vol = df15["volume"]
+    # 1) Считаем «единый» пакет индикаторов (кэш/ATR уже внутри)
+    ind_df = calculate_all_indicators(df15, use_cache=True)
 
-    out: Dict[str, Any] = {}
-    out["ema9"] = float(_ema(close, 9).iloc[-1])
-    out["ema21"] = float(_ema(close, 21).iloc[-1])
-    out["ema20"] = float(_ema(close, 20).iloc[-1])
-    out["ema50"] = float(_ema(close, 50).iloc[-1])
+    # Последние значения (с защитой от NaN)
+    def _last(col: str) -> Optional[float]:
+        try:
+            v = float(ind_df[col].iloc[-1])
+            return v if np.isfinite(v) else None
+        except Exception:
+            return None
 
-    rsi = _rsi(close, 14)
-    out["rsi"] = float(rsi.iloc[-1])
+    # 2) EMA 9/21/20/50 — быстрым калькулятором (в нём используются те же алгоритмы)
+    calc = IndicatorCalculator()
+    emas = calc.calculate_emas(ind_df["close"], [9, 21, 20, 50])
+    ema9 = float(emas[9].iloc[-1]) if len(emas[9]) else np.nan
+    ema21 = float(emas[21].iloc[-1]) if len(emas[21]) else np.nan
+    ema20 = float(emas[20].iloc[-1]) if len(emas[20]) else np.nan
+    ema50 = float(emas[50].iloc[-1]) if len(emas[50]) else np.nan
 
-    macd_h = _macd_hist(close, 12, 26, 9)
-    out["macd_hist"] = float(macd_h.iloc[-1])
+    out: Dict[str, Any] = {
+        # Унифицированные индикаторы
+        "rsi": _last("rsi"),
+        "macd_hist": _last("macd_hist"),
+        "atr": _last("atr"),
+        "price": _last("close"),
+        "volume_ratio": _last("volume_ratio"),
+        # EMA (для совместимости со старым кодом/логикой правил)
+        "ema9": float(ema9) if np.isfinite(ema9) else None,
+        "ema21": float(ema21) if np.isfinite(ema21) else None,
+        "ema20": float(ema20) if np.isfinite(ema20) else None,
+        "ema50": float(ema50) if np.isfinite(ema50) else None,
+    }
 
-    atr = _atr(df15, 14)
-    out["atr"] = float(atr.iloc[-1])
-
-    out["price"] = float(close.iloc[-1])
-    out["atr_pct"] = float(out["atr"] / out["price"] * 100.0) if out["price"] > 0 else None
-
-    vol_sma20 = vol.rolling(20).mean()
-    vr_val = vol_sma20.iloc[-1] if len(vol_sma20) else np.nan
-    vr = float(vol.iloc[-1] / vr_val) if (vr_val and not np.isnan(vr_val)) else None
-    out["volume_ratio"] = vr
+    # Derived: ATR%
+    if out.get("atr") and out.get("price"):
+        out["atr_pct"] = float(out["atr"] / out["price"] * 100.0) if out["price"] > 0 else None
+    else:
+        out["atr_pct"] = None
 
     return out
 
 
 def _compute_trend_4h(df4h: pd.DataFrame) -> Optional[bool]:
-    """bull=True, bear=False, None=неопределённо."""
-    if df4h.empty:
+    """bull=True, bear=False, None=неопределённо (через те же EMA-алгоритмы)."""
+    if df4h is None or df4h.empty:
         return None
-    ema20_4h = _ema(df4h["close"], 20).iloc[-1]
-    ema50_4h = _ema(df4h["close"], 50).iloc[-1]
-    if np.isnan(ema20_4h) or np.isnan(ema50_4h):
+    try:
+        calc = IndicatorCalculator()
+        emas = calc.calculate_emas(pd.to_numeric(df4h["close"], errors="coerce").astype("float64"), [20, 50])
+        ema20_4h = float(emas[20].iloc[-1]) if len(emas[20]) else np.nan
+        ema50_4h = float(emas[50].iloc[-1]) if len(emas[50]) else np.nan
+        if not (np.isfinite(ema20_4h) and np.isfinite(ema50_4h)):
+            return None
+        return bool(ema20_4h > ema50_4h)
+    except Exception:
         return None
-    return bool(ema20_4h > ema50_4h)
 
 
 def _market_condition(ind_15m: Dict[str, Any], trend_4h: Optional[bool]) -> str:
@@ -121,25 +125,24 @@ def _market_condition(ind_15m: Dict[str, Any], trend_4h: Optional[bool]) -> str:
         return "bull_4h"
     if trend_4h is False:
         return "bear_4h"
-    if ind_15m.get("ema20", 0) > ind_15m.get("ema50", 0):
+    if (ind_15m.get("ema20") or 0) > (ind_15m.get("ema50") or 0):
         return "bull_15m"
-    if ind_15m.get("ema20", 0) < ind_15m.get("ema50", 0):
+    if (ind_15m.get("ema20") or 0) < (ind_15m.get("ema50") or 0):
         return "bear_15m"
     return "SIDEWAYS"
 
 
 def _rule_score(ind: Dict[str, Any]) -> float:
-    """Простая весовая модель без AI: 0..1"""
+    """Простая весовая модель без AI: 0..1 (оставлена как была)."""
     score = 0.0
     score += 0.20 * (1.0 if ind.get("rsi") is not None and 30 < ind["rsi"] < 70 else 0.0)
-    score += 0.20 * (1.0 if ind.get("macd_hist", 0) > 0 else 0.0)
-    score += 0.20 * (1.0 if ind.get("ema9", 0) > ind.get("ema21", 0) else 0.0)
-    score += 0.15 * (1.0 if ind.get("ema20", 0) > ind.get("ema50", 0) else 0.0)
+    score += 0.20 * (1.0 if (ind.get("macd_hist") or 0) > 0 else 0.0)
+    score += 0.20 * (1.0 if (ind.get("ema9") or 0) > (ind.get("ema21") or 0) else 0.0)
+    score += 0.15 * (1.0 if (ind.get("ema20") or 0) > (ind.get("ema50") or 0) else 0.0)
     vr = ind.get("volume_ratio")
     if vr is not None and np.isfinite(vr):
-        # 2× среднего объёма → +0.15
-        score += 0.15 * _clamp(vr / 2.0, 0.0, 1.0)
-    return _clamp(score)
+        score += 0.15 * _clamp(vr / 2.0, 0.0, 1.0)  # 2× среднего объёма → +0.15
+    return max(0.0, min(1.0, score))
 
 
 # ----------------------- Context penalties -----------------------
@@ -159,7 +162,6 @@ def _apply_context_penalties(
     Применяет мягкие штрафы/бонусы по ENV.
     Возвращает (скор_после, детали).
     """
-    # флаг: можно отключить пенальти кодом при желании
     if not int(os.getenv("USE_CONTEXT_PENALTIES", "0")):
         return base_score, {"enabled": False, "applied": []}
 
@@ -175,7 +177,7 @@ def _apply_context_penalties(
         dom_thresh = float(os.getenv("CTX_BTC_DOM_THRESH", "52.0"))
         dom_pen = float(os.getenv("CTX_BTC_DOM_PENALTY", "-0.05"))
 
-        if snap.btc_dominance is not None:
+        if getattr(snap, "btc_dominance", None) is not None:
             cond_alts = (not alts_only) or _is_alt_symbol(symbol)
             if cond_alts and float(snap.btc_dominance) >= dom_thresh:
                 score += dom_pen
@@ -187,7 +189,7 @@ def _apply_context_penalties(
     try:
         dxy_thr = float(os.getenv("CTX_DXY_DELTA_THRESH", "0.5"))
         dxy_pen = float(os.getenv("CTX_DXY_PENALTY", "-0.05"))
-        if snap.dxy_change_1d is not None and float(snap.dxy_change_1d) >= dxy_thr:
+        if getattr(snap, "dxy_change_1d", None) is not None and float(snap.dxy_change_1d) >= dxy_thr:
             score += dxy_pen
             penalties.append({"factor": "dxy_change_1d", "value": snap.dxy_change_1d, "delta": dxy_pen})
     except Exception as e:
@@ -199,7 +201,7 @@ def _apply_context_penalties(
         fng_under = float(os.getenv("CTX_FNG_UNDERSHOOT", "25"))
         fng_pen = float(os.getenv("CTX_FNG_PENALTY", "-0.05"))
         fng_bonus = float(os.getenv("CTX_FNG_BONUS", "0.03"))
-        if snap.fear_greed is not None:
+        if getattr(snap, "fear_greed", None) is not None:
             fng = float(snap.fear_greed)
             if fng >= fng_over:
                 score += fng_pen
@@ -210,7 +212,7 @@ def _apply_context_penalties(
     except Exception as e:
         logger.debug(f"ctx penalty fng skipped: {e}")
 
-    score = _clamp(score, clamp_min, clamp_max)
+    score = max(clamp_min, min(clamp_max, score))
     return score, {"enabled": True, "applied": penalties, "clamp": [clamp_min, clamp_max]}
 
 
@@ -221,7 +223,7 @@ def aggregate_features(
     exchange,
     # старые параметры — оставлены для совместимости со старыми вызовами:
     symbol: str = "BTC/USDT",
-    timeframe: Optional[str] = None,  # игнорируем, у нас мульти-TF
+    timeframe: Optional[str] = None,   # игнорируем, у нас мульти-TF
     timeframes: Optional[Sequence[str]] = None,
     limit: int = 200,
     settings: Any = None,
@@ -230,18 +232,8 @@ def aggregate_features(
     **kwargs,
 ) -> Dict[str, Any]:
     """
-    Возвращает единый пакет фич:
-    {
-      "symbol", "timeframe", "timestamp",
-      "indicators": {...}, "rule_score", "rule_score_penalized", "ai_score",
-      "data_quality": {...}, "context": {...},
-      # и совместимые поля:
-      "scores": {"rule", "ai", "total_hint"},
-      "market": {"condition", "atr_pct"},
-      "data": {...}
-    }
+    Возвращает единый пакет фич (совместим с прежней структурой).
     """
-
     # приоритет: явные аргументы -> cfg -> дефолт
     symbol = symbol or getattr(cfg, "SYMBOL", "BTC/USDT")
 
@@ -279,11 +271,11 @@ def aggregate_features(
     if "15m" not in dfs:
         return {"error": "no_primary_data"}
 
-    # 2) Индикаторы 15m и тренд 4h
+    # 2) Индикаторы 15m и тренд 4h (через unified analysis.*)
     try:
         ind15 = _compute_indicators_15m(dfs["15m"])
     except Exception as e:
-        logger.error(f"❌ Indicators computation failed: {e}")
+        logger.error(f"❌ Indicators computation failed: {e}", exc_info=True)
         return {"error": "indicators_failed"}
 
     trend4h = _compute_trend_4h(dfs.get("4h", pd.DataFrame()))
@@ -313,7 +305,7 @@ def aggregate_features(
     if snapshot is not None:
         rule_penalized, penalties_info = _apply_context_penalties(symbol, rule, snapshot)
 
-    # 7) AI-score (fall-back, если модель не инициализировалась)
+    # 7) AI-score (fallback, если модель ещё не готова)
     ai_score = float(getattr(cfg, "AI_FAILOVER_SCORE", 0.55))
 
     # 8) Качество данных
@@ -338,12 +330,17 @@ def aggregate_features(
         "symbol": symbol,
         "timeframe": "15m",
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+
         "indicators": ind15,
         "rule_score": float(rule),
         "rule_score_penalized": float(rule_penalized),
         "ai_score": float(ai_score),
         "data_quality": data_quality,
         "context": ctx_payload,
+
+        # ✔️ Добавочно — отдадим фрейм 15m для RiskManager (динамический SL)
+        "frames": {"15m": dfs["15m"]},
+
         # Совместимые поля, чтобы старый /status ничего не ломал:
         "scores": {
             "rule": float(rule),
