@@ -45,10 +45,9 @@ USER appuser
 
 WORKDIR /app
 
-# venv + зависимости как у тебя
-ENV VENV_PATH=/opt/venv
-RUN python -m venv $VENV_PATH
-ENV PATH="$VENV_PATH/bin:$PATH"
+# Устанавливаем зависимости сразу в системный Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
