@@ -100,3 +100,9 @@ def atr_last(high: Iterable[float] | pd.Series, low: Iterable[float] | pd.Series
 
 def atr_pct_last(high: Iterable[float] | pd.Series, low: Iterable[float] | pd.Series, close: Iterable[float] | pd.Series, period: int = 14) -> float:
     return float(atr_pct(high, low, close, period).iloc[-1])
+
+def macd_hist(series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """Совместимость со старым API: вернуть только гистограмму MACD."""
+    _, _, hist = macd(series, fast=fast, slow=slow, signal=signal)
+    return hist
+
