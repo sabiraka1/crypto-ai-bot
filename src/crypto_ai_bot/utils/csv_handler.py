@@ -1,58 +1,94 @@
-# src/crypto_ai_bot/utils/csv_handler.py
-"""
-🗂️ CSVHandler — безопасная запись CSV-логов (без внешних зависимостей)
-- Лог закрытых сделок: CLOSED_TRADES_CSV (из Settings)
-- Авто-создание папок и заголовка
-"""
-
-from __future__ import annotations
-
-import os
-import csv
-import threading
-from typing import Dict, Any
-
-from crypto_ai_bot.config.settings import Settings
-
-
-class CSVHandler:
-    _lock = threading.RLock()
-
-    @staticmethod
-    def _ensure_parent(path: str) -> None:
-        try:
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-        except Exception:
-            pass
-
-    @staticmethod
-    def _ensure_header(path: str, fieldnames) -> None:
-        exists = os.path.exists(path)
-        if not exists or os.path.getsize(path) == 0:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-
-    @classmethod
-    def log_close_trade(cls, row: Dict[str, Any]) -> None:
-        cfg = Settings.load()
-        path = getattr(cfg, "CLOSED_TRADES_CSV", os.path.join("data", "closed_trades.csv"))
-        fields = [
-            "timestamp", "symbol", "side",
-            "entry_price", "exit_price",
-            "qty_usd", "pnl_pct", "pnl_abs",
-            "reason", "buy_score", "ai_score",
-            "duration_minutes", "close_ts"
-        ]
-        safe_row = {k: row.get(k) for k in fields}
-        cls._ensure_parent(path)
-        with cls._lock:
-            cls._ensure_header(path, fields)
-            with open(path, "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fields)
-                writer.writerow(safe_row or {})
-
-
-__all__ = ["CSVHandler"]
+diff --git a/src/crypto_ai_bot/utils/csv_handler.py b/src/crypto_ai_bot/utils/csv_handler.py
+index 0000000..0000001 100644
+--- a/src/crypto_ai_bot/utils/csv_handler.py
++++ b/src/crypto_ai_bot/utils/csv_handler.py
+@@ -9,6 +9,7 @@ from __future__ import annotations
+ 
+ import os
+ import csv
++from datetime import datetime
+ import threading
+ from typing import Dict, Any
+ 
+@@ -55,5 +56,76 @@ class CSVHandler:
+                 writer = csv.DictWriter(f, fieldnames=fields)
+                 writer.writerow(safe_row or {})
+ 
++    @classmethod
++    def get_trade_stats(cls) -> Dict[str, Any]:
++        """
++        Быстрый подсчёт статистики по файлу закрытых сделок (без pandas).
++        Возвращает: {"count", "wins", "losses", "pnl_abs_sum", "last_ts"}.
++        """
++        cfg = Settings.load()
++        path = getattr(cfg, "CLOSED_TRADES_CSV", os.path.join("data", "closed_trades.csv"))
++        if not os.path.exists(path) or os.path.getsize(path) == 0:
++            return {"count": 0, "wins": 0, "losses": 0, "pnl_abs_sum": 0.0, "last_ts": None}
++
++        count = wins = losses = 0
++        pnl_sum = 0.0
++        last_dt = None
++
++        def _parse_iso(ts: str):
++            try:
++                if not ts:
++                    return None
++                ts = ts.replace("Z", "+00:00")
++                return datetime.fromisoformat(ts)
++            except Exception:
++                return None
++
++        def _to_float(v):
++            try:
++                return float(v)
++            except Exception:
++                return None
++
++        try:
++            with open(path, "r", encoding="utf-8") as f:
++                reader = csv.DictReader(f)
++                for row in reader:
++                    count += 1
++
++                    # pnl_abs / pnl_usd / pnl
++                    pnl = None
++                    for key in ("pnl_abs", "pnl_usd", "pnl"):
++                        v = _to_float(row.get(key))
++                        if v is not None:
++                            pnl = v
++                            break
++                    if pnl is not None:
++                        pnl_sum += pnl
++                        if pnl > 0:
++                            wins += 1
++                        elif pnl < 0:
++                            losses += 1
++                    else:
++                        # fall back по знаку процента
++                        pct = _to_float(row.get("pnl_pct") or row.get("pnl_percent"))
++                        if pct is not None:
++                            if pct > 0:
++                                wins += 1
++                            elif pct < 0:
++                                losses += 1
++
++                    # последний таймштамп
++                    ts = (
++                        row.get("timestamp")
++                        or row.get("exit_ts")
++                        or row.get("close_ts")
++                        or row.get("close_datetime")
++                    )
++                    dt = _parse_iso(ts) if ts else None
++                    if dt and (last_dt is None or dt > last_dt):
++                        last_dt = dt
++        except Exception:
++            pass
++
++        return {
++            "count": count, "wins": wins, "losses": losses,
++            "pnl_abs_sum": round(pnl_sum, 2),
++            "last_ts": (last_dt.isoformat().replace("+00:00", "Z") if last_dt else None),
++        }
+ 
+ __all__ = ["CSVHandler"]
