@@ -1,471 +1,435 @@
+
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
-crypto_ai_bot/trading/bot.py
----------------------------------
-Компактный и надёжный торговый цикл без лишних зависимостей.
-Совместим с обновлённым signals/signal_aggregator.aggregate_features().
-
-Основные принципы:
-- Один торговый цикл в процессе (thread-safe).
-- Реальные рыночные данные всегда используются (даже в SAFE/PAPER режимах).
-- Идемпотентные рыночные заявки (client tag) + ретраи.
-- Простой ATR-базовый SL/TP + трейлинг (включается по флагу).
-- Без создания новых модулей/файлов в проекте (опирается на существующие).
+crypto_ai_bot/telegram/bot.py
+-----------------------------
+Telegram-бот (вебхук) с широким набором команд.
+Добавлено: /config теперь показывает значения из Settings (если доступен).
 """
 
 import os
-import time
-import math
-import uuid
+import io
+import csv
 import json
-import threading
-import logging
-from dataclasses import dataclass, asdict
+import traceback
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
-import numpy as np
-import pandas as pd
+import requests
+
+# Matplotlib: headless backend для Railway/Replit
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 try:
-    import ccxt  # только для type hints/рыночных вызовов
-    from ccxt.base.errors import NetworkError, ExchangeError
-except Exception:  # pragma: no cover
+    import pandas as pd
+except Exception:
+    pd = None
+
+try:
+    import ccxt
+except Exception:
     ccxt = None
-    class NetworkError(Exception): ...
-    class ExchangeError(Exception): ...
 
-from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features
-
-logger = logging.getLogger(__name__)
-logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
-
-
-# ---------------------- Вспомогательные структуры ----------------------
-
-@dataclass
-class Settings:
-    SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
-    TIMEFRAME: str = os.getenv("TIMEFRAME", "15m")
-    ANALYSIS_INTERVAL: int = int(os.getenv("ANALYSIS_INTERVAL", "15"))  # минут
-    TRADE_AMOUNT: float = float(os.getenv("TRADE_AMOUNT", "10"))  # $
-    MAX_CONCURRENT_POS: int = int(os.getenv("MAX_CONCURRENT_POS", "1"))
-    SAFE_MODE: int = int(os.getenv("SAFE_MODE", "1"))
-    PAPER_MODE: int = int(os.getenv("PAPER_MODE", "1"))
-    ENABLE_TRADING: int = int(os.getenv("ENABLE_TRADING", "1"))
-
-    # Гейты модели/правил
-    AI_MIN_TO_TRADE: float = float(os.getenv("AI_MIN_TO_TRADE", "0.55"))
-    MIN_SCORE_TO_BUY: float = float(os.getenv("MIN_SCORE_TO_BUY", "0.65"))
-    ENFORCE_AI_GATE: int = int(os.getenv("ENFORCE_AI_GATE", "1"))
-
-    # RSI/выходы
-    RSI_OVERBOUGHT: float = float(os.getenv("RSI_OVERBOUGHT", "70"))
-    RSI_CRITICAL: float = float(os.getenv("RSI_CRITICAL", "90"))
-
-    # ATR/волатильность
-    ATR_PERIOD: int = int(os.getenv("ATR_PERIOD", "14"))
-    TRAILING_STOP_ENABLE: int = int(os.getenv("TRAILING_STOP_ENABLE", "1"))
-    TRAILING_STOP_PCT: float = float(os.getenv("TRAILING_STOP_PCT", "0.5"))  # % от цены
-    STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "2.0"))
-    TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "1.5"))
-
-    # Файлы paper-режима
-    PAPER_POSITIONS_FILE: str = os.getenv("PAPER_POSITIONS_FILE", "paper_positions.json")
-    PAPER_ORDERS_FILE: str = os.getenv("PAPER_ORDERS_FILE", "paper_orders.csv")
-    PAPER_PNL_FILE: str = os.getenv("PAPER_PNL_FILE", "paper_pnl.csv")
-
-    @classmethod
-    def build(cls) -> "Settings":
-        return cls()
-
-
-@dataclass
-class Position:
-    symbol: str
-    side: str            # "buy" или "sell"
-    qty: float
-    entry_price: float
-    opened_at: str
-    sl: Optional[float] = None
-    tp: Optional[float] = None
-    trailing_max: Optional[float] = None  # для трейлинга
-    status: str = "open"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-
-# ---------------------- Буфер для paper-режима ----------------------
-
-class PaperStore:
-    """Лёгкий стор без сторонних библиотек. Никаких новых модулей в проекте."""
-    def __init__(self, positions_path: str, orders_csv: str, pnl_csv: str):
-        self.positions_path = positions_path
-        self.orders_csv = orders_csv
-        self.pnl_csv = pnl_csv
-        self._ensure_files()
-
-    def _ensure_files(self):
-        # positions.json
-        if not os.path.exists(self.positions_path):
-            with open(self.positions_path, "w", encoding="utf-8") as f:
-                json.dump({"open": []}, f, ensure_ascii=False, indent=2)
-        # orders.csv
-        if not os.path.exists(self.orders_csv):
-            import csv
-            with open(self.orders_csv, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["ts", "symbol", "side", "qty", "price", "client_tag", "type"])
-        # pnl.csv
-        if not os.path.exists(self.pnl_csv):
-            import csv
-            with open(self.pnl_csv, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["ts_open", "ts_close", "symbol", "side", "qty", "entry_price", "exit_price", "pnl_abs", "pnl_pct"])
-
-    def load_positions(self) -> list:
-        with open(self.positions_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("open", [])
-
-    def save_positions(self, positions: list):
-        tmp = self.positions_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"open": positions}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.positions_path)
-
-    def append_order(self, symbol: str, side: str, qty: float, price: float, client_tag: str, order_type: str):
-        import csv
-        with open(self.orders_csv, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow([datetime.now(timezone.utc).isoformat(), symbol, side, f"{qty:.8f}", f"{price:.8f}", client_tag, order_type])
-
-    def append_pnl(self, pos: Position, exit_price: float):
-        import csv
-        pnl_abs = (exit_price - pos.entry_price) * pos.qty if pos.side == "buy" else (pos.entry_price - exit_price) * pos.qty
-        pnl_pct = (exit_price / pos.entry_price - 1.0) * (100 if pos.side == "buy" else -100)
-        with open(self.pnl_csv, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow([pos.opened_at, datetime.now(timezone.utc).isoformat(), pos.symbol, pos.side, f"{pos.qty:.8f}", f"{pos.entry_price:.8f}", f"{exit_price:.8f}", f"{pnl_abs:.8f}", f"{pnl_pct:.4f}"])
-
-
-# ---------------------- Основной класс бота ----------------------
-
-class TradingBot:
-    _instance_lock = threading.Lock()
-    _loop_thread: Optional[threading.Thread] = None
-    _running: bool = False
-
-    def __init__(self, exchange: Any, notifier=None, settings: Optional[Settings] = None):
-        self.cfg = settings or Settings.build()
-        self.exchange = exchange
-        self.notifier = notifier  # функция send_telegram_message(text, image_path=None)
-
-        # Управление позицией (в памяти)
-        self.position: Optional[Position] = None
-
-        # Paper store (без внешних зависимостей)
-        self.paper = PaperStore(self.cfg.PAPER_POSITIONS_FILE, self.cfg.PAPER_ORDERS_FILE, self.cfg.PAPER_PNL_FILE)
-
-    # ------------- Публичный интерфейс -------------
-
-    @classmethod
-    def get_instance(cls, exchange: Any, notifier=None, settings: Optional[Settings] = None) -> "TradingBot":
-        with cls._instance_lock:
-            if not hasattr(cls, "_singleton"):
-                cls._singleton = TradingBot(exchange, notifier, settings)
-        return cls._singleton
-
-    def start(self):
-        """Запускает один торговый цикл в отдельном потоке."""
-        with TradingBot._instance_lock:
-            if TradingBot._running:
-                logger.info("Trading loop already running; skip start()")
-                return
-            TradingBot._running = True
-
-        self._loop_thread = threading.Thread(target=self._loop, name="trading-loop", daemon=True)
-        self._loop_thread.start()
-        logger.info("✅ Trading loop started")
-
-    def stop(self):
-        with TradingBot._instance_lock:
-            TradingBot._running = False
-        if self._loop_thread and self._loop_thread.is_alive():
-            self._loop_thread.join(timeout=5)
-
-    # ------------- Основной цикл -------------
-
-    def _loop(self):
-        interval_sec = max(60, int(self.cfg.ANALYSIS_INTERVAL) * 60)
-        # Выравнивание по границе свечи
-        while TradingBot._running:
-            try:
-                self._tick()
-            except Exception as e:
-                logger.exception(f"tick failed: {e}")
-                self._notify(f"⚠️ Tick failed: {e}")
-            # ждать до следующей границы
-            now = time.time()
-            sleep_for = interval_sec - (now % interval_sec)
-            time.sleep(max(5, min(sleep_for, interval_sec)))
-
-        logger.info("🛑 Trading loop stopped")
-
-    # ------------- Одна итерация: анализ → действие -------------
-
-    def _tick(self):
-        symbol = self.cfg.SYMBOL
-        feat = aggregate_features(self.cfg, self.exchange, symbol=symbol, limit=200)
-
-        if "error" in feat:
-            logger.warning(f"aggregate_features error: {feat['error']}")
-            return
-
-        ind = feat["indicators"]
-        price = float(ind.get("price") or 0.0)
-        atr = float(ind.get("atr") or 0.0)
-        atr_pct = float(ind.get("atr_pct") or 0.0)
-        rule_score = float(feat.get("rule_score_penalized", feat.get("rule_score", 0.5)))
-        ai_score = float(feat.get("ai_score", 0.55))
-
-        self._notify(f"ℹ️ {symbol} @ {price:.2f} | rule={rule_score:.2f} ai={ai_score:.2f} | ATR%={atr_pct:.2f} | {feat['market']['condition']}")
-
-        # Обновить существующую позицию (SL/TP/трейлинг)
-        if self.position:
-            self._maybe_close_position(price, atr)
-            # если закрылась, не открываем новую на этой же свече
-            if not self.position:
-                return
-
-        # Решение об открытии
-        if not self._can_open_new():
-            return
-
-        if self._is_buy_signal(rule_score, ai_score, ind):
-            self._open_position("buy", price, atr)
-        elif self._is_sell_signal(rule_score, ai_score, ind):
-            self._open_position("sell", price, atr)
-
-    # ------------- Решения и гейты -------------
-
-    def _can_open_new(self) -> bool:
-        if self.position is not None:
-            return False
-        if int(self.cfg.ENABLE_TRADING) != 1:
-            return False
-        return True
-
-    def _is_buy_signal(self, rule: float, ai: float, ind: Dict[str, Any]) -> bool:
-        if int(self.cfg.ENFORCE_AI_GATE) == 1 and ai < self.cfg.AI_MIN_TO_TRADE:
-            return False
-        if rule < self.cfg.MIN_SCORE_TO_BUY:
-            return False
-        rsi = ind.get("rsi")
-        if rsi is not None and rsi >= self.cfg.RSI_CRITICAL:
-            return False
-        # трендовый фильтр: ema20>ema50
-        if (ind.get("ema20") or 0) <= (ind.get("ema50") or 0):
-            return False
-        return True
-
-    def _is_sell_signal(self, rule: float, ai: float, ind: Dict[str, Any]) -> bool:
-        # Для компактности — миррор buy: продаём в шорт только если ema20<ema50.
-        if int(self.cfg.ENFORCE_AI_GATE) == 1 and ai < self.cfg.AI_MIN_TO_TRADE:
-            return False
-        if rule < self.cfg.MIN_SCORE_TO_BUY:
-            return False
-        rsi = ind.get("rsi")
-        if rsi is not None and rsi <= (100 - self.cfg.RSI_CRITICAL):
-            return False
-        if (ind.get("ema20") or 0) >= (ind.get("ema50") or 0):
-            return False
-        return True
-
-    # ------------- Исполнение сделок -------------
-
-    def _open_position(self, side: str, price: float, atr: float):
-        symbol = self.cfg.SYMBOL
-        qty = self._quote_to_base(self.cfg.TRADE_AMOUNT, price)
-
-        # Заявка: либо реальная, либо бумажная
-        order_ok = self._create_market_order(symbol, side, qty, price)
-        if not order_ok:
-            self._notify(f"❌ Не удалось открыть позицию {side} {symbol}")
-            return
-
-        # Базовые SL/TP: ATR приоритетен; если ATR==0 — отталкиваемся от pct
-        sl, tp = self._compute_sl_tp(price, atr, side)
-
-        self.position = Position(
-            symbol=symbol,
-            side=side,
-            qty=qty,
-            entry_price=price,
-            opened_at=datetime.now(timezone.utc).isoformat(),
-            sl=sl, tp=tp,
-            trailing_max=price if side == "buy" else None
-        )
-
-        self._notify(f"✅ Открыта позиция: {side} {symbol} qty={qty:.8f} @ {price:.2f} | SL={sl and f'{sl:.2f}'} TP={tp and f'{tp:.2f}'}")
-
-        # В paper-режиме — записать позиции
-        if int(self.cfg.PAPER_MODE) == 1:
-            open_list = self.paper.load_positions()
-            open_list.append(self.position.to_dict())
-            self.paper.save_positions(open_list)
-
-    def _maybe_close_position(self, price: float, atr: float):
-        if not self.position:
-            return
-        pos = self.position
-
-        # Трейлинг
-        if int(self.cfg.TRAILING_STOP_ENABLE) == 1:
-            if pos.side == "buy":
-                pos.trailing_max = max(pos.trailing_max or price, price)
-            else:
-                # для шорта можно хранить trailing_min (но для компактности опустим)
-                pass
-
-        # Проверка SL/TP
-        hit_tp = False
-        hit_sl = False
-
-        if pos.side == "buy":
-            if pos.tp and price >= pos.tp:
-                hit_tp = True
-            if pos.sl and price <= pos.sl:
-                hit_sl = True
-        else:
-            if pos.tp and price <= pos.tp:
-                hit_tp = True
-            if pos.sl and price >= pos.sl:
-                hit_sl = True
-
-        if hit_tp or hit_sl:
-            reason = "TP" if hit_tp else "SL"
-            self._close_position(price, reason)
-
-    def _close_position(self, exit_price: float, reason: str):
-        if not self.position:
-            return
-        pos = self.position
-        symbol = pos.symbol
-        side = "sell" if pos.side == "buy" else "buy"
-
-        order_ok = self._create_market_order(symbol, side, pos.qty, exit_price, order_type="close")
-        if not order_ok:
-            self._notify(f"❌ Не удалось закрыть позицию {symbol} ({reason})")
-            return
-
-        # PnL
-        pnl_abs = (exit_price - pos.entry_price) * pos.qty if pos.side == "buy" else (pos.entry_price - exit_price) * pos.qty
-        pnl_pct = (exit_price / pos.entry_price - 1.0) * (100 if pos.side == "buy" else -100)
-
-        self._notify(f"🧾 Закрыта позиция {symbol} по {reason}: exit={exit_price:.2f}, pnl={pnl_abs:.4f} ({pnl_pct:.2f}%)")
-
-        # Paper: записи
-        if int(self.cfg.PAPER_MODE) == 1:
-            self.paper.append_pnl(pos, exit_price)
-            # убрать из открытых
-            open_list = [p for p in self.paper.load_positions() if p.get("opened_at") != pos.opened_at]
-            self.paper.save_positions(open_list)
-
-        self.position = None
-
-    # ------------- Низкоуровневые утилиты -------------
-
-    def _quote_to_base(self, quote_usd: float, price: float) -> float:
-        if price <= 0:
-            return 0.0
-        # шаг округления 1e-6 по умолчанию, можно уточнить при интеграции
-        amt = math.floor((quote_usd / price) / 1e-6) * 1e-6
-        return max(0.0, float(amt))
-
-    def _compute_sl_tp(self, entry: float, atr: float, side: str):
-        if atr and np.isfinite(atr) and entry > 0:
-            k1, k2 = 1.5, 2.5
-            if side == "buy":
-                sl = entry - k1 * atr
-                tp = entry + k2 * atr
-            else:
-                sl = entry + k1 * atr
-                tp = entry - k2 * atr
-            return float(sl), float(tp)
-        # fallback на фиксированные проценты
-        sl = entry * (1 - self.cfg.STOP_LOSS_PCT / 100) if side == "buy" else entry * (1 + self.cfg.STOP_LOSS_PCT / 100)
-        tp = entry * (1 + self.cfg.TAKE_PROFIT_PCT / 100) if side == "buy" else entry * (1 - self.cfg.TAKE_PROFIT_PCT / 100)
-        return float(sl), float(tp)
-
-    def _get_last_price(self, symbol: str, fallback_df: Optional[pd.DataFrame] = None) -> float:
-        # попытаться через биржу
-        try:
-            if hasattr(self.exchange, "fetch_ticker"):
-                t = self.exchange.fetch_ticker(symbol)
-                px = t.get("last") or t.get("close")
-                if px:
-                    return float(px)
-        except Exception as e:
-            logger.debug(f"fetch_ticker failed: {e}")
-        # фолбэк на последнюю свечу
-        if fallback_df is not None and not fallback_df.empty:
-            return float(fallback_df["close"].iloc[-1])
-        # крайний случай
+# Попытаться подтянуть Settings для красивого /config
+try:
+    from crypto_ai_bot.trading.bot import Settings as _Settings
+except Exception:
+    _Settings = None
+
+# ------------ ENV ------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_IDS = os.getenv("ADMIN_CHAT_IDS") or os.getenv("CHAT_ID") or ""
+SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
+TIMEFRAME = os.getenv("TIMEFRAME", "15m")
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", "10"))
+SAFE_MODE = int(os.getenv("SAFE_MODE", "1"))
+PAPER_MODE = int(os.getenv("PAPER_MODE", "1"))
+
+PAPER_POSITIONS_FILE = os.getenv("PAPER_POSITIONS_FILE", "paper_positions.json")
+PAPER_ORDERS_FILE    = os.getenv("PAPER_ORDERS_FILE", "paper_orders.csv")
+PAPER_PNL_FILE       = os.getenv("PAPER_PNL_FILE", "paper_pnl.csv")
+
+CLOSED_TRADES_CSV = os.getenv("CLOSED_TRADES_CSV", "closed_trades.csv")
+SIGNALS_CSV       = os.getenv("SIGNALS_CSV", "sinyal_fiyat_analizi.csv")
+
+GATE_API_KEY    = os.getenv("GATE_API_KEY") or os.getenv("API_KEY")
+GATE_API_SECRET = os.getenv("GATE_API_SECRET") or os.getenv("API_SECRET")
+
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+
+
+# ------------ Telegram helpers ------------
+def _tg_request(method: str, params: Dict[str, Any] = None, files: Dict[str, Any] = None) -> Dict[str, Any]:
+    if not BOT_TOKEN:
+        return {"ok": False, "error": "no_token"}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    try:
+        resp = requests.post(url, data=params or {}, files=files or None, timeout=15)
+        if resp.headers.get("Content-Type","").startswith("application/json"):
+            return resp.json()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def send_telegram_message(text: str, chat_id: Optional[str] = None) -> None:
+    chat_ids = [c.strip() for c in (chat_id or ADMIN_CHAT_IDS).split(",") if c.strip()]
+    if not chat_ids:
+        return
+    for cid in chat_ids:
+        _tg_request("sendMessage", {"chat_id": cid, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+
+def send_telegram_photo(caption: str, fig) -> None:
+    chat_ids = [c.strip() for c in ADMIN_CHAT_IDS.split(",") if c.strip()]
+    if not chat_ids:
+        return
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    for cid in chat_ids:
+        files = {"photo": ("chart.png", buf, "image/png")}
+        _tg_request("sendPhoto", {"chat_id": cid, "caption": caption}, files=files)
+    buf.close()
+
+
+# ------------ Market helpers ------------
+def _exchange() -> Any:
+    if not ccxt:
+        return None
+    return ccxt.gateio({
+        "apiKey": GATE_API_KEY,
+        "secret": GATE_API_SECRET,
+        "enableRateLimit": True,
+        "timeout": 20000,
+        "options": {"defaultType": "spot"}
+    })
+
+def _fetch_ohlcv(symbol: str, timeframe: str, limit: int = 200) -> List[List[float]]:
+    ex = _exchange()
+    if not ex:
+        return []
+    return ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+def _last_price(symbol: str) -> float:
+    ex = _exchange()
+    if not ex:
+        return 0.0
+    try:
+        t = ex.fetch_ticker(symbol)
+        return float(t.get("last") or t.get("close") or 0.0)
+    except Exception:
         return 0.0
 
-    def _create_market_order(self, symbol: str, side: str, qty: float, price_hint: float, order_type: str = "open") -> bool:
-        """Единая точка: уважает SAFE_MODE/PAPER_MODE. Возвращает True, если «сделка» засчитана."""
-        client_tag = f"bot-{order_type}-{uuid.uuid4().hex[:12]}"
-        # SAFE → не отправляем на биржу
-        if int(self.cfg.SAFE_MODE) == 1:
-            logger.info(f"[SAFE] {order_type} {symbol} {side} qty={qty:.8f}")
-            if int(self.cfg.PAPER_MODE) == 1:
-                self.paper.append_order(symbol, side, qty, price_hint, client_tag, order_type)
-            return True
 
-        # PAPER → записываем эмуляцию и выходим
-        if int(self.cfg.PAPER_MODE) == 1:
-            self.paper.append_order(symbol, side, qty, price_hint, client_tag, order_type)
-            return True
-
-        # Живая заявка (ccxt)
-        if not hasattr(self.exchange, "create_order"):
-            logger.error("exchange has no create_order; enable SAFE/PAPER or implement adapter")
-            return False
-
-        retries = 3
-        delay = 0.4
-        for i in range(retries):
-            try:
-                params = {"text": client_tag} if "gate" in str(type(self.exchange)).lower() else {}
-                self.exchange.create_order(symbol, "market", side, qty, params=params)  # type: ignore
-                logger.info(f"[LIVE] Order sent: {order_type} {symbol} {side} qty={qty:.8f}")
-                return True
-            except NetworkError as e:
-                time.sleep(delay * (2 ** i))
-                continue
-            except ExchangeError as e:
-                logger.error(f"create_order failed: {e}")
-                return False
-            except Exception as e:
-                logger.error(f"create_order unexpected: {e}")
-                return False
-        return False
-
-    def _notify(self, text: str):
+# ------------ CSV helpers ------------
+def _safe_read_csv(path: str) -> Optional["pd.DataFrame"]:
+    if not pd or not os.path.exists(path):
+        return None
+    try:
+        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+    except Exception:
         try:
-            if self.notifier:
-                self.notifier(text)
+            return pd.read_csv(path, engine="python", on_bad_lines="skip", sep=";")
         except Exception:
-            logger.debug("notifier failed", exc_info=True)
+            return None
+
+def _paper_positions() -> List[Dict[str, Any]]:
+    if not os.path.exists(PAPER_POSITIONS_FILE):
+        return []
+    try:
+        with open(PAPER_POSITIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("open", [])
+    except Exception:
+        return []
 
 
-# ------------- Утилита интеграции (минимум кода в server.py) -------------
+# ------------ Commands ------------
+def cmd_start(chat_id: str):
+    send_telegram_message(
+        "<b>Привет! Я готов 🤖</b>\n"
+        "Команды: /help — все, /status, /profit, /profit_chart, /errors, /orders, /positions, /close, "
+        "/chart, /test, /train, /train_model, /signal, /signals, /metrics, /config, /settrade, /setrisk, "
+        "/balance, /history, /version, /webhook, /log", chat_id
+    )
 
-def get_bot(exchange: Any, notifier=None, settings: Optional[Settings] = None) -> TradingBot:
-    """Единственная точка получения синглтона бота в приложении."""
-    return TradingBot.get_instance(exchange=exchange, notifier=notifier, settings=settings)
+def cmd_help(chat_id: str):
+    send_telegram_message(
+        "<b>Команды</b>\n"
+        "/status — состояние позиции, цена, PnL\n"
+        "/profit — суммарная прибыль/убыток\n"
+        "/profit_chart — график прибыли\n"
+        "/errors — последние строки из CSV сигналов\n"
+        "/orders — последние заявки (paper)\n"
+        "/positions — открытые позиции (paper)\n"
+        "/close — закрыть текущую позицию (paper)\n"
+        "/chart — свежий график цены\n"
+        "/test — тестовый сигнал/график\n"
+        "/train, /train_model — обучение модели\n"
+        "/signal, /signals — текущие оценки\n"
+        "/metrics — метрики\n"
+        "/config — важные настройки\n"
+        "/settrade 25 — TRADE_AMOUNT=25\n"
+        "/setrisk 2 1.5 — SL=2% TP=1.5%\n"
+        "/balance — paper Δ\n"
+        "/history — история сделок\n"
+        "/version — версия\n"
+        "/webhook — проверка вебхука\n"
+        "/log — диагностический лог", chat_id
+    )
+
+def cmd_ping(chat_id: str): send_telegram_message("pong", chat_id)
+def cmd_alive(chat_id: str): send_telegram_message("alive: ✅", chat_id)
+def cmd_version(chat_id: str): send_telegram_message(f"version: {APP_VERSION}", chat_id)
+
+def cmd_status(chat_id: str):
+    pos = _paper_positions()
+    price = _last_price(SYMBOL)
+    if pos:
+        p = pos[-1]
+        side = p.get("side"); qty = float(p.get("qty", 0.0))
+        entry = float(p.get("entry_price", 0.0))
+        pnl_abs = (price - entry) * qty if side == "buy" else (entry - price) * qty
+        pnl_pct = (price / entry - 1.0) * (100 if side == "buy" else -100) if entry > 0 else 0.0
+        send_telegram_message(
+            f"<b>Status</b>\n{SYMBOL} {side} qty={qty:.8f}\nentry={entry:.2f} price={price:.2f}\n"
+            f"PnL={pnl_abs:.4f} ({pnl_pct:.2f}%)", chat_id
+        )
+    else:
+        send_telegram_message(f"No open positions for {SYMBOL}. Price={price:.2f}", chat_id)
+
+def cmd_profit(chat_id: str):
+    df = _safe_read_csv(CLOSED_TRADES_CSV) or _safe_read_csv(PAPER_PNL_FILE)
+    if df is None or df.empty:
+        send_telegram_message("Нет данных о закрытых сделках.", chat_id); return
+    try:
+        total = float(df["pnl_abs"].sum()) if "pnl_abs" in df.columns else float(df.iloc[:, -1].astype(float).sum())
+        send_telegram_message(f"Суммарная прибыль: {total:.4f} USDT", chat_id)
+    except Exception as e:
+        send_telegram_message(f"Ошибка чтения профита: {e}", chat_id)
+
+def cmd_profit_chart(chat_id: str):
+    df = _safe_read_csv(CLOSED_TRADES_CSV) or _safe_read_csv(PAPER_PNL_FILE)
+    if df is None or df.empty:
+        send_telegram_message("Нет данных для графика прибыли.", chat_id); return
+    try:
+        pnl = (df["pnl_abs"].astype(float).cumsum()
+               if "pnl_abs" in df.columns else df.iloc[:, -1].astype(float).cumsum())
+        fig = plt.figure()
+        plt.plot(range(len(pnl)), pnl.values)
+        plt.title("Cumulative PnL"); plt.xlabel("Trade #"); plt.ylabel("PnL (USDT)")
+        send_telegram_photo("Cumulative PnL", fig)
+    except Exception as e:
+        send_telegram_message(f"График не построен: {e}", chat_id)
+
+def cmd_errors(chat_id: str, limit: int = 15):
+    df = _safe_read_csv(SIGNALS_CSV)
+    if df is None or df.empty:
+        send_telegram_message("Файл сигналов пуст или не найден.", chat_id); return
+    try:
+        tail = df.tail(limit)
+        lines = []
+        for _, row in tail.iterrows():
+            try:
+                ts = row.get("timestamp") or row.get("ts") or ""
+                signal = row.get("signal") or row.get("decision") or ""
+                price = row.get("price") or row.get("entry_price") or ""
+                score = row.get("score") or row.get("ai_score") or row.get("rule_score") or ""
+                lines.append(f"{ts} | {signal} | {price} | {score}")
+            except Exception: pass
+        send_telegram_message("<b>Последние сигналы</b>\n" + ("\n".join(lines) if lines else "—"), chat_id)
+    except Exception as e:
+        send_telegram_message(f"Ошибка чтения CSV: {e}", chat_id)
+
+def cmd_orders(chat_id: str, limit: int = 20):
+    if not os.path.exists(PAPER_ORDERS_FILE):
+        send_telegram_message("Файл заявок не найден.", chat_id); return
+    try:
+        rows = []
+        with open(PAPER_ORDERS_FILE, "r", encoding="utf-8") as f:
+            r = csv.reader(f); next(r, None)
+            for row in r: rows.append(row)
+        rows = rows[-limit:]
+        send_telegram_message("<b>Последние заявки (paper)</b>\n" + "\n".join([" | ".join(x) for x in rows]), chat_id)
+    except Exception as e:
+        send_telegram_message(f"Ошибка чтения заявок: {e}", chat_id)
+
+def cmd_positions(chat_id: str):
+    pos = _paper_positions()
+    if not pos: send_telegram_message("Открытых позиций нет.", chat_id); return
+    lines = [f"{p.get('symbol')} {p.get('side')} qty={p.get('qty')} @ {p.get('entry_price')}" for p in pos]
+    send_telegram_message("<b>Открытые позиции</b>\n" + "\n".join(lines), chat_id)
+
+def cmd_close(chat_id: str):
+    pos = _paper_positions()
+    if not pos: send_telegram_message("Позиции нет.", chat_id); return
+    p = pos[-1]; price = _last_price(SYMBOL)
+    qty = float(p.get("qty", 0.0)); entry = float(p.get("entry_price", 0.0))
+    side = "sell" if p.get("side") == "buy" else "buy"
+    pnl_abs = (price - entry) * qty if side == "sell" else (entry - price) * qty
+    pnl_pct = (price / entry - 1.0) * (100 if side == "sell" else -100) if entry > 0 else 0.0
+    try:
+        with open(PAPER_PNL_FILE, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow([p.get("opened_at"), datetime.now(timezone.utc).isoformat(), SYMBOL, p.get("side"), qty, entry, price, pnl_abs, pnl_pct])
+        with open(PAPER_POSITIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"open": []}, f)
+        send_telegram_message(f"Позиция закрыта @ {price:.2f} | PnL={pnl_abs:.4f} ({pnl_pct:.2f}%)", chat_id)
+    except Exception as e:
+        send_telegram_message(f"Не удалось закрыть позицию: {e}", chat_id)
+
+def cmd_chart(chat_id: str, limit: int = 150):
+    try:
+        ohlcv = _fetch_ohlcv(SYMBOL, TIMEFRAME, limit=limit)
+        if not ohlcv: send_telegram_message("Нет данных OHLCV.", chat_id); return
+        xs = list(range(len(ohlcv))); closes = [c[4] for c in ohlcv]
+        fig = plt.figure(); plt.plot(xs, closes)
+        plt.title(f"{SYMBOL} ({TIMEFRAME})"); plt.xlabel("Bar #"); plt.ylabel("Close")
+        send_telegram_photo(f"{SYMBOL} ({TIMEFRAME})", fig)
+    except Exception as e:
+        send_telegram_message(f"Ошибка построения графика: {e}", chat_id)
+
+def cmd_test(chat_id: str):
+    price = _last_price(SYMBOL)
+    send_telegram_message(f"Тестовый сигнал: {SYMBOL} @ {price:.2f} | TRADE_AMOUNT={TRADE_AMOUNT}", chat_id)
+    cmd_chart(chat_id, limit=100)
+
+def cmd_train(chat_id: str):
+    try:
+        try:
+            from crypto_ai_bot.analysis.sinyal_skorlayici import train_model  # приоритетно
+        except Exception:
+            from crypto_ai_bot.sinyal_skorlayici import train_model          # fallback
+        result = train_model()
+        send_telegram_message(f"Обучение завершено: {result}", chat_id)
+    except Exception as e:
+        send_telegram_message(f"Не удалось запустить обучение: {e}", chat_id)
+
+def cmd_train_model(chat_id: str): cmd_train(chat_id)
+def cmd_signal(chat_id: str):
+    price = _last_price(SYMBOL)
+    send_telegram_message(f"Сигнал: цена {SYMBOL}={price:.2f} — детали в /signals", chat_id)
+def cmd_signals(chat_id: str):
+    price = _last_price(SYMBOL)
+    send_telegram_message(f"<b>Signals</b>\nprice={price:.2f}\n(rule/ai показываются ботом в статусах)", chat_id)
+
+def cmd_metrics(chat_id: str):
+    # Текстовый снэпшот. Для Prometheus есть эндпоинт на сервере.
+    send_telegram_message("metrics: см. /metrics на сервере (Prometheus format)", chat_id)
+
+def _fmt_bool(v: int) -> str:
+    return "on ✅" if int(v) == 1 else "off ⛔"
+
+def cmd_config(chat_id: str):
+    if _Settings is not None:
+        cfg = _Settings.build()
+        text = (
+            "<b>Config (Settings)</b>\n"
+            f"SYMBOL={cfg.SYMBOL}  TIMEFRAME={cfg.TIMEFRAME}\n"
+            f"TRADE_AMOUNT={cfg.TRADE_AMOUNT}  ENABLE_TRADING={cfg.ENABLE_TRADING}\n"
+            f"SAFE_MODE={cfg.SAFE_MODE} ({_fmt_bool(cfg.SAFE_MODE)})  PAPER_MODE={cfg.PAPER_MODE} ({_fmt_bool(cfg.PAPER_MODE)})\n"
+            f"AI_MIN_TO_TRADE={cfg.AI_MIN_TO_TRADE}  MIN_SCORE_TO_BUY={cfg.MIN_SCORE_TO_BUY}\n"
+            f"USE_CONTEXT_PENALTIES={cfg.USE_CONTEXT_PENALTIES}\n"
+            f"CTX_BTC_DOM_THRESH={getattr(cfg,'CTX_BTC_DOM_THRESH', '—')}  CTX_DXY_DELTA_THRESH={getattr(cfg,'CTX_DXY_DELTA_THRESH','—')}\n"
+            f"CTX_FNG_OVERHEATED={getattr(cfg,'CTX_FNG_OVERHEATED','—')}  CTX_FNG_UNDERSHOOT={getattr(cfg,'CTX_FNG_UNDERSHOOT','—')}\n"
+        )
+    else:
+        # Fallback: показать ENV
+        text = (
+            "<b>Config (ENV)</b>\n"
+            f"SYMBOL={SYMBOL}  TIMEFRAME={TIMEFRAME}\n"
+            f"TRADE_AMOUNT={TRADE_AMOUNT}\n"
+            f"SAFE_MODE={SAFE_MODE}  PAPER_MODE={PAPER_MODE}\n"
+        )
+    send_telegram_message(text, chat_id)
+
+def cmd_settrade(chat_id: str, amt: str):
+    global TRADE_AMOUNT
+    try:
+        TRADE_AMOUNT = float(amt); send_telegram_message(f"TRADE_AMOUNT={TRADE_AMOUNT}", chat_id)
+    except Exception:
+        send_telegram_message("Использование: /settrade 10", chat_id)
+
+def cmd_setrisk(chat_id: str, sl: str, tp: str):
+    os.environ["STOP_LOSS_PCT"] = str(sl); os.environ["TAKE_PROFIT_PCT"] = str(tp)
+    send_telegram_message(f"STOP_LOSS_PCT={sl} TAKE_PROFIT_PCT={tp}", chat_id)
+
+def cmd_balance(chat_id: str):
+    df = _safe_read_csv(PAPER_PNL_FILE)
+    total = float(df["pnl_abs"].sum()) if df is not None and "pnl_abs" in df.columns else 0.0
+    send_telegram_message(f"Paper balance Δ: {total:.4f} USDT", chat_id)
+
+def cmd_history(chat_id: str, limit: int = 20):
+    df = _safe_read_csv(PAPER_PNL_FILE) or _safe_read_csv(CLOSED_TRADES_CSV)
+    if df is None or df.empty: send_telegram_message("История пуста.", chat_id); return
+    last = df.tail(limit); lines = []
+    for _, r in last.iterrows():
+        try:
+            lines.append(f"{r.iloc[0]} | {r.iloc[2]} | {float(r.iloc[-2]):.4f} ({float(r.iloc[-1]):.2f}%)")
+        except Exception: pass
+    send_telegram_message("<b>История</b>\n" + "\n".join(lines), chat_id)
+
+def cmd_webhook(chat_id: str): send_telegram_message("Webhook OK", chat_id)
+def cmd_log(chat_id: str): send_telegram_message("Log snapshot: (см. Railway logs)", chat_id)
+def cmd_unknown(chat_id: str, text: str): send_telegram_message(f"Неизвестная команда: {text}\n/help — список.", chat_id)
+
+# ------------ Dispatcher ------------
+def _parse_command(text: str) -> Tuple[str, List[str]]:
+    if not text: return "", []
+    parts = text.strip().split(); cmd = parts[0].lower()
+    if cmd.startswith("/"): cmd = cmd[1:]
+    return cmd, parts[1:]
+
+def _dispatch(chat_id: str, cmd: str, args: List[str]):
+    try:
+        if   cmd in ("start",): return cmd_start(chat_id)
+        elif cmd in ("help",): return cmd_help(chat_id)
+        elif cmd in ("ping",): return cmd_ping(chat_id)
+        elif cmd in ("alive",): return cmd_alive(chat_id)
+        elif cmd in ("version","v"): return cmd_version(chat_id)
+        elif cmd in ("status",): return cmd_status(chat_id)
+        elif cmd in ("profit",): return cmd_profit(chat_id)
+        elif cmd in ("profit_chart","pnl","pnl_chart"): return cmd_profit_chart(chat_id)
+        elif cmd in ("errors","err"): return cmd_errors(chat_id)
+        elif cmd in ("orders",): return cmd_orders(chat_id)
+        elif cmd in ("positions","open"): return cmd_positions(chat_id)
+        elif cmd in ("close",): return cmd_close(chat_id)
+        elif cmd in ("chart",): return cmd_chart(chat_id)
+        elif cmd in ("test",): return cmd_test(chat_id)
+        elif cmd in ("train",): return cmd_train(chat_id)
+        elif cmd in ("train_model","retrain"): return cmd_train_model(chat_id)
+        elif cmd in ("signal",): return cmd_signal(chat_id)
+        elif cmd in ("signals",): return cmd_signals(chat_id)
+        elif cmd in ("metrics",): return cmd_metrics(chat_id)
+        elif cmd in ("config",): return cmd_config(chat_id)
+        elif cmd in ("settrade",): return cmd_settrade(chat_id, args[0]) if args else send_telegram_message("Использование: /settrade 10", chat_id)
+        elif cmd in ("setrisk",): return cmd_setrisk(chat_id, args[0], args[1]) if len(args)>=2 else send_telegram_message("Использование: /setrisk 2 1.5", chat_id)
+        elif cmd in ("balance",): return cmd_balance(chat_id)
+        elif cmd in ("history",): return cmd_history(chat_id)
+        elif cmd in ("webhook",): return cmd_webhook(chat_id)
+        elif cmd in ("log","logs"): return cmd_log(chat_id)
+        else: return cmd_unknown(chat_id, "/" + cmd)
+    except Exception as e:
+        send_telegram_message(f"Ошибка /{cmd}: {e}", chat_id)
+
+# ------------ Webhook entry ------------
+async def process_update(payload: Dict[str, Any]) -> None:
+    try:
+        message = payload.get("message") or payload.get("edited_message") or payload.get("callback_query", {}).get("message") or {}
+        chat = message.get("chat", {})
+        chat_id = str(chat.get("id") or ADMIN_CHAT_IDS or "")
+        text = ""
+        if "text" in message:
+            text = message["text"]
+        elif payload.get("callback_query", {}).get("data"):
+            text = payload["callback_query"]["data"]
+        if not chat_id: return
+        cmd, args = _parse_command(text)
+        if not cmd: return
+        _dispatch(chat_id, cmd, args)
+    except Exception as e:
+        send_telegram_message(f"process_update error: {e}\n{traceback.format_exc()[:400]}")

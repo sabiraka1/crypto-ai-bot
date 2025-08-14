@@ -1,74 +1,49 @@
+
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""
-crypto_ai_bot/app/server.py
-----------------------------
-Объединённая версия server.corrected.py и server.py
-- Полная интеграция с Telegram-ботом (process_update)
-- Fallback-отправка сообщений при недоступном боте
-- Сохраняет все эндпоинты и логику старта торгового бота
-"""
-
 import os
+import time
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 try:
     import ccxt
 except Exception:
     ccxt = None
 
-import requests
-
-# Импортируем реальный Telegram-бот
-try:
-    from crypto_ai_bot.telegram.bot import process_update, send_telegram_message as bot_send_message
-except ImportError:
-    process_update = None
-    bot_send_message = None
-
+# Telegram + Bot
+from crypto_ai_bot.telegram.bot import process_update, send_telegram_message
 from crypto_ai_bot.trading.bot import get_bot, Settings
+
+# --- Minimal Prometheus metrics ---
+try:
+    from prometheus_client import CollectorRegistry, Gauge, generate_latest, CONTENT_TYPE_LATEST
+except Exception:
+    CollectorRegistry = None
+    Gauge = None
+    def generate_latest(reg): return b"metrics_not_available"
+    CONTENT_TYPE_LATEST = "text/plain"
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 
 app = FastAPI(title="crypto-ai-bot", version=os.getenv("APP_VERSION", "1.0.0"))
 
-# ----------- Telegram notifier (с fallback) -----------
-
-def send_telegram_message(text: str, image_path: Optional[str] = None):
-    """Отправка через встроенный бот или напрямую через Telegram API"""
-    if bot_send_message:
-        try:
-            bot_send_message(text)
-            return
-        except Exception as e:
-            logger.warning(f"[TELEGRAM BOT ERROR] {e}, fallback to direct send")
-
-    token = os.getenv("BOT_TOKEN")
-    chat_ids = os.getenv("ADMIN_CHAT_IDS") or os.getenv("CHAT_ID")
-    if not token or not chat_ids:
-        logger.info(f"[TELEGRAM DISABLED] {text}")
-        return
-
-    for chat in str(chat_ids).split(","):
-        try:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            data = {
-                "chat_id": chat.strip(),
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            }
-            requests.post(url, data=data, timeout=10)
-        except Exception as e:
-            logger.warning(f"[TELEGRAM FALLBACK ERROR] {e}")
-
-# ----------- ccxt exchange adapter -----------
+# Prometheus registry
+START_TS = time.time()
+if CollectorRegistry and Gauge:
+    REGISTRY = CollectorRegistry()
+    APP_INFO = Gauge("app_info", "App info", ["version"], registry=REGISTRY)
+    APP_INFO.labels(version=os.getenv("APP_VERSION", "1.0.0")).set(1)
+    UPTIME = Gauge("app_uptime_seconds", "Uptime seconds", registry=REGISTRY)
+else:
+    REGISTRY = None
+    APP_INFO = None
+    UPTIME = None
 
 class ExchangeAdapter:
     def __init__(self):
@@ -85,25 +60,20 @@ class ExchangeAdapter:
             })
 
     def get_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
-        if not self._ex:
-            raise RuntimeError("ccxt not available")
+        if not self._ex: raise RuntimeError("ccxt not available")
         return self._ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
     def fetch_ticker(self, symbol: str):
-        if not self._ex:
-            return {}
+        if not self._ex: return {}
         return self._ex.fetch_ticker(symbol)
 
     def create_order(self, symbol: str, type_: str, side: str, amount: float, params: Optional[Dict[str, Any]] = None):
-        if not self._ex:
-            raise RuntimeError("ccxt not available")
+        if not self._ex: raise RuntimeError("ccxt not available")
         params = params or {}
         if "text" not in params:
             import uuid
             params["text"] = f"bot-{uuid.uuid4().hex[:12]}"
         return self._ex.create_order(symbol, type_, side, amount, None, params)
-
-# ----------- Lifecycle -----------
 
 _bot_started = False
 _exchange: Optional[ExchangeAdapter] = None
@@ -113,7 +83,6 @@ def startup_event():
     global _bot_started, _exchange
     if not _exchange:
         _exchange = ExchangeAdapter()
-
     if not _bot_started and int(os.getenv("ENABLE_TRADING", "1")) == 1:
         bot = get_bot(exchange=_exchange, notifier=send_telegram_message, settings=Settings.build())
         bot.start()
@@ -122,19 +91,9 @@ def startup_event():
     else:
         logger.info("Trading bot NOT started (already started or disabled)")
 
-@app.on_event("shutdown")
-def shutdown_event():
-    logger.info("Shutting down app...")
-
-# ----------- Routes -----------
-
 @app.get("/health")
 def health():
-    return {
-        "ok": True,
-        "version": app.version,
-        "web_concurrency": os.getenv("WEB_CONCURRENCY", "1")
-    }
+    return {"ok": True, "version": app.version, "web_concurrency": os.getenv("WEB_CONCURRENCY", "1")}
 
 @app.get("/alive")
 def alive():
@@ -142,20 +101,18 @@ def alive():
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(req: Request):
-    """Приём обновлений Telegram и передача в бот, с логированием"""
     try:
         payload = await req.json()
     except Exception:
         payload = {}
-
-    logger.info(f"[WEBHOOK] update_id={payload.get('update_id')} keys={list(payload.keys())}")
-
-    if process_update:
-        try:
-            await process_update(payload)
-        except Exception as e:
-            logger.error(f"Error in process_update: {e}")
-    else:
-        logger.warning("process_update not available, skipping bot handling")
-
+    await process_update(payload)
     return JSONResponse({"ok": True})
+
+@app.get("/metrics")
+def metrics():
+    if REGISTRY and UPTIME:
+        UPTIME.set(time.time() - START_TS)
+        data = generate_latest(REGISTRY)
+        return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+    # Fallback: текст
+    return PlainTextResponse("metrics_not_available")
