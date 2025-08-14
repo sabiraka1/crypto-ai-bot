@@ -223,3 +223,4 @@ class RealTimePerformanceTracker:
         metrics_dict["consecutive_losses"] = self.consecutive_losses
         return check_performance_alerts(metrics_dict, self.alert_thresholds)
 
+

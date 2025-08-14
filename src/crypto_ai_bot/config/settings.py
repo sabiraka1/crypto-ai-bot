@@ -246,3 +246,4 @@ RISK_ATR_COMPARE = _cfg.RISK_ATR_COMPARE
 
 __all__ = ["Settings", "TradingConfig"]
 
+

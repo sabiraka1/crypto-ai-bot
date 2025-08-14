@@ -229,3 +229,4 @@ def test_watchdog_class():
         assert watchdog.check_interval == 60
         assert watchdog._running is False
 
+

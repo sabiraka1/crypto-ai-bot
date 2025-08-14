@@ -23,7 +23,7 @@ except Exception:
     process_update = None  # graceful if telegram module missing
 
 # Import Trading bot
-from crypto_ai_bot.core.bot import get_bot`nfrom crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.core.bot import get_bot`r`nfrom crypto_ai_bot.core.settings import Settings
 
 # ------------ logging ------------
 logger = logging.getLogger(__name__)
@@ -212,4 +212,7 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Op
         result = {"ok": True}
 
     return JSONResponse(result)
+
+
+
 

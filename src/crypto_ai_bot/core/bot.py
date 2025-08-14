@@ -14,3 +14,4 @@ except Exception:
     def get_bot(*args, **kwargs):  # type: ignore
         raise RuntimeError("Legacy TradingBot/get_bot not found")
 
+

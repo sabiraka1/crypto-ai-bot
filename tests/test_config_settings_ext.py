@@ -48,3 +48,4 @@ def test_timeframe_and_defaults(monkeypatch):
     if hasattr(CFG, "TIMEFRAME"):
         assert getattr(CFG, "TIMEFRAME") in ("1m", "5m", "15m", "1h", "4h", "1d")
 
+

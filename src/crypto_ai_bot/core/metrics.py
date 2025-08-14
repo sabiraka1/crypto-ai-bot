@@ -140,3 +140,4 @@ if 'APIRouter' in globals() and router is not None:
         body = "app_up 1\napp_info{service=\"crypto-ai-bot\",version=\"1.0\"} 1\n"
         return Response(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
+

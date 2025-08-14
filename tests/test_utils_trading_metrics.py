@@ -109,3 +109,4 @@ def test_functions_handle_nans(series):
         res = fn(**params) if params else fn(series)
         assert isinstance(res, (int, float, np.floating)) or res is None
 
+

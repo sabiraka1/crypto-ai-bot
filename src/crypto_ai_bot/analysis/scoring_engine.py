@@ -200,3 +200,4 @@ class ScoringEngine:
         """РЈРЅРёС„РёС†РёСЂРѕРІР°РЅРЅР°СЏ С‚РѕС‡РєР° РІС…РѕРґР°. Р’РѕР·РІСЂР°С‰Р°РµС‚ (buy_score_norm, ai_score, details)."""
         return self.evaluate(df, ai_score=ai_score)
 
+

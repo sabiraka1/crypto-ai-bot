@@ -31,3 +31,4 @@ def exchange_keys() -> Tuple[str, str]:
     sec = (os.getenv("API_SECRET") or os.getenv("GATE_API_SECRET") or "").strip()
     return key, sec
 
+

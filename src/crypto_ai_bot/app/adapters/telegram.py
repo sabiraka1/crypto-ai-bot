@@ -18,3 +18,4 @@ def process_update(payload: Dict[str, Any]) -> None:
     # если легаси отсутствует — тихий no-op
     return None
 
+

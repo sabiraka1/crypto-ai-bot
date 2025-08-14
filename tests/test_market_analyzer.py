@@ -401,3 +401,4 @@ class TestEdgeCases:
         assert isinstance(condition, MarketCondition)
         assert 0.0 <= confidence <= 1.0
 
+

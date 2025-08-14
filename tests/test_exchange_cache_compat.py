@@ -145,3 +145,4 @@ class TestExchangeCacheCompat:
         result = ecc.get("existing_key", 60)
         assert result == "cached_value"
 
+

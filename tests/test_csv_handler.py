@@ -666,3 +666,4 @@ class TestIntegration:
         if daily_stats is not None:
             assert len(daily_stats) <= 30
 
+

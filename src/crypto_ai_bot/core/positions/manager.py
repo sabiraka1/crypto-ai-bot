@@ -63,3 +63,4 @@ class PositionManager:
         self.trades.add(Trade(id=str(uuid.uuid4()), pos_id=pos_id, symbol=pos.symbol, side="sell", qty=pos.qty, price=price, fee=0.0, ts=now))
         self.positions.close(pos_id=pos_id, closed_ts=now, pnl=pnl)
 
+

@@ -210,3 +210,4 @@ class TestSimplePositionManager:
             assert result is not None
             assert "paper" in result or "sim" in str(result.get("id", ""))
 
+

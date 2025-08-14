@@ -376,3 +376,4 @@ class TestEdgeCases:
             if len(atr_values) > 0:
                 assert atr_values.mean() < 1.0
 
+

@@ -402,3 +402,4 @@ class TestStateManager:
             mock_dt.now.return_value = base_time + timedelta(seconds=cooldown_seconds + 1)
             assert sm.is_in_cooldown() is False
 
+

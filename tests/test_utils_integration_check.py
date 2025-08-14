@@ -119,3 +119,4 @@ def test_print_integration_report_smoke(capsys):
     assert "technical_indicators" in out
     assert "monitoring" in out
 
+
