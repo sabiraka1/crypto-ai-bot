@@ -4,26 +4,32 @@ from __future__ import annotations
 """
 crypto_ai_bot/app/server.py
 ----------------------------
-FastAPI-приложение для Railway с безопасным стартом торгового цикла.
-- Старт бота на событии startup (синглтон, не плодит циклы).
-- /health, /alive — для проверок.
-- /telegram/webhook — приём Telegram-обновлений (минимум логики, можно прокинуть в существующий telegram_bot).
-- ExchangeAdapter — тонкая обёртка вокруг ccxt.gateio без новых файлов.
+Объединённая версия server.corrected.py и server.py
+- Полная интеграция с Telegram-ботом (process_update)
+- Fallback-отправка сообщений при недоступном боте
+- Сохраняет все эндпоинты и логику старта торгового бота
 """
 
 import os
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 try:
     import ccxt
-except Exception:  # pragma: no cover
+except Exception:
     ccxt = None
 
 import requests
+
+# Импортируем реальный Telegram-бот
+try:
+    from crypto_ai_bot.telegram.bot import process_update, send_telegram_message as bot_send_message
+except ImportError:
+    process_update = None
+    bot_send_message = None
 
 from crypto_ai_bot.trading.bot import get_bot, Settings
 
@@ -32,22 +38,35 @@ logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging
 
 app = FastAPI(title="crypto-ai-bot", version=os.getenv("APP_VERSION", "1.0.0"))
 
-# ----------- Telegram notifier -----------
+# ----------- Telegram notifier (с fallback) -----------
 
 def send_telegram_message(text: str, image_path: Optional[str] = None):
+    """Отправка через встроенный бот или напрямую через Telegram API"""
+    if bot_send_message:
+        try:
+            bot_send_message(text)
+            return
+        except Exception as e:
+            logger.warning(f"[TELEGRAM BOT ERROR] {e}, fallback to direct send")
+
     token = os.getenv("BOT_TOKEN")
     chat_ids = os.getenv("ADMIN_CHAT_IDS") or os.getenv("CHAT_ID")
     if not token or not chat_ids:
         logger.info(f"[TELEGRAM DISABLED] {text}")
         return
+
     for chat in str(chat_ids).split(","):
         try:
             url = f"https://api.telegram.org/bot{token}/sendMessage"
-            data = {"chat_id": chat.strip(), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+            data = {
+                "chat_id": chat.strip(),
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            }
             requests.post(url, data=data, timeout=10)
         except Exception as e:
-            logger.warning(f"telegram send failed: {e}")
-
+            logger.warning(f"[TELEGRAM FALLBACK ERROR] {e}")
 
 # ----------- ccxt exchange adapter -----------
 
@@ -65,7 +84,6 @@ class ExchangeAdapter:
                 "options": {"defaultType": "spot"}
             })
 
-    # TradingBot ожидает эти методы:
     def get_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
         if not self._ex:
             raise RuntimeError("ccxt not available")
@@ -80,12 +98,10 @@ class ExchangeAdapter:
         if not self._ex:
             raise RuntimeError("ccxt not available")
         params = params or {}
-        # Gate.io клиентский тэг:
         if "text" not in params:
             import uuid
             params["text"] = f"bot-{uuid.uuid4().hex[:12]}"
         return self._ex.create_order(symbol, type_, side, amount, None, params)
-
 
 # ----------- Lifecycle -----------
 
@@ -97,25 +113,28 @@ def startup_event():
     global _bot_started, _exchange
     if not _exchange:
         _exchange = ExchangeAdapter()
-    # единичный запуск бота
+
     if not _bot_started and int(os.getenv("ENABLE_TRADING", "1")) == 1:
         bot = get_bot(exchange=_exchange, notifier=send_telegram_message, settings=Settings.build())
         bot.start()
         _bot_started = True
-        logger.info("Trading bot started in startup_event()")
+        logger.info("Trading bot started")
     else:
-        logger.info("Trading bot NOT started (already started or ENABLE_TRADING=0)")
+        logger.info("Trading bot NOT started (already started or disabled)")
 
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("Shutting down app...")
 
-
 # ----------- Routes -----------
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": app.version, "web_concurrency": os.getenv("WEB_CONCURRENCY", "1")}
+    return {
+        "ok": True,
+        "version": app.version,
+        "web_concurrency": os.getenv("WEB_CONCURRENCY", "1")
+    }
 
 @app.get("/alive")
 def alive():
@@ -123,12 +142,20 @@ def alive():
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(req: Request):
-    """Приём обновлений Telegram. Если есть свой telegram_bot — можно прокинуть туда логику здесь."""
+    """Приём обновлений Telegram и передача в бот, с логированием"""
     try:
         payload = await req.json()
     except Exception:
         payload = {}
-    # Минимальная обработка: просто логирование и ACK
-    logger.info(f"[WEBHOOK] update_id={payload.get('update_id')} keys={list(payload.keys())}")
-    return JSONResponse({"ok": True})
 
+    logger.info(f"[WEBHOOK] update_id={payload.get('update_id')} keys={list(payload.keys())}")
+
+    if process_update:
+        try:
+            await process_update(payload)
+        except Exception as e:
+            logger.error(f"Error in process_update: {e}")
+    else:
+        logger.warning("process_update not available, skipping bot handling")
+
+    return JSONResponse({"ok": True})
