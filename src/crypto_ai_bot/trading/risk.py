@@ -131,3 +131,4 @@ def validate_open(cfg, exchange: Any, symbol: str, indicators: Optional[Dict[str
 
 
 
+

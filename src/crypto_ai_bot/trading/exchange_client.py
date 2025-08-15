@@ -1,19 +1,19 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 trading/exchange_client.py
 --------------------------
-Единый адаптер доступа к бирже (через ccxt).
-Никаких прямых `requests` и никакой логики общих HTTP‑запросов — только биржа.
+Ğ•Ğ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ°Ğ´Ğ°Ğ¿Ñ‚ĞµÑ€ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ° Ğº Ğ±Ğ¸Ñ€Ğ¶Ğµ (Ñ‡ĞµÑ€ĞµĞ· ccxt).
+ĞĞ¸ĞºĞ°ĞºĞ¸Ñ… Ğ¿Ñ€ÑĞ¼Ñ‹Ñ… `requests` Ğ¸ Ğ½Ğ¸ĞºĞ°ĞºĞ¾Ğ¹ Ğ»Ğ¾Ğ³Ğ¸ĞºĞ¸ Ğ¾Ğ±Ñ‰Ğ¸Ñ… HTTPâ€‘Ğ·Ğ°Ğ¿Ñ€Ğ¾ÑĞ¾Ğ² â€” Ñ‚Ğ¾Ğ»ÑŒĞºĞ¾ Ğ±Ğ¸Ñ€Ğ¶Ğ°.
 
-Использование:
+Ğ˜ÑĞ¿Ğ¾Ğ»ÑŒĞ·Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ:
     from crypto_ai_bot.trading.exchange_client import ExchangeClient
     ex = ExchangeClient.from_settings(Settings.build())
     ohlcv = ex.fetch_ohlcv('BTC/USDT', '15m', limit=500)
 
-Заметки:
-- Таймауты/ретраи/прокси берутся из Settings (если заданы).
-- Включён rateLimit ccxt (exchange.enableRateLimit = True).
-- Все методы обёрнуты в ловушку ошибок с нормальными сообщениями.
+Ğ—Ğ°Ğ¼ĞµÑ‚ĞºĞ¸:
+- Ğ¢Ğ°Ğ¹Ğ¼Ğ°ÑƒÑ‚Ñ‹/Ñ€ĞµÑ‚Ñ€Ğ°Ğ¸/Ğ¿Ñ€Ğ¾ĞºÑĞ¸ Ğ±ĞµÑ€ÑƒÑ‚ÑÑ Ğ¸Ğ· Settings (ĞµÑĞ»Ğ¸ Ğ·Ğ°Ğ´Ğ°Ğ½Ñ‹).
+- Ğ’ĞºĞ»ÑÑ‡Ñ‘Ğ½ rateLimit ccxt (exchange.enableRateLimit = True).
+- Ğ’ÑĞµ Ğ¼ĞµÑ‚Ğ¾Ğ´Ñ‹ Ğ¾Ğ±Ñ‘Ñ€Ğ½ÑƒÑ‚Ñ‹ Ğ² Ğ»Ğ¾Ğ²ÑƒÑˆĞºÑƒ Ğ¾ÑˆĞ¸Ğ±Ğ¾Ğº Ñ Ğ½Ğ¾Ñ€Ğ¼Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¼Ğ¸ ÑĞ¾Ğ¾Ğ±Ñ‰ĞµĞ½Ğ¸ÑĞ¼Ğ¸.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class ExchangeClient:
         self._ex = exchange
         self._timeout = timeout
 
-    # --- фабрика из Settings ---
+    # --- Ñ„Ğ°Ğ±Ñ€Ğ¸ĞºĞ° Ğ¸Ğ· Settings ---
     @classmethod
     def from_settings(cls, cfg: Settings) -> "ExchangeClient":
         ex_id = getattr(cfg, "EXCHANGE_ID", "binance")
@@ -57,7 +57,7 @@ class ExchangeClient:
         })
         return cls(exchange, timeout=float(getattr(cfg, "HTTP_TIMEOUT", 8.0)))
 
-    # --- базовые методы ---
+    # --- Ğ±Ğ°Ğ·Ğ¾Ğ²Ñ‹Ğµ Ğ¼ĞµÑ‚Ğ¾Ğ´Ñ‹ ---
     def fetch_ohlcv(self, symbol: str, timeframe: str, *, limit: int = 500) -> List[List[float]]:
         try:
             return self._ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -98,7 +98,7 @@ class ExchangeClient:
             logger.exception("cancel_all_orders failed: %r", e)
             raise
 
-    # --- утилиты ---
+    # --- ÑƒÑ‚Ğ¸Ğ»Ğ¸Ñ‚Ñ‹ ---
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         try:
             if hasattr(self._ex, "set_leverage"):
@@ -112,3 +112,4 @@ class ExchangeClient:
     @property
     def raw(self) -> Any:
         return self._ex
+

@@ -189,3 +189,4 @@ async def telegram_webhook(request: Request) -> JSONResponse:
     except Exception as e:
         logger.exception("process_update error")
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+

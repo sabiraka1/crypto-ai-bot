@@ -123,7 +123,7 @@ class SimpleMonitor:
                     # РџРѕР»СѓС‡Р°РµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ СЃРґРµР»РѕРє
                     if hasattr(trading_bot, 'pm'):
                         try:
-                            from utils.csv_handler import CSVHandler
+                            from crypto_ai_bot.utils.csv_handler import CSVHandler
                             stats = CSVHandler.get_trade_stats()
                             total_trades = stats.get("count", 0)
                         except Exception:
@@ -309,7 +309,7 @@ class SmartWatchdog:
             
             # РћС‚РїСЂР°РІР»СЏРµРј СѓРІРµРґРѕРјР»РµРЅРёРµ
             try:
-                from telegram.api_utils import send_message
+                from crypto_ai_bot.telegram.handler import send_telegram_message as send_message
                 send_message("рџ”„ Watchdog restarting trading bot due to failures")
             except Exception:
                 pass
@@ -563,7 +563,7 @@ def monitor_resources():
 def send_telegram_alert(message):
     """Legacy С„СѓРЅРєС†РёСЏ РѕС‚РїСЂР°РІРєРё Р°Р»РµСЂС‚РѕРІ"""
     try:
-        from telegram.api_utils import send_message
+        from crypto_ai_bot.telegram.handler import send_telegram_message as send_message
         send_message(f"рџљЁ {message}")
     except Exception as e:
         logging.error(f"Alert send failed: {e}")
@@ -584,6 +584,8 @@ __all__ = [
     'start_background_monitoring',
     'get_resource_summary'
 ]
+
+
 
 
 

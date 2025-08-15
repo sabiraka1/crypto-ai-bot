@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-Trading bot (чистая версия, исправлено):
-- только единые импорты из core.*
-- валидатор как validate_features (алиас)
-- PaperStore гарантированно создаёт папки/файлы
-- singleton-доступ через get_bot(...)
+Trading bot (Ñ‡Ğ¸ÑÑ‚Ğ°Ñ Ğ²ĞµÑ€ÑĞ¸Ñ, Ğ¸ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¾):
+- Ñ‚Ğ¾Ğ»ÑŒĞºĞ¾ ĞµĞ´Ğ¸Ğ½Ñ‹Ğµ Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚Ñ‹ Ğ¸Ğ· core.*
+- Ğ²Ğ°Ğ»Ğ¸Ğ´Ğ°Ñ‚Ğ¾Ñ€ ĞºĞ°Ğº validate_features (Ğ°Ğ»Ğ¸Ğ°Ñ)
+- PaperStore Ğ³Ğ°Ñ€Ğ°Ğ½Ñ‚Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ½Ğ¾ ÑĞ¾Ğ·Ğ´Ğ°Ñ‘Ñ‚ Ğ¿Ğ°Ğ¿ĞºĞ¸/Ñ„Ğ°Ğ¹Ğ»Ñ‹
+- singleton-Ğ´Ğ¾ÑÑ‚ÑƒĞ¿ Ñ‡ĞµÑ€ĞµĞ· get_bot(...)
 
-⚠️ Исправления в этой версии:
-- Правильная связка Aggregator → Policy: aggregate_features(cfg, exchange, ...) → policy.decide(features, cfg)
-- Полностью убран legacy fuse_scores (дублировал логику policy)
+âš ï¸ Ğ˜ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¸Ñ Ğ² ÑÑ‚Ğ¾Ğ¹ Ğ²ĞµÑ€ÑĞ¸Ğ¸:
+- ĞŸÑ€Ğ°Ğ²Ğ¸Ğ»ÑŒĞ½Ğ°Ñ ÑĞ²ÑĞ·ĞºĞ° Aggregator â†’ Policy: aggregate_features(cfg, exchange, ...) â†’ policy.decide(features, cfg)
+- ĞŸĞ¾Ğ»Ğ½Ğ¾ÑÑ‚ÑŒÑ ÑƒĞ±Ñ€Ğ°Ğ½ legacy fuse_scores (Ğ´ÑƒĞ±Ğ»Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ» Ğ»Ğ¾Ğ³Ğ¸ĞºÑƒ policy)
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-# === единые импорты (без фоллбеков) ===
+# === ĞµĞ´Ğ¸Ğ½Ñ‹Ğµ Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚Ñ‹ (Ğ±ĞµĞ· Ñ„Ğ¾Ğ»Ğ»Ğ±ĞµĞºĞ¾Ğ²) ===
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.core.signals.validator import validate as validate_features
@@ -43,10 +43,10 @@ class PaperStore:
         self._ensure_files()
 
     def _ensure_files(self) -> None:
-        # создаём директории
+        # ÑĞ¾Ğ·Ğ´Ğ°Ñ‘Ğ¼ Ğ´Ğ¸Ñ€ĞµĞºÑ‚Ğ¾Ñ€Ğ¸Ğ¸
         for p in (self.positions_path, self.orders_path, self.pnl_path):
             p.parent.mkdir(parents=True, exist_ok=True)
-        # создаём файлы с заголовками/пустым содержимым
+        # ÑĞ¾Ğ·Ğ´Ğ°Ñ‘Ğ¼ Ñ„Ğ°Ğ¹Ğ»Ñ‹ Ñ Ğ·Ğ°Ğ³Ğ¾Ğ»Ğ¾Ğ²ĞºĞ°Ğ¼Ğ¸/Ğ¿ÑƒÑÑ‚Ñ‹Ğ¼ ÑĞ¾Ğ´ĞµÑ€Ğ¶Ğ¸Ğ¼Ñ‹Ğ¼
         if not self.positions_path.exists():
             self.positions_path.write_text("[]", encoding="utf-8")
         if not self.orders_path.exists():
@@ -68,22 +68,22 @@ class TradingBot:
         self.notify = notifier
         self.cfg = settings
 
-        # paper store (создаёт папки/файлы сам)
+        # paper store (ÑĞ¾Ğ·Ğ´Ğ°Ñ‘Ñ‚ Ğ¿Ğ°Ğ¿ĞºĞ¸/Ñ„Ğ°Ğ¹Ğ»Ñ‹ ÑĞ°Ğ¼)
         self.paper = PaperStore(
             self.cfg.PAPER_POSITIONS_FILE,
             self.cfg.PAPER_ORDERS_FILE,
             self.cfg.PAPER_PNL_FILE,
         )
 
-        self.positions = []  # простая in-memory витрина (если нужно)
+        self.positions = []  # Ğ¿Ñ€Ğ¾ÑÑ‚Ğ°Ñ in-memory Ğ²Ğ¸Ñ‚Ñ€Ğ¸Ğ½Ğ° (ĞµÑĞ»Ğ¸ Ğ½ÑƒĞ¶Ğ½Ğ¾)
 
-    # --- публичный API (для Telegram) ---
+    # --- Ğ¿ÑƒĞ±Ğ»Ğ¸Ñ‡Ğ½Ñ‹Ğ¹ API (Ğ´Ğ»Ñ Telegram) ---
     def request_market_order(self, side: str, amount: float) -> str:
         side = side.lower()
         if side not in ("buy", "sell"):
             return "side must be buy|sell"
 
-        # безопасные режимы → только записываем «бумажный» ордер
+        # Ğ±ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ñ‹Ğµ Ñ€ĞµĞ¶Ğ¸Ğ¼Ñ‹ â†’ Ñ‚Ğ¾Ğ»ÑŒĞºĞ¾ Ğ·Ğ°Ğ¿Ğ¸ÑÑ‹Ğ²Ğ°ĞµĞ¼ Â«Ğ±ÑƒĞ¼Ğ°Ğ¶Ğ½Ñ‹Ğ¹Â» Ğ¾Ñ€Ğ´ĞµÑ€
         if self.cfg.SAFE_MODE or self.cfg.PAPER_MODE or not self.cfg.ENABLE_TRADING:
             self.paper.append_order({
                 "id": "paper",
@@ -95,7 +95,7 @@ class TradingBot:
             })
             return f"[PAPER] {side} {amount} {self.cfg.SYMBOL}"
 
-        # live-ордер
+        # live-Ğ¾Ñ€Ğ´ĞµÑ€
         try:
             order = self.exchange.create_order(self.cfg.SYMBOL, "market", side, amount)  # type: ignore[attr-defined]
             return f"live order ok: {order}"
@@ -104,14 +104,14 @@ class TradingBot:
             return f"live order failed: {e}"
 
     def request_close_position(self) -> str:
-        # Заглушка: зависит от твоего менеджера позиций
+        # Ğ—Ğ°Ğ³Ğ»ÑƒÑˆĞºĞ°: Ğ·Ğ°Ğ²Ğ¸ÑĞ¸Ñ‚ Ğ¾Ñ‚ Ñ‚Ğ²Ğ¾ĞµĞ³Ğ¾ Ğ¼ĞµĞ½ĞµĞ´Ğ¶ĞµÑ€Ğ° Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¹
         return "close-position: not implemented here"
 
-    # --- основной «тик» стратегии ---
+    # --- Ğ¾ÑĞ½Ğ¾Ğ²Ğ½Ğ¾Ğ¹ Â«Ñ‚Ğ¸ĞºÂ» ÑÑ‚Ñ€Ğ°Ñ‚ĞµĞ³Ğ¸Ğ¸ ---
     def evaluate(self) -> Dict[str, Any]:
         """
-        Собирает признаки и возвращает решение.
-        Правильная цепочка вызовов:
+        Ğ¡Ğ¾Ğ±Ğ¸Ñ€Ğ°ĞµÑ‚ Ğ¿Ñ€Ğ¸Ğ·Ğ½Ğ°ĞºĞ¸ Ğ¸ Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ.
+        ĞŸÑ€Ğ°Ğ²Ğ¸Ğ»ÑŒĞ½Ğ°Ñ Ñ†ĞµĞ¿Ğ¾Ñ‡ĞºĞ° Ğ²Ñ‹Ğ·Ğ¾Ğ²Ğ¾Ğ²:
           - aggregate_features(cfg, exchange, symbol=..., timeframe=..., limit=...)
           - policy.decide(features, cfg)
         """
@@ -127,7 +127,7 @@ class TradingBot:
             return {"ok": False, "reason": reason, "features": feats}
 
         decision = policy_decide(feats, self.cfg)
-        # Back-compat: также отдадим верхнеуровневый score
+        # Back-compat: Ñ‚Ğ°ĞºĞ¶Ğµ Ğ¾Ñ‚Ğ´Ğ°Ğ´Ğ¸Ğ¼ Ğ²ĞµÑ€Ñ…Ğ½ĞµÑƒÑ€Ğ¾Ğ²Ğ½ĞµĞ²Ñ‹Ğ¹ score
         return {
             "ok": True,
             "decision": decision,
@@ -142,7 +142,8 @@ class TradingBot:
             cls._singleton = TradingBot(exchange, notifier, settings)
         return cls._singleton
 
-# фабрика для server/telegram
+# Ñ„Ğ°Ğ±Ñ€Ğ¸ĞºĞ° Ğ´Ğ»Ñ server/telegram
 def get_bot(exchange: Any, notifier, settings: Optional[Settings] = None) -> TradingBot:
     cfg = settings or Settings.build()
     return TradingBot.get_instance(exchange, notifier, cfg)
+
