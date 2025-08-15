@@ -1,39 +1,58 @@
-# src/crypto_ai_bot/telegram/handler.py
-"""
-Единая «фасадная» точка для Telegram-отправок/обработчика.
-Никакой логики — только делегирование в telegram.bot.
-
-Оставляет совместимость для старых импортов вида:
-- from crypto_ai_bot.telegram.handler import send_telegram_message
-- from crypto_ai_bot.telegram.handler import process_update
-"""
-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
+import csv, math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, Mapping
 
-from typing import Optional, Any
+@dataclass
+class TradeStats:
+    total_trades: int
+    win_trades: int
+    loss_trades: int
+    total_pnl: float
+    win_rate: float
+    last_ts: int | None
 
-# Реальная реализация живёт в telegram.bot
-from crypto_ai_bot.telegram.bot import (
-    init as tg_init,
-    tg_send_message,
-    tg_send_photo,
-    process_update as tg_process_update,
-)
+class CSVHandler:
+    @staticmethod
+    def append_row(csv_path: str | Path, row: Mapping[str, Any]) -> None:
+        p = Path(csv_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        exists = p.exists()
+        with p.open("a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not exists:
+                w.writeheader()
+            w.writerow(row)
 
-# Публичные имена, которые используются сервером/утилитами:
-init = tg_init
+    @staticmethod
+    def get_trade_stats(csv_path: str | Path) -> TradeStats:
+        p = Path(csv_path)
+        if not p.exists():
+            return TradeStats(0, 0, 0, 0.0, 0.0, None)
 
+        total = wins = losses = 0
+        pnl_sum = 0.0
+        last_ts: int | None = None
 
-def send_telegram_message(text: str, chat_id: Optional[str] = None) -> tuple[bool, Any]:
-    """Совместимое имя для отправки текста."""
-    return tg_send_message(text, chat_id=chat_id)
+        with p.open("r", newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            # ожидаемые поля: ts, pnl
+            for row in r:
+                total += 1
+                pnl = float(row.get("pnl", "0") or 0)
+                pnl_sum += pnl
+                if pnl > 0:
+                    wins += 1
+                elif pnl < 0:
+                    losses += 1
+                try:
+                    ts = int(row.get("ts") or 0)
+                    if ts:
+                        last_ts = max(last_ts or 0, ts)
+                except Exception:
+                    pass
 
-
-def send_telegram_photo(photo_url: str, caption: str = "", chat_id: Optional[str] = None) -> tuple[bool, Any]:
-    """Совместимое имя для отправки фото/PNG."""
-    return tg_send_photo(photo_url, caption=caption, chat_id=chat_id)
-
-
-def process_update(update: dict) -> None:
-    """Проксируем обработку апдейта."""
-    return tg_process_update(update)
+        win_rate = (wins / total) if total else 0.0
+        return TradeStats(total, wins, losses, pnl_sum, win_rate, last_ts)

@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Production-ready Telegram адаптер без os.getenv:
-- Единая точка: tg_send_message(), tg_send_photo(), process_update(payload)
-- Команды: /help, /status, /chart, /train, /errors, /setwebhook, /getwebhook, /delwebhook (админ)
-- Минимум зависимостей, без дублирования индикаторов (индикаторы считаем в core-слое при необходимости)
-"""
+# см. примечания в шапке файла
 from __future__ import annotations
 
 import io
@@ -14,21 +9,18 @@ from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 import matplotlib
-matplotlib.use("Agg")  # headless
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 try:
-    import ccxt  # публичные данные для /status и /chart
+    import ccxt
 except Exception:
-    ccxt = None  # будет мягкий фоллбэк
+    ccxt = None
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils.http_client import http_get, http_post  # простой HTTP-адаптер на requests
+from crypto_ai_bot.utils.http_client import http_get, http_post
 
 log = logging.getLogger(__name__)
-
-
-# === Вспомогательные утилиты ===
 
 def _is_admin(chat_id: int, cfg: Settings) -> bool:
     if not cfg.ADMIN_CHAT_IDS:
@@ -36,15 +28,10 @@ def _is_admin(chat_id: int, cfg: Settings) -> bool:
     ids = {s.strip() for s in str(cfg.ADMIN_CHAT_IDS).split(",") if s.strip()}
     return str(chat_id) in ids
 
-
 def _api_url(cfg: Settings, method: str) -> str:
     return f"https://api.telegram.org/bot{cfg.BOT_TOKEN}/{method}"
 
-
 def tg_send_message(chat_id: int, text: str, parse_mode: str = "HTML", cfg: Optional[Settings] = None) -> bool:
-    """
-    Единая отправка текста. cfg может быть передана извне (сервер), иначе загрузим лениво.
-    """
     cfg = cfg or Settings.build()
     try:
         url = _api_url(cfg, "sendMessage")
@@ -58,11 +45,7 @@ def tg_send_message(chat_id: int, text: str, parse_mode: str = "HTML", cfg: Opti
         log.exception("tg_send_message error: %s", e)
         return False
 
-
 def tg_send_photo(chat_id: int, image_bytes: bytes, caption: Optional[str] = None, cfg: Optional[Settings] = None) -> bool:
-    """
-    Единая отправка фото (PNG\JPG в памяти).
-    """
     cfg = cfg or Settings.build()
     try:
         url = _api_url(cfg, "sendPhoto")
@@ -80,9 +63,6 @@ def tg_send_photo(chat_id: int, image_bytes: bytes, caption: Optional[str] = Non
         log.exception("tg_send_photo error: %s", e)
         return False
 
-
-# === Командные хелперы ===
-
 def _cmd_help(_: Dict[str, Any], cfg: Settings) -> str:
     admin_note = "\n\nАдминские:\n/setwebhook\n/getwebhook\n/delwebhook" if cfg.ADMIN_CHAT_IDS else ""
     return (
@@ -90,11 +70,10 @@ def _cmd_help(_: Dict[str, Any], cfg: Settings) -> str:
         "/help — справка\n"
         "/status — статус и базовые метрики\n"
         "/chart — график OHLCV + краткий обзор\n"
-        "/train — обучить/переобучить модель (безопасная заглушка)\n"
-        "/errors — последние строки из лога"
+        "/train — обучить модель (заглушка)\n"
+        "/errors — хвост логов"
         f"{admin_note}"
     )
-
 
 def _fetch_ticker_price(cfg: Settings) -> Optional[float]:
     if not ccxt:
@@ -106,7 +85,6 @@ def _fetch_ticker_price(cfg: Settings) -> Optional[float]:
     except Exception as e:
         log.warning("fetch_ticker failed: %s", e)
         return None
-
 
 def _cmd_status(_: Dict[str, Any], cfg: Settings) -> str:
     price = _fetch_ticker_price(cfg)
@@ -123,7 +101,6 @@ def _cmd_status(_: Dict[str, Any], cfg: Settings) -> str:
         f"Mode: {', '.join(flags)}"
     )
 
-
 def _fetch_ohlcv(cfg: Settings, limit: int = 120) -> Optional[pd.DataFrame]:
     if not ccxt:
         return None
@@ -138,7 +115,6 @@ def _fetch_ohlcv(cfg: Settings, limit: int = 120) -> Optional[pd.DataFrame]:
     except Exception as e:
         log.warning("fetch_ohlcv failed: %s", e)
         return None
-
 
 def _make_chart(df: pd.DataFrame, title: str = "") -> bytes:
     fig = plt.figure(figsize=(9, 5), dpi=100)
@@ -155,8 +131,7 @@ def _make_chart(df: pd.DataFrame, title: str = "") -> bytes:
     buf.seek(0)
     return buf.read()
 
-
-def _cmd_chart(_: Dict[str, Any], cfg: Settings) -> Tuple[Optional[bytes], str]:
+def _cmd_chart(_: Dict[str, Any], cfg: Settings) -> tuple[Optional[bytes], str]:
     df = _fetch_ohlcv(cfg, limit=150)
     if df is None or df.empty:
         return None, "Не удалось получить данные OHLCV."
@@ -165,19 +140,14 @@ def _cmd_chart(_: Dict[str, Any], cfg: Settings) -> Tuple[Optional[bytes], str]:
     caption = f"<b>{cfg.SYMBOL} • {cfg.TIMEFRAME}</b>\nClose: <b>{last['close']:.2f}</b>  Vol: <code>{int(last['volume'])}</code>"
     return img, caption
 
-
 def _cmd_train(_: Dict[str, Any], __: Settings) -> str:
-    # Заглушка, чтобы команда не падала: можно связать с вашим train-пайплайном позже
-    return "🚧 Train: старт обучения (заглушка). В проде свяжем с реальным пайплайном."
-
+    return "🚧 Train: старт обучения (заглушка). Позже свяжем с реальным пайплайном."
 
 def _cmd_errors(_: Dict[str, Any], cfg: Settings) -> str:
     try:
-        import os
         from pathlib import Path
         logs_dir = Path(cfg.LOGS_DIR or "logs")
         logs_dir.mkdir(parents=True, exist_ok=True)
-        # читаем самый свежий лог-файл, если есть
         files = sorted(logs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not files:
             return "Логи не найдены."
@@ -188,9 +158,6 @@ def _cmd_errors(_: Dict[str, Any], cfg: Settings) -> str:
     except Exception as e:
         log.warning("/errors failed: %s", e)
         return "Не удалось прочитать логи."
-
-
-# === Админские команды вебхука ===
 
 def _admin_set_webhook(chat_id: int, cfg: Settings) -> str:
     if not _is_admin(chat_id, cfg):
@@ -207,7 +174,6 @@ def _admin_set_webhook(chat_id: int, cfg: Settings) -> str:
     ok = j.get("ok", False)
     return f"setWebhook → ok={ok}\n<code>{json.dumps(j, ensure_ascii=False)}</code>"
 
-
 def _admin_get_webhook(chat_id: int, cfg: Settings) -> str:
     if not _is_admin(chat_id, cfg):
         return "Недостаточно прав."
@@ -219,7 +185,6 @@ def _admin_get_webhook(chat_id: int, cfg: Settings) -> str:
         j = {"ok": False, "raw": r.text}
     ok = j.get("ok", False)
     return f"getWebhookInfo → ok={ok}\n<code>{json.dumps(j, ensure_ascii=False)}</code>"
-
 
 def _admin_del_webhook(chat_id: int, cfg: Settings) -> str:
     if not _is_admin(chat_id, cfg):
@@ -233,33 +198,18 @@ def _admin_del_webhook(chat_id: int, cfg: Settings) -> str:
     ok = j.get("ok", False)
     return f"deleteWebhook → ok={ok}\n<code>{json.dumps(j, ensure_ascii=False)}</code>"
 
-
-# === Основной обработчик апдейтов ===
-
 def process_update(payload: Dict[str, Any], cfg: Optional[Settings] = None) -> None:
-    """
-    Вызывается из FastAPI (/telegram). Поддерживает и sync, и async вызов в сервере.
-    """
     cfg = cfg or Settings.build()
-
-    msg = None
-    if "message" in payload:
-        msg = payload["message"]
-    elif "edited_message" in payload:
-        msg = payload["edited_message"]
+    msg = payload.get("message") or payload.get("edited_message")
     if not msg:
         return
-
     chat_id = int(msg["chat"]["id"])
     text = str(msg.get("text") or "").strip()
-
     if not text.startswith("/"):
         tg_send_message(chat_id, "Используйте /help для списка команд.", cfg=cfg)
         return
-
     cmd, *args = text.split()
     cmd = cmd.lower()
-
     if cmd == "/help":
         tg_send_message(chat_id, _cmd_help(msg, cfg), cfg=cfg); return
     if cmd == "/status":
@@ -275,13 +225,10 @@ def process_update(payload: Dict[str, Any], cfg: Optional[Settings] = None) -> N
         tg_send_message(chat_id, _cmd_train(msg, cfg), cfg=cfg); return
     if cmd == "/errors":
         tg_send_message(chat_id, _cmd_errors(msg, cfg), cfg=cfg); return
-
-    # admin
     if cmd == "/setwebhook":
         tg_send_message(chat_id, _admin_set_webhook(chat_id, cfg), cfg=cfg); return
     if cmd == "/getwebhook":
         tg_send_message(chat_id, _admin_get_webhook(chat_id, cfg), cfg=cfg); return
     if cmd == "/delwebhook":
         tg_send_message(chat_id, _admin_del_webhook(chat_id, cfg), cfg=cfg); return
-
     tg_send_message(chat_id, "Неизвестная команда. /help", cfg=cfg)
