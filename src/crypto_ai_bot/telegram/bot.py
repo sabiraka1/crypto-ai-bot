@@ -1,114 +1,89 @@
-# -*- coding: utf-8 -*-
-"""
-Minimal Telegram bot interface built on top of unified Settings.
-This module exposes a single function:
-    process_update(payload: dict) -> None | Awaitable[None]
-
-Supported commands:
-  /start, /help, /ping, /status, /version, /config
-"""
+# src/crypto_ai_bot/telegram/bot.py
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Optional
 
-try:
-    from crypto_ai_bot.core.settings import Settings  # type: ignore
-except Exception:  # pragma: no cover
-    from crypto_ai_bot.core.settings import Settings  # type: ignore
-
-from crypto_ai_bot.telegram.handler import tg_send_message
+from crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.utils.http_client import http_post  # единая точка HTTP
 
 logger = logging.getLogger("crypto_ai_bot.telegram.bot")
 
+_CFG: Optional[Settings] = None
 
-def _reply(text: str) -> None:
-    ok, resp = tg_send_message(text)
+
+def init(cfg: Settings) -> None:
+    """Инициализация Telegram-бота единым Settings (без os.getenv)."""
+    global _CFG
+    _CFG = cfg
+    logger.info("telegram.bot initialized")
+
+
+def _ensure_cfg() -> Settings:
+    assert _CFG is not None, "telegram.bot not initialized — call init(Settings) first"
+    return _CFG
+
+
+def _tg_api(token: str, method: str) -> str:
+    return f"https://api.telegram.org/bot{token}/{method}"
+
+
+def tg_send_message(text: str, chat_id: Optional[str] = None) -> tuple[bool, Any]:
+    cfg = _ensure_cfg()
+    token = cfg.TELEGRAM_BOT_TOKEN
+    to = chat_id or cfg.TELEGRAM_CHAT_ID
+    if not token or not to:
+        logger.warning("Telegram token/chat_id not configured")
+        return False, "not-configured"
+
+    payload = {"chat_id": to, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    ok, data = http_post(_tg_api(token, "sendMessage"), json=payload, timeout=10)
     if not ok:
-        logger.warning("tg_send_message failed: %s", resp)
+        logger.warning("tg_send_message failed: %s", data)
+    return ok, data
 
 
-def _help_text(cfg: Settings) -> str:
-    return (
-        "🤖 *crypto-ai-bot*\n\n"
-        "Доступные команды:\n"
-        "• /start — краткая справка\n"
-        "• /help — список команд\n"
-        "• /ping — проверка связи\n"
-        "• /status — текущий инструмент/таймфрейм\n"
-        "• /version — версия сервера\n"
-        "• /config — основные настройки (без секретов)\n"
-    )
+def tg_send_photo(photo_url: str, caption: str = "", chat_id: Optional[str] = None) -> tuple[bool, Any]:
+    cfg = _ensure_cfg()
+    token = cfg.TELEGRAM_BOT_TOKEN
+    to = chat_id or cfg.TELEGRAM_CHAT_ID
+    if not token or not to:
+        logger.warning("Telegram token/chat_id not configured")
+        return False, "not-configured"
+
+    payload = {"chat_id": to, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
+    ok, data = http_post(_tg_api(token, "sendPhoto"), json=payload, timeout=10)
+    if not ok:
+        logger.warning("tg_send_photo failed: %s", data)
+    return ok, data
 
 
-def _mask(k: str, v: Any) -> Any:
-    ks = k.upper()
-    if any(s in ks for s in ("SECRET", "TOKEN", "API_KEY", "APIKEY", "PASSWORD")):
-        return "***"
-    return v
+# --- Простая обработка апдейтов (webhook) ---
 
-
-def _config_text(cfg: Settings) -> str:
+def process_update(update: dict) -> None:
+    """
+    Минимальный обработчик Telegram-апдейта.
+    Поддерживает /start, /ping и текстовые эхо.
+    """
     try:
-        from dataclasses import asdict, is_dataclass
+        message = update.get("message") or update.get("edited_message")
+        if not message:
+            return
 
-        data = asdict(cfg) if is_dataclass(cfg) else cfg.__dict__
-    except Exception:
-        data = cfg.__dict__
-    parts = [f"*{k}*: `{_mask(k, v)}`" for k, v in data.items()]
-    return "⚙️ *Config*\n" + "\n".join(parts[:100])  # ограничим разумно
+        chat_id = str(message["chat"]["id"])
+        text = str(message.get("text") or "").strip()
 
+        if text.startswith("/start"):
+            tg_send_message("Бот запущен. Команда: /ping — проверка связи.", chat_id=chat_id)
+            return
 
-def _status_text(cfg: Settings) -> str:
-    return f"ℹ️ *Status*\nSYMBOL: `{cfg.SYMBOL}`\nTIMEFRAME: `{cfg.TIMEFRAME}`"
+        if text.startswith("/ping"):
+            tg_send_message("pong ✅", chat_id=chat_id)
+            return
 
+        # эхо по умолчанию (можно отключить)
+        if text:
+            tg_send_message(f"echo: <code>{text}</code>", chat_id=chat_id)
 
-def _version_text() -> str:
-    return "version: 1.0.0"
-
-
-def _extract_cmd_and_args(payload: Dict[str, Any]) -> tuple[str, str]:
-    text = (
-        payload.get("message", {}).get("text")
-        or payload.get("edited_message", {}).get("text")
-        or ""
-    ).strip()
-    if not text.startswith("/"):
-        return "", ""
-    parts = text.split(maxsplit=1)
-    cmd = parts[0].split("@")[0].lower()
-    args = parts[1] if len(parts) > 1 else ""
-    return cmd, args
-
-
-def process_update(payload: Dict[str, Any]) -> None | asyncio.Future:
-    cfg = Settings.build()
-    cmd, args = _extract_cmd_and_args(payload)
-
-    if not cmd:
-        # ignore non-commands
-        return None
-
-    if cmd in ("/start", "/help"):
-        _reply(_help_text(cfg))
-        return None
-
-    if cmd == "/ping":
-        _reply("pong")
-        return None
-
-    if cmd == "/status":
-        _reply(_status_text(cfg))
-        return None
-
-    if cmd == "/version":
-        _reply(_version_text())
-        return None
-
-    if cmd == "/config":
-        _reply(_config_text(cfg))
-        return None
-
-    _reply("Неизвестная команда. Напишите /help")
-    return None
+    except Exception as e:
+        logger.exception("process_update failed: %s", e)
