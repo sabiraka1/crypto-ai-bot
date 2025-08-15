@@ -80,7 +80,7 @@ def on_startup() -> None:
 
     # 2) ĞµĞ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ±Ğ¾Ñ‚ (Ğ¿Ğ¾ Ğ²Ğ¾Ğ·Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ÑÑ‚Ğ¸)
     try:
-        get_bot(notifier=send_telegram_message, settings=cfg)
+        bot = get_bot(exchange=_exchange, notifier=send_telegram_message, settings=cfg)
         logger.info("Trading bot is initialized (singleton).")
     except Exception:
         logger.exception("Trading bot init failed â€” Ğ¿Ñ€Ğ¾Ğ´Ğ¾Ğ»Ğ¶Ğ°Ñ Ğ±ĞµĞ· Ğ½ĞµĞ³Ğ¾ (API Ğ¶Ğ¸Ğ²).")
