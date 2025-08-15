@@ -137,3 +137,5 @@ def get_bot(exchange: Any, notifier, settings: Optional[Settings] = None) -> Tra
     cfg = settings or Settings.build()
     return TradingBot.get_instance(exchange, notifier, cfg)
 
+
+
