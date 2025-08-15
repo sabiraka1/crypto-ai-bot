@@ -1,44 +1,48 @@
-﻿def get_trade_stats(path: str) -> dict:
-    """
-    Унифицированная статистика по трейдам из CSV.
-    Возвращает: total_trades, win_trades, loss_trades, total_pnl, win_rate, last_ts
-    (сохраняем обратную совместимость: если где-то ждут старые ключи — их можно собрать из этого словаря).
-    """
-    import csv, time
+﻿from __future__ import annotations
+import csv, math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-    total = wins = losses = 0
-    total_pnl = 0.0
-    last_ts = 0
+@dataclass
+class TradeStats:
+    total_trades: int
+    win_trades: int
+    loss_trades: int
+    total_pnl: float
+    win_rate: float
+    last_ts: int | None
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
+class CSVHandler:
+    # ... остальной код
+
+    @staticmethod
+    def get_trade_stats(csv_path: str | Path) -> TradeStats:
+        p = Path(csv_path)
+        if not p.exists():
+            return TradeStats(0, 0, 0, 0.0, 0.0, None)
+
+        total = wins = losses = 0
+        pnl_sum = 0.0
+        last_ts: int | None = None
+
+        with p.open("r", newline="", encoding="utf-8") as f:
             r = csv.DictReader(f)
+            # ожидаемые поля: ts, pnl  (при необходимости дополни под свой формат)
             for row in r:
                 total += 1
                 pnl = float(row.get("pnl", "0") or 0)
-                total_pnl += pnl
+                pnl_sum += pnl
                 if pnl > 0:
                     wins += 1
                 elif pnl < 0:
                     losses += 1
-                ts = int(row.get("ts", "0") or 0)
-                if ts > last_ts:
-                    last_ts = ts
-    except FileNotFoundError:
-        pass
+                try:
+                    ts = int(row.get("ts") or 0)
+                    if ts:
+                        last_ts = max(last_ts or 0, ts)
+                except Exception:
+                    pass
 
-    win_rate = round(100.0 * wins / total, 2) if total else 0.0
-
-    return dict(
-        total_trades=total,
-        win_trades=wins,
-        loss_trades=losses,
-        total_pnl=round(total_pnl, 2),
-        win_rate=win_rate,
-        last_ts=last_ts or int(time.time()),
-    )
-
-
-
-
-
+        win_rate = (wins / total) if total else 0.0
+        return TradeStats(total, wins, losses, pnl_sum, win_rate, last_ts)
