@@ -111,12 +111,34 @@ def macd_hist(series, fast: int = 12, slow: int = 26, signal: int = 9):
     _, _, hist = macd(series, fast=fast, slow=slow, signal=signal)
     return hist
 
+# --- Thin helper for legacy code ---
+def calculate_all_indicators(df, *, ema_fast=12, ema_slow=26, rsi_period=14,
+                             macd_fast=12, macd_slow=26, macd_signal=9, atr_period=14):
+    """
+    Legacy совместимость: возвращает словарь популярных индикаторов
+    по последним значениям.
+    """
+    close = df["close"].astype(float)
 
+    ema_fast_s = ema(close, ema_fast)
+    ema_slow_s = ema(close, ema_slow)
+    rsi_s = rsi(close, rsi_period)
+    macd_line, macd_sig, macd_hist_s = macd(close, macd_fast, macd_slow, macd_signal)
+    atr_s = atr(df, atr_period)
 
+    def _last(s):
+        try:
+            v = float(s.iloc[-1])
+            return v if math.isfinite(v) else None  # type: ignore[name-defined]
+        except Exception:
+            return None
 
-
-
-
-
-
-
+    return {
+        "ema_fast": _last(ema_fast_s),
+        "ema_slow": _last(ema_slow_s),
+        "rsi": _last(rsi_s),
+        "macd": _last(macd_line),
+        "macd_signal": _last(macd_sig),
+        "macd_hist": _last(macd_hist_s),
+        "atr": _last(atr_s),
+    }
