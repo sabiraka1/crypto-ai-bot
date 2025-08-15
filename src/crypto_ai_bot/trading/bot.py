@@ -1,15 +1,13 @@
 ﻿# -*- coding: utf-8 -*-
 """
-Clean trading bot module.
-- Uses unified Settings from core.settings
-- Imports signals from core.signals.*
-- Keeps fuse_scores from trading.signals.score_fusion
-- Robust PaperStore that auto-creates directories/files
-- Exposes get_bot(exchange, notifier, settings) singleton
+Trading bot (чистая версия):
+- только единые импорты из core.*
+- валидатор как validate_features (алиас)
+- PaperStore гарантированно создаёт папки/файлы
+- singleton-доступ через get_bot(...)
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -18,24 +16,17 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-try:
-    # unified config
-    from crypto_ai_bot.core.settings import Settings
-    from crypto_ai_bot.core.signals.aggregator import aggregate_features
-    from crypto_ai_bot.core.signals.validator import validate_features
-    from crypto_ai_bot.core.signals.policy import decide as policy_decide
-except Exception:
-    # fallback paths (kept for compatibility with older trees)
-    from crypto_ai_bot.core.settings import Settings  # type: ignore
-    from crypto_ai_bot.trading.signals.signal_aggregator import aggregate_features  # type: ignore
-    from crypto_ai_bot.trading.signals.signal_validator import validate_features  # type: ignore
-    from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide  # type: ignore
+# === единые импорты (без фоллбеков) ===
+from crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.core.signals.aggregator import aggregate_features
+from crypto_ai_bot.core.signals.validator import validate as validate_features
+from crypto_ai_bot.core.signals.policy import decide as policy_decide
 
-# keep your fusion
+# если у тебя есть собственный фьюзер — оставим как есть; иначе дефолт
 try:
     from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
 except Exception:  # pragma: no cover
-    def fuse_scores(*_, **__):  # type: ignore
+    def fuse_scores(*_, **__) -> float:
         return 0.5
 
 logger = logging.getLogger(__name__)
@@ -55,10 +46,10 @@ class PaperStore:
         self._ensure_files()
 
     def _ensure_files(self) -> None:
-        # create parent dirs
-        for p in [self.positions_path, self.orders_path, self.pnl_path]:
+        # создаём директории
+        for p in (self.positions_path, self.orders_path, self.pnl_path):
             p.parent.mkdir(parents=True, exist_ok=True)
-        # touch files
+        # создаём файлы с заголовками/пустым содержимым
         if not self.positions_path.exists():
             self.positions_path.write_text("[]", encoding="utf-8")
         if not self.orders_path.exists():
@@ -79,21 +70,24 @@ class TradingBot:
         self.exchange = exchange
         self.notify = notifier
         self.cfg = settings
-        # paper store
+
+        # paper store (создаёт папки/файлы сам)
         self.paper = PaperStore(
             self.cfg.PAPER_POSITIONS_FILE,
             self.cfg.PAPER_ORDERS_FILE,
             self.cfg.PAPER_PNL_FILE,
         )
-        self.positions = []  # simple in-memory view
 
-    # --------- public API (Telegram uses) ---------
+        self.positions = []  # простая in-memory витрина (если нужно)
+
+    # --- публичный API (для Telegram) ---
     def request_market_order(self, side: str, amount: float) -> str:
         side = side.lower()
         if side not in ("buy", "sell"):
             return "side must be buy|sell"
+
+        # безопасные режимы → только записываем «бумажный» ордер
         if self.cfg.SAFE_MODE or self.cfg.PAPER_MODE or not self.cfg.ENABLE_TRADING:
-            # paper/log only
             self.paper.append_order({
                 "id": "paper",
                 "ts": pd.Timestamp.utcnow().isoformat(),
@@ -103,7 +97,8 @@ class TradingBot:
                 "price": 0.0,
             })
             return f"[PAPER] {side} {amount} {self.cfg.SYMBOL}"
-        # live
+
+        # live-ордер
         try:
             order = self.exchange.create_order(self.cfg.SYMBOL, "market", side, amount)  # type: ignore[attr-defined]
             return f"live order ok: {order}"
@@ -112,32 +107,28 @@ class TradingBot:
             return f"live order failed: {e}"
 
     def request_close_position(self) -> str:
-        # placeholder (depends on your PM)
+        # Заглушка: зависит от твоего менеджера позиций
         return "close-position: not implemented here"
 
-    # --------- strategy tick ---------
+    # --- основной «тик» стратегии ---
     def evaluate(self) -> Dict[str, Any]:
         feats = aggregate_features(self.cfg.SYMBOL, self.cfg.TIMEFRAME, limit=self.cfg.AGGREGATOR_LIMIT)
         ok, reason = validate_features(feats, self.cfg)
         if not ok:
             return {"ok": False, "reason": reason, "features": feats}
+
         rule_score = fuse_scores(feats)
         decision = policy_decide(rule_score, feats, self.cfg)
         return {"ok": True, "decision": decision, "score": rule_score, "features": feats}
 
-    # singleton access
+    # singleton
     @classmethod
     def get_instance(cls, exchange: Any, notifier, settings: Settings) -> "TradingBot":
         if cls._singleton is None:
             cls._singleton = TradingBot(exchange, notifier, settings)
         return cls._singleton
 
-# factory kept for server/telegram
+# фабрика для server/telegram
 def get_bot(exchange: Any, notifier, settings: Optional[Settings] = None) -> TradingBot:
     cfg = settings or Settings.build()
     return TradingBot.get_instance(exchange, notifier, cfg)
-
-
-
-
-
