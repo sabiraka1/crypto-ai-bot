@@ -667,3 +667,4 @@ class TestIntegration:
             assert len(daily_stats) <= 30
 
 
+

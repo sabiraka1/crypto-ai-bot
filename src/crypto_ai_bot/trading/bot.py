@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Clean trading bot module.
 - Uses unified Settings from core.settings
@@ -136,3 +136,4 @@ class TradingBot:
 def get_bot(exchange: Any, notifier, settings: Optional[Settings] = None) -> TradingBot:
     cfg = settings or Settings.build()
     return TradingBot.get_instance(exchange, notifier, cfg)
+

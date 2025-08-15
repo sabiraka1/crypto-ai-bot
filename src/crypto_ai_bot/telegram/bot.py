@@ -1,4 +1,4 @@
-
+﻿
 # Clean Telegram adapter for webhook-based updates.
 # Uses core Settings and the unified TradingBot entrypoint.
 from __future__ import annotations
@@ -49,20 +49,20 @@ def tg_reply(update: Dict[str, Any], text: str, **kwargs) -> None:
 
 def _help_text() -> str:
     return (
-        "<b>Справка по командам</b>\n\n"
-        "Основные:\n"
-        "/start — приветствие\n"
-        "/status — цена/индикаторы/позиция\n"
-        "/chart — график (упрощённо)\n"
-        "/errors — последние ошибки\n"
-        "/config — текущая конфигурация\n"
-        "/ping — проверка связи\n"
-        "/version — версия\n\n"
-        "Трейдинг:\n"
-        "/testbuy &lt;сумма&gt; — тестовая покупка\n"
-        "/testsell — тестовая продажа/закрытие\n\n"
-        "Сервис:\n"
-        "/setwebhook, /getwebhook, /delwebhook — управление вебхуком\n"
+        "<b>Ğ¡Ğ¿Ñ€Ğ°Ğ²ĞºĞ° Ğ¿Ğ¾ ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´Ğ°Ğ¼</b>\n\n"
+        "ĞÑĞ½Ğ¾Ğ²Ğ½Ñ‹Ğµ:\n"
+        "/start â€” Ğ¿Ñ€Ğ¸Ğ²ĞµÑ‚ÑÑ‚Ğ²Ğ¸Ğµ\n"
+        "/status â€” Ñ†ĞµĞ½Ğ°/Ğ¸Ğ½Ğ´Ğ¸ĞºĞ°Ñ‚Ğ¾Ñ€Ñ‹/Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ñ\n"
+        "/chart â€” Ğ³Ñ€Ğ°Ñ„Ğ¸Ğº (ÑƒĞ¿Ñ€Ğ¾Ñ‰Ñ‘Ğ½Ğ½Ğ¾)\n"
+        "/errors â€” Ğ¿Ğ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ Ğ¾ÑˆĞ¸Ğ±ĞºĞ¸\n"
+        "/config â€” Ñ‚ĞµĞºÑƒÑ‰Ğ°Ñ ĞºĞ¾Ğ½Ñ„Ğ¸Ğ³ÑƒÑ€Ğ°Ñ†Ğ¸Ñ\n"
+        "/ping â€” Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ĞºĞ° ÑĞ²ÑĞ·Ğ¸\n"
+        "/version â€” Ğ²ĞµÑ€ÑĞ¸Ñ\n\n"
+        "Ğ¢Ñ€ĞµĞ¹Ğ´Ğ¸Ğ½Ğ³:\n"
+        "/testbuy &lt;ÑÑƒĞ¼Ğ¼Ğ°&gt; â€” Ñ‚ĞµÑÑ‚Ğ¾Ğ²Ğ°Ñ Ğ¿Ğ¾ĞºÑƒĞ¿ĞºĞ°\n"
+        "/testsell â€” Ñ‚ĞµÑÑ‚Ğ¾Ğ²Ğ°Ñ Ğ¿Ñ€Ğ¾Ğ´Ğ°Ğ¶Ğ°/Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚Ğ¸Ğµ\n\n"
+        "Ğ¡ĞµÑ€Ğ²Ğ¸Ñ:\n"
+        "/setwebhook, /getwebhook, /delwebhook â€” ÑƒĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¸Ğµ Ğ²ĞµĞ±Ñ…ÑƒĞºĞ¾Ğ¼\n"
     )
 
 def _format_config(cfg: Settings) -> str:
@@ -82,7 +82,7 @@ def _format_config(cfg: Settings) -> str:
 def _format_status() -> str:
     try:
         bot = get_bot(exchange=None, notifier=None, settings=CFG)
-        # Попробуем получить последние фичи (без падения, если нет данных)
+        # ĞŸĞ¾Ğ¿Ñ€Ğ¾Ğ±ÑƒĞµĞ¼ Ğ¿Ğ¾Ğ»ÑƒÑ‡Ğ¸Ñ‚ÑŒ Ğ¿Ğ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ Ñ„Ğ¸Ñ‡Ğ¸ (Ğ±ĞµĞ· Ğ¿Ğ°Ğ´ĞµĞ½Ğ¸Ñ, ĞµÑĞ»Ğ¸ Ğ½ĞµÑ‚ Ğ´Ğ°Ğ½Ğ½Ñ‹Ñ…)
         try:
             features = bot.aggregate_features()
             rsi = features.get("rsi")
@@ -93,11 +93,11 @@ def _format_status() -> str:
             rsi = None; atr = None; rule = 0; ai = 0
         price = getattr(bot, "last_price", None) or (features.get("price") if 'features' in locals() else None)
         trend = "bullish" if rule >= 0.55 else "bearish"
-        parts = [f"ℹ️ {CFG.SYMBOL} @ {price or '—'} | rule={rule} | ai={ai} | ATR%≈{round(atr or 0, 2) if atr else '—'} | {trend}"]
+        parts = [f"â„¹ï¸ {CFG.SYMBOL} @ {price or 'â€”'} | rule={rule} | ai={ai} | ATR%â‰ˆ{round(atr or 0, 2) if atr else 'â€”'} | {trend}"]
         return "\n".join(parts)
     except Exception as e:
         logger.exception("status error")
-        return f"Ошибка статуса: {e}"
+        return f"ĞÑˆĞ¸Ğ±ĞºĞ° ÑÑ‚Ğ°Ñ‚ÑƒÑĞ°: {e}"
 
 def _with_public_url() -> Optional[str]:
     public_url = os.getenv("PUBLIC_URL") or ""
@@ -110,7 +110,7 @@ def _with_public_url() -> Optional[str]:
 def _set_webhook() -> str:
     public = _with_public_url()
     if not public:
-        return "PUBLIC_URL не задан."
+        return "PUBLIC_URL Ğ½Ğµ Ğ·Ğ°Ğ´Ğ°Ğ½."
     secret = os.getenv("TELEGRAM_SECRET_TOKEN", "")
     url = _tg_url("setWebhook")
     hook = f"{public}/telegram/webhook"
@@ -118,7 +118,7 @@ def _set_webhook() -> str:
         "url": hook,
         **({"secret_token": secret} if secret else {})
     }, timeout=10).json()
-    return f"setWebhook → {resp}"
+    return f"setWebhook â†’ {resp}"
 
 def _get_webhook() -> str:
     url = _tg_url("getWebhookInfo")
@@ -134,47 +134,47 @@ def _del_webhook() -> str:
         resp = requests.post(url, json={"drop_pending_updates": False}, timeout=10).json()
     except Exception as e:
         resp = {"ok": False, "error": str(e)}
-    return f"deleteWebhook → {resp}"
+    return f"deleteWebhook â†’ {resp}"
 
 def _cmd_testbuy(args: str) -> str:
     try:
         amt = float(args.strip() or "0")
         if amt <= 0: 
-            return "Укажи сумму: /testbuy 10"
+            return "Ğ£ĞºĞ°Ğ¶Ğ¸ ÑÑƒĞ¼Ğ¼Ñƒ: /testbuy 10"
         bot = get_bot(exchange=None, notifier=None, settings=CFG)
         try:
             bot.request_market_order("buy", amt)
-            return f"✅ Заявка на покупку отправлена: {amt}"
+            return f"âœ… Ğ—Ğ°ÑĞ²ĞºĞ° Ğ½Ğ° Ğ¿Ğ¾ĞºÑƒĞ¿ĞºÑƒ Ğ¾Ñ‚Ğ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ°: {amt}"
         except Exception as e:
-            return f"Ошибка отправки заявки: {e}"
+            return f"ĞÑˆĞ¸Ğ±ĞºĞ° Ğ¾Ñ‚Ğ¿Ñ€Ğ°Ğ²ĞºĞ¸ Ğ·Ğ°ÑĞ²ĞºĞ¸: {e}"
     except Exception:
-        return "Формат: /testbuy 10"
+        return "Ğ¤Ğ¾Ñ€Ğ¼Ğ°Ñ‚: /testbuy 10"
 
 def _cmd_testsell(_args: str) -> str:
     try:
         bot = get_bot(exchange=None, notifier=None, settings=CFG)
         try:
             bot.request_close_position()
-            return "✅ Заявка на закрытие позиции отправлена"
+            return "âœ… Ğ—Ğ°ÑĞ²ĞºĞ° Ğ½Ğ° Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚Ğ¸Ğµ Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¸ Ğ¾Ñ‚Ğ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ°"
         except Exception as e:
-            return f"Ошибка отправки заявки: {e}"
+            return f"ĞÑˆĞ¸Ğ±ĞºĞ° Ğ¾Ñ‚Ğ¿Ñ€Ğ°Ğ²ĞºĞ¸ Ğ·Ğ°ÑĞ²ĞºĞ¸: {e}"
     except Exception as e:
-        return f"Ошибка: {e}"
+        return f"ĞÑˆĞ¸Ğ±ĞºĞ°: {e}"
 
 def _cmd_errors() -> str:
     log_dir = os.getenv("LOGS_DIR", "logs")
     path = os.path.join(log_dir, "app.log")
     if not os.path.exists(path):
-        return "Лог-файл ещё не создан"
+        return "Ğ›Ğ¾Ğ³-Ñ„Ğ°Ğ¹Ğ» ĞµÑ‰Ñ‘ Ğ½Ğµ ÑĞ¾Ğ·Ğ´Ğ°Ğ½"
     try:
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()[-50:]
-        return "<b>Последние ошибки/логи:</b>\n" + "".join(lines[-20:])[-3500:]
+        return "<b>ĞŸĞ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ Ğ¾ÑˆĞ¸Ğ±ĞºĞ¸/Ğ»Ğ¾Ğ³Ğ¸:</b>\n" + "".join(lines[-20:])[-3500:]
     except Exception as e:
-        return f"Не удалось прочитать логи: {e}"
+        return f"ĞĞµ ÑƒĞ´Ğ°Ğ»Ğ¾ÑÑŒ Ğ¿Ñ€Ğ¾Ñ‡Ğ¸Ñ‚Ğ°Ñ‚ÑŒ Ğ»Ğ¾Ğ³Ğ¸: {e}"
 
 def handle_update(update: Dict[str, Any]) -> None:
-    # Sync handler — for invocation from FastAPI async wrapper
+    # Sync handler â€” for invocation from FastAPI async wrapper
     try:
         if "message" not in update: 
             return
@@ -205,7 +205,7 @@ def handle_update(update: Dict[str, Any]) -> None:
         elif cmd == "/delwebhook":
             tg_reply(update, _del_webhook())
         else:
-            tg_reply(update, "Неизвестная команда. Напиши /help")
+            tg_reply(update, "ĞĞµĞ¸Ğ·Ğ²ĞµÑÑ‚Ğ½Ğ°Ñ ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´Ğ°. ĞĞ°Ğ¿Ğ¸ÑˆĞ¸ /help")
     except Exception as e:
         logger.exception("handle_update error: %s", e)
 
@@ -213,3 +213,4 @@ def handle_update(update: Dict[str, Any]) -> None:
 async def process_update(update: Dict[str, Any]) -> Dict[str, Any]:
     handle_update(update)
     return {"ok": True}
+

@@ -25,3 +25,4 @@ class TradeRepository:
     def last(self, limit: int = 50) -> List[Trade]: ...
 
 
+

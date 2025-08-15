@@ -124,3 +124,4 @@ def aggregate_features(cfg, exchange, symbol: Optional[str] = None, timeframe: O
     return {"indicators": indicators, "market": market, "rule_score": rule_score}
 
 
+

@@ -38,3 +38,4 @@ def dxy_change_pct_1d(timeout: float = 6.0) -> Optional[float]:
     return (last / prev - 1.0) * 100.0
 
 
+

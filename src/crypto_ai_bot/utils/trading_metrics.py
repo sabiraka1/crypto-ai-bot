@@ -416,3 +416,4 @@ def calculate_all_metrics(trades_df: pd.DataFrame) -> Dict[str, Any]:
     return metrics
 
 
+

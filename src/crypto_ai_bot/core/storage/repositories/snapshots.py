@@ -21,3 +21,4 @@ class SnapshotRepository:
     def list(self, symbol: str, timeframe: str, limit: int = 200) -> List[Snapshot]: ...
 
 
+
