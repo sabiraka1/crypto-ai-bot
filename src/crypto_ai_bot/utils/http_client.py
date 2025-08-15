@@ -77,3 +77,4 @@ def http_get(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, An
 
 def http_post(url: str, json_body: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     return get_http_client().post_json(url, json_body, headers=headers)
+

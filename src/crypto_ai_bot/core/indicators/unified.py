@@ -142,3 +142,4 @@ def calculate_all_indicators(df, *, ema_fast=12, ema_slow=26, rsi_period=14,
         "macd_hist": _last(macd_hist_s),
         "atr": _last(atr_s),
     }
+

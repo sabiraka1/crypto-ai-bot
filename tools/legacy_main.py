@@ -33,8 +33,8 @@ from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.state_manager import StateManager
 from crypto_ai_bot.core.events import EventBus
 from crypto_ai_bot.trading.exchange_client import ExchangeClient
-from crypto_ai_bot.trading.position_manager import PositionManager
-from crypto_ai_bot.trading.risk_manager import RiskManager
+from crypto_ai_bot.core.positions.manager import PositionManager
+from crypto_ai_bot.core.risk.manager import RiskManager
 
 # РџРѕРґРґРµСЂР¶РёРј РѕР±Р° РІР°СЂРёР°РЅС‚Р° РЅР°Р·РІР°РЅРёСЏ РґР°С‚Р°РєР»Р°СЃСЃР° Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ (Deps РёР»Рё TradingDeps)
 try:
@@ -129,6 +129,7 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+
 
 
 

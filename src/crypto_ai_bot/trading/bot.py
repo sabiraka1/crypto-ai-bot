@@ -21,9 +21,9 @@ try:
     from crypto_ai_bot.core.signals.validator import validate_features
     from crypto_ai_bot.core.signals.policy import decide as policy_decide
 except Exception:  # совместимость, если core/ ещё не полностью внедрён
-    from crypto_ai_bot.trading.signals.sinyal_skorlayici import aggregate_features  # type: ignore
-    from crypto_ai_bot.trading.signals.signal_validator import validate_features  # type: ignore
-    from crypto_ai_bot.trading.signals.entry_policy import decide as policy_decide  # type: ignore
+    from crypto_ai_bot.core.signals.aggregator import aggregate_features  # type: ignore
+    from crypto_ai_bot.core.signals.validator import validate_features  # type: ignore
+    from crypto_ai_bot.core.signals.policy import decide as policy_decide  # type: ignore
 
 log = logging.getLogger(__name__)
 
@@ -232,4 +232,5 @@ class TradingBot:
 def get_bot(exchange: ExchangeClient, notifier, settings: Optional[Settings] = None) -> TradingBot:
     cfg = settings or Settings.build()
     return TradingBot.get_instance(exchange=exchange, notifier=notifier, settings=cfg)
+
 

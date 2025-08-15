@@ -57,3 +57,4 @@ class CSVHandler:
         win_rate = (wins / total) if total else 0.0
         return TradeStats(total, wins, losses, pnl_sum, win_rate, last_ts)
 
+
