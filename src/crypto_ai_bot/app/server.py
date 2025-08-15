@@ -1,192 +1,207 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import json
-import logging
 import os
-from typing import Optional, Dict, Any
+import logging
+import time
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request
+import requests
+from fastapi import FastAPI, Request, Header
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-# Единый конфиг
-from crypto_ai_bot.core.settings import Settings
-
-# Биржевой клиент и единая точка входа для бота
-from crypto_ai_bot.trading.exchange_client import ExchangeClient
-from crypto_ai_bot.trading.bot import get_bot
-
-# Телеграм-логика (через модуль бота); используем если доступна
 try:
-    from crypto_ai_bot.telegram import bot as tgbot  # ожидаем tg_send_message, process_update
-except Exception:  # модуль может отсутствовать при некоторых сборках
-    tgbot = None  # type: ignore
+    import ccxt
+except Exception:  # pragma: no cover
+    ccxt = None
 
-logger = logging.getLogger("crypto_ai_bot.app.server")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+# Import Telegram update dispatcher from our bot module
+try:
+    from crypto_ai_bot.telegram.bot import process_update
+except Exception:
+    process_update = None  # graceful if telegram module missing
+
+# Import Trading bot
+from crypto_ai_bot.trading.bot import get_bot, Settings
+
+# ------------ logging ------------
+logger = logging.getLogger(__name__)
+logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
+
+app = FastAPI(title="crypto-ai-bot", version=os.getenv("APP_VERSION", "1.0.0"))
+_start_ts = time.time()
 
 
-app = FastAPI(title="crypto-ai-bot", version="1.0.0")
-
-# Глобальные singletons
-_settings: Optional[Settings] = None
-_exchange: Optional[ExchangeClient] = None
-
-
-def _set_webhook_if_possible(cfg: Settings) -> tuple[bool, Any]:
-    """
-    Ставит Telegram webhook, если есть токен и PUBLIC_URL.
-    Возвращает (ok, resp_or_error).
-    """
-    token = cfg.TELEGRAM_BOT_TOKEN
-    public_url = cfg.PUBLIC_URL
-    if not token or not public_url:
-        return False, "skip (no token or PUBLIC_URL)"
-
-    api_url = f"https://api.telegram.org/bot{token}/setWebhook"
-    payload = {
-        "url": f"{public_url}/telegram",
-        "secret_token": cfg.TELEGRAM_SECRET_TOKEN or "",
-        "drop_pending_updates": True,
-    }
-    try:
-        import requests  # используем, если есть в окружении
-        r = requests.post(api_url, json=payload, timeout=10)
-        ok = r.ok
+# ------------ helpers ------------
+def send_telegram_message(text: str):
+    token = os.getenv("BOT_TOKEN")
+    chat_ids = os.getenv("ADMIN_CHAT_IDS") or ""
+    if not token or not chat_ids:
+        logger.info(f"[TELEGRAM DISABLED] {text}")
+        return
+    for chat in chat_ids.split(","):
+        chat = chat.strip()
+        if not chat:
+            continue
         try:
-            data = r.json()
-        except Exception:
-            data = {"text": r.text}
-        return ok, data
-    except Exception as e:
-        logger.warning("setWebhook request failed: %s", e)
-        return False, str(e)
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            data = {
+                "chat_id": chat,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            requests.post(url, data=data, timeout=10)
+        except Exception as e:
+            logger.warning(f"telegram send failed: {e}")
 
 
-def _get_webhook_info(cfg: Settings) -> tuple[bool, Any]:
-    token = cfg.TELEGRAM_BOT_TOKEN
-    if not token:
-        return False, "skip (no token)"
-    url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
+class ExchangeAdapter:
+    def __init__(self):
+        key = os.getenv("GATE_API_KEY") or os.getenv("API_KEY")
+        secret = os.getenv("GATE_API_SECRET") or os.getenv("API_SECRET")
+        self._ex = None
+        if ccxt:
+            self._ex = ccxt.gateio(
+                {
+                    "apiKey": key,
+                    "secret": secret,
+                    "enableRateLimit": True,
+                    "timeout": 20000,
+                    "options": {"defaultType": "spot"},
+                }
+            )
+
+    def get_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
+        if not self._ex:
+            raise RuntimeError("ccxt not available")
+        return self._ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+    def fetch_ticker(self, symbol: str):
+        if not self._ex:
+            return {}
+        return self._ex.fetch_ticker(symbol)
+
+    def create_order(self, symbol: str, type_: str, side: str, amount: float, params: Optional[Dict[str, Any]] = None):
+        if not self._ex:
+            raise RuntimeError("ccxt not available")
+        params = params or {}
+        if "text" not in params:
+            import uuid
+
+            params["text"] = f"bot-{uuid.uuid4().hex[:12]}"
+        return self._ex.create_order(symbol, type_, side, amount, None, params)
+
+
+# ------------ lifecycle ------------
+_bot_started = False
+_exchange: Optional[ExchangeAdapter] = None
+
+
+def _webhook_target_url() -> Optional[str]:
+    base = os.getenv("PUBLIC_URL", "").rstrip("/")
+    if not base:
+        return None
+    return f"{base}/telegram/webhook"
+
+
+def _get_webhook_info(token: str) -> Dict[str, Any]:
     try:
-        import requests
-        r = requests.get(url, timeout=10)
-        ok = r.ok
-        try:
-            data = r.json()
-        except Exception:
-            data = {"text": r.text}
-        return ok, data
+        r = requests.get(f"https://api.telegram.org/bot{token}/getWebhookInfo", timeout=10)
+        return r.json()
     except Exception as e:
-        logger.warning("getWebhookInfo failed: %s", e)
-        return False, str(e)
+        logger.warning(f"getWebhookInfo failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 
-def send_telegram_message(text: str) -> None:
-    """
-    Унифицированный notifier для торгового бота.
-    Использует tg_send_message(chat_id, text), если модуль доступен.
-    """
+def _set_webhook(token: str, url: str, secret: Optional[str]) -> Dict[str, Any]:
     try:
-        if tgbot is None:
-            return
-        if _settings and getattr(_settings, "TELEGRAM_CHAT_ID", None):
-            tgbot.tg_send_message(_settings.TELEGRAM_CHAT_ID, text)  # type: ignore[attr-defined]
+        data = {"url": url}
+        if secret:
+            data["secret_token"] = secret
+        r = requests.post(f"https://api.telegram.org/bot{token}/setWebhook", data=data, timeout=10)
+        return r.json()
     except Exception as e:
-        logger.warning("tg notify failed: %s", e)
+        logger.warning(f"setWebhook failed: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 @app.on_event("startup")
-def on_startup() -> None:
-    global _settings, _exchange
-    # Единый конфиг
-    _settings = Settings.build()
-    logger.info("Startup with SYMBOL=%s TIMEFRAME=%s", _settings.SYMBOL, _settings.TIMEFRAME)
+def on_startup():
+    global _bot_started, _exchange
+    logger.info("Application startup...")
 
-    # Создаём клиент биржи один раз
-    if _exchange is None:
-        _exchange = ExchangeClient(_settings)
+    # start trading bot (single instance)
+    if not _exchange:
+        _exchange = ExchangeAdapter()
+    if not _bot_started and int(os.getenv("ENABLE_TRADING", "1")) == 1:
+        bot = get_bot(exchange=_exchange, notifier=send_telegram_message, settings=Settings.build())
+        bot.start()
+        _bot_started = True
+        logger.info("Trading bot started")
+    else:
+        logger.info("Trading bot NOT started (already started or disabled)")
 
-    # Инициализируем торговый бот
-    try:
-        get_bot(exchange=_exchange, notifier=send_telegram_message, settings=_settings)  # type: ignore[arg-type]
-    except Exception as e:
-        logger.error("Trading bot init failed — %s", e)
-
-    # Ставим webhook (best-effort)
-    try:
-        ok, resp = _set_webhook_if_possible(_settings)
-        logger.info("setWebhook(%s/telegram) → ok=%s resp=%s", _settings.PUBLIC_URL, ok, resp)
-        ok2, info = _get_webhook_info(_settings)
-        logger.info("getWebhookInfo → ok=%s info=%s", ok2, info)
-    except Exception as e:
-        logger.warning("Webhook check failed: %s", e)
-
-
-@app.get("/")
-def root() -> Dict[str, Any]:
-    return {
-        "name": "crypto-ai-bot",
-        "version": app.version,
-        "symbol": Settings.SYMBOL,
-        "timeframe": Settings.TIMEFRAME,
-        "public_url": os.getenv("PUBLIC_URL", ""),
-        "ok": True,
-    }
+    # auto webhook
+    if int(os.getenv("ENABLE_WEBHOOK", "0")) == 1:
+        token = os.getenv("BOT_TOKEN")
+        secret = os.getenv("TELEGRAM_SECRET_TOKEN")
+        target = _webhook_target_url()
+        if token and target:
+            info = _get_webhook_info(token)
+            current_url = (info.get("result") or {}).get("url") if info.get("ok") else None
+            logger.info(f"[webhook] getWebhookInfo ok={info.get('ok')} url={current_url}")
+            if current_url != target:
+                res = _set_webhook(token, target, secret)
+                logger.info(f"[webhook] setWebhook result ok={res.get('ok')}")
+        else:
+            logger.info("[webhook] skipped (no BOT_TOKEN or PUBLIC_URL)")
 
 
-@app.get("/healthz")
-def healthz() -> Dict[str, Any]:
-    # Минимальная проверка «живости»: конфиг загрузился
-    return {"ok": True, "cfg_loaded": _settings is not None}
+# ------------ routes ------------
+@app.get("/health")
+def health():
+    return {"ok": True, "version": app.version, "web_concurrency": os.getenv("WEB_CONCURRENCY", "1")}
+
+
+@app.get("/alive")
+def alive():
+    return {"alive": True}
 
 
 @app.get("/metrics")
-def metrics() -> PlainTextResponse:
-    # Простейшие метрики (без зависимостей от prometheus_client)
+def metrics():
+    # minimal Prometheus metrics
+    uptime = int(time.time() - _start_ts)
     lines = [
-        "# HELP app_up 1 if app is up",
-        "# TYPE app_up gauge",
-        "app_up 1",
+        f'app_info{{version="{app.version}"}} 1',
+        f"app_uptime_seconds {uptime}",
     ]
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+    return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
 
 
-@app.get("/config")
-def config_endpoint() -> JSONResponse:
-    cfg = _settings or Settings.build()
-    hidden = {"TELEGRAM_BOT_TOKEN"}  # токен не светим
-    data = {k: (None if k in hidden else getattr(cfg, k)) for k in cfg.__annotations__.keys()}  # type: ignore
-    return JSONResponse(data)
+@app.get("/telegram/ping")
+def telegram_ping():
+    send_telegram_message("🔔 server ping")
+    return {"ok": True}
 
 
-@app.post("/telegram")
-async def telegram_webhook(request: Request) -> JSONResponse:
-    """
-    Вебхук для Telegram:
-    - проверяем секрет из заголовка X-Telegram-Bot-Api-Secret-Token;
-    - пробрасываем апдейт в telegram.bot.process_update(payload).
-    """
-    cfg = _settings or Settings.build()
-    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    if cfg.TELEGRAM_SECRET_TOKEN and secret != cfg.TELEGRAM_SECRET_TOKEN:
-        return JSONResponse({"ok": False, "description": "bad secret"}, status_code=403)
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)):
+    # optional secret token enforcement
+    expected = os.getenv("TELEGRAM_SECRET_TOKEN")
+    if expected:
+        if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != expected:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
 
     try:
         payload = await request.json()
     except Exception:
         payload = {}
-
-    try:
-        if tgbot and hasattr(tgbot, "process_update"):
-            # Совместимость: process_update может быть sync/async
-            res = tgbot.process_update(payload)  # type: ignore[attr-defined]
-            if hasattr(res, "__await__"):
-                await res  # если корутина
-        else:
-            logger.debug("tgbot.process_update is not available — skip")
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        logger.exception("process_update error")
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
+    logger.info(f"[WEBHOOK] keys={list(payload.keys())}")
+    if process_update is not None:
+        try:
+            await process_update(payload)
+        except Exception as e:
+            logger.exception(f"process_update error: {e}")
+    return JSONResponse({"ok": True})
