@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 import csv, math
 from dataclasses import dataclass
@@ -38,7 +38,7 @@ class CSVHandler:
 
         with p.open("r", newline="", encoding="utf-8") as f:
             r = csv.DictReader(f)
-            # ожидаемые поля: ts, pnl
+            # Ğ¾Ğ¶Ğ¸Ğ´Ğ°ĞµĞ¼Ñ‹Ğµ Ğ¿Ğ¾Ğ»Ñ: ts, pnl
             for row in r:
                 total += 1
                 pnl = float(row.get("pnl", "0") or 0)
@@ -56,3 +56,4 @@ class CSVHandler:
 
         win_rate = (wins / total) if total else 0.0
         return TradeStats(total, wins, losses, pnl_sum, win_rate, last_ts)
+

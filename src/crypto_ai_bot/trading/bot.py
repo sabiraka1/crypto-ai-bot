@@ -232,3 +232,4 @@ class TradingBot:
 def get_bot(exchange: ExchangeClient, notifier, settings: Optional[Settings] = None) -> TradingBot:
     cfg = settings or Settings.build()
     return TradingBot.get_instance(exchange=exchange, notifier=notifier, settings=cfg)
+

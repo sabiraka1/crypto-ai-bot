@@ -289,3 +289,4 @@ def process_update(update: Dict[str, Any]) -> None:
 
     except Exception as e:
         logger.exception("process_update failed: %s", e)
+
