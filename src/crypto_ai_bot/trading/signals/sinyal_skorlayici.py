@@ -1,138 +1,128 @@
-﻿
-# -*- coding: utf-8 -*-
+﻿# src/crypto_ai_bot/trading/signals/sinyal_skorlayici.py
 from __future__ import annotations
 
-# crypto_ai_bot/sinyal_skorlayici.py
-# ----------------------------------
-# РџСЂРѕСЃС‚Р°СЏ, РЅРѕ РєРѕСЂСЂРµРєС‚РЅР°СЏ С‚СЂРµРЅРёСЂРѕРІРєР° РјРѕРґРµР»Рё СЃ TimeSeriesSplit (walk-forward).
-# - Р—Р°РіСЂСѓР¶Р°РµС‚ OHLCV С‡РµСЂРµР· ccxt (СЂРµР°Р»СЊРЅС‹Рµ РґР°РЅРЅС‹Рµ) РїРѕ SYMBOL/TIMEFRAME/LOOKBACK
-# - РЎС‚СЂРѕРёС‚ РїСЂРёР·РЅР°РєРё РёР· crypto_ai_bot.core.indicators.unified
-# - Р¦РµР»СЊ: Р±СѓРґРµС‚ Р»Рё РґРѕС…РѕРґРЅРѕСЃС‚СЊ Р·Р° РіРѕСЂРёР·РѕРЅС‚РѕРј H > T% РґРѕ СѓС…РѕРґР° РЅРёР¶Рµ -S% (СѓРїСЂРѕС‰С‘РЅРЅР°СЏ РјРµС‚РєР°)
-# - РњРѕРґРµР»СЊ: LogisticRegression (scikit-learn) + СЃРѕС…СЂР°РЅРµРЅРёРµ РІ models/
-# - Р’РѕР·РІСЂР°С‰Р°РµС‚ РєРѕСЂРѕС‚РєРёР№ С‚РµРєСЃС‚РѕРІС‹Р№ РѕС‚С‡С‘С‚
-
-import os
+import math
 from typing import Dict, Any
+
 import numpy as np
 import pandas as pd
 
 try:
-    import ccxt
+    # Пытаемся использовать единый набор индикаторов
+    from crypto_ai_bot.core.indicators import unified as I  # type: ignore
 except Exception:
-    ccxt = None
-
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, precision_recall_fscore_support
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-import joblib
-
-from crypto_ai_bot.core.indicators.unified import calculate_all_indicators
+    I = None  # fallback ниже
 
 
-def _exchange():
-    if not ccxt:
-        raise RuntimeError("ccxt not available")
-    key = os.getenv("GATE_API_KEY") or os.getenv("API_KEY")
-    secret = os.getenv("GATE_API_SECRET") or os.getenv("API_SECRET")
-    return ccxt.gateio({
-        "apiKey": key,
-        "secret": secret,
-        "enableRateLimit": True,
-        "timeout": 20000,
-        "options": {"defaultType": "spot"}
-    })
+# -------------------- Fallback-индикаторы (локально, только если нет unified) --------------------
+def _ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    up = (delta.clip(lower=0)).rolling(period).mean()
+    down = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = up / (down.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def _macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    ema_fast = _ema(series, fast)
+    ema_slow = _ema(series, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low).abs(),
+                    (high - prev_close).abs(),
+                    (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
 
 
-def _load_ohlcv(symbol: str, timeframe: str, limit: int = 1500) -> pd.DataFrame:
-    ex = _exchange()
-    data = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=["time","open","high","low","close","volume"])
-    df["time"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-    df.set_index("time", inplace=True)
-    return df
+# -------------------- Хелперы --------------------
+def _last(x: pd.Series | None) -> float | None:
+    if x is None or len(x) == 0:
+        return None
+    v = x.iloc[-1]
+    try:
+        fv = float(v)
+    except Exception:
+        return None
+    if math.isfinite(fv):
+        return fv
+    return None
+
+def _safe_ema(series: pd.Series, period: int) -> pd.Series:
+    if I and hasattr(I, "ema"):
+        return I.ema(series, period)  # type: ignore[attr-defined]
+    return _ema(series, period)
+
+def _safe_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    if I and hasattr(I, "rsi"):
+        return I.rsi(series, period)  # type: ignore[attr-defined]
+    return _rsi(series, period)
+
+def _safe_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    if I and hasattr(I, "macd"):
+        return I.macd(series, fast, slow, signal)  # type: ignore[attr-defined]
+    return _macd(series, fast, slow, signal)
+
+def _safe_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    if I and hasattr(I, "atr"):
+        return I.atr(df, period)  # type: ignore[attr-defined]
+    return _atr(df, period)
 
 
-def _make_labels(df: pd.DataFrame, horizon: int = 8, up_pct: float = 0.6, down_pct: float = 0.6) -> pd.Series:
-    # РџСЂРѕСЃС‚Р°СЏ РіРѕСЂРёР·РѕРЅС‚-РјРµС‚РєР°: 1, РµСЃР»Рё РІ С‚РµС‡РµРЅРёРµ horizon Р±Р°СЂРѕРІ РІРїРµСЂС‘Рґ С†РµРЅР° РїРѕРґРЅРёРјРµС‚СЃСЏ РЅР° up_pct% СЂР°РЅСЊС€Рµ,
-    # С‡РµРј РѕРїСѓСЃС‚РёС‚СЃСЏ РЅР° down_pct%; РёРЅР°С‡Рµ 0.
-    c = df["close"].values
-    up_thr = 1.0 + up_pct/100.0
-    dn_thr = 1.0 - down_pct/100.0
-    y = np.zeros(len(c), dtype=int)
-    for i in range(len(c)-horizon):
-        base = c[i]
-        up_hit = dn_hit = None
-        for j in range(1, horizon+1):
-            r = c[i+j] / base
-            if up_hit is None and r >= up_thr: up_hit = j
-            if dn_hit is None and r <= dn_thr: dn_hit = j
-            if up_hit is not None and dn_hit is not None: break
-        y[i] = 1 if (up_hit is not None and (dn_hit is None or up_hit < dn_hit)) else 0
-    return pd.Series(y, index=df.index)
+# -------------------- Публичный API --------------------
+def aggregate_features(df: pd.DataFrame, settings) -> Dict[str, Any]:
+    """
+    Единый сбор фич без зависимости от calculate_all_indicators.
+    Возвращает минимум, чтобы принимать решение:
+      - ema_fast / ema_slow (по close)
+      - rsi14
+      - macd_hist
+      - atr
+    """
+    close = df["close"].astype(float)
 
-
-def train_model() -> str:
-    symbol = os.getenv("SYMBOL", "BTC/USDT")
-    timeframe = os.getenv("TIMEFRAME", "15m")
-    lookback = int(os.getenv("TRAIN_LOOKBACK", "1200"))
-    horizon = int(os.getenv("TRAIN_HORIZON", "8"))
-    up_pct = float(os.getenv("TRAIN_UP_PCT", "0.6"))
-    down_pct = float(os.getenv("TRAIN_DOWN_PCT", "0.6"))
-
-    df = _load_ohlcv(symbol, timeframe, limit=lookback)
-    feats = calculate_all_indicators(df)
-    feats = feats.dropna().copy()
-
-    # Р¦РµР»СЊ
-    y = _make_labels(feats, horizon=horizon, up_pct=up_pct, down_pct=down_pct)
-    y = y.reindex(feats.index).fillna(0).astype(int)
-
-    # РњР°С‚СЂРёС†Р° РїСЂРёР·РЅР°РєРѕРІ
-    X = feats[["rsi","macd_hist","ema9","ema21","ema20","ema50","atr","volume_ratio"]].astype(float).values
-
-    # Walk-forward
-    tscv = TimeSeriesSplit(n_splits=5)
-    aucs = []; prs = []; recs = []; f1s = []
-
-    model = Pipeline([
-        ("scaler", StandardScaler(with_mean=False)),
-        ("clf", LogisticRegression(max_iter=200))
-    ])
-
-    for train_idx, test_idx in tscv.split(X):
-        Xtr, Xte = X[train_idx], X[test_idx]
-        ytr, yte = y.iloc[train_idx], y.iloc[test_idx]
-        model.fit(Xtr, ytr)
-        proba = model.predict_proba(Xte)[:,1]
-        pred = (proba >= 0.5).astype(int)
-        aucs.append(roc_auc_score(yte, proba))
-        pr, rc, f1, _ = precision_recall_fscore_support(yte, pred, average="binary", zero_division=0)
-        prs.append(pr); recs.append(rc); f1s.append(f1)
-
-    # РћР±СѓС‡Р°РµРј РЅР° РІСЃС‘Рј Рё СЃРѕС…СЂР°РЅСЏРµРј
-    model.fit(X, y.values)
-    model_dir = os.getenv("MODEL_DIR", "models")
-    os.makedirs(model_dir, exist_ok=True)
-    out_path = os.path.join(model_dir, "signal_model.joblib")
-    joblib.dump(model, out_path)
-
-    msg = (
-        f"MODEL trained for {symbol} {timeframe}\n"
-        f"AUC(meanВ±std): {np.mean(aucs):.3f}В±{np.std(aucs):.3f}\n"
-        f"P/R/F1: {np.mean(prs):.2f}/{np.mean(recs):.2f}/{np.mean(f1s):.2f}\n"
-        f"Saved: {out_path}"
+    ema_fast = _safe_ema(close, getattr(settings, "EMA_FAST", 12))
+    ema_slow = _safe_ema(close, getattr(settings, "EMA_SLOW", 26))
+    rsi14 = _safe_rsi(close, getattr(settings, "RSI_PERIOD", 14))
+    _, _, macd_hist = _safe_macd(
+        close,
+        getattr(settings, "MACD_FAST", 12),
+        getattr(settings, "MACD_SLOW", 26),
+        getattr(settings, "MACD_SIGNAL", 9),
     )
-    return msg
+    atr_s = _safe_atr(df, getattr(settings, "ATR_PERIOD", 14))
+
+    feats = {
+        "ema_fast": _last(ema_fast),
+        "ema_slow": _last(ema_slow),
+        "rsi14": _last(rsi14),
+        "macd_hist": _last(macd_hist),
+        "atr": _last(atr_s),
+    }
+    return feats
 
 
-
-
-
-
-
-
-
-
-
+def validate_features(features: Dict[str, Any], *_args, **_kwargs) -> Dict[str, Any]:
+    """
+    Простейшая валидация: убираем None/NaN и оставляем только числовые значения.
+    Сигнатура гибкая для обратной совместимости.
+    """
+    out: Dict[str, Any] = {}
+    for k, v in features.items():
+        try:
+            fv = float(v)
+            if math.isfinite(fv):
+                out[k] = fv
+        except Exception:
+            continue
+    return out
