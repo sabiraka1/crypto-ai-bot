@@ -1,7 +1,4 @@
-$path = "src\crypto_ai_bot\telegram\bot.py"
-New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
-Set-Content -Path $path -Encoding UTF8 -Value @'
-# Telegram bot adapter (clean, unified).
+﻿# Telegram bot adapter (clean, unified).
 
 from __future__ import annotations
 
@@ -292,6 +289,3 @@ def process_update(update: Dict[str, Any]) -> None:
 
     except Exception as e:
         logger.exception("process_update failed: %s", e)
-'@
-git add $path
-git commit -m "telegram: clean bot adapter (no os.getenv, unified http client/indicators, commands & webhook)"
