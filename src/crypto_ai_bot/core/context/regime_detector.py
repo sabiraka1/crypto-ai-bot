@@ -1,0 +1,11 @@
+﻿# Market regime detector 
+
+
+
+
+
+
+
+
+
+
