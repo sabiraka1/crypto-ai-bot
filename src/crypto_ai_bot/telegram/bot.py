@@ -1,234 +1,297 @@
-# -*- coding: utf-8 -*-
-# см. примечания в шапке файла
+$path = "src\crypto_ai_bot\telegram\bot.py"
+New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+Set-Content -Path $path -Encoding UTF8 -Value @'
+# Telegram bot adapter (clean, unified).
+
 from __future__ import annotations
 
 import io
-import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
+import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-try:
-    import ccxt
-except Exception:
-    ccxt = None
+# Headless backend for servers
+import matplotlib
+matplotlib.use("Agg")  # type: ignore
+import matplotlib.pyplot as plt  # type: ignore
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils.http_client import http_get, http_post
+from crypto_ai_bot.core.signals.aggregator import aggregate_features
+from crypto_ai_bot.utils.http_client import get_http_client
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-def _is_admin(chat_id: int, cfg: Settings) -> bool:
-    if not cfg.ADMIN_CHAT_IDS:
-        return False
-    ids = {s.strip() for s in str(cfg.ADMIN_CHAT_IDS).split(",") if s.strip()}
-    return str(chat_id) in ids
+# ---- module state ----
+_cfg: Optional[Settings] = None
+_chat_id: Optional[str] = None
+_token: Optional[str] = None
+_base: Optional[str] = None
+_exchange = None   # ccxt-like client injected via set_providers()
 
-def _api_url(cfg: Settings, method: str) -> str:
-    return f"https://api.telegram.org/bot{cfg.BOT_TOKEN}/{method}"
 
-def tg_send_message(chat_id: int, text: str, parse_mode: str = "HTML", cfg: Optional[Settings] = None) -> bool:
-    cfg = cfg or Settings.build()
+# -------- init / DI --------
+def init_telegram(cfg: Settings, chat_id: Optional[str] = None) -> None:
+    """Initialize token/base/chat from Settings (one time per process)."""
+    global _cfg, _chat_id, _token, _base
+    _cfg = cfg
+    _chat_id = chat_id or cfg.TELEGRAM_CHAT_ID
+    _token = cfg.TELEGRAM_BOT_TOKEN
+    if not _token:
+        logger.warning("Telegram token is empty; sending disabled.")
+    _base = f"https://api.telegram.org/bot{_token}" if _token else None
+    logger.info("Telegram init: chat=%s", _chat_id)
+
+
+def set_providers(exchange) -> None:
+    """Inject exchange client to allow /status and /chart."""
+    global _exchange
+    _exchange = exchange
+
+
+# -------- small helpers --------
+def _api_url(method: str) -> str:
+    if not _base:
+        raise RuntimeError("Telegram is not initialized")
+    return f"{_base}/{method}"
+
+
+def _chunk_text(text: str, limit: int = 4096) -> List[str]:
+    return [text[i:i+limit] for i in range(0, len(text), limit)] or [""]
+
+
+# -------- HTTP wrappers (unified client) --------
+def _post_json(url: str, json: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     try:
-        url = _api_url(cfg, "sendMessage")
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode, "disable_web_page_preview": True}
-        r = http_post(url, json=payload, timeout=10)
-        ok = bool(r.ok and r.json().get("ok"))
-        if not ok:
-            log.warning("tg_send_message failed: %s", r.text)
-        return ok
+        c = get_http_client()
+        resp = c.post_json(url, json=json, timeout=15)
+        return bool(resp.get("ok", False)), resp
     except Exception as e:
-        log.exception("tg_send_message error: %s", e)
-        return False
+        logger.exception("Telegram POST failed: %s", e)
+        return False, {"ok": False, "error": str(e)}
 
-def tg_send_photo(chat_id: int, image_bytes: bytes, caption: Optional[str] = None, cfg: Optional[Settings] = None) -> bool:
-    cfg = cfg or Settings.build()
+
+def _get_json(url: str, params: Dict[str, Any] | None = None) -> Tuple[bool, Dict[str, Any]]:
     try:
-        url = _api_url(cfg, "sendPhoto")
-        files = {"photo": ("chart.png", image_bytes)}
-        data = {"chat_id": str(chat_id)}
-        if caption:
-            data["caption"] = caption
-            data["parse_mode"] = "HTML"
-        r = http_post(url, data=data, files=files, timeout=15)
-        ok = bool(r.ok and r.json().get("ok"))
-        if not ok:
-            log.warning("tg_send_photo failed: %s", r.text)
-        return ok
+        c = get_http_client()
+        resp = c.get_json(url, params=params or {}, timeout=15)
+        return bool(resp.get("ok", False)), resp
     except Exception as e:
-        log.exception("tg_send_photo error: %s", e)
-        return False
+        logger.exception("Telegram GET failed: %s", e)
+        return False, {"ok": False, "error": str(e)}
 
-def _cmd_help(_: Dict[str, Any], cfg: Settings) -> str:
-    admin_note = "\n\nАдминские:\n/setwebhook\n/getwebhook\n/delwebhook" if cfg.ADMIN_CHAT_IDS else ""
+
+# -------- public senders --------
+def tg_send_message(text: str,
+                    chat_id: Optional[str] = None,
+                    cfg: Optional[Settings] = None) -> Tuple[bool, Dict[str, Any]]:
+    cfg = cfg or _cfg
+    cid = chat_id or _chat_id or (cfg.TELEGRAM_CHAT_ID if cfg else None)
+    if not _token or not _base or not cid:
+        logger.warning("tg_send_message skipped: token/base/chat missing")
+        return False, {"ok": False, "error": "not-initialized"}
+
+    ok_total = True
+    last: Dict[str, Any] = {}
+    for chunk in _chunk_text(text):
+        ok, resp = _post_json(_api_url("sendMessage"),
+                              {"chat_id": cid, "text": chunk, "parse_mode": "HTML"})
+        ok_total &= ok
+        last = resp
+    return ok_total, last
+
+
+def tg_send_photo(photo_bytes: bytes,
+                  caption: str = "",
+                  chat_id: Optional[str] = None,
+                  cfg: Optional[Settings] = None) -> Tuple[bool, Dict[str, Any]]:
+    cfg = cfg or _cfg
+    cid = chat_id or _chat_id or (cfg.TELEGRAM_CHAT_ID if cfg else None)
+    if not _token or not _base or not cid:
+        logger.warning("tg_send_photo skipped: token/base/chat missing")
+        return False, {"ok": False, "error": "not-initialized"}
+
+    try:
+        c = get_http_client()
+        files = {"photo": ("chart.png", photo_bytes, "image/png")}
+        data = {"chat_id": cid, "caption": caption}
+        resp = c.post_multipart(_api_url("sendPhoto"), data=data, files=files, timeout=30)
+        return bool(resp.get("ok", False)), resp
+    except Exception as e:
+        logger.exception("tg_send_photo failed: %s", e)
+        return False, {"ok": False, "error": str(e)}
+
+
+# -------- webhook helpers --------
+def set_webhook() -> Tuple[bool, Dict[str, Any]]:
+    if not _cfg or not _base:
+        return False, {"ok": False, "error": "not-initialized"}
+    if not _cfg.PUBLIC_URL:
+        return False, {"ok": False, "error": "PUBLIC_URL is empty"}
+
+    url = f"{_cfg.PUBLIC_URL}/telegram"
+    payload = {
+        "url": url,
+        "secret_token": _cfg.TELEGRAM_SECRET_TOKEN or "",
+        # "allowed_updates": ["message", "edited_message", "callback_query"],
+    }
+    return _post_json(_api_url("setWebhook"), payload)
+
+
+def get_webhook() -> Tuple[bool, Dict[str, Any]]:
+    if not _base:
+        return False, {"ok": False, "error": "not-initialized"}
+    return _get_json(_api_url("getWebhookInfo"))
+
+
+def del_webhook() -> Tuple[bool, Dict[str, Any]]:
+    if not _base:
+        return False, {"ok": False, "error": "not-initialized"}
+    return _post_json(_api_url("deleteWebhook"), {"drop_pending_updates": True})
+
+
+# -------- commands --------
+def _cmd_help() -> str:
     return (
-        "<b>Доступные команды</b>\n"
-        "/help — справка\n"
-        "/status — статус и базовые метрики\n"
-        "/chart — график OHLCV + краткий обзор\n"
-        "/train — обучить модель (заглушка)\n"
-        "/errors — хвост логов"
-        f"{admin_note}"
+        "<b>Commands</b>\\n"
+        "/help — this help\\n"
+        "/status — price/EMA/RSI/MACD/ATR\\n"
+        "/chart — chart close+EMA20\\n"
+        "/train — run trainer (if exists)\\n"
+        "/errors — last log lines\\n"
+        "/setwebhook | /getwebhook | /delwebhook"
     )
 
-def _fetch_ticker_price(cfg: Settings) -> Optional[float]:
-    if not ccxt:
-        return None
+
+def _status_text() -> str:
+    if not (_cfg and _exchange):
+        return "❗️ Not initialized."
     try:
-        ex = getattr(ccxt, cfg.EXCHANGE_NAME)()
-        t = ex.fetch_ticker(cfg.SYMBOL)
-        return float(t.get("last") or t.get("close") or 0.0) or None
+        feats = aggregate_features(
+            exchange=_exchange,
+            symbol=_cfg.SYMBOL,
+            timeframe=_cfg.TIMEFRAME,
+            limit=_cfg.AGGREGATOR_LIMIT,
+            settings=_cfg,
+        )
+        price = feats.get("last_close") or feats.get("price") or "-"
+        rsi = feats.get("rsi")
+        macd = feats.get("macd")
+        macd_sig = feats.get("macd_signal") or feats.get("macd_signal_line")
+        atrp = feats.get("atr_percent")
+        ema20 = feats.get("ema20")
+        dir_hint = "🟢" if (macd and macd_sig and macd > macd_sig) else ("🔴" if (macd and macd_sig and macd < macd_sig) else "⚪️")
+        return (
+            f"<b>{_cfg.SYMBOL}</b> {_cfg.TIMEFRAME} {dir_hint}\\n"
+            f"Price: <b>{price}</b>\\n"
+            f"EMA20: {ema20}\\n"
+            f"RSI: {rsi}\\n"
+            f"MACD: {macd} / {macd_sig}\\n"
+            f"ATR%: {atrp}"
+        )
     except Exception as e:
-        log.warning("fetch_ticker failed: %s", e)
-        return None
+        logger.exception("status failed: %s", e)
+        return f"⚠️ status error: {e}"
 
-def _cmd_status(_: Dict[str, Any], cfg: Settings) -> str:
-    price = _fetch_ticker_price(cfg)
-    flags = []
-    flags.append("SAFE" if cfg.SAFE_MODE else "LIVE")
-    flags.append("PAPER" if cfg.PAPER_MODE else "REAL")
-    flags.append(f"W:{cfg.WEB_CONCURRENCY}")
-    price_txt = f"{price:.2f}" if price is not None else "n/a"
-    return (
-        f"<b>Status</b>\n"
-        f"Symbol: <code>{cfg.SYMBOL}</code>\n"
-        f"Timeframe: <code>{cfg.TIMEFRAME}</code>\n"
-        f"Price: <b>{price_txt}</b>\n"
-        f"Mode: {', '.join(flags)}"
-    )
 
-def _fetch_ohlcv(cfg: Settings, limit: int = 120) -> Optional[pd.DataFrame]:
-    if not ccxt:
-        return None
-    try:
-        ex = getattr(ccxt, cfg.EXCHANGE_NAME)()
-        ohlcv = ex.fetch_ohlcv(cfg.SYMBOL, timeframe=cfg.TIMEFRAME, limit=limit)
-        if not ohlcv:
-            return None
-        df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-        return df
-    except Exception as e:
-        log.warning("fetch_ohlcv failed: %s", e)
-        return None
+def _plot_chart_png(limit: int = 150) -> bytes:
+    if not (_cfg and _exchange):
+        raise RuntimeError("Not initialized")
+    candles = _exchange.fetch_ohlcv(_cfg.SYMBOL, _cfg.TIMEFRAME, limit=limit)
+    if not candles:
+        raise RuntimeError("No OHLCV")
 
-def _make_chart(df: pd.DataFrame, title: str = "") -> bytes:
-    fig = plt.figure(figsize=(9, 5), dpi=100)
-    ax = plt.gca()
-    ax.plot(df["ts"], df["close"], linewidth=1.5)
-    ax.set_title(title or "Chart")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Close")
+    df = pd.DataFrame(candles, columns=["ts","open","high","low","close","vol"])
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+
+    fig = plt.figure(figsize=(7, 3.2), dpi=140)
+    ax = fig.add_subplot(111)
+    ax.plot(df["close"].values, label="Close")
+    ax.plot(df["ema20"].values, label="EMA20")
+    ax.legend(loc="upper left")
+    ax.set_title(f"{_cfg.SYMBOL} {_cfg.TIMEFRAME}")
     ax.grid(True, alpha=0.3)
-    fig.autofmt_xdate()
+
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", bbox_inches="tight")
+    fig.tight_layout()
+    fig.savefig(buf, format="png")
     plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    return buf.getvalue()
 
-def _cmd_chart(_: Dict[str, Any], cfg: Settings) -> tuple[Optional[bytes], str]:
-    df = _fetch_ohlcv(cfg, limit=150)
-    if df is None or df.empty:
-        return None, "Не удалось получить данные OHLCV."
-    img = _make_chart(df, title=f"{cfg.SYMBOL} • {cfg.TIMEFRAME}")
-    last = df.iloc[-1]
-    caption = f"<b>{cfg.SYMBOL} • {cfg.TIMEFRAME}</b>\nClose: <b>{last['close']:.2f}</b>  Vol: <code>{int(last['volume'])}</code>"
-    return img, caption
 
-def _cmd_train(_: Dict[str, Any], __: Settings) -> str:
-    return "🚧 Train: старт обучения (заглушка). Позже свяжем с реальным пайплайном."
-
-def _cmd_errors(_: Dict[str, Any], cfg: Settings) -> str:
+def _tail_log_lines(n: int = 60) -> str:
     try:
-        from pathlib import Path
-        logs_dir = Path(cfg.LOGS_DIR or "logs")
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        files = sorted(logs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not files:
-            return "Логи не найдены."
-        path = files[0]
-        tail = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[-40:]
-        txt = "\n".join(tail)
-        return f"<b>Последние строки {path.name}</b>\n<code>{txt}</code>"
+        import os
+        path = getattr(_cfg, "LOG_FILE", None) if _cfg else None
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()[-n:]
+            return "<code>" + "".join(lines)[-4090:] + "</code>"
+    except Exception:
+        pass
+    return "No log file available."
+
+
+# -------- dispatcher --------
+def process_update(update: Dict[str, Any]) -> None:
+    """Handle Telegram update dict (message only for simplicity)."""
+    try:
+        msg = update.get("message") or update.get("edited_message")
+        if not msg:
+            return
+
+        chat = msg.get("chat", {})
+        chat_id = chat.get("id") or _chat_id
+        text = (msg.get("text") or "").strip()
+
+        if text.startswith("/"):
+            cmd = text.split()[0].lower()
+
+            if cmd == "/help":
+                tg_send_message(_cmd_help(), chat_id=chat_id); return
+
+            if cmd == "/status":
+                tg_send_message(_status_text(), chat_id=chat_id); return
+
+            if cmd == "/chart":
+                try:
+                    png = _plot_chart_png()
+                    tg_send_photo(png, caption="Chart", chat_id=chat_id)
+                except Exception as e:
+                    tg_send_message(f"⚠️ chart error: {e}", chat_id=chat_id)
+                return
+
+            if cmd == "/train":
+                try:
+                    from crypto_ai_bot.ml import trainer  # optional
+                    trainer.run_training(_cfg)  # type: ignore
+                    tg_send_message("✅ Training started.", chat_id=chat_id)
+                except Exception:
+                    tg_send_message("ℹ️ Trainer not available.", chat_id=chat_id)
+                return
+
+            if cmd == "/errors":
+                tg_send_message(_tail_log_lines(), chat_id=chat_id); return
+
+            if cmd == "/setwebhook":
+                ok, resp = set_webhook()
+                tg_send_message(f"setWebhook → ok={ok} resp={resp}", chat_id=chat_id); return
+
+            if cmd == "/getwebhook":
+                ok, resp = get_webhook()
+                tg_send_message(f"getWebhook → ok={ok} resp={resp}", chat_id=chat_id); return
+
+            if cmd == "/delwebhook":
+                ok, resp = del_webhook()
+                tg_send_message(f"deleteWebhook → ok={ok} resp={resp}", chat_id=chat_id); return
+
+        # fallback
+        if text:
+            tg_send_message("Type /help", chat_id=chat_id)
+
     except Exception as e:
-        log.warning("/errors failed: %s", e)
-        return "Не удалось прочитать логи."
-
-def _admin_set_webhook(chat_id: int, cfg: Settings) -> str:
-    if not _is_admin(chat_id, cfg):
-        return "Недостаточно прав."
-    if not cfg.PUBLIC_URL:
-        return "PUBLIC_URL не задан."
-    url = _api_url(cfg, "setWebhook")
-    payload = {"url": f"{cfg.PUBLIC_URL.rstrip('/')}/telegram", "secret_token": cfg.TELEGRAM_SECRET_TOKEN or ""}
-    r = http_post(url, json=payload, timeout=10)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"ok": False, "raw": r.text}
-    ok = j.get("ok", False)
-    return f"setWebhook → ok={ok}\n<code>{json.dumps(j, ensure_ascii=False)}</code>"
-
-def _admin_get_webhook(chat_id: int, cfg: Settings) -> str:
-    if not _is_admin(chat_id, cfg):
-        return "Недостаточно прав."
-    url = _api_url(cfg, "getWebhookInfo")
-    r = http_get(url, timeout=10)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"ok": False, "raw": r.text}
-    ok = j.get("ok", False)
-    return f"getWebhookInfo → ok={ok}\n<code>{json.dumps(j, ensure_ascii=False)}</code>"
-
-def _admin_del_webhook(chat_id: int, cfg: Settings) -> str:
-    if not _is_admin(chat_id, cfg):
-        return "Недостаточно прав."
-    url = _api_url(cfg, "deleteWebhook")
-    r = http_get(url, timeout=10)
-    try:
-        j = r.json()
-    except Exception:
-        j = {"ok": False, "raw": r.text}
-    ok = j.get("ok", False)
-    return f"deleteWebhook → ok={ok}\n<code>{json.dumps(j, ensure_ascii=False)}</code>"
-
-def process_update(payload: Dict[str, Any], cfg: Optional[Settings] = None) -> None:
-    cfg = cfg or Settings.build()
-    msg = payload.get("message") or payload.get("edited_message")
-    if not msg:
-        return
-    chat_id = int(msg["chat"]["id"])
-    text = str(msg.get("text") or "").strip()
-    if not text.startswith("/"):
-        tg_send_message(chat_id, "Используйте /help для списка команд.", cfg=cfg)
-        return
-    cmd, *args = text.split()
-    cmd = cmd.lower()
-    if cmd == "/help":
-        tg_send_message(chat_id, _cmd_help(msg, cfg), cfg=cfg); return
-    if cmd == "/status":
-        tg_send_message(chat_id, _cmd_status(msg, cfg), cfg=cfg); return
-    if cmd == "/chart":
-        img, cap = _cmd_chart(msg, cfg)
-        if img:
-            tg_send_photo(chat_id, img, caption=cap, cfg=cfg)
-        else:
-            tg_send_message(chat_id, cap, cfg=cfg)
-        return
-    if cmd == "/train":
-        tg_send_message(chat_id, _cmd_train(msg, cfg), cfg=cfg); return
-    if cmd == "/errors":
-        tg_send_message(chat_id, _cmd_errors(msg, cfg), cfg=cfg); return
-    if cmd == "/setwebhook":
-        tg_send_message(chat_id, _admin_set_webhook(chat_id, cfg), cfg=cfg); return
-    if cmd == "/getwebhook":
-        tg_send_message(chat_id, _admin_get_webhook(chat_id, cfg), cfg=cfg); return
-    if cmd == "/delwebhook":
-        tg_send_message(chat_id, _admin_del_webhook(chat_id, cfg), cfg=cfg); return
-    tg_send_message(chat_id, "Неизвестная команда. /help", cfg=cfg)
+        logger.exception("process_update failed: %s", e)
+'@
+git add $path
+git commit -m "telegram: clean bot adapter (no os.getenv, unified http client/indicators, commands & webhook)"
