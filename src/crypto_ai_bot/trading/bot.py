@@ -1,10 +1,14 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-Trading bot (чистая версия):
+Trading bot (чистая версия, исправлено):
 - только единые импорты из core.*
 - валидатор как validate_features (алиас)
 - PaperStore гарантированно создаёт папки/файлы
 - singleton-доступ через get_bot(...)
+
+⚠️ Исправления в этой версии:
+- Правильная связка Aggregator → Policy: aggregate_features(cfg, exchange, ...) → policy.decide(features, cfg)
+- Полностью убран legacy fuse_scores (дублировал логику policy)
 """
 from __future__ import annotations
 
@@ -21,13 +25,6 @@ from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.signals.aggregator import aggregate_features
 from crypto_ai_bot.core.signals.validator import validate as validate_features
 from crypto_ai_bot.core.signals.policy import decide as policy_decide
-
-# если у тебя есть собственный фьюзер — оставим как есть; иначе дефолт
-try:
-    from crypto_ai_bot.trading.signals.score_fusion import fuse_scores
-except Exception:  # pragma: no cover
-    def fuse_scores(*_, **__) -> float:
-        return 0.5
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
@@ -112,14 +109,31 @@ class TradingBot:
 
     # --- основной «тик» стратегии ---
     def evaluate(self) -> Dict[str, Any]:
-        feats = aggregate_features(self.cfg.SYMBOL, self.cfg.TIMEFRAME, limit=self.cfg.AGGREGATOR_LIMIT)
+        """
+        Собирает признаки и возвращает решение.
+        Правильная цепочка вызовов:
+          - aggregate_features(cfg, exchange, symbol=..., timeframe=..., limit=...)
+          - policy.decide(features, cfg)
+        """
+        feats = aggregate_features(
+            self.cfg,
+            self.exchange,
+            symbol=self.cfg.SYMBOL,
+            timeframe=self.cfg.TIMEFRAME,
+            limit=self.cfg.AGGREGATOR_LIMIT,
+        )
         ok, reason = validate_features(feats, self.cfg)
         if not ok:
             return {"ok": False, "reason": reason, "features": feats}
 
-        rule_score = fuse_scores(feats)
-        decision = policy_decide(rule_score, feats, self.cfg)
-        return {"ok": True, "decision": decision, "score": rule_score, "features": feats}
+        decision = policy_decide(feats, self.cfg)
+        # Back-compat: также отдадим верхнеуровневый score
+        return {
+            "ok": True,
+            "decision": decision,
+            "score": float(decision.get("score", 0.0)),
+            "features": feats,
+        }
 
     # singleton
     @classmethod
