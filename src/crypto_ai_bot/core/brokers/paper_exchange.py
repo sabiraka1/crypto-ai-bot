@@ -1,117 +1,95 @@
 from __future__ import annotations
 
-import time
+"""
+Простой PaperExchange для тестов/pepper-trading.
+- Нормализует symbol/timeframe во всех входах
+- Интерфейс совместим с ExchangeInterface
+- Детерминированная генерация OHLCV для стабильных тестов
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Tuple
+import math
+import random
 
-from crypto_ai_bot.core.brokers.base import ExchangeInterface
-from crypto_ai_bot.core.brokers import to_exchange_symbol, normalize_timeframe
-from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
-from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe, to_exchange_symbol
 
-class PaperExchange(ExchangeInterface):
-    def __init__(self, *, latency_ms: int = 50, commission_pct: float = 0.0004):
-        self.id = "paper"
-        self.latency_ms = int(latency_ms)
-        self.commission_pct = float(commission_pct)
-        self.cb = CircuitBreaker()
+
+@dataclass
+class PaperExchange:
+    mode: str = "paper"
+    seed: int = 42
+    price_map: Dict[str, float] = field(default_factory=dict)
+
+    def _rng(self, key: str) -> random.Random:
+        # детерминированный генератор на основе ключа + seed
+        return random.Random(hash((self.seed, key)) & 0xFFFFFFFF)
 
     # --- helpers ---
-    def _sleep(self):
-        time.sleep(max(0.0, self.latency_ms / 1000.0))
+    def _tf_seconds(self, tf: str) -> int:
+        # простая конвертация
+        tf = tf.lower()
+        if tf.endswith("m"):
+            return int(tf[:-1]) * 60
+        if tf.endswith("h"):
+            return int(tf[:-1]) * 3600
+        if tf.endswith("d"):
+            return int(tf[:-1]) * 86400
+        return 3600
 
-    # --- interface ---
+    # --- protocol methods ---
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
-        ex_symbol = to_exchange_symbol(symbol, self.id)
+        sym = normalize_symbol(symbol)
         tf = normalize_timeframe(timeframe)
-        key = f"{self.id}:fetch_ohlcv"
-
-        def _impl():
-            self._sleep()
-            now = int(time.time() * 1000)
-            # dummy candles, strictly increasing
-            candles = []
-            step = 60_000  # 1m
-            for i in range(limit):
-                t = now - (limit - i) * step
-                o = 10000.0 + i
-                h = o * 1.01
-                l = o * 0.99
-                c = o * 1.001
-                v = 1.0
-                candles.append([t, o, h, l, c, v])
-            return candles
-
-        t0 = time.perf_counter()
-        try:
-            res = self.cb.call(_impl, key=key, timeout=5.0, fail_threshold=5, open_seconds=8.0)
-            dt = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("broker_request_ms", dt, {"exchange": self.id, "method": "fetch_ohlcv"})
-            metrics.inc("broker_requests_total", {"exchange": self.id, "method": "fetch_ohlcv"})
-            return res
-        except Exception as e:
-            dt = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("broker_request_ms", dt, {"exchange": self.id, "method": "fetch_ohlcv"})
-            metrics.inc("broker_errors_total", {"exchange": self.id, "method": "fetch_ohlcv", "type": type(e).__name__})
-            raise
+        secs = self._tf_seconds(tf)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        start = now - timedelta(seconds=secs * (limit))
+        rr = self._rng(f"ohlcv:{sym}:{tf}:{limit}:{start.isoformat()}")
+        base = self.price_map.get(sym, 50000.0)
+        out: List[List[float]] = []
+        t = start
+        price = base
+        for i in range(limit):
+            t = t + timedelta(seconds=secs)
+            # синтетика: плавный тренд + небольшой шум
+            angle = i / max(1, limit) * math.pi * 2
+            drift = math.sin(angle) * (base * 0.005)
+            noise = rr.uniform(-base * 0.001, base * 0.001)
+            close = max(1.0, base + drift + noise)
+            high = close * (1 + rr.uniform(0, 0.003))
+            low = close * (1 - rr.uniform(0, 0.003))
+            open_ = (price + close) / 2
+            vol = abs(rr.gauss(10.0, 2.0))
+            out.append([int(t.timestamp() * 1000), float(open_), float(high), float(low), float(close), float(vol)])
+            price = close
+        # последнюю цену положим в карту
+        self.price_map[sym] = price
+        return out
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        ex_symbol = to_exchange_symbol(symbol, self.id)
-        key = f"{self.id}:fetch_ticker"
-        def _impl():
-            self._sleep()
-            return {"symbol": ex_symbol, "last": 10000.0, "timestamp": int(time.time() * 1000)}
-        t0 = time.perf_counter()
-        try:
-            res = self.cb.call(_impl, key=key, timeout=5.0, fail_threshold=5, open_seconds=8.0)
-            dt = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("broker_request_ms", dt, {"exchange": self.id, "method": "fetch_ticker"})
-            metrics.inc("broker_requests_total", {"exchange": self.id, "method": "fetch_ticker"})
-            return res
-        except Exception as e:
-            dt = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("broker_request_ms", dt, {"exchange": self.id, "method": "fetch_ticker"})
-            metrics.inc("broker_errors_total", {"exchange": self.id, "method": "fetch_ticker", "type": type(e).__name__})
-            raise
+        sym = normalize_symbol(symbol)
+        last = self.price_map.get(sym, 50000.0)
+        return {"symbol": to_exchange_symbol(sym), "last": float(last), "close": float(last), "bid": float(last*0.999), "ask": float(last*1.001)}
 
-    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Optional[Decimal] = None) -> Dict[str, Any]:
-        ex_symbol = to_exchange_symbol(symbol, self.id)
-        key = f"{self.id}:create_order"
-        def _impl():
-            self._sleep()
-            amt = float(amount)
-            last = 10000.0
-            filled = amt
-            cost = filled * last * (1.0 + self.commission_pct)
-            return {"id": f"paper_{int(time.time()*1000)}", "symbol": ex_symbol, "status": "closed", "filled": filled, "price": last, "cost": cost, "side": side, "type": type_}
-        t0 = time.perf_counter()
-        try:
-            res = self.cb.call(_impl, key=key, timeout=5.0, fail_threshold=5, open_seconds=8.0)
-            dt = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("broker_request_ms", dt, {"exchange": self.id, "method": "create_order"})
-            metrics.inc("broker_requests_total", {"exchange": self.id, "method": "create_order"})
-            return res
-        except Exception as e:
-            dt = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("broker_request_ms", dt, {"exchange": self.id, "method": "create_order"})
-            metrics.inc("broker_errors_total", {"exchange": self.id, "method": "create_order", "type": type(e).__name__})
-            raise
+    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Decimal | None = None) -> Dict[str, Any]:
+        sym = normalize_symbol(symbol)
+        # рыночное исполнение по текущему last
+        tkr = self.fetch_ticker(sym)
+        last = Decimal(str(tkr.get("last", "0")))
+        order_id = f"paper-{sym}-{side}-{int(datetime.now(timezone.utc).timestamp())}"
+        filled = amount
+        exec_price = last if price is None else Decimal(price)
+        return {"id": order_id, "symbol": to_exchange_symbol(sym), "type": type_, "side": side, "amount": str(amount), "price": float(exec_price), "filled": str(filled), "status": "closed"}
 
     def fetch_balance(self) -> Dict[str, Any]:
-        key = f"{self.id}:fetch_balance"
-        def _impl():
-            self._sleep()
-            return {"USDT": {"free": 1000.0, "used": 0.0, "total": 1000.0}}
-        return self.cb.call(_impl, key=key, timeout=5.0, fail_threshold=5, open_seconds=8.0)
+        # статичный баланс для тестов
+        return {"free": {"USDT": 100000.0}, "used": {}, "total": {"USDT": 100000.0}}
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        key = f"{self.id}:cancel_order"
-        def _impl():
-            self._sleep()
-            return {"id": order_id, "status": "canceled"}
-        return self.cb.call(_impl, key=key, timeout=5.0, fail_threshold=5, open_seconds=8.0)
+        return {"id": order_id, "status": "canceled"}
 
-def from_settings(cfg) -> PaperExchange:
-    latency = int(getattr(cfg, "PAPER_LATENCY_MS", 50))
-    fee = float(getattr(cfg, "PAPER_COMMISSION_PCT", 0.0004))
-    return PaperExchange(latency_ms=latency, commission_pct=fee)
+    # stats for metrics (optional)
+    def get_stats(self) -> Dict[str, Any]:
+        return {}

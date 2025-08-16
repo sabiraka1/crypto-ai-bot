@@ -18,6 +18,8 @@ from crypto_ai_bot.core.positions import manager as positions_manager
 from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
 from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.utils.http_client import get_http_client
+from crypto_ai_bot.utils.time_sync import measure_time_drift
 
 app = FastAPI(title="crypto-ai-bot")
 
@@ -36,6 +38,8 @@ positions_manager.configure_repositories(positions_repo=POS_REPO, trades_repo=TR
 
 # bot
 BOT = TradingBot(CFG, idem_repo=IDEM)
+
+HTTP = get_http_client()
 
 @app.on_event("startup")
 async def _on_start() -> None:
@@ -84,9 +88,15 @@ def health():
     except Exception as e:
         br_status = {"status": f"error:{type(e).__name__}"}
 
-    # Time drift (stub 0 for now)
-    drift_ms = 0
-    time_status = {"status": "ok", "drift_ms": drift_ms, "limit_ms": int(getattr(CFG, "TIME_DRIFT_LIMIT_MS", 1000))}
+    # Time drift via HTTP (safe fallback on error)
+    try:
+        drift = measure_time_drift(HTTP, timeout=float(getattr(CFG, "HEALTH_TIME_TIMEOUT_S", 2.0)))
+        drift_ms = int(drift.get("drift_ms", 0) or 0)
+        # сохраняем в CFG, чтобы risk.rules.check_time_sync мог читать
+        setattr(CFG, "TIME_DRIFT_MS", drift_ms)
+        time_status = {"status": "ok" if drift.get("ok") else "error", "drift_ms": drift_ms, "latency_ms": int(drift.get("latency_ms", -1))}
+    except Exception as e:
+        time_status = {"status": f"error:{type(e).__name__}", "drift_ms": None, "latency_ms": None}
 
     # Migrations health
     try:
@@ -110,6 +120,14 @@ def health():
         overall, level = "degraded", "major"
     elif mig_status.get("status") == "pending":
         overall, level = "degraded", "minor"
+
+    # degrade by drift limit
+    try:
+        limit_ms = int(getattr(CFG, "TIME_DRIFT_LIMIT_MS", 1000))
+        if isinstance(time_status.get("drift_ms"), int) and time_status["drift_ms"] > limit_ms:
+            overall, level = "degraded", "major"
+    except Exception:
+        pass
 
     return JSONResponse({
         "status": overall,
