@@ -6,7 +6,19 @@ from typing import Any, Dict, List, Optional
 DEC_Q = Decimal("0.00000001")
 
 def _fmt(d: Decimal) -> str:
-    return str(d.quantize(DEC_Q, rounding=ROUND_DOWN))
+    """Форматирует Decimal в строку с 8 знаками после запятой"""
+    if d == 0:
+        return "0.00000000"
+    quantized = d.quantize(DEC_Q, rounding=ROUND_DOWN)
+    # Преобразуем в строку с фиксированной точкой
+    result = format(quantized, 'f')
+    # Убеждаемся, что есть 8 знаков после запятой
+    if '.' in result:
+        integer_part, decimal_part = result.split('.')
+        decimal_part = decimal_part.ljust(8, '0')[:8]
+        return f"{integer_part}.{decimal_part}"
+    else:
+        return f"{result}.00000000"
 
 class PositionManager:
     """
@@ -127,7 +139,9 @@ class PositionManager:
             self._save(pos)
             return pos
 
-        new_size = Decimal(pos.get("size", "0")) - size
+        current_size = Decimal(pos.get("size", "0"))
+        new_size = current_size - size
+        
         if new_size <= 0:
             new_size = Decimal("0")
             # Очищаем историю сделок при закрытии позиции
@@ -136,11 +150,13 @@ class PositionManager:
             pos["avg_price"] = _fmt(Decimal("0"))
         else:
             # Корректируем историю сделок пропорционально
-            if symbol in self._trades_history:
-                reduction_ratio = size / Decimal(pos.get("size", "1"))
+            if symbol in self._trades_history and current_size > 0:
+                reduction_ratio = size / current_size
                 for trade in self._trades_history[symbol]:
                     trade["size"] = trade["size"] * (1 - reduction_ratio)
-            pos["avg_price"] = _fmt(self._calculate_avg_price(symbol))
+            # Средняя цена остается той же при частичном закрытии
+            if "avg_price" not in pos:
+                pos["avg_price"] = _fmt(self._calculate_avg_price(symbol))
         
         pos["size"] = _fmt(new_size)
         self._save(pos)

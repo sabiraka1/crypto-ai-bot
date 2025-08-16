@@ -86,7 +86,8 @@ def test_open_add_reduce_close_flow():
 
     # Частичное закрытие (reduce теперь не требует цену)
     snap = pm.reduce(sym, Decimal("0.005"))
-    assert snap["size"].startswith("0.025")  # 0.03 - 0.005 = 0.025
+    # 0.03 - 0.005 = 0.025
+    assert snap["size"] == "0.02500000"
     # Средняя цена должна остаться той же после частичного закрытия
     assert abs(float(snap["avg_price"]) - 50666.6666) < 1.0
 
