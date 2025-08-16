@@ -1,97 +1,82 @@
-# src/crypto_ai_bot/core/signals/policy.py
 from __future__ import annotations
-
+from typing import Any, Dict, Optional
 from decimal import Decimal
-from typing import Any, Dict
+from uuid import uuid4
 
 from . import _build, _fusion
 from crypto_ai_bot.core.risk import manager as risk_manager
-from crypto_ai_bot.utils import metrics
 
+def _as_decimal(x) -> Decimal:
+    try:
+        return Decimal(str(x))
+    except Exception:
+        return Decimal('0')
 
-def _heuristic_rule_score(features: Dict[str, Any]) -> float:
-    ind = features.get("indicators", {})
-    ema_f = ind.get("ema_fast")
-    ema_s = ind.get("ema_slow")
-    rsi = ind.get("rsi")
-    macd_hist = ind.get("macd_hist")
-    if None in (ema_f, ema_s, rsi, macd_hist):
-        return 0.5
-    score = 0.5
-    score += 0.2 if ema_f > ema_s else -0.2
-    if 45 <= rsi <= 60:
-        score += 0.05
-    elif rsi < 30 or rsi > 70:
-        score -= 0.1
-    score += 0.1 if macd_hist > 0 else -0.1
-    return max(0.0, min(1.0, score))
-
-
-def _position_size_buy(cfg, price: float) -> Decimal:
-    quote_usd = Decimal(str(getattr(cfg, "ORDER_QUOTE_SIZE", "100")))
-    if price <= 0:
-        return Decimal("0")
-    return (quote_usd / Decimal(str(price))).quantize(Decimal("0.00000001"))
-
-
-def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
+def decide(cfg, broker, *, symbol: Optional[str], timeframe: Optional[str], limit: Optional[int]) -> Dict[str, Any]:
+    """Public decision point. Returns dict with full explain-schema.
+    Structure:
+      {
+        action, size, sl, tp, trail, score, symbol, timeframe, ts, decision_id,
+        explain: {signals, blocks, weights, thresholds, context}
+      }
+    """
     feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+    # signals come from features.indicators etc.
+    signals = feats.get('indicators', {}) | (feats.get('signals', {}) or {})
 
-    if feats.get("rule_score") is None:
-        feats["rule_score"] = _heuristic_rule_score(feats)
+    # simple rule score from a couple of indicators (example logic)
+    # you can replace by your more advanced scoring inside _build
+    rule_score = feats.get('rule_score')
+    ai_score = feats.get('ai_score')
+    score = _fusion.fuse(rule_score, ai_score, cfg)
 
-    score = _fusion.fuse(feats.get("rule_score"), feats.get("ai_score"), cfg)
-    ok, reason = risk_manager.check(feats, cfg)
+    # basic thresholds
+    buy_thr = getattr(cfg, 'THRESHOLD_BUY', 0.55)
+    sell_thr = getattr(cfg, 'THRESHOLD_SELL', 0.45)
 
-    price = float(feats["market"]["price"] or 0.0)
-    atr_pct = float(feats["indicators"]["atr_pct"] or 0.0)
+    action: str = 'hold'
+    size = Decimal('0')
+    if score >= Decimal(str(buy_thr)):
+        action = 'buy'
+        size = _as_decimal(getattr(cfg, 'DEFAULT_ORDER_SIZE', '0.01'))
+    elif score <= Decimal(str(sell_thr)):
+        action = 'sell'
+        size = _as_decimal(getattr(cfg, 'DEFAULT_ORDER_SIZE', '0.01'))
 
-    BUY_TH = float(getattr(cfg, "SCORE_BUY_MIN", 0.6))
-    SELL_TH = float(getattr(cfg, "SCORE_SELL_MIN", 0.4))
-    SLx = float(getattr(cfg, "SL_ATR_MULT", 1.5))
-    TPx = float(getattr(cfg, "TP_ATR_MULT", 2.5))
-
-    explain = {
-        "signals": {
-            "ema_fast": feats["indicators"]["ema_fast"],
-            "ema_slow": feats["indicators"]["ema_slow"],
-            "rsi": feats["indicators"]["rsi"],
-            "macd_hist": feats["indicators"]["macd_hist"],
-            "atr_pct": atr_pct,
-        },
-        "blocks": {"risk_ok": ok, "risk_reason": reason},
-        "weights": {
-            "rule": float(getattr(cfg, "DECISION_RULE_WEIGHT", getattr(cfg, "SCORE_RULE_WEIGHT", 0.7))),
-            "ai": float(getattr(cfg, "DECISION_AI_WEIGHT", getattr(cfg, "SCORE_AI_WEIGHT", 0.3))),
-        },
-        "thresholds": {"buy": BUY_TH, "sell": SELL_TH, "sl_atr": SLx, "tp_atr": TPx},
-        "context": {"price": price, "timeframe": timeframe, "symbol": symbol},
-        "rule_score": feats.get("rule_score"),
-        "ai_score": feats.get("ai_score"),
+    decision = {
+        'action': action,
+        'size': str(size),
+        'sl': None,
+        'tp': None,
+        'trail': None,
+        'score': float(score),
+        'symbol': symbol or getattr(cfg, 'SYMBOL', 'BTC/USDT'),
+        'timeframe': timeframe or getattr(cfg, 'TIMEFRAME', '1h'),
+        'ts': int(feats.get('market', {}).get('ts') or 0),
+        'decision_id': uuid4().hex,
+        'explain': {
+            'signals': signals,
+            'blocks': feats.get('blocks', {}),
+            'weights': {
+                'rule': getattr(cfg, 'SCORE_RULE_WEIGHT', 0.5),
+                'ai': getattr(cfg, 'SCORE_AI_WEIGHT', 0.5),
+            },
+            'thresholds': {
+                'buy': buy_thr,
+                'sell': sell_thr,
+            },
+            'context': {
+                'price': float(feats.get('market', {}).get('price') or 0),
+                'atr': float(signals.get('atr') or 0),
+                'atr_pct': float(signals.get('atr_pct') or 0),
+            }
+        }
     }
 
-    decision: Dict[str, Any] = {
-        "action": "hold",
-        "size": "0",
-        "sl": None,
-        "tp": None,
-        "trail": None,
-        "score": score,
-        "explain": explain,
-    }
-
+    # risk pre-check right here is optional; main check happens in use-case
+    ok, reason = risk_manager.check(decision, cfg)
     if not ok:
-        metrics.inc("decide_blocked_total", {"reason": reason})
-        return decision
+        # keep action but annotate
+        decision['explain']['blocks']['risk'] = reason
 
-    if score >= BUY_TH and price > 0:
-        size = _position_size_buy(cfg, price)
-        sl = price * (1.0 - (SLx * atr_pct / 100.0)) if atr_pct > 0 else None
-        tp = price * (1.0 + (TPx * atr_pct / 100.0)) if atr_pct > 0 else None
-        decision.update({"action": "buy", "size": str(size), "sl": sl, "tp": tp})
-    elif score <= SELL_TH and price > 0:
-        frac = float(getattr(cfg, "SELL_SIGNAL_FRACTION", 0.5))
-        decision.update({"action": "sell", "size": str(frac), "sl": None, "tp": None})
-
-    metrics.inc("bot_decision_total", {"action": decision["action"]})
     return decision

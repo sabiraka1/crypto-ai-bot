@@ -1,75 +1,62 @@
-# src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
-
-from decimal import Decimal
 from typing import Any, Dict, Optional
+from decimal import Decimal
 
-from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.core.positions.manager import PositionManager
-from crypto_ai_bot.core.storage.interfaces import (
-    PositionRepository,
-    TradeRepository,
-    AuditRepository,
-    UnitOfWork,
-)
-
-
-def _to_decimal(x: Any) -> Decimal:
-    if x is None:
-        return Decimal("0")
-    return Decimal(str(x))
-
+from crypto_ai_bot.core.storage.idempotency_helper import make_idempotency_key, check_and_store
 
 def place_order(
-    cfg: Any,
-    broker: Any,  # оставляем для совместимости сигнатуры, внутри не используем
-    *,
-    positions_repo: PositionRepository,
-    trades_repo: TradeRepository,
-    audit_repo: AuditRepository,
-    uow: UnitOfWork,
+    cfg,
+    broker,
+    positions_repo,
+    trades_repo,
+    audit_repo,
+    uow,
+    idempotency_repo,
     decision: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """Execute order atomically with idempotency. Returns execution result dict.
+    Assumes decision fields: action ('buy'|'sell'|'hold'), size (Decimal-like), price (optional),
+    symbol, ts (ms, optional), decision_id.
     """
-    Исполнение решения:
-      - buy/sell: открытие или увеличение позиции (через PositionManager)
-      - close: полное закрытие по символу
-      - hold/unknown: пропуск
+    action = str(decision.get('action') or 'hold').lower()
+    symbol = decision.get('symbol') or getattr(cfg, 'SYMBOL', 'BTC/USDT')
+    size = Decimal(str(decision.get('size') or '0'))
+    ts_ms = int(decision.get('ts') or 0)
+    decision_id = str(decision.get('decision_id') or 'missing')
 
-    Вся идемпотентность — на уровне вызывающего (use-case eval_and_execute).
-    """
-    symbol: str = decision.get("symbol") or getattr(cfg, "SYMBOL", "BTC/USDT")
-    action: str = (decision.get("action") or "hold").lower()
+    if action == 'hold' or size == 0:
+        return {'status': 'skipped', 'reason': 'hold', 'decision_id': decision_id}
 
-    # hint-цена не обязательна; хранить как Decimal строкой
-    price_hint: Optional[Decimal] = None
-    if "price" in decision and decision["price"] is not None:
-        price_hint = _to_decimal(decision["price"])
+    side = 'buy' if size > 0 else 'sell'
+    key = make_idempotency_key(symbol=symbol, side=side, size=abs(size), ts_ms=ts_ms, decision_id=decision_id)
 
-    size: Decimal = _to_decimal(decision.get("size", "0"))
+    claimed = check_and_store(idempotency_repo, key)
+    if not claimed:
+        return {'status': 'duplicate', 'key': key, 'decision_id': decision_id}
 
-    pm = PositionManager(
-        positions_repo=positions_repo,
-        trades_repo=trades_repo,
-        audit_repo=audit_repo,
-        uow=uow,
-    )
+    pm = PositionManager(positions_repo=positions_repo, trades_repo=trades_repo, audit_repo=audit_repo, uow=uow)
 
-    if action in ("hold", "", None):
-        return {"status": "skipped", "reason": "hold"}
+    # For simplicity we let exchange adapter calculate price when None (market order)
+    price = decision.get('price')
+    if price is not None:
+        price = Decimal(str(price))
 
-    if action == "close":
-        snap = pm.close_all(symbol)
-        metrics.inc("order_submitted_total", {"side": "close"})
-        return {"status": "ok", "position": snap}
+    # Execute via exchange adapter
+    # For a paper/backtest exchange, broker.create_order should behave deterministically
+    order_resp = broker.create_order(symbol=symbol, type_='market', side=side, amount=abs(size), price=price)
 
-    if action not in ("buy", "sell"):
-        return {"status": "skipped", "reason": f"unknown action '{action}'"}
+    # Update local storage/position snapshot
+    # We choose executed price from adapter response if available, otherwise 'price'
+    executed_price = Decimal(str(order_resp.get('price') or price or 0))
+    pm.open_or_add(symbol, Decimal(str(size if side == 'buy' else -abs(size) if size > 0 else size)), executed_price)
 
-    signed_size = size if action == "buy" else (size * Decimal("-1"))
+    # persist idempotent result
+    try:
+        if idempotency_repo is not None:
+            idempotency_repo.commit(key, {'order': order_resp})
+    except Exception:
+        # do not fail the whole call if commit fails; consistency is eventual
+        pass
 
-    # В PositionManager цена может быть None — возьмётся из брокера/текущего тикера, если реализовано.
-    snap = pm.open_or_add(symbol, signed_size, price_hint)
-
-    metrics.inc("order_submitted_total", {"side": action})
-    return {"status": "ok", "position": snap}
+    return {'status': 'ok', 'key': key, 'order': order_resp, 'decision_id': decision_id}
