@@ -1,42 +1,68 @@
 # src/crypto_ai_bot/core/signals/_build.py
 from __future__ import annotations
 
-from decimal import Decimal
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict
 
 import pandas as pd
 
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-from crypto_ai_bot.core.validators.dataframe import require_ohlcv, assert_min_len
-from crypto_ai_bot.core.indicators import unified as ind
+from crypto_ai_bot.core.validators import require_ohlcv_min
+from crypto_ai_bot.core.indicators.unified import ema, rsi, macd, atr
 
 
-def _to_df(ohlcv: list[list[float]]) -> pd.DataFrame:
+def _last_ts_iso(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+
+
+def build(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
     """
-    Преобразует CCXT-совместимый OHLCV в DataFrame с каноническими колонками.
-    ohlcv: [[ts_ms, open, high, low, close, volume], ...]
+    1) Нормализация symbol/timeframe (единые правила).
+    2) Забираем OHLCV у брокера.
+    3) Приводим к канону и минимуму длины.
+    4) Считаем индикаторы (только через unified).
+    5) Готовим стабильную структуру features.
     """
-    if not ohlcv:
-        raise ValueError("empty OHLCV")
-    df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-    # ts → UTC datetime (но для индикаторов удобно держать как ms; конвертим только для "market" блока)
-    return require_ohlcv(df)
+    sym = normalize_symbol(symbol)
+    tf = normalize_timeframe(timeframe)
 
+    rows = broker.fetch_ohlcv(sym, tf, int(limit))
+    df = require_ohlcv_min(rows, min_len=int(getattr(cfg, "MIN_FEATURE_BARS", 100)))
 
-def _indicators(df: pd.DataFrame) -> Dict[str, float]:
-    """Вычисляет базовые индикаторы на последней свече."""
-    assert_min_len(df, 50)  # безопасный минимум для EMA50/MACD
-    close = df["close"]
-    high, low = df["high"], df["low"]
+    # Индикаторы (векторные)
+    close = pd.Series(df["close"].to_numpy(), copy=False)
+    high = pd.Series(df["high"].to_numpy(), copy=False)
+    low = pd.Series(df["low"].to_numpy(), copy=False)
 
-    ema20 = float(ind.ema(close, 20).iloc[-1])
-    ema50 = float(ind.ema(close, 50).iloc[-1])
-    rsi14 = float(ind.rsi(close, 14).iloc[-1])
+    ema20 = ema(close, 20).iloc[-1]
+    ema50 = ema(close, 50).iloc[-1]
+    rsi14 = rsi(close, 14).iloc[-1]
+    macd_line, macd_signal, macd_hist = macd(close, 12, 26, 9)
+    macd_hist_last = macd_hist.iloc[-1]
 
-    macd_line, macd_signal, macd_hist = ind.macd(close)  # дефолт: 12/26/9
-    macd_hist_last = float(macd_hist.iloc[-1])
+    atr14 = atr(high, low, close, 14).iloc[-1]
+    last_close = Decimal(str(df["close"].iloc[-1]))
+    atr_pct = float((Decimal(str(atr14)) / (last_close if last_close != 0 else Decimal("1"))) * 100)
 
-    atr14 = float(ind.atr(high, low, close, 14).iloc[-1])
-    price = float(close.iloc[-1])
-    atr_pct = float(atr14 / price * 100.0)*_
+    features = {
+        "indicators": {
+            "ema20": float(ema20),
+            "ema50": float(ema50),
+            "rsi14": float(rsi14),
+            "macd_hist": float(macd_hist_last),
+            "atr": float(atr14),
+            "atr_pct": float(atr_pct),
+        },
+        "market": {
+            "symbol": sym,
+            "timeframe": tf,
+            "ts": _last_ts_iso(int(df["ts"].iloc[-1])),
+            "price": last_close,  # Decimal
+        },
+        # Доп. источники скоринга можно проставлять выше по стэку:
+        "rule_score": None,
+        "ai_score": None,
+    }
+
+    return features
