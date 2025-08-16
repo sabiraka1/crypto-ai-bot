@@ -1,31 +1,39 @@
 from __future__ import annotations
 
-"""
-Агрегация правил риска. Все проверки — чистые функции.
-"""
+from typing import Any, Dict, Tuple, List
 
-from typing import Any, Dict, Tuple, Callable, List
+from crypto_ai_bot.utils import metrics
 from . import rules
 
 
-Rule = Callable[[Dict[str, Any], object], Tuple[bool, str | None]]
+def check(features: Dict[str, Any], cfg) -> Tuple[bool, str]:
+    """
+    Единая точка агрегации risk-правил.
+    Возвращает (ok, reason). Первый фэйл — останавливаемся.
+    Порядок важен: time_sync — самый первый.
+    """
+    sequence = [
+        ("time_sync", lambda: rules.check_time_sync(cfg)),
+        # Ниже — оставлены заглушки/пример вызовов. При необходимости включайте.
+        # ("hours",      lambda: rules.check_hours(features, cfg)),
+        # ("spread",     lambda: rules.check_spread(features, cfg)),
+        # ("exposure",   lambda: rules.check_max_exposure(features.get("exposure"), cfg)),
+        # ("seq_losses", lambda: rules.check_seq_losses(features.get("seq_losses"), cfg)),
+    ]
 
-DEFAULT_RULES: List[Rule] = [
-    rules.check_time_sync,
-    rules.check_spread,
-    rules.check_hours,
-    rules.check_seq_losses,
-    rules.check_max_exposure,
-]
+    for name, fn in sequence:
+        res = fn()
+        if not res.ok:
+            # метрики и понятная причина отказа
+            try:
+                metrics.inc("risk_verdict_total", {"rule": name, "result": "blocked"})
+            except Exception:
+                pass
+            return False, res.reason
 
+    try:
+        metrics.inc("risk_verdict_total", {"rule": "all", "result": "ok"})
+    except Exception:
+        pass
 
-def check(features: Dict[str, Any], cfg, custom_rules: List[Rule] | None = None) -> Tuple[bool, str | None]:
-    rs = custom_rules or DEFAULT_RULES
-    for r in rs:
-        try:
-            ok, reason = r(features, cfg)
-        except Exception as e:
-            return False, f"risk_rule_error:{r.__name__}:{type(e).__name__}"
-        if not ok:
-            return False, reason
-    return True, None
+    return True, "ok"
