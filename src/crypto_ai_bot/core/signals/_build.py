@@ -1,68 +1,115 @@
 # src/crypto_ai_bot/core/signals/_build.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import pandas as pd
 
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-from crypto_ai_bot.core.validators import require_ohlcv_min
-from crypto_ai_bot.core.indicators.unified import ema, rsi, macd, atr
+from crypto_ai_bot.core.indicators import unified as I
+from crypto_ai_bot.core.validators.dataframe import assert_min_len  # require_ohlcv (если есть)
+from crypto_ai_bot.utils import metrics
 
 
-def _last_ts_iso(ts_ms: int) -> str:
-    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+def _to_df(ohlcv: list[list[float]]) -> pd.DataFrame:
+    # ожидаем: [[ts, o, h, l, c, v], ...]
+    df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+    # упорядочим на всякий случай
+    df = df.sort_values("ts").reset_index(drop=True)
+    return df
+
+
+def _last_float(s: pd.Series, default: float | None = None) -> float | None:
+    try:
+        v = s.dropna().iloc[-1]
+        return float(v)
+    except Exception:
+        return default
+
+
+def _calc_indicators(df: pd.DataFrame, cfg) -> Dict[str, float | None]:
+    # параметры по умолчанию
+    ema_fast = int(getattr(cfg, "EMA_FAST", 20))
+    ema_slow = int(getattr(cfg, "EMA_SLOW", 50))
+    rsi_n = int(getattr(cfg, "RSI_N", 14))
+    macd_fast = int(getattr(cfg, "MACD_FAST", 12))
+    macd_slow = int(getattr(cfg, "MACD_SLOW", 26))
+    macd_sig = int(getattr(cfg, "MACD_SIGNAL", 9))
+    atr_n = int(getattr(cfg, "ATR_N", 14))
+
+    ema_f = I.ema(df["close"], ema_fast)
+    ema_s = I.ema(df["close"], ema_slow)
+    rsi = I.rsi(df["close"], rsi_n)
+    macd, macd_sig_s, macd_hist = I.macd(df["close"], macd_fast, macd_slow, macd_sig)
+    atr = I.atr(df["high"], df["low"], df["close"], atr_n)
+
+    close = df["close"]
+    atr_pct = (atr / close) * 100.0
+
+    return {
+        "ema_fast": _last_float(ema_f),
+        "ema_slow": _last_float(ema_s),
+        "rsi": _last_float(rsi),
+        "macd": _last_float(macd),
+        "macd_signal": _last_float(macd_sig_s),
+        "macd_hist": _last_float(macd_hist),
+        "atr": _last_float(atr),
+        "atr_pct": _last_float(atr_pct),
+        "close": _last_float(close),
+    }
 
 
 def build(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
     """
-    1) Нормализация symbol/timeframe (единые правила).
-    2) Забираем OHLCV у брокера.
-    3) Приводим к канону и минимуму длины.
-    4) Считаем индикаторы (только через unified).
-    5) Готовим стабильную структуру features.
+    Сбор фич: OHLCV → индикаторы → нормализация → market/ticker (spread).
+    Никаких HTTP/ENV — только вызовы брокера + чистые вычисления.
     """
     sym = normalize_symbol(symbol)
     tf = normalize_timeframe(timeframe)
 
-    rows = broker.fetch_ohlcv(sym, tf, int(limit))
-    df = require_ohlcv_min(rows, min_len=int(getattr(cfg, "MIN_FEATURE_BARS", 100)))
+    # 1) рыночные бары
+    ohlcv = broker.fetch_ohlcv(sym, tf, int(limit))
+    df = _to_df(ohlcv)
+    min_bars = int(getattr(cfg, "MIN_FEATURE_BARS", 100))
+    assert_min_len(df, min_bars)
 
-    # Индикаторы (векторные)
-    close = pd.Series(df["close"].to_numpy(), copy=False)
-    high = pd.Series(df["high"].to_numpy(), copy=False)
-    low = pd.Series(df["low"].to_numpy(), copy=False)
+    # 2) индикаторы
+    feats = _calc_indicators(df, cfg)
 
-    ema20 = ema(close, 20).iloc[-1]
-    ema50 = ema(close, 50).iloc[-1]
-    rsi14 = rsi(close, 14).iloc[-1]
-    macd_line, macd_signal, macd_hist = macd(close, 12, 26, 9)
-    macd_hist_last = macd_hist.iloc[-1]
+    # 3) тикер для спреда/последней цены
+    try:
+        tkr = broker.fetch_ticker(sym)
+        bid = float(tkr.get("bid") or tkr.get("last") or feats["close"] or 0.0)
+        ask = float(tkr.get("ask") or tkr.get("last") or feats["close"] or 0.0)
+        price = float(tkr.get("last") or feats["close"] or (bid + ask) / 2.0)
+        spread_pct = float(((ask - bid) / price) * 100.0) if price > 0 else 0.0
+    except Exception:
+        # если тикер недоступен — используем close и нулевой спред
+        bid = ask = price = float(feats["close"] or 0.0)
+        spread_pct = 0.0
 
-    atr14 = atr(high, low, close, 14).iloc[-1]
-    last_close = Decimal(str(df["close"].iloc[-1]))
-    atr_pct = float((Decimal(str(atr14)) / (last_close if last_close != 0 else Decimal("1"))) * 100)
+    metrics.inc("features_built_total", {"tf": tf})
 
-    features = {
+    return {
         "indicators": {
-            "ema20": float(ema20),
-            "ema50": float(ema50),
-            "rsi14": float(rsi14),
-            "macd_hist": float(macd_hist_last),
-            "atr": float(atr14),
-            "atr_pct": float(atr_pct),
+            "ema_fast": feats["ema_fast"],
+            "ema_slow": feats["ema_slow"],
+            "rsi": feats["rsi"],
+            "macd": feats["macd"],
+            "macd_signal": feats["macd_signal"],
+            "macd_hist": feats["macd_hist"],
+            "atr": feats["atr"],
+            "atr_pct": feats["atr_pct"],
         },
         "market": {
-            "symbol": sym,
+            "price": price,
+            "bid": bid,
+            "ask": ask,
+            "spread_pct": spread_pct,
             "timeframe": tf,
-            "ts": _last_ts_iso(int(df["ts"].iloc[-1])),
-            "price": last_close,  # Decimal
+            "symbol": sym,
         },
-        # Доп. источники скоринга можно проставлять выше по стэку:
-        "rule_score": None,
-        "ai_score": None,
+        "rule_score": None,  # может быть заполнен в policy при необходимости
+        "ai_score": None,    # если ML блок подключится
     }
-
-    return features

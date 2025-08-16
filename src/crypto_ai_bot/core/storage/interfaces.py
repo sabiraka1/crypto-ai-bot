@@ -1,49 +1,56 @@
 # src/crypto_ai_bot/core/storage/interfaces.py
 from __future__ import annotations
-
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 
-class TradeRepository(Protocol):
-    def insert(self, tr: Any) -> None: ...
-    def upsert_by_client_order_id(self, client_order_id: str, tr: Any) -> None: ...
-    def list_recent(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]: ...
+@runtime_checkable
+class UnitOfWork(Protocol):
+    def transaction(self) -> AbstractContextManager[None]: ...
 
 
-class PositionRepository(Protocol):
-    def upsert(self, p: Any) -> None: ...
-    def mark_closed(self, pos_id: str, realized_pnl: Decimal, closed_at_ms: int) -> None: ...
-    def update_size_and_price(self, pos_id: str, new_size: Decimal, new_avg_price: Decimal, realized_pnl: Decimal, ts_ms: int) -> None: ...
-    def get_open(self) -> List[Dict[str, Any]]: ...
-    def get_by_id(self, pos_id: str) -> Optional[Dict[str, Any]]: ...
-
-
-class SnapshotRepository(Protocol):
-    def insert(self, taken_at_ms: int, payload: Dict[str, Any]) -> int: ...
-    def last(self) -> Optional[Dict[str, Any]]: ...
-    def list_recent(self, limit: int = 100) -> List[Dict[str, Any]]: ...
-
-
-class AuditRepository(Protocol):
-    def log(
-        self,
-        *,
-        at_ms: int,
-        actor: str,
-        action: str,
-        entity_type: str,
-        entity_id: str | None,
-        details: Dict[str, Any] | None = None,
-        idempotency_key: str | None = None,
-    ) -> None: ...
-    def list_recent(self, limit: int = 200) -> List[Dict[str, Any]]: ...
-
-
+@runtime_checkable
 class IdempotencyRepository(Protocol):
-    """
-    record(key, ttl) -> True, если ключ записан впервые (можно выполнять операцию).
-    False, если ключ ещё «жив» (операцию нужно пропустить как дубль).
-    """
-    def record(self, key: str, ttl_seconds: int) -> bool: ...
-    def purge_expired(self) -> int: ...
+    def claim(self, key: str, ttl_seconds: int) -> bool: ...
+    def commit(self, key: str) -> None: ...
+    def release(self, key: str) -> None: ...
+
+
+@dataclass
+class Trade:
+    id: str
+    symbol: str
+    side: str
+    amount: Decimal
+    price: Decimal
+    cost: Decimal
+    fee_currency: str
+    fee_cost: Decimal
+    ts: int
+    client_order_id: str | None = None
+    meta: Dict[str, Any] | None = None
+
+
+@runtime_checkable
+class TradeRepository(Protocol):
+    def insert(self, trade: Trade) -> None: ...
+    def list_by_symbol(self, symbol: str, limit: int = 100) -> list[Trade]: ...
+
+
+@runtime_checkable
+class PositionRepository(Protocol):
+    def get_open_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]: ...
+    def upsert(self, position: Dict[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class AuditRepository(Protocol):
+    def record(self, event: Dict[str, Any]) -> None: ...
+
+
+@runtime_checkable
+class SnapshotRepository(Protocol):
+    def upsert(self, snap: Dict[str, Any]) -> None: ...
+    def get_last(self, symbol: str) -> Optional[Dict[str, Any]]: ...

@@ -57,6 +57,10 @@ class PaperExchange(ExchangeInterface):
       Если ccxt недоступен → бросаем PermanentExchangeError (для paper нужна цена).
     """
 
+    @classmethod
+    def from_settings(cls, cfg):
+        return cls(cfg=cfg)
+
     def __init__(self, *, cfg: Any):
         self._cfg = cfg
         self._name = "paper"
@@ -287,7 +291,6 @@ class PaperExchange(ExchangeInterface):
                 if limit_price >= (ask or last):
                     exec_price = limit_price
                 else:
-                    # не маркетируемая заявка — для простоты исполним по лимитной (см. примечание)
                     exec_price = limit_price
             else:
                 if limit_price <= (bid or last):
@@ -337,8 +340,6 @@ class PaperExchange(ExchangeInterface):
         return res
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        # В этой простой реализации «ожидающих» ордеров нет — все исполняются сразу.
-        # Отмена — no-op.
         metrics.inc("broker_requests_total", _labels("cancel_order", self._name, 200))
         return {"id": order_id, "status": "canceled", "timestamp": _now_ms()}
 
