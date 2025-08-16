@@ -1,106 +1,76 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 from crypto_ai_bot.core.use_cases.evaluate import evaluate
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute
-from crypto_ai_bot.core.risk import manager as risk_manager
-from crypto_ai_bot.core.positions.tracker import build_context
 
-HELP = (
-    "Команды:\n"
-    "/start — приветствие\n"
-    "/status — текущее состояние и оценка риска\n"
-    "/tick — только оценка (без исполнения)\n"
-    "/execute — оценка + исполнение (если риск разрешит)\n"
-    "/why — объяснение решения и причин блокировки\n"
-    "/help — показать это сообщение\n"
-)
+def _fmt_explain_short(explain: Dict[str, Any]) -> str:
+    blocks = explain.get("blocks") or {}
+    sigs = explain.get("signals") or {}
+    lines = []
+    if blocks.get("risk"):
+        lines.append(f"🚫 risk: {blocks['risk'].get('reason')}")
+    if "rate_limit" in blocks:
+        rl = blocks["rate_limit"]
+        lines.append(f"⏱ rate_limit {rl.get('key')} ({rl.get('calls')}/{rl.get('per_s')}s)")
+    show = []
+    for k in ("ema_fast","ema_slow","rsi","macd_hist","atr","atr_pct"):
+        if k in sigs:
+            try:
+                show.append(f"{k}={float(sigs[k]):.4g}")
+            except Exception:
+                show.append(f"{k}={sigs[k]}")
+    if show:
+        lines.append("🔎 " + ", ".join(show))
+    return "\n".join(lines) if lines else "—"
 
-def _arg_after(cmd: str, text: str) -> str:
-    # Возвращает аргументы после команды, если есть
-    try:
-        if not text.startswith(cmd):
-            return ""
-        rest = text[len(cmd):].strip()
-        return rest
-    except Exception:
-        return ""
-
-def _parse_symbol_timeframe(args: str, cfg) -> tuple[str, str]:
-    # Простейший парсер "<SYMBOL> <TF>"
-    parts = [p for p in (args or "").replace(",", " ").split() if p]
-    symbol = parts[0] if parts else cfg.SYMBOL
-    timeframe = parts[1] if len(parts) > 1 else cfg.TIMEFRAME
-    return symbol, timeframe
+def _ok(d: Dict[str, Any], key: str) -> bool:
+    return key in d and d[key] not in (None, "", 0, "0")
 
 def handle_update(update: Dict[str, Any], cfg, broker, **repos) -> Dict[str, Any]:
     """
-    Тонкий адаптер Telegram → core.use_cases.*
-    Возвращает dict, который app.server отдаёт как JSON.
+    Тонкий адаптер: парсит команды и маршрутизирует в use-cases.
+    Поддержка: /start, /status, /why, /tick, /execute
+    Возвращает готовый JSON (для FastAPI обработчика).
     """
-    text = ""
-    try:
-        message = update.get("message") or update.get("edited_message") or {}
-        text = str(message.get("text", "")).strip()
-    except Exception:
-        text = ""
+    text = (update.get("message") or {}).get("text", "").strip()
+    if not text:
+        return {"ok": True, "text": "empty_message"}
 
-    if not text or text == "/help":
-        return {"ok": True, "text": HELP}
+    parts = text.split()
+    cmd = parts[0].lower()
 
-    if text == "/start":
-        return {"ok": True, "text": "Привет! Я готов работать. Введите /help чтобы увидеть команды."}
+    symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
+    timeframe = getattr(cfg, "TIMEFRAME", "1h")
+    limit = int(getattr(cfg, "DEFAULT_LIMIT", 300))
 
-    if text.startswith("/status"):
-        args = _arg_after("/status", text)
-        symbol, timeframe = _parse_symbol_timeframe(args, cfg)
+    if cmd == "/start":
+        return {"ok": True, "text": "Hi! Use /status, /why, /tick, /execute"}
 
-        summary = build_context(cfg, broker,
-                                positions_repo=repos.get("positions_repo"),
-                                trades_repo=repos.get("trades_repo"))
-        ok, reason = risk_manager.check(summary, cfg)
+    if cmd == "/status":
+        dec = evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
         return {
             "ok": True,
-            "status": "ok",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "risk": {"ok": bool(ok), "reason": reason},
-            "summary": summary,
+            "text": f"symbol={symbol} tf={timeframe}\naction={dec.get('action')} score={dec.get('score')}",
         }
 
-    if text.startswith("/tick"):
-        args = _arg_after("/tick", text)
-        symbol, timeframe = _parse_symbol_timeframe(args, cfg)
-        dec = evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=300, **repos)
-        return {"ok": True, "status": "evaluated", "symbol": symbol, "timeframe": timeframe, "decision": dec}
+    if cmd == "/why":
+        dec = evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
+        expl = dec.get("explain") or {}
+        return {
+            "ok": True,
+            "text": f"/why for {symbol} {timeframe}\n{_fmt_explain_short(expl)}\nscore={dec.get('score')} action={dec.get('action')}",
+            "explain": expl,  # в ответе отдадим полный explain
+        }
 
-    if text.startswith("/execute"):
-        args = _arg_after("/execute", text)
-        symbol, timeframe = _parse_symbol_timeframe(args, cfg)
-        res = eval_and_execute(cfg, broker, symbol=symbol, timeframe=timeframe, limit=300, **repos)
+    if cmd == "/tick":
+        dec = evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
+        return {"ok": True, "decision": dec}
+
+    if cmd == "/execute":
+        res = eval_and_execute(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
         return {"ok": True, **res}
 
-    if text.startswith("/why"):
-        args = _arg_after("/why", text)
-        symbol, timeframe = _parse_symbol_timeframe(args, cfg)
-
-        summary = build_context(cfg, broker,
-                                positions_repo=repos.get("positions_repo"),
-                                trades_repo=repos.get("trades_repo"))
-        ok, reason = risk_manager.check(summary, cfg)
-        dec = evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=300,
-                       risk_reason=(None if ok else reason), **repos)
-        explain = dec.get("explain", {})
-        return {
-            "ok": True,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "risk": {"ok": bool(ok), "reason": reason},
-            "explain": explain,
-            "score": dec.get("score"),
-            "action": dec.get("action"),
-        }
-
-    # неизвестная команда — подсказка
-    return {"ok": False, "error": "unknown_command", "text": HELP}
+    return {"ok": False, "text": f"unknown command: {cmd}"}

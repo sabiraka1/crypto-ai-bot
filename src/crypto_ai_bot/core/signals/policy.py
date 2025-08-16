@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Dict, Optional
-from datetime import datetime, timezone
 
 from . import _build, _fusion
+from crypto_ai_bot.core.risk import manager as risk_manager
+from crypto_ai_bot.utils import metrics
+
+def _d(v, default: str = "0") -> str:
+    try:
+        return str(Decimal(str(v)))
+    except Exception:
+        return default
+
+def _cfg(cfg, name: str, default):
+    return getattr(cfg, name, default)
 
 def _ensure_explain(decision: Dict[str, Any]) -> Dict[str, Any]:
     ex = decision.get("explain")
@@ -17,136 +28,95 @@ def _ensure_explain(decision: Dict[str, Any]) -> Dict[str, Any]:
     ex.setdefault("context", {})
     return ex
 
-def _coalesce_rule_score(features: Dict[str, Any]) -> Optional[float]:
-    # Если _build уже дал rule_score — используем его
-    rs = features.get("rule_score")
-    if isinstance(rs, (int, float)):
-        try:
-            x = float(rs)
-            if x < 0: x = 0.0
-            if x > 1: x = 1.0
-            return x
-        except Exception:
-            pass
-    # Простейшая эвристика fallback на основе индикаторов
-    ind = features.get("indicators", {}) or {}
-    ema_fast = ind.get("ema_fast") or ind.get("ema20") or ind.get("ema_20")
-    ema_slow = ind.get("ema_slow") or ind.get("ema50") or ind.get("ema_50")
-    rsi = ind.get("rsi")
-    macd_hist = ind.get("macd_hist")
-    score = 0.5
-    try:
-        if ema_fast is not None and ema_slow is not None:
-            score += 0.2 if float(ema_fast) > float(ema_slow) else -0.2
-    except Exception:
-        pass
-    try:
-        if rsi is not None:
-            r = float(rsi)
-            if r < 30: score += 0.1
-            if r > 70: score -= 0.1
-    except Exception:
-        pass
-    try:
-        if macd_hist is not None:
-            mh = float(macd_hist)
-            score += 0.1 if mh > 0 else -0.1
-    except Exception:
-        pass
-    # clamp
-    if score < 0: score = 0.0
-    if score > 1: score = 1.0
-    return score
+def _choose_action(score: float, buy_th: float, sell_th: float) -> str:
+    if score >= buy_th:
+        return "buy"
+    if score <= sell_th:
+        return "sell"
+    return "hold"
 
-def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int = 300, **repos) -> Dict[str, Any]:
+def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int, **repos) -> Dict[str, Any]:
     """
-    ЕДИНАЯ точка принятия решений.
-    1) Собирает фичи через _build.build()
-    2) Объединяет rule_score + ai_score → score через _fusion.fuse()
-    3) Возвращает решение: action|size|sl|tp|trail|score + explain{signals,weights,thresholds,context}
+    ЕДИНАЯ точка принятия решения.
+    Возвращает dict (Decision-подобный):
+      {action, size, sl, tp, trail, score, explain{signals,blocks,weights,thresholds,context}}
     """
-    features = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
+    # Сбор фич (OHLCV -> индикаторы -> normalize)
+    feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
+    ind = feats.get("indicators", {}) or {}
+    market = feats.get("market", {}) or {}
 
-    # Сигнальная часть (без IO): соединение rule/ai
-    rule_score = _coalesce_rule_score(features)
-    ai_score = features.get("ai_score")
-    try:
-        ai_score = float(ai_score) if ai_score is not None else None
-    except Exception:
-        ai_score = None
+    # Правила риска (блокировки)
+    ok, reason = risk_manager.check(feats, cfg)
 
-    score = _fusion.fuse(rule_score, ai_score, cfg)
+    # Rule/AI score (поддерживаем оба источника)
+    rule_score = feats.get("rule_score")
+    ai_score = feats.get("ai_score")
+    score = float(_fusion.fuse(rule_score, ai_score, cfg))
 
-    thr_buy = float(getattr(cfg, "THRESHOLD_BUY", 0.60))
-    thr_sell = float(getattr(cfg, "THRESHOLD_SELL", 0.40))
+    # Весовые коэффициенты/пороги из Settings
+    w_rule = float(_cfg(cfg, "SCORE_RULE_WEIGHT", 0.5))
+    w_ai   = float(_cfg(cfg, "SCORE_AI_WEIGHT", 0.5))
+    th_buy  = float(_cfg(cfg, "BUY_THRESHOLD", 0.6))
+    th_sell = float(_cfg(cfg, "SELL_THRESHOLD", 0.4))
 
-    if score >= thr_buy:
-        action = "buy"
-    elif score <= thr_sell:
-        action = "sell"
-    else:
+    action = _choose_action(score, th_buy, th_sell)
+    size = _d(_cfg(cfg, "ORDER_SIZE", "0"))
+
+    # ATR-driven SL/TP/Trail (если есть atr/price)
+    atr = ind.get("atr") or ind.get("atr_pct")
+    price = market.get("price")
+    sl = tp = trail = None
+    if isinstance(price, (int, float)) and isinstance(atr, (int, float)):
+        atr_mult_sl = float(_cfg(cfg, "SL_ATR_MULT", 0.0))
+        atr_mult_tp = float(_cfg(cfg, "TP_ATR_MULT", 0.0))
+        atr_mult_tr = float(_cfg(cfg, "TRAIL_ATR_MULT", 0.0))
+        if atr_mult_sl > 0:
+            sl = float(price - atr * atr_mult_sl) if action == "buy" else float(price + atr * atr_mult_sl)
+        if atr_mult_tp > 0:
+            tp = float(price + atr * atr_mult_tp) if action == "buy" else float(price - atr * atr_mult_tp)
+        if atr_mult_tr > 0:
+            trail = float(atr * atr_mult_tr)
+
+    # Если риск заблокировал — держим позицию
+    if not ok:
         action = "hold"
 
-    # Размер/SL/TP/Trail — упрощённо: ответственность других слоёв/настроек
-    size = "0"  # подбирается risk/position sizing, тут — не лезем
-    sl = None
-    tp = None
-    trail = None
-
+    # explain (полный формат)
     decision: Dict[str, Any] = {
         "action": action,
-        "size": size,
+        "size": size if action in ("buy", "sell") else "0",
         "sl": sl,
         "tp": tp,
         "trail": trail,
-        "score": float(score),
-    }
-
-    # --- explain ---
-    ex = _ensure_explain(decision)
-
-    # 1) signals — вытащим ключевые индикаторы из features (если есть)
-    ind = features.get("indicators", {}) or {}
-    # аккуратно приводим к float где возможно
-    def _maybe_float(x):
-        try:
-            return float(x)
-        except Exception:
-            return x
-    ex["signals"].update({
-        "ema_fast": _maybe_float(ind.get("ema_fast", ind.get("ema20", ind.get("ema_20")))),
-        "ema_slow": _maybe_float(ind.get("ema_slow", ind.get("ema50", ind.get("ema_50")))),
-        "rsi": _maybe_float(ind.get("rsi")),
-        "macd_hist": _maybe_float(ind.get("macd_hist")),
-        "atr": _maybe_float(ind.get("atr")),
-        "atr_pct": _maybe_float(ind.get("atr_pct")),
-    })
-
-    # 2) weights
-    ex["weights"].update({
-        "rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)),
-        "ai": float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5)),
-    })
-
-    # 3) thresholds
-    ex["thresholds"].update({
-        "buy": thr_buy,
-        "sell": thr_sell,
-    })
-
-    # 4) context: symbol/timeframe/price/ts/mode
-    price = None
-    ts = None
-    mkt = features.get("market", {})
-    if isinstance(mkt, dict):
-        price = mkt.get("price")
-        ts = mkt.get("ts")
-    ex["context"].update({
+        "score": score,
         "symbol": symbol,
         "timeframe": timeframe,
-        "price": _maybe_float(price),
-        "ts": ts if ts is not None else datetime.now(timezone.utc).isoformat(),
-        "mode": getattr(cfg, "MODE", "paper"),
-    })
+    }
+    ex = _ensure_explain(decision)
+    # signals — основные индикаторы, если есть
+    for key in ("ema_fast", "ema_slow", "ema20", "ema50", "rsi", "macd", "macd_signal", "macd_hist", "atr", "atr_pct"):
+        if key in ind:
+            ex["signals"][key] = float(ind[key])
+    # blocks — причина риска, если была
+    if not ok:
+        ex["blocks"]["risk"] = {"reason": str(reason)}
+    # weights/thresholds
+    ex["weights"] = {"rule": w_rule, "ai": w_ai}
+    ex["thresholds"] = {"buy": th_buy, "sell": th_sell}
+    # context — цена/время/лимит
+    for ctx_k in ("price", "ts"):
+        if ctx_k in market:
+            try:
+                ex["context"][ctx_k] = market[ctx_k]
+            except Exception:
+                pass
+    ex["context"]["limit"] = int(limit)
+
+    # метрики — гистограмма по score
+    try:
+        metrics.observe("decision_score", float(score), {"action": action}, buckets=[0.0, 0.25, 0.5, 0.75, 1.0])
+    except Exception:
+        pass
 
     return decision
