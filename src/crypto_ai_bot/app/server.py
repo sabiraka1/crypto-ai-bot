@@ -49,10 +49,10 @@ def _ensure_db_and_repos() -> Dict[str, Any]:
     _db_conn = db_connect(cfg.DB_PATH)
     apply_migrations(_db_conn)
     _repos = {
-        "positions_repo": PositionRepository(_db_conn),
-        "trades_repo":    TradeRepository(_db_conn),
-        "snapshots_repo": SnapshotRepository(_db_conn),
-        "audit_repo":     AuditRepository(_db_conn),
+        "positions_repo": PositionRepository(_db_conn, cfg),
+        "trades_repo":    TradeRepository(_db_conn, cfg),
+        "snapshots_repo": SnapshotRepository(_db_conn, cfg),
+        "audit_repo":     AuditRepository(_db_conn, cfg),
         "idempotency_repo": IdempotencyRepository(_db_conn),
     }
     metrics.inc("db_connected_total", {})
@@ -62,7 +62,6 @@ def _ensure_db_and_repos() -> Dict[str, Any]:
 async def _startup_event() -> None:
     global _maint_task
     _ = _ensure_db_and_repos()
-    # фоновая задача обслуживания БД
     async def _maint_loop():
         interval = int(getattr(cfg, "DB_MAINTENANCE_INTERVAL_SEC", 900))
         while True:
@@ -89,10 +88,6 @@ async def _shutdown_event() -> None:
     _maint_task = None
     _db_conn = None
     _repos = {}
-
-# ------------------------------------------------------------------
-# health / metrics
-# ------------------------------------------------------------------
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
@@ -130,10 +125,6 @@ async def health() -> Dict[str, Any]:
 @app.get("/metrics", response_class=PlainTextResponse)
 async def get_metrics() -> str:
     return metrics.export()
-
-# ------------------------------------------------------------------
-# status / debug
-# ------------------------------------------------------------------
 
 def _limits_from_cfg(cfg) -> Dict[str, Any]:
     return {
@@ -186,10 +177,6 @@ async def http_execute(symbol: Optional[str] = None, timeframe: Optional[str] = 
     except Exception as e:
         return {"status": "error", "error": f"execute_failed: {type(e).__name__}: {e}"}
 
-# Telegram webhook
-from crypto_ai_bot.app.adapters.telegram import handle_update as tg_handle_update
-from fastapi import Request
-
 @app.post("/telegram")
 async def telegram_webhook(request: Request) -> Dict[str, Any]:
     secret_hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -202,7 +189,6 @@ async def telegram_webhook(request: Request) -> Dict[str, Any]:
     repos = _ensure_db_and_repos()
     return tg_handle_update(update, cfg, broker, **repos)
 
-# tick (optional)
 @app.post("/tick")
 async def tick(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
     try:

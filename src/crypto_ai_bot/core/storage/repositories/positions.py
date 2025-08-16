@@ -1,90 +1,56 @@
 from __future__ import annotations
-
-import sqlite3
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
-class PositionRepository:
+from .base import _WriteCountingRepo
+
+class PositionRepository(_WriteCountingRepo):
     """
-    SQLite репозиторий позиций.
-    Требуемые (желательные) поля таблицы positions:
-      id TEXT PRIMARY KEY,
-      symbol TEXT,
-      side TEXT,              -- 'buy'|'sell'
-      amount REAL,
-      entry_price REAL,
-      status TEXT,            -- 'open'|'closed'
-      opened_at_ms INTEGER,
-      closed_at_ms INTEGER NULL
-    Реализация дружелюбна к различиям схемы: если части полей нет — будет best-effort.
+    Ожидаем схему:
+      positions(id TEXT PK, symbol TEXT, side TEXT, amount REAL, entry_price REAL, status TEXT, opened_at INTEGER, updated_at INTEGER)
+      индексы по (status, symbol)
     """
 
-    def __init__(self, conn: sqlite3.Connection):
-        self._con = conn
+    def upsert(self, position: Dict[str, Any]) -> None:
+        pos_id = str(position.get("id") or position.get("pos_id") or "")
+        symbol = str(position.get("symbol"))
+        side = str(position.get("side"))
+        amount = float(position.get("amount", 0.0))
+        entry_price = float(position.get("entry_price", 0.0))
+        status = str(position.get("status") or "open")
+        opened_at = int(position.get("opened_at") or datetime.now(tz=timezone.utc).timestamp())
+        updated_at = int(datetime.now(tz=timezone.utc).timestamp())
 
-    # -------- базовые операции (минимум API, чтобы не ломать старый код) --------
+        cur = self._con.cursor()
+        try:
+            # REPLACE обеспечивает идемпотентность id
+            cur.execute(
+                "REPLACE INTO positions(id, symbol, side, amount, entry_price, status, opened_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (pos_id, symbol, side, amount, entry_price, status, opened_at, updated_at),
+            )
+            self._inc_writes("positions", 1)
+        finally:
+            cur.close()
+
     def get_open(self) -> List[Dict[str, Any]]:
+        cur = self._con.cursor()
         try:
-            cur = self._con.execute(
-                """SELECT id, symbol, side, amount, entry_price
-                   FROM positions
-                   WHERE status = 'open'"""
-            )
+            cur.execute("SELECT id, symbol, side, amount, entry_price, status, opened_at, updated_at FROM positions WHERE status='open' ORDER BY opened_at DESC")
             rows = cur.fetchall()
-        except Exception:
-            return []
-        out: List[Dict[str, Any]] = []
-        for r in rows or []:
-            try:
-                out.append({
-                    "id": r[0],
-                    "symbol": r[1],
-                    "side": r[2],
-                    "amount": float(r[3]) if r[3] is not None else None,
-                    "entry_price": float(r[4]) if r[4] is not None else None,
-                })
-            except Exception:
-                continue
-        return out
+            return [
+                {"id": r[0], "symbol": r[1], "side": r[2], "amount": r[3], "entry_price": r[4], "status": r[5], "opened_at": r[6], "updated_at": r[7]}
+                for r in rows
+            ]
+        finally:
+            cur.close()
 
-    # -------- быстрый агрегат для экспозиции --------
-    def get_open_exposure_fast(self, *, symbol: Optional[str] = None) -> Dict[str, Optional[float]]:
-        """
-        Возвращает {exposure_usd, exposure_pct?}.
-        Для скорости пытается использовать предрасчитанные колонки, если они есть.
-        По умолчанию exposure_usd = SUM(ABS(amount * entry_price)) по открытым позициям.
-        exposure_pct возвращается только если в таблице присутствует колонка equity_usd (необязательно).
-        """
-        where = "WHERE status = 'open'"
-        params: tuple = ()
-        if symbol:
-            where += " AND symbol = ?"
-            params = (symbol,)
-        # Быстрый путь через entry_price*amount
+    def get_by_id(self, pos_id: str) -> Optional[Dict[str, Any]]:
+        cur = self._con.cursor()
         try:
-            cur = self._con.execute(
-                f"""SELECT SUM(ABS(COALESCE(amount,0) * COALESCE(entry_price,0))) AS exposure_usd
-                    FROM positions
-                    {where}""",
-                params,
-            )
+            cur.execute("SELECT id, symbol, side, amount, entry_price, status, opened_at, updated_at FROM positions WHERE id=? LIMIT 1", (pos_id,))
             row = cur.fetchone()
-            exposure_usd = float(row[0]) if row and row[0] is not None else None
-        except Exception:
-            exposure_usd = None
-
-        # Пытаемся достать equity_usd из последней записи (если кто-то пишет туда снимки)
-        exposure_pct = None
-        if exposure_usd is not None:
-            try:
-                cur2 = self._con.execute(
-                    "SELECT equity_usd FROM account_equity ORDER BY ts_ms DESC LIMIT 1"
-                )
-                r2 = cur2.fetchone()
-                if r2 and r2[0]:
-                    eq = float(r2[0])
-                    if eq > 0:
-                        exposure_pct = exposure_usd / eq * 100.0
-            except Exception:
-                pass
-
-        return {"exposure_usd": exposure_usd, "exposure_pct": exposure_pct}
+            if not row:
+                return None
+            return {"id": row[0], "symbol": row[1], "side": row[2], "amount": row[3], "entry_price": row[4], "status": row[5], "opened_at": row[6], "updated_at": row[7]}
+        finally:
+            cur.close()
