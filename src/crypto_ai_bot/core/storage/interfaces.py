@@ -1,82 +1,49 @@
 # src/crypto_ai_bot/core/storage/interfaces.py
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol, runtime_checkable, Iterable, Any
+from typing import Any, Dict, List, Optional, Protocol
 
 
-# ---------- Ошибки/исключения хранилища ----------
-class StorageError(Exception): ...
-class ConflictError(StorageError): ...
-class NotFoundError(StorageError): ...
+class TradeRepository(Protocol):
+    def insert(self, tr: Any) -> None: ...
+    def upsert_by_client_order_id(self, client_order_id: str, tr: Any) -> None: ...
+    def list_recent(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]: ...
 
 
-# ---------- Общая транзакция/контейнер ----------
-class Transaction(AbstractContextManager):
-    """База для контекстного менеджера транзакций (BEGIN..COMMIT/ROLLBACK)."""
-    def __exit__(self, exc_type, exc, tb) -> bool:  # pragma: no cover
-        return False
+class PositionRepository(Protocol):
+    def upsert(self, p: Any) -> None: ...
+    def mark_closed(self, pos_id: str, realized_pnl: Decimal, closed_at_ms: int) -> None: ...
+    def update_size_and_price(self, pos_id: str, new_size: Decimal, new_avg_price: Decimal, realized_pnl: Decimal, ts_ms: int) -> None: ...
+    def get_open(self) -> List[Dict[str, Any]]: ...
+    def get_by_id(self, pos_id: str) -> Optional[Dict[str, Any]]: ...
 
 
-class Repositories(Protocol):
-    """
-    Контейнер с репозиториями и (опционально) транзакцией.
-    Реализация (например, sqlite_adapter) должна предоставить эти атрибуты.
-    """
-    # обязательные репозитории:
-    idempotency: "IdempotencyRepository"
-    trades: "TradeRepository"           # реализуй по своему контракту
-    positions: "PositionRepository"     # реализуй по своему контракту
-    audit: "AuditRepository"
-
-    # опционально:
-    def transaction(self) -> Transaction: ...
-    # либо атрибут txn/contextmanager, если так удобнее в твоём адаптере
+class SnapshotRepository(Protocol):
+    def insert(self, taken_at_ms: int, payload: Dict[str, Any]) -> int: ...
+    def last(self) -> Optional[Dict[str, Any]]: ...
+    def list_recent(self, limit: int = 100) -> List[Dict[str, Any]]: ...
 
 
-# ---------- Идемпотентность ----------
-@dataclass(frozen=True)
-class IdemStatus:
-    key: str
-    state: str   # "claimed" | "committed"
-    ttl_seconds: int
+class AuditRepository(Protocol):
+    def log(
+        self,
+        *,
+        at_ms: int,
+        actor: str,
+        action: str,
+        entity_type: str,
+        entity_id: str | None,
+        details: Dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> None: ...
+    def list_recent(self, limit: int = 200) -> List[Dict[str, Any]]: ...
 
-@runtime_checkable
+
 class IdempotencyRepository(Protocol):
     """
-    Репозиторий идемпотентности на уровне приложения.
-    Семантика:
-      - claim(key, ttl): если ключ свободен или истёк → занять, вернуть True.
-                         если уже активен → False (дубликат).
-      - commit(key): помечает «успешно завершено», чтобы повтор не выполнялся.
-      - release(key): освобождает ключ (например, при ошибке).
-      - exists_active(key): активен ли ключ (claimed/committed и не истёк).
-      - purge_expired(): удалить протухшие записи, вернуть кол-во.
+    record(key, ttl) -> True, если ключ записан впервые (можно выполнять операцию).
+    False, если ключ ещё «жив» (операцию нужно пропустить как дубль).
     """
-    def claim(self, key: str, ttl_seconds: int, payload: dict | None = None) -> bool: ...
-    def commit(self, key: str) -> None: ...
-    def release(self, key: str) -> None: ...
-    def exists_active(self, key: str) -> bool: ...
+    def record(self, key: str, ttl_seconds: int) -> bool: ...
     def purge_expired(self) -> int: ...
-    def get(self, key: str) -> IdemStatus | None: ...
-
-
-# ---------- Простейшие контракты доменных репозиториев ----------
-# Ниже — легкие заглушки интерфейсов, чтобы use_cases не зависел от конкретной реализации.
-
-@runtime_checkable
-class AuditRepository(Protocol):
-    def log_event(self, event_type: str, data: dict) -> None: ...
-
-@runtime_checkable
-class TradeRepository(Protocol):
-    def insert_raw_order(self, order: dict) -> None: ...
-    # добавляй методы под свою доменную модель
-
-@runtime_checkable
-class PositionRepository(Protocol):
-    def upsert_position(self, pos: dict) -> None: ...
-    # добавляй методы под свою доменную модель

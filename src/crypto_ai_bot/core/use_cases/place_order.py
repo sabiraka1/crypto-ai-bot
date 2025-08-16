@@ -6,11 +6,11 @@ from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from crypto_ai_bot.core.positions.manager import PositionManager
-from crypto_ai_bot.core.storage.repositories import (
-    TradeRepositorySQLite,
-    PositionRepositorySQLite,
-    SnapshotRepositorySQLite,
-    AuditRepositorySQLite,
+from crypto_ai_bot.core.storage.interfaces import (
+    TradeRepository,
+    PositionRepository,
+    AuditRepository,
+    IdempotencyRepository,
 )
 from crypto_ai_bot.utils import metrics
 
@@ -23,8 +23,7 @@ def _to_dec(x: Any, default: str = "0") -> Decimal:
 
 
 def _client_oid(decision: Dict[str, Any]) -> str:
-    # детерминированный не нужен — достаточно «уникального» для идемпотентности
-    return f"bot-{uuid.uuid4().hex[:16]}"
+    return decision.get("client_order_id") or f"bot-{uuid.uuid4().hex[:16]}"
 
 
 def place_order(
@@ -33,14 +32,15 @@ def place_order(
     con,
     decision: Dict[str, Any],
     *,
+    trades: TradeRepository,
+    positions: PositionRepository,
+    audit: AuditRepository,
+    idem: IdempotencyRepository | None = None,
     client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Исполнить решение бота:
-      - action: buy|sell|hold
-      - size: Decimal|str|float (если нет — DEFAULT_ORDER_SIZE из Settings)
-      - sl/tp/trail: опционально
-    Все операции проводятся через PositionManager (он внутри пишет trade/position/audit в одной транзакции).
+    Исполняет решение (buy/sell), фиксирует trade/position/audit в ОДНОЙ транзакции (делает PositionManager),
+    защищает от повторов через IdempotencyRepository.
     """
     action = str(decision.get("action", "hold")).lower()
     if action == "hold":
@@ -55,16 +55,26 @@ def place_order(
 
     sl = decision.get("sl")
     tp = decision.get("tp")
+    client_order_id = client_order_id or _client_oid(decision)
+    idem_ttl = int(getattr(cfg, "IDEMPOTENCY_TTL_SEC", 900))
+
+    # Сквозной ключ (можно включить режим/символ для уникальности):
+    idem_key = f"order:{action}:{symbol}:{client_order_id}"
+
+    # Идемпотентность: если ключ "жив" — это повтор
+    if idem is not None:
+        fresh = idem.record(idem_key, ttl_seconds=idem_ttl)
+        if not fresh:
+            metrics.inc("order_skipped_total", {"reason": "duplicate"})
+            return {"status": "duplicate", "client_order_id": client_order_id, "decision": decision}
 
     pm = PositionManager(
         con=con,
         broker=broker,
-        trades=TradeRepositorySQLite(con),
-        positions=PositionRepositorySQLite(con),
-        audit=AuditRepositorySQLite(con),
+        trades=trades,
+        positions=positions,
+        audit=audit,
     )
-
-    client_order_id = client_order_id or decision.get("client_order_id") or _client_oid(decision)
 
     try:
         if action in {"buy", "sell"}:
@@ -83,4 +93,4 @@ def place_order(
             return {"status": "skipped", "reason": "unknown_action", "decision": decision}
     except Exception as e:
         metrics.inc("order_failed_total", {"reason": "exception"})
-        return {"status": "error", "error": repr(e), "decision": decision}
+        return {"status": "error", "error": repr(e), "decision": decision, "client_order_id": client_order_id}
