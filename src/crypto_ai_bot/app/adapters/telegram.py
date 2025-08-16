@@ -1,94 +1,132 @@
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 from decimal import Decimal
+import math
 
-from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
-from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
-from crypto_ai_bot.core.use_cases.get_stats import get_stats as uc_get_stats
+from crypto_ai_bot.core.use_cases.evaluate import evaluate
+from crypto_ai_bot.utils.http_client import get_http_client
 
-def _fmt_explain(decision: Dict[str, Any]) -> str:
-    e = decision.get("explain", {}) or {}
-    lines = []
-    lines.append(f"score: {decision.get('score')}")
-    thr = e.get("thresholds", {})
-    if thr:
-        lines.append(f"thresholds: buy={thr.get('buy')} sell={thr.get('sell')}")
-    sig = e.get("signals", {})
-    if sig:
-        top = {k: sig[k] for k in list(sig)[:6]}
-        lines.append("signals: " + ", ".join(f"{k}={v}" for k,v in top.items()))
-    ctx = e.get("context", {})
-    if ctx:
-        lines.append("ctx: " + ", ".join(f"{k}={v}" for k,v in ctx.items()))
-    blk = e.get("blocks", {})
-    if blk:
-        lines.append("blocks: " + str(blk))
+HELP = (
+    "🤖 *Crypto AI Bot*\n"
+    "/start — помощь\n"
+    "/status — текущий сигнал (без исполнения)\n"
+    "/why — объяснение сигнала (индикаторы/порог/веса/контекст)\n"
+    "\n"
+    "Пример: просто отправь /status"
+)
+
+def _fmt_pct(x: Optional[float]) -> str:
+    if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+        return "—"
+    return f"{x:.2f}%"
+
+def _fmt_num(x: Optional[float]) -> str:
+    if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+        return "—"
+    if abs(x) >= 100:
+        return f"{x:,.2f}"
+    return f"{x:.6f}".rstrip("0").rstrip(".")
+
+def _pick_text(update: Dict[str, Any]) -> tuple[int, str]:
+    msg = (update.get("message") or update.get("edited_message") or {})
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id", 0)
+    text = msg.get("text") or ""
+    return int(chat_id), str(text).strip()
+
+def _render_status(decision: Dict[str, Any]) -> str:
+    ctx = (decision.get("explain") or {}).get("context") or {}
+    ind = (decision.get("explain") or {}).get("signals") or {}
+    price = (decision.get("explain") or {}).get("context", {}).get("price")
+    return (
+        "📈 *Status*\n"
+        f"• Action: *{decision.get('action','?').upper()}*\n"
+        f"• Score: *{decision.get('score',0):.3f}*\n"
+        f"• Price: *{_fmt_num(price)}*\n"
+        f"• RSI: {_fmt_num(ind.get('rsi'))} | MACD hist: {_fmt_num(ind.get('macd_hist'))}\n"
+        f"• EMA: fast {_fmt_num(ind.get('ema_fast'))} / slow {_fmt_num(ind.get('ema_slow'))}\n"
+        f"• ATR%: {_fmt_pct(ind.get('atr_pct'))} | Spread%: {_fmt_pct(ctx.get('spread_pct'))}\n"
+    )
+
+def _render_why(decision: Dict[str, Any]) -> str:
+    e = decision.get("explain") or {}
+    ind = e.get("signals") or {}
+    ctx = e.get("context") or {}
+    w = e.get("weights") or {}
+    thr = e.get("thresholds") or {}
+    blocks = e.get("blocks") or {}
+
+    lines = [
+        "🧠 *Why?*",
+        f"• Action: *{decision.get('action','?').upper()}* | Score: *{decision.get('score',0):.3f}*",
+        f"• Weights: rule={w.get('rule',0.5):.2f}, ai={w.get('ai',0.5):.2f}",
+        f"• Thresholds: buy={thr.get('buy',0.6):.2f}, sell={thr.get('sell',0.4):.2f}",
+        "• Signals:",
+        f"    - RSI: {_fmt_num(ind.get('rsi'))}",
+        f"    - MACD hist: {_fmt_num(ind.get('macd_hist'))}",
+        f"    - EMA fast/slow: {_fmt_num(ind.get('ema_fast'))} / {_fmt_num(ind.get('ema_slow'))}",
+        f"    - ATR%: {_fmt_pct(ind.get('atr_pct'))}",
+        "• Context:",
+        f"    - hour: {ctx.get('hour','—')}  | spread%: {_fmt_pct(ctx.get('spread_pct'))}",
+        f"    - exposure%: {_fmt_pct(ctx.get('exposure_pct'))} | exposure$: {_fmt_num(ctx.get('exposure_usd'))}",
+        f"    - day_dd%: {_fmt_pct(ctx.get('day_drawdown_pct'))}",
+    ]
+    if blocks:
+        lines.append("• Blocks:")
+        for k, v in blocks.items():
+            lines.append(f"    - {k}: {v}")
     return "\n".join(lines)
 
-def _parse_days(text: str) -> int:
-    parts = text.strip().split()
-    if len(parts) < 2:
-        return 1
-    tok = parts[1].lower()
-    if tok.endswith('d'):
-        tok = tok[:-1]
+def _send_text(chat_id: int, text: str, cfg) -> Dict[str, Any]:
+    token = getattr(cfg, "TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        # return as plain data if token not configured (server can log)
+        return {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        d = int(tok)
-        return max(1, min(365, d))
-    except Exception:
-        return 1
+        http = get_http_client()
+        resp = http.post_json(url, json=payload, timeout=10.0)
+        return resp or {"ok": False}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-async def handle_update(update: Dict[str, Any], cfg, bot, http) -> Dict[str, Any]:
-    message = (update or {}).get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    text = (message.get("text") or "").strip()
+def handle_update(update: Dict[str, Any], cfg, broker, **deps) -> Dict[str, Any]:
+    """
+    Тонкий адаптер команд → use-cases.
 
-    symbol = cfg.SYMBOL
-    timeframe = cfg.TIMEFRAME
-    limit = 300
+    deps (опционально):
+      - positions_repo
+      - trades_repo
+      - snapshots_repo
+    """
+    chat_id, text = _pick_text(update)
+    if not chat_id:
+        return {"ok": False, "error": "no_chat_id"}
 
-    if text.startswith("/start"):
-        reply = "Команды: /status, /why, /stats [Nd], /buy <s> (dev), /sell <s> (dev)"
-        return {"chat_id": chat_id, "text": reply}
+    cmd = text.split()[0].lower() if text else ""
+    if cmd in ("/start", "/help"):
+        return _send_text(chat_id, HELP, cfg)
 
-    if text.startswith("/status"):
-        d = uc_evaluate(cfg, bot, symbol=symbol, timeframe=timeframe, limit=limit)
-        reply = f"status: {d.get('action')} score={d.get('score')}\n{_fmt_explain(d)}"
-        return {"chat_id": chat_id, "text": reply}
-
-    if text.startswith("/why"):
-        d = uc_evaluate(cfg, bot, symbol=symbol, timeframe=timeframe, limit=limit)
-        reply = "WHY:\n" + _fmt_explain(d)
-        return {"chat_id": chat_id, "text": reply}
-
-    if text.startswith("/stats"):
-        days = _parse_days(text)
-        s = uc_get_stats(cfg, bot, positions_repo=None, trades_repo=None, symbol=symbol, window_days=days)
-        exp = s.get("exposure_value", "0")
-        pnl_u = s.get("pnl_unrealized", "0")
-        pnl_r = s.get("realized_pnl_window", "0")
-        cnt = s.get("positions_open", 0)
-        trades = s.get("trades_window_count", 0)
-        top = s.get("top_symbols", [])
-        top_s = ", ".join(f"{t['symbol']}:{t['exposure']}" for t in top) if top else "-"
-        reply = f"stats({days}d): pos={cnt}, exposure={exp}, pnl_unreal={pnl_u}, pnl_realized={pnl_r}, trades={trades}\nTOP: {top_s}"
-        return {"chat_id": chat_id, "text": reply}
-
-    if text.startswith("/buy") or text.startswith("/sell"):
-        if cfg.MODE == "live":
-            return {"chat_id": chat_id, "text": "Недоступно в live режиме."}
-        parts = text.split()
-        if len(parts) < 2:
-            return {"chat_id": chat_id, "text": "Укажи размер: /buy 0.01"}
+    if cmd == "/status":
         try:
-            amt = Decimal(parts[1])
-        except Exception:
-            return {"chat_id": chat_id, "text": "Неверный размер. Пример: /buy 0.01"}
-        action = "buy" if text.startswith("/buy") else "sell"
-        res = uc_eval_and_execute(
-            cfg, bot, symbol=symbol, timeframe=timeframe, limit=1,
-            positions_repo=None, trades_repo=None, audit_repo=None, uow=None, idempotency_repo=None,
-        )
-        return {"chat_id": chat_id, "text": f"dev {action} {amt}: {res.get('status')}"}
+            dec = evaluate(cfg, broker, symbol=cfg.SYMBOL, timeframe=cfg.TIMEFRAME, limit=300, **deps)
+            return _send_text(chat_id, _render_status(dec), cfg)
+        except Exception as e:
+            return _send_text(chat_id, f"⚠️ error: {type(e).__name__}: {e}", cfg)
 
-    return {"chat_id": chat_id, "text": "Неизвестная команда. Есть: /status, /why, /stats [Nd], /buy <s> (dev), /sell <s> (dev)"} 
+    if cmd == "/why":
+        try:
+            dec = evaluate(cfg, broker, symbol=cfg.SYMBOL, timeframe=cfg.TIMEFRAME, limit=300, **deps)
+            return _send_text(chat_id, _render_why(dec), cfg)
+        except Exception as e:
+            return _send_text(chat_id, f"⚠️ error: {type(e).__name__}: {e}", cfg)
+
+    # Unknown -> help
+    return _send_text(chat_id, HELP, cfg)
