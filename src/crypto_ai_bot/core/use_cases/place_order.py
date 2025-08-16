@@ -1,214 +1,97 @@
-# src/crypto_ai_bot/core/use_cases/place_order.py
+# src/crypto_ai_bot/core/signals/policy.py
 from __future__ import annotations
 
-import hashlib
-import json
-import time
-from contextlib import nullcontext
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
-from crypto_ai_bot.core.brokers.symbols import split_symbol
-from crypto_ai_bot.core.types.trading import Trade  # DTO
+from . import _build, _fusion
+from crypto_ai_bot.core.risk import manager as risk_manager
 from crypto_ai_bot.utils import metrics
 
-# типовые интерфейсы; ожидаем, что они есть в core/storage/interfaces.py
-try:
-    from crypto_ai_bot.core.storage.interfaces import (
-        IdempotencyRepository,
-        TradeRepository,
-        PositionRepository,
-        AuditRepository,
-        UnitOfWork,
-    )
-except Exception:
-    # Мягкий fallback: объявим Protocol-подобные заглушки, чтобы не ронять импорт
-    class IdempotencyRepository:  # type: ignore
-        def claim(self, key: str, ttl_seconds: int) -> bool: ...
-        def commit(self, key: str) -> None: ...
-        def release(self, key: str) -> None: ...
 
-    class TradeRepository:  # type: ignore
-        def insert(self, trade: Trade) -> None: ...
-
-    class PositionRepository:  # type: ignore
-        def get_open_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]: ...
-        def upsert(self, position: Dict[str, Any]) -> None: ...
-
-    class AuditRepository:  # type: ignore
-        def record(self, event: Dict[str, Any]) -> None: ...
-
-    class UnitOfWork:  # type: ignore
-        def transaction(self):
-            return nullcontext()
+def _heuristic_rule_score(features: Dict[str, Any]) -> float:
+    ind = features.get("indicators", {})
+    ema_f = ind.get("ema_fast")
+    ema_s = ind.get("ema_slow")
+    rsi = ind.get("rsi")
+    macd_hist = ind.get("macd_hist")
+    if None in (ema_f, ema_s, rsi, macd_hist):
+        return 0.5
+    score = 0.5
+    score += 0.2 if ema_f > ema_s else -0.2
+    if 45 <= rsi <= 60:
+        score += 0.05
+    elif rsi < 30 or rsi > 70:
+        score -= 0.1
+    score += 0.1 if macd_hist > 0 else -0.1
+    return max(0.0, min(1.0, score))
 
 
-def _decision_key(symbol: str, decision: Dict[str, Any]) -> str:
-    """
-    Дет-ключ идемпотентности. Если decision содержит 'idempotency_key' — используем его.
-    Иначе хешируем существенные поля решения + символ.
-    """
-    explicit = decision.get("idempotency_key")
-    if isinstance(explicit, str) and explicit:
-        return explicit
+def _position_size_buy(cfg, price: float) -> Decimal:
+    quote_usd = Decimal(str(getattr(cfg, "ORDER_QUOTE_SIZE", "100")))
+    if price <= 0:
+        return Decimal("0")
+    return (quote_usd / Decimal(str(price))).quantize(Decimal("0.00000001"))
 
-    payload = {
-        "symbol": symbol,
-        "action": decision.get("action"),
-        "size": str(decision.get("size")),
-        "sl": decision.get("sl"),
-        "tp": decision.get("tp"),
-        "trail": decision.get("trail"),
-        "score": round(float(decision.get("score") or 0.0), 4),
+
+def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
+    feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+
+    if feats.get("rule_score") is None:
+        feats["rule_score"] = _heuristic_rule_score(feats)
+
+    score = _fusion.fuse(feats.get("rule_score"), feats.get("ai_score"), cfg)
+    ok, reason = risk_manager.check(feats, cfg)
+
+    price = float(feats["market"]["price"] or 0.0)
+    atr_pct = float(feats["indicators"]["atr_pct"] or 0.0)
+
+    BUY_TH = float(getattr(cfg, "SCORE_BUY_MIN", 0.6))
+    SELL_TH = float(getattr(cfg, "SCORE_SELL_MIN", 0.4))
+    SLx = float(getattr(cfg, "SL_ATR_MULT", 1.5))
+    TPx = float(getattr(cfg, "TP_ATR_MULT", 2.5))
+
+    explain = {
+        "signals": {
+            "ema_fast": feats["indicators"]["ema_fast"],
+            "ema_slow": feats["indicators"]["ema_slow"],
+            "rsi": feats["indicators"]["rsi"],
+            "macd_hist": feats["indicators"]["macd_hist"],
+            "atr_pct": atr_pct,
+        },
+        "blocks": {"risk_ok": ok, "risk_reason": reason},
+        "weights": {
+            "rule": float(getattr(cfg, "DECISION_RULE_WEIGHT", getattr(cfg, "SCORE_RULE_WEIGHT", 0.7))),
+            "ai": float(getattr(cfg, "DECISION_AI_WEIGHT", getattr(cfg, "SCORE_AI_WEIGHT", 0.3))),
+        },
+        "thresholds": {"buy": BUY_TH, "sell": SELL_TH, "sl_atr": SLx, "tp_atr": TPx},
+        "context": {"price": price, "timeframe": timeframe, "symbol": symbol},
+        "rule_score": feats.get("rule_score"),
+        "ai_score": feats.get("ai_score"),
     }
-    dj = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return "order:" + hashlib.sha256(dj.encode("utf-8")).hexdigest()[:32]
 
+    decision: Dict[str, Any] = {
+        "action": "hold",
+        "size": "0",
+        "sl": None,
+        "tp": None,
+        "trail": None,
+        "score": score,
+        "explain": explain,
+    }
 
-def _amount_for_sell_fraction(
-    broker: Any,
-    positions_repo: PositionRepository,
-    symbol: str,
-    fraction: Decimal,
-) -> Decimal:
-    """
-    Рассчитать объём продажи как долю от открытой позиции по символу.
-    Если позиция неизвестна — попытка продать 0.
-    """
-    if fraction <= 0:
-        return Decimal("0")
+    if not ok:
+        metrics.inc("decide_blocked_total", {"reason": reason})
+        return decision
 
-    # предпочтительно из репозитория позиций
-    pos = None
-    try:
-        pos = positions_repo.get_open_by_symbol(symbol)  # ожидается dict или DTO
-    except Exception:
-        pos = None
+    if score >= BUY_TH and price > 0:
+        size = _position_size_buy(cfg, price)
+        sl = price * (1.0 - (SLx * atr_pct / 100.0)) if atr_pct > 0 else None
+        tp = price * (1.0 + (TPx * atr_pct / 100.0)) if atr_pct > 0 else None
+        decision.update({"action": "buy", "size": str(size), "sl": sl, "tp": tp})
+    elif score <= SELL_TH and price > 0:
+        frac = float(getattr(cfg, "SELL_SIGNAL_FRACTION", 0.5))
+        decision.update({"action": "sell", "size": str(frac), "sl": None, "tp": None})
 
-    if not pos:
-        return Decimal("0")
-
-    qty = Decimal(str(pos.get("size") or pos.get("qty") or "0"))
-    if qty <= 0:
-        return Decimal("0")
-
-    return (qty * fraction).quantize(Decimal("0.00000001"))
-
-
-def place_order(
-    cfg: Any,
-    broker: Any,
-    *,
-    symbol: str,
-    decision: Dict[str, Any],
-    positions_repo: PositionRepository,
-    trades_repo: TradeRepository,
-    audit_repo: AuditRepository,
-    idemp_repo: IdempotencyRepository,
-    uow: Optional[UnitOfWork] = None,
-) -> Dict[str, Any]:
-    """
-    Разместить ордер и записать последствия (trade/audit/position) атомарно.
-    Все побочные эффекты — только внутри транзакции UnitOfWork (если передан).
-    """
-    if decision.get("action") in (None, "hold", "noop"):
-        return {"ok": True, "skipped": True, "reason": "hold"}
-
-    key = _decision_key(symbol, decision)
-    ttl = int(getattr(cfg, "IDEMP_TTL_SEC", 30))
-
-    if not idemp_repo.claim(key, ttl_seconds=ttl):
-        metrics.inc("order_duplicate_total", {"symbol": symbol})
-        return {"ok": True, "duplicate": True, "idempotency_key": key}
-
-    # вычислим amount и сторону
-    action = str(decision.get("action")).lower()
-    side = "buy" if action == "buy" else "sell"
-    size_raw = str(decision.get("size") or "0")
-    amount = Decimal("0")
-
-    if action == "buy":
-        # size трактуем как абсолютное количество базовой валюты (см. policy._position_size_buy)
-        amount = Decimal(size_raw)
-    else:
-        # size трактуем как долю (0..1) от открытой позиции
-        try:
-            frac = Decimal(size_raw)
-        except Exception:
-            frac = Decimal("0")
-        amount = _amount_for_sell_fraction(broker, positions_repo, symbol, frac)
-
-    if amount <= 0:
-        idemp_repo.release(key)
-        return {"ok": False, "error": "amount_is_zero", "idempotency_key": key}
-
-    # client_order_id для брокера (детерминированный)
-    client_oid = f"ai-{key}"
-
-    # исполняем на брокере (market-ордер)
-    metrics.inc("order_submitted_total", {"side": side})
-    res = broker.create_order(symbol, "market", side, amount, None, client_order_id=client_oid)
-
-    # собираем Trade DTO
-    base, quote = split_symbol(symbol)
-    trade = Trade(
-        id=str(res.get("id") or ""),
-        symbol=symbol,
-        side=side,
-        amount=Decimal(str(res.get("filled") or amount)),
-        price=Decimal(str(res.get("price") or "0")),
-        cost=Decimal(str(res.get("cost") or "0")),
-        fee_currency=str(((res.get("fee") or {}) or {}).get("currency") or quote),
-        fee_cost=Decimal(str(((res.get("fee") or {}) or {}).get("cost") or "0")),
-        ts=int(res.get("timestamp") or int(time.time() * 1000)),
-        client_order_id=client_oid,
-        meta={"decision": decision, "raw": res},
-    )
-
-    # транзакционно записываем последствия
-    ctx = uow.transaction() if (uow and hasattr(uow, "transaction")) else nullcontext()
-    with ctx:
-        audit_repo.record(
-            {
-                "type": "order_submitted",
-                "symbol": symbol,
-                "side": side,
-                "amount": str(amount),
-                "client_order_id": client_oid,
-                "ts": trade.ts,
-            }
-        )
-        trades_repo.insert(trade)
-
-        # простейшая модель позиции: агрегируем по символу
-        open_pos = positions_repo.get_open_by_symbol(symbol)
-        if action == "buy":
-            new_qty = Decimal(str((open_pos or {}).get("size", "0"))) + trade.amount
-        else:
-            new_qty = max(Decimal("0"), Decimal(str((open_pos or {}).get("size", "0"))) - trade.amount)
-
-        positions_repo.upsert(
-            {
-                "symbol": symbol,
-                "size": str(new_qty),
-                "avg_price": str(trade.price),  # улучшение: пересчитывать среднюю
-                "updated_ts": trade.ts,
-            }
-        )
-
-        audit_repo.record(
-            {
-                "type": "order_filled",
-                "symbol": symbol,
-                "side": side,
-                "amount": str(trade.amount),
-                "price": str(trade.price),
-                "fee": str(trade.fee_cost),
-                "client_order_id": client_oid,
-                "ts": trade.ts,
-            }
-        )
-
-    idemp_repo.commit(key)
-    metrics.inc("order_filled_total", {"side": side})
-    return {"ok": True, "order": res, "trade_id": trade.id, "idempotency_key": key}
+    metrics.inc("bot_decision_total", {"action": decision["action"]})
+    return decision

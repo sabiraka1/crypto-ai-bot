@@ -19,14 +19,11 @@ from crypto_ai_bot.core.storage.repositories import (
     SqliteAuditRepository,
     SqliteIdempotencyRepository,
 )
-from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
-from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_order
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
-
 from crypto_ai_bot.utils.http_client import get_http_client
-from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.utils import metrics, time_sync as ts
+from crypto_ai_bot.core.orchestrator import Orchestrator
 
-# Телеграм адаптер может быть опционален (например, на ранних этапах)
 try:
     from crypto_ai_bot.app.adapters.telegram import handle_update as tg_handle_update
     _HAS_TG = True
@@ -34,18 +31,11 @@ except Exception:
     tg_handle_update = None  # type: ignore
     _HAS_TG = False
 
-
-# ───────────────────────────── инициализация ─────────────────────────────────
-
 cfg = Settings.build()
-
-# гарантируем, что каталог для БД существует
 db_path = Path(getattr(cfg, "DB_PATH", "data/bot.db"))
 db_path.parent.mkdir(parents=True, exist_ok=True)
-
 con = connect(str(db_path))
 uow = SqliteUnitOfWork(con)
-
 repos: Dict[str, Any] = {
     "trades": SqliteTradeRepository(con),
     "positions": SqlitePositionRepository(con),
@@ -54,57 +44,81 @@ repos: Dict[str, Any] = {
     "idempotency": SqliteIdempotencyRepository(con),
     "uow": uow,
 }
-
-broker = create_broker(cfg)  # фабрика под MODE: live/paper/backtest
-http = get_http_client()     # единый HTTP клиент для «внешних» интеграций (бот-API и т.п.)
-
+broker = create_broker(cfg)
+http = get_http_client()
 app = FastAPI(title="Crypto AI Bot", version=getattr(cfg, "APP_VERSION", "0.1.0"))
 
-
-# ───────────────────────────── служебные штуки ────────────────────────────────
+orch = Orchestrator(cfg=cfg, broker=broker, repos=repos, http=http)
 
 def _component_health() -> Dict[str, Any]:
-    """
-    Возвращает статус внутренних компонент.
-    Никаких блокирующих долгих операций.
-    """
-    status = {"db": "unknown", "broker": "unknown", "mode": cfg.MODE}
-
-    # DB ping
+    out: Dict[str, Any] = {
+        "mode": cfg.MODE,
+        "db": {"status": "unknown", "latency_ms": None},
+        "broker": {"status": "unknown", "latency_ms": None},
+        "time": {"status": "unknown", "drift_ms": None, "source": None},
+    }
+    # DB
+    t0 = time.perf_counter()
     try:
         con.execute("SELECT 1;")
-        status["db"] = "ok"
+        out["db"]["status"] = "ok"
     except Exception as e:
-        status["db"] = f"error: {type(e).__name__}"
+        out["db"]["status"] = f"error:{type(e).__name__}"
+    out["db"]["latency_ms"] = int((time.perf_counter() - t0) * 1000)
 
-    # Broker ping (коротко: только попытка получить тикер)
+    # Broker
+    t0 = time.perf_counter()
     try:
         _ = broker.fetch_ticker(cfg.SYMBOL)
-        status["broker"] = "ok"
+        out["broker"]["status"] = "ok"
     except Exception as e:
-        status["broker"] = f"error: {type(e).__name__}"
+        out["broker"]["status"] = f"error:{type(e).__name__}"
+    out["broker"]["latency_ms"] = int((time.perf_counter() - t0) * 1000)
 
-    return status
+    # Time drift (используем кеш; если устарел — Orchestrator обновит)
+    drift = ts.get_cached_drift_ms(None)
+    out["time"]["drift_ms"] = drift
+    out["time"]["source"] = "worldtimeapi"
+    lim = int(getattr(cfg, "TIME_DRIFT_MAX_MS", 1500))
+    out["time"]["status"] = "ok" if abs(drift or 0) <= lim else "error:drift"
 
+    return out
 
-def _overall_status(components: Dict[str, str]) -> str:
-    if all(v == "ok" for v in components.values() if v not in ("mode",)):
-        return "healthy"
-    if any(str(v).startswith("error") for v in components.values()):
-        return "degraded"
-    return "unknown"
+def _overall_status(comp: Dict[str, Any]) -> tuple[str, str]:
+    errs = []
+    lat = []
+    # собираем статусы
+    for k in ("db", "broker", "time"):
+        st = comp.get(k, {}).get("status")
+        if isinstance(st, str) and st.startswith("error"):
+            errs.append(k)
+    # деградация по латентности (порог можно вынести в Settings)
+    db_ms = comp["db"]["latency_ms"] or 0
+    br_ms = comp["broker"]["latency_ms"] or 0
+    lat = max(db_ms, br_ms)
 
+    if errs:
+        status = "degraded"
+        level = "major" if "db" in errs or "broker" in errs else "minor"
+    else:
+        status = "healthy"
+        level = "none"
 
-# ───────────────────────────── маршруты ──────────────────────────────────────
+    # если нет ошибок, но очень медленно — считаем degraded/minor
+    if not errs and lat > int(getattr(cfg, "HEALTH_LATENCY_WARN_MS", 1500)):
+        status = "degraded"
+        level = "minor"
+
+    return status, level
 
 @app.get("/health")
 def health() -> JSONResponse:
-    t0 = time.perf_counter()
     comp = _component_health()
-    overall = _overall_status(comp)
-    metrics.observe("health_check_duration_seconds", time.perf_counter() - t0, {"status": overall})
+    status, level = _overall_status(comp)
+    metrics.observe("health_check_duration_seconds", (comp["db"]["latency_ms"] or 0) / 1000.0, {"status": status})
     payload = {
-        "status": overall,
+        "status": status,
+        "degradation_level": level,
         "components": comp,
         "symbol": cfg.SYMBOL,
         "timeframe": cfg.TIMEFRAME,
@@ -113,50 +127,30 @@ def health() -> JSONResponse:
     }
     return JSONResponse(payload)
 
-
 @app.get("/metrics")
 def metrics_export() -> Response:
-    text = metrics.export()
-    # стандартный content-type для Prometheus text exposition format
-    return PlainTextResponse(
-        text,
-        media_type="text/plain; version=0.0.4; charset=utf-8",
-    )
-
+    return PlainTextResponse(metrics.export(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 @app.post("/telegram")
 async def telegram_webhook(request: Request) -> JSONResponse:
     if not _HAS_TG or tg_handle_update is None:
         raise HTTPException(status_code=501, detail="telegram adapter not installed")
-
-    # Базовая защита: секрет заголовка Telegram (если сконфигурирован)
     secret = getattr(cfg, "TELEGRAM_WEBHOOK_SECRET", None)
-    if secret:
-        recv = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-        if recv != secret:
-            raise HTTPException(status_code=403, detail="forbidden")
-
+    if secret and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+        raise HTTPException(status_code=403, detail="forbidden")
     raw = await request.body()
     try:
         update = json.loads(raw.decode("utf-8") or "{}")
     except Exception:
         update = {}
-
-    # Передаём всё в адаптер — без бизнес-логики
     try:
-        result = await tg_handle_update(update, cfg, broker, http)  # тонкий адаптер
+        result = await tg_handle_update(update, cfg, broker, http)
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
     return JSONResponse(result or {"ok": True})
-
 
 @app.post("/tick")
 def tick() -> JSONResponse:
-    """
-    Явный однократный шаг цикла (удобно для smoke-тестов и crontab).
-    Конвейер: evaluate → risk (внутри) → place_order (атомарно).
-    """
     try:
         res = uc_eval_and_execute(
             cfg,
@@ -170,18 +164,18 @@ def tick() -> JSONResponse:
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-
-# ───────────────────────────── lifecycle hooks ────────────────────────────────
-
 @app.on_event("startup")
 async def on_startup() -> None:
     metrics.inc("app_start_total", {"mode": cfg.MODE})
-
+    await orch.start()
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     metrics.inc("app_stop_total", {"mode": cfg.MODE})
-    # закрывать соединение sqlite не обязательно, но можно:
+    try:
+        await orch.stop()
+    except Exception:
+        pass
     try:
         con.close()
     except Exception:

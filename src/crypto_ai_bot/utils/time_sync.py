@@ -1,58 +1,37 @@
 # src/crypto_ai_bot/utils/time_sync.py
 from __future__ import annotations
 
-import math
 import time
-from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Dict, Optional
+
+_CACHE: Dict[str, Any] = {"drift_ms": None, "ts": 0, "source": None}
 
 
-WORLD_TIME_API = "https://worldtimeapi.org/api/timezone/Etc/UTC"
+def measure_time_drift(http) -> tuple[int, str]:
+    """Запрашиваем эталонное время и считаем смещение (ms) против локального."""
+    t0 = int(time.time() * 1000)
+    data = http.get_json("https://worldtimeapi.org/api/timezone/Etc/UTC")
+    # worldtimeapi возвращает 'unixtime' (сек) и 'utc_datetime'
+    server_ms = int(data.get("unixtime", int(time.time())) * 1000)
+    t1 = int(time.time() * 1000)
+    # половина RTT — грубая коррекция
+    rtt = t1 - t0
+    drift = (server_ms + rtt // 2) - t1
+    return drift, "worldtimeapi"
 
 
-async def measure_time_drift(http) -> Optional[float]:
-    """
-    Возвращает оценку дрейфа системного времени в миллисекундах относительно внешнего источника.
-    Если внешний источник недоступен — возвращает None (статус 'unknown' в /health).
-    ВАЖНО: внешний HTTP вызов — выполняется через utils.http_client, как и предписано правилами.
-    """
+def ensure_recent_measurement(http, max_age_sec: int = 60) -> None:
+    now = int(time.time() * 1000)
+    if (_CACHE["ts"] or 0) + max_age_sec * 1000 > now:
+        return
     try:
-        # http.get_json может быть синхронным; если так — завернём в тред на стороне вызывающего
-        data = await _maybe_async_get_json(http, WORLD_TIME_API)
-        # worldtimeapi.org возвращает 'unixtime' (секунды) и 'datetime'
-        if "unixtime" in data:
-            external_ts_ms = float(data["unixtime"]) * 1000.0
-        elif "datetime" in data:
-            # ISO8601 → ms
-            dt = datetime.fromisoformat(data["datetime"].replace("Z", "+00:00"))
-            external_ts_ms = dt.timestamp() * 1000.0
-        else:
-            return None
-
-        local_ts_ms = time.time() * 1000.0
-        drift_ms = local_ts_ms - external_ts_ms
-        # округлим «красиво»
-        return float(int(drift_ms))
+        dms, src = measure_time_drift(http)
+        _CACHE.update({"drift_ms": int(dms), "ts": now, "source": src})
     except Exception:
-        return None
+        # не обновляем на ошибке, оставляем старое значение
+        pass
 
 
-async def _maybe_async_get_json(http, url: str) -> dict:
-    """
-    Вспомогательный адаптер: если http.get_json синхронный — исполним в отдельном треде,
-    если он async — просто подождём его.
-    """
-    fn = getattr(http, "get_json", None)
-    if fn is None:
-        raise RuntimeError("HttpClient has no get_json()")
-
-    if _is_coroutine_function(fn):
-        return await fn(url, timeout=5.0, headers={"User-Agent": "crypto-ai-bot/health-probe"})
-    else:
-        import asyncio
-        return await asyncio.to_thread(fn, url, timeout=5.0, headers={"User-Agent": "crypto-ai-bot/health-probe"})
-
-
-def _is_coroutine_function(func) -> bool:
-    import inspect
-    return inspect.iscoroutinefunction(func)
+def get_cached_drift_ms(default: int = 0) -> int:
+    v = _CACHE.get("drift_ms")
+    return int(v) if isinstance(v, int) else default
