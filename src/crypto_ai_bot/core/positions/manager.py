@@ -1,133 +1,261 @@
 from __future__ import annotations
-import time
-from dataclasses import dataclass
+
+"""
+core/positions/manager.py — единая точка управления позициями.
+Цели:
+- Чистый API для use-cases: open / partial_close / close / get_snapshot / get_pnl / get_exposure
+- Не зависит от конкретной БД: репозитории прокидываются через configure_repositories()
+- Если репозитории не сконфигурированы — работает безопасный in-memory fallback (для локальных тестов)
+- Деньги — Decimal, время — UTC-aware ISO8601
+"""
+
+from dataclasses import asdict
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from threading import RLock
+from typing import Any, Dict, List, Optional
 
-from crypto_ai_bot.core.storage.interfaces import PositionRepository, TradeRepository, AuditRepository, UnitOfWork
+try:
+    # Контракты типов, если есть
+    from crypto_ai_bot.core.types.trading import Position  # type: ignore
+except Exception:
+    Position = None  # будем работать со словарями, если моделей нет
 
-@dataclass
-class PositionManager:
-    positions_repo: PositionRepository
-    trades_repo: TradeRepository
-    audit_repo: AuditRepository
-    uow: UnitOfWork
+# Репозитории (инжектируются один раз при старте приложения)
+_POS_REPO = None
+_TRADES_REPO = None
+_AUDIT_REPO = None
 
-    def _now(self) -> int:
-        return int(time.time() * 1000)
+_lock = RLock()
+_MEM_POS: Dict[str, Dict[str, Any]] = {}  # pos_id -> position dict
 
-    def open_or_add(self, symbol: str, delta_size: Decimal, price: Optional[Decimal]) -> Dict[str, Any]:
-        if delta_size == 0:
-            return self.get_snapshot(symbol)
 
-        pos = self.positions_repo.get_by_symbol(symbol)
-        if pos is None:
-            if price is None:
-                raise ValueError("price is required for opening a new position")
-            self.uow.begin()
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def configure_repositories(*, positions_repo=None, trades_repo=None, audit_repo=None) -> None:
+    """
+    Вызвать один раз при старте приложения (server.py) для подключения БД-репозиториев.
+    """
+    global _POS_REPO, _TRADES_REPO, _AUDIT_REPO
+    with _lock:
+        if positions_repo is not None:
+            _POS_REPO = positions_repo
+        if trades_repo is not None:
+            _TRADES_REPO = trades_repo
+        if audit_repo is not None:
+            _AUDIT_REPO = audit_repo
+
+
+def _new_pos_id(symbol: str) -> str:
+    ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+    return f"{symbol.replace('/', '_')}:{ts}"
+
+
+def open(*, symbol: str, side: str, size: Decimal, sl: Optional[Decimal] = None, tp: Optional[Decimal] = None) -> Dict[str, Any]:
+    """
+    Идемпотентность обеспечивается на уровне use-case через IdempotencyRepository.
+    Здесь — атомарное создание/апдейт позиции.
+    Возвращает простой dict (сериализуемый).
+    """
+    pos_id = _new_pos_id(symbol)
+    now = _utcnow_iso()
+    pos_dict: Dict[str, Any] = {
+        "id": pos_id,
+        "symbol": symbol,
+        "side": side,
+        "size": str(size),
+        "sl": str(sl) if sl is not None else None,
+        "tp": str(tp) if tp is not None else None,
+        "status": "open",
+        "opened_at": now,
+        "closed_at": None,
+        "avg_price": None,  # цену заполняет слой исполнения/брокер при наличии
+    }
+
+    with _lock:
+        if _POS_REPO is not None and hasattr(_POS_REPO, "upsert"):
             try:
-                self.positions_repo.save(symbol, delta_size, price)
-                self.trades_repo.insert({
-                    "ts": self._now(),
-                    "symbol": symbol,
-                    "side": "buy" if delta_size > 0 else "sell",
-                    "size": str(abs(delta_size)),
-                    "price": str(price),
-                    "meta": {"reason": "open_or_add:new"},
-                })
-                self.audit_repo.log("position_opened", {"symbol": symbol, "size": str(delta_size), "price": str(price)})
-                self.uow.commit()
+                if Position is not None:
+                    _POS_REPO.upsert(Position(**pos_dict))  # type: ignore[arg-type]
+                else:
+                    _POS_REPO.upsert(pos_dict)  # type: ignore[attr-defined]
             except Exception:
-                self.uow.rollback()
-                raise
-            return self.get_snapshot(symbol)
-
-        cur_size: Decimal = pos["size"]
-        cur_avg: Decimal = pos["avg_price"]
-        new_size = cur_size + delta_size
-
-        if new_size == 0:
-            px = price if price is not None else cur_avg
-            self.uow.begin()
-            try:
-                self.positions_repo.save(symbol, Decimal("0"), cur_avg)
-                self.trades_repo.insert({
-                    "ts": self._now(),
-                    "symbol": symbol,
-                    "side": "sell" if cur_size > 0 else "buy",
-                    "size": str(abs(delta_size)),
-                    "price": str(px),
-                    "meta": {"reason": "open_or_add:close"},
-                })
-                self.audit_repo.log("position_closed", {"symbol": symbol, "close_size": str(delta_size), "price": str(px)})
-                self.uow.commit()
-            except Exception:
-                self.uow.rollback()
-                raise
-            return self.get_snapshot(symbol)
-
-        px = price if price is not None else cur_avg
-        if (cur_size > 0 and new_size > 0) or (cur_size < 0 and new_size < 0):
-            new_avg = ((cur_size * cur_avg) + (delta_size * px)) / new_size
+                # не роняем — дублируем в память
+                _MEM_POS[pos_id] = pos_dict.copy()
         else:
-            new_avg = px
+            _MEM_POS[pos_id] = pos_dict.copy()
 
-        self.uow.begin()
-        try:
-            self.positions_repo.save(symbol, new_size, new_avg)
-            self.trades_repo.insert({
-                "ts": self._now(),
-                "symbol": symbol,
-                "side": "buy" if delta_size > 0 else "sell",
-                "size": str(abs(delta_size)),
-                "price": str(px),
-                "meta": {"reason": "open_or_add:adjust"},
-            })
-            self.audit_repo.log("position_adjusted", {
-                "symbol": symbol,
-                "delta": str(delta_size),
-                "price": str(px),
-                "new_size": str(new_size),
-                "new_avg": str(new_avg),
-            })
-            self.uow.commit()
-        except Exception:
-            self.uow.rollback()
-            raise
+        if _AUDIT_REPO is not None and hasattr(_AUDIT_REPO, "append"):
+            try:
+                _AUDIT_REPO.append({
+                    "ts": now,
+                    "type": "position_open",
+                    "position_id": pos_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "size": str(size),
+                })
+            except Exception:
+                pass
 
-        return self.get_snapshot(symbol)
+    return pos_dict
 
-    def close_all(self, symbol: str) -> Dict[str, Any]:
-        pos = self.positions_repo.get_by_symbol(symbol)
-        if not pos or pos["size"] == 0:
-            return {"symbol": symbol, "size": "0", "avg_price": "0"}
-        close_size = -pos["size"]
-        px = pos["avg_price"]
-        self.uow.begin()
-        try:
-            self.positions_repo.save(symbol, Decimal("0"), pos["avg_price"])
-            self.trades_repo.insert({
-                "ts": self._now(),
-                "symbol": symbol,
-                "side": "sell" if close_size < 0 else "buy",
-                "size": str(abs(close_size)),
-                "price": str(px),
-                "meta": {"reason": "close_all"},
-            })
-            self.audit_repo.log("position_closed", {"symbol": symbol, "close_size": str(close_size), "price": str(px)})
-            self.uow.commit()
-        except Exception:
-            self.uow.rollback()
-            raise
-        return self.get_snapshot(symbol)
 
-    def get_snapshot(self, symbol: str) -> Dict[str, Any]:
-        pos = self.positions_repo.get_by_symbol(symbol)
-        if not pos:
-            return {"symbol": symbol, "size": "0", "avg_price": "0"}
-        return {
-            "symbol": symbol,
-            "size": str(pos["size"]),
-            "avg_price": str(pos["avg_price"]),
-            "updated_at": pos["updated_at"],
-        }
+def partial_close(pos_id: str, size: Decimal) -> Dict[str, Any]:
+    """
+    Частичное закрытие позиции: уменьшает размер, не уходит в отрицательные значения.
+    Если размер становится 0 — статус 'closed' и метка времени закрытия.
+    """
+    now = _utcnow_iso()
+    with _lock:
+        pos = None
+        # пробуем из репозитория (если есть get_by_id)
+        if _POS_REPO is not None and hasattr(_POS_REPO, "get_by_id"):
+            try:
+                obj = _POS_REPO.get_by_id(pos_id)
+                if obj:
+                    if hasattr(obj, "__dict__"):
+                        pos = dict(obj.__dict__)
+                    elif hasattr(obj, "model_dump"):
+                        pos = obj.model_dump()
+                    elif isinstance(obj, dict):
+                        pos = obj
+            except Exception:
+                pos = None
+        # fallback на память
+        if pos is None:
+            pos = _MEM_POS.get(pos_id)
+        if pos is None:
+            return {"status": "not_found", "position_id": pos_id}
+
+        cur_size = Decimal(str(pos.get("size", "0")))
+        new_size = cur_size - size
+        if new_size <= Decimal("0"):
+            pos["size"] = "0"
+            pos["status"] = "closed"
+            pos["closed_at"] = now
+        else:
+            pos["size"] = str(new_size)
+
+        # сохранить
+        if _POS_REPO is not None and hasattr(_POS_REPO, "upsert"):
+            try:
+                if Position is not None:
+                    _POS_REPO.upsert(Position(**pos))  # type: ignore[arg-type]
+                else:
+                    _POS_REPO.upsert(pos)  # type: ignore[attr-defined]
+            except Exception:
+                _MEM_POS[pos_id] = pos.copy()
+        else:
+            _MEM_POS[pos_id] = pos.copy()
+
+        if _AUDIT_REPO is not None and hasattr(_AUDIT_REPO, "append"):
+            try:
+                _AUDIT_REPO.append({
+                    "ts": now,
+                    "type": "position_partial_close",
+                    "position_id": pos_id,
+                    "size": str(size),
+                    "new_size": pos["size"],
+                })
+            except Exception:
+                pass
+
+    return {"status": "ok", "position": pos}
+
+
+def close(pos_id: str) -> Dict[str, Any]:
+    """
+    Полное закрытие позиции.
+    """
+    now = _utcnow_iso()
+    with _lock:
+        pos = None
+        if _POS_REPO is not None and hasattr(_POS_REPO, "get_by_id"):
+            try:
+                obj = _POS_REPO.get_by_id(pos_id)
+                if obj:
+                    if hasattr(obj, "__dict__"):
+                        pos = dict(obj.__dict__)
+                    elif hasattr(obj, "model_dump"):
+                        pos = obj.model_dump()
+                    elif isinstance(obj, dict):
+                        pos = obj
+            except Exception:
+                pos = None
+        if pos is None:
+            pos = _MEM_POS.get(pos_id)
+        if pos is None:
+            return {"status": "not_found", "position_id": pos_id}
+
+        pos["size"] = "0"
+        pos["status"] = "closed"
+        pos["closed_at"] = now
+
+        if _POS_REPO is not None and hasattr(_POS_REPO, "upsert"):
+            try:
+                if Position is not None:
+                    _POS_REPO.upsert(Position(**pos))  # type: ignore[arg-type]
+                else:
+                    _POS_REPO.upsert(pos)  # type: ignore[attr-defined]
+            except Exception:
+                _MEM_POS[pos_id] = pos.copy()
+        else:
+            _MEM_POS[pos_id] = pos.copy()
+
+        if _AUDIT_REPO is not None and hasattr(_AUDIT_REPO, "append"):
+            try:
+                _AUDIT_REPO.append({
+                    "ts": now,
+                    "type": "position_close",
+                    "position_id": pos_id,
+                })
+            except Exception:
+                pass
+
+    return {"status": "ok", "position": pos}
+
+
+def get_snapshot() -> Dict[str, Any]:
+    """
+    Простая сводка по открытым позициям.
+    """
+    with _lock:
+        opens: List[Dict[str, Any]] = []
+
+        if _POS_REPO is not None and hasattr(_POS_REPO, "get_open"):
+            try:
+                rows = _POS_REPO.get_open()
+                for obj in rows:
+                    if hasattr(obj, "__dict__"):
+                        opens.append(dict(obj.__dict__))
+                    elif hasattr(obj, "model_dump"):
+                        opens.append(obj.model_dump())
+                    elif isinstance(obj, dict):
+                        opens.append(obj)
+            except Exception:
+                # fallback к памяти
+                opens = [v for v in _MEM_POS.values() if v.get("status") == "open"]
+        else:
+            opens = [v for v in _MEM_POS.values() if v.get("status") == "open"]
+
+        total_size = sum(Decimal(str(p.get("size", "0"))) for p in opens)
+        return {"open_positions": opens, "total_size": str(total_size)}
+
+
+def get_pnl() -> Decimal:
+    """
+    Возвращает совокупный PnL (plug — 0), пока нет цен/трека.
+    Если появится связка с tracker/ценой — тут будем считать.
+    """
+    return Decimal("0")
+
+
+def get_exposure() -> Decimal:
+    """
+    Возвращает текущую экспозицию (plug — 0).
+    Для точного подсчёта нужен доступ к mark price/last price и валюте котировки.
+    """
+    return Decimal("0")

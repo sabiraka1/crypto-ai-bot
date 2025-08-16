@@ -1,114 +1,221 @@
 from __future__ import annotations
 
+"""
+core/settings.py — ЕДИНСТВЕННОЕ место чтения ENV.
+Возвращает валидированный и нормализованный Settings через Settings.build().
+
+Жёсткие гарантии:
+- Только os.getenv (или .env через python-dotenv) — никаких других побочных эффектов.
+- Деньги: Decimal, время: значения в мс, секундных интервалах — int.
+- Веса и пороги — валидируются и при необходимости нормализуются.
+- Все значения доступны как атрибуты экземпляра Settings.
+"""
+
 import os
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from dataclasses import dataclass
+from typing import Optional
 
-def _getenv(name: str, default: str = "") -> str:
-    return os.getenv(name, default)
+try:
+    # Разрешено: загрузка .env только здесь
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(override=False)
+except Exception:
+    # Библиотека может отсутствовать — это не критично
+    pass
 
-def _getenv_bool(name: str, default: bool=False) -> bool:
-    v = os.getenv(name)
+
+def _to_bool(v: Optional[str], default: bool = False) -> bool:
     if v is None:
         return default
-    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+    return str(v).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
-def _getenv_int(name: str, default: int=0) -> int:
+
+def _to_int(v: Optional[str], default: int) -> int:
     try:
-        return int(os.getenv(name, str(default)))
+        return int(str(v)) if v is not None else default
     except Exception:
         return default
 
-def _getenv_float(name: str, default: float=0.0) -> float:
+
+def _to_decimal(v: Optional[str], default: Decimal) -> Decimal:
+    if v is None or v == "":
+        return default
     try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
+        # строго через строку
+        return Decimal(str(v))
+    except (InvalidOperation, ValueError):
         return default
 
+
+def _clamp01(x: float) -> float:
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+@dataclass
 class Settings:
-    # Mode
-    MODE: str
-    SYMBOL: str
-    TIMEFRAME: str
+    # --- Режим работы / брокер ---
+    MODE: str                     # "live" | "paper" | "backtest"
+    EXCHANGE_ID: str              # например "binance" (для live/backtest)
+    BROKER: str                   # "ccxt" | "paper" | "backtest"
 
-    # Paths
-    DB_PATH: str
+    # --- Торговля / символы ---
+    SYMBOL: str                   # "BTC/USDT"
+    TIMEFRAME: str                # "1h"
+    DEFAULT_LIMIT: int            # кол-во свечей по умолчанию
+    DEFAULT_ORDER_SIZE: str       # строка, чтобы не потерять точность при Decimal
 
-    # Decisions
+    # --- Пороги решений / веса ---
     THRESHOLD_BUY: float
     THRESHOLD_SELL: float
     SCORE_RULE_WEIGHT: float
     SCORE_AI_WEIGHT: float
-    DEFAULT_ORDER_SIZE: str
 
-    # Risk
-    MAX_SPREAD_PCT: float
-    MAX_DRAWDOWN_PCT: float
-    MAX_SEQ_LOSSES: int
-    MAX_EXPOSURE_PCT: float | None
-    MAX_EXPOSURE_USD: float | None
-    TIME_DRIFT_MAX_MS: int
-    TRADING_START_HOUR: int
-    TRADING_END_HOUR: int
+    # --- Идемпотентность ---
+    IDEMPOTENCY_TTL_S: int
 
-    # Rate limits
+    # --- Time sync ---
+    TIME_DRIFT_LIMIT_MS: int
+
+    # --- Rate limit ---
     RL_EVALUATE_CALLS: int
-    RL_EVALUATE_PERIOD: float
-    RL_PLACE_ORDER_CALLS: int
-    RL_PLACE_ORDER_PERIOD: float
-    RL_EVAL_EXEC_CALLS: int
-    RL_EVAL_EXEC_PERIOD: float
+    RL_EVALUATE_PERIOD_S: int
+    RL_EXECUTE_CALLS: int
+    RL_EXECUTE_PERIOD_S: int
 
-    # DB maintenance
-    DB_MAINTENANCE_ENABLE: bool
-    DB_MAINTENANCE_INTERVAL_SEC: int
-    DB_VACUUM_MIN_MB: float
-    DB_VACUUM_FREE_RATIO: float
-    DB_ANALYZE_EVERY_WRITES: int
-    DB_WRITES_SINCE_ANALYZE: int  # счётчик; можно инкрементировать из репозиториев
+    # --- HTTP / Circuit Breaker (используются в utils/http_client и брокерах) ---
+    HTTP_TIMEOUT_S: float
+    HTTP_RETRIES: int
+    HTTP_BACKOFF_BASE: float
+    HTTP_BACKOFF_JITTER: float
 
-    # Telegram
-    TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_SECRET_TOKEN: str | None
+    CB_FAIL_THRESHOLD: int
+    CB_OPEN_SECONDS: float
+    CB_TIMEOUT_S: float
+
+    # --- Paper/Backtest параметры ---
+    PAPER_COMMISSION_PCT: Decimal
+    PAPER_SLIPPAGE_PCT: Decimal
+
+    # --- Storage / БД ---
+    DB_PATH: str
+
+    # --- Безопасность ---
+    SAFE_MODE: bool               # если True — торговля принудительно запрещена, даже если ENABLE_TRADING=True
+    ENABLE_TRADING: bool          # общий флаг торговли (для live/paper)
 
     @classmethod
     def build(cls) -> "Settings":
-        s = cls()
-        s.MODE = _getenv("MODE", "paper")
-        s.SYMBOL = _getenv("SYMBOL", "BTC/USDT")
-        s.TIMEFRAME = _getenv("TIMEFRAME", "1h")
+        # --- Режимы/брокер ---
+        MODE = os.getenv("MODE", "paper").strip().lower()
+        if MODE not in {"live", "paper", "backtest"}:
+            MODE = "paper"
 
-        s.DB_PATH = _getenv("DB_PATH", os.path.join("data", "bot.db"))
+        # Явное имя брокера (приземляем режим на реализацию)
+        if MODE == "live":
+            BROKER = os.getenv("BROKER", "ccxt").strip().lower()
+        elif MODE == "paper":
+            BROKER = "paper"
+        else:
+            BROKER = "backtest"
 
-        s.THRESHOLD_BUY = _getenv_float("THRESHOLD_BUY", 0.60)
-        s.THRESHOLD_SELL = _getenv_float("THRESHOLD_SELL", 0.40)
-        s.SCORE_RULE_WEIGHT = _getenv_float("SCORE_RULE_WEIGHT", 0.5)
-        s.SCORE_AI_WEIGHT = _getenv_float("SCORE_AI_WEIGHT", 0.5)
-        s.DEFAULT_ORDER_SIZE = _getenv("DEFAULT_ORDER_SIZE", "0.0")
+        EXCHANGE_ID = os.getenv("EXCHANGE_ID", "binance").strip().lower()
 
-        s.MAX_SPREAD_PCT = _getenv_float("MAX_SPREAD_PCT", 0.25)
-        s.MAX_DRAWDOWN_PCT = _getenv_float("MAX_DRAWDOWN_PCT", 5.0)
-        s.MAX_SEQ_LOSSES = _getenv_int("MAX_SEQ_LOSSES", 3)
-        s.MAX_EXPOSURE_PCT = _getenv_float("MAX_EXPOSURE_PCT", 0.0) or None
-        s.MAX_EXPOSURE_USD = _getenv_float("MAX_EXPOSURE_USD", 0.0) or None
-        s.TIME_DRIFT_MAX_MS = _getenv_int("TIME_DRIFT_MAX_MS", 1500)
-        s.TRADING_START_HOUR = _getenv_int("TRADING_START_HOUR", 0)
-        s.TRADING_END_HOUR = _getenv_int("TRADING_END_HOUR", 24)
+        # --- Торговля ---
+        SYMBOL = os.getenv("SYMBOL", "BTC/USDT").strip()
+        TIMEFRAME = os.getenv("TIMEFRAME", "1h").strip()
+        DEFAULT_LIMIT = _to_int(os.getenv("DEFAULT_LIMIT"), 300)
+        DEFAULT_ORDER_SIZE = os.getenv("DEFAULT_ORDER_SIZE", "0.01").strip()
 
-        s.RL_EVALUATE_CALLS = _getenv_int("RL_EVALUATE_CALLS", 6)
-        s.RL_EVALUATE_PERIOD = _getenv_float("RL_EVALUATE_PERIOD", 10)
-        s.RL_PLACE_ORDER_CALLS = _getenv_int("RL_PLACE_ORDER_CALLS", 3)
-        s.RL_PLACE_ORDER_PERIOD = _getenv_float("RL_PLACE_ORDER_PERIOD", 10)
-        s.RL_EVAL_EXEC_CALLS = _getenv_int("RL_EVAL_EXEC_CALLS", 3)
-        s.RL_EVAL_EXEC_PERIOD = _getenv_float("RL_EVAL_EXEC_PERIOD", 10)
+        # --- Пороги/веса ---
+        THRESHOLD_BUY = float(os.getenv("THRESHOLD_BUY", "0.55"))
+        THRESHOLD_SELL = float(os.getenv("THRESHOLD_SELL", "0.45"))
+        # Гарантия осмысленных порогов
+        if not (0.0 <= THRESHOLD_SELL <= 1.0):
+            THRESHOLD_SELL = 0.45
+        if not (0.0 <= THRESHOLD_BUY <= 1.0):
+            THRESHOLD_BUY = 0.55
+        if THRESHOLD_BUY <= THRESHOLD_SELL:
+            # минимальный зазор 0.05
+            mid = 0.50
+            THRESHOLD_SELL = min(0.49, mid - 0.05)
+            THRESHOLD_BUY = max(0.51, mid + 0.05)
 
-        s.DB_MAINTENANCE_ENABLE = _getenv_bool("DB_MAINTENANCE_ENABLE", True)
-        s.DB_MAINTENANCE_INTERVAL_SEC = _getenv_int("DB_MAINTENANCE_INTERVAL_SEC", 900)
-        s.DB_VACUUM_MIN_MB = _getenv_float("DB_VACUUM_MIN_MB", 64)
-        s.DB_VACUUM_FREE_RATIO = _getenv_float("DB_VACUUM_FREE_RATIO", 0.20)
-        s.DB_ANALYZE_EVERY_WRITES = _getenv_int("DB_ANALYZE_EVERY_WRITES", 5000)
-        s.DB_WRITES_SINCE_ANALYZE = 0  # инициализация счётчика
+        SCORE_RULE_WEIGHT = _clamp01(float(os.getenv("SCORE_RULE_WEIGHT", "0.5")))
+        SCORE_AI_WEIGHT = _clamp01(float(os.getenv("SCORE_AI_WEIGHT", "0.5")))
+        # Нормализация весов, если сумма > 1
+        s = SCORE_RULE_WEIGHT + SCORE_AI_WEIGHT
+        if s == 0.0:
+            SCORE_RULE_WEIGHT, SCORE_AI_WEIGHT = 0.5, 0.5
+        elif s > 1.0:
+            SCORE_RULE_WEIGHT = SCORE_RULE_WEIGHT / s
+            SCORE_AI_WEIGHT = SCORE_AI_WEIGHT / s
 
-        s.TELEGRAM_BOT_TOKEN = _getenv("TELEGRAM_BOT_TOKEN", "")
-        s.TELEGRAM_SECRET_TOKEN = _getenv("TELEGRAM_SECRET_TOKEN", "") or None
+        # --- Идемпотентность / time sync ---
+        IDEMPOTENCY_TTL_S = _to_int(os.getenv("IDEMPOTENCY_TTL_S"), 300)
+        TIME_DRIFT_LIMIT_MS = _to_int(os.getenv("TIME_DRIFT_LIMIT_MS"), 1000)
 
-        return s
+        # --- Rate Limit ---
+        RL_EVALUATE_CALLS = _to_int(os.getenv("RL_EVALUATE_CALLS"), 60)
+        RL_EVALUATE_PERIOD_S = _to_int(os.getenv("RL_EVALUATE_PERIOD_S"), 60)
+        RL_EXECUTE_CALLS = _to_int(os.getenv("RL_EXECUTE_CALLS"), 10)
+        RL_EXECUTE_PERIOD_S = _to_int(os.getenv("RL_EXECUTE_PERIOD_S"), 60)
+
+        # --- HTTP / CB ---
+        HTTP_TIMEOUT_S = float(os.getenv("HTTP_TIMEOUT_S", "5.0"))
+        HTTP_RETRIES = _to_int(os.getenv("HTTP_RETRIES"), 2)
+        HTTP_BACKOFF_BASE = float(os.getenv("HTTP_BACKOFF_BASE", "0.3"))
+        HTTP_BACKOFF_JITTER = float(os.getenv("HTTP_BACKOFF_JITTER", "0.2"))
+
+        CB_FAIL_THRESHOLD = _to_int(os.getenv("CB_FAIL_THRESHOLD"), 3)
+        CB_OPEN_SECONDS = float(os.getenv("CB_OPEN_SECONDS", "5.0"))
+        CB_TIMEOUT_S = float(os.getenv("CB_TIMEOUT_S", "2.5"))
+
+        # --- Paper/Backtest параметры ---
+        PAPER_COMMISSION_PCT = _to_decimal(os.getenv("PAPER_COMMISSION_PCT"), Decimal("0.001"))  # 0.1%
+        PAPER_SLIPPAGE_PCT = _to_decimal(os.getenv("PAPER_SLIPPAGE_PCT"), Decimal("0.0005"))     # 0.05%
+
+        # --- Storage ---
+        DB_PATH = os.getenv("DB_PATH", "data/bot.sqlite").strip()
+
+        # --- Безопасность ---
+        SAFE_MODE = _to_bool(os.getenv("SAFE_MODE"), False)
+        ENABLE_TRADING = _to_bool(os.getenv("ENABLE_TRADING"), MODE != "backtest")
+        if SAFE_MODE:
+            ENABLE_TRADING = False
+
+        return cls(
+            MODE=MODE,
+            EXCHANGE_ID=EXCHANGE_ID,
+            BROKER=BROKER,
+            SYMBOL=SYMBOL,
+            TIMEFRAME=TIMEFRAME,
+            DEFAULT_LIMIT=DEFAULT_LIMIT,
+            DEFAULT_ORDER_SIZE=DEFAULT_ORDER_SIZE,
+            THRESHOLD_BUY=THRESHOLD_BUY,
+            THRESHOLD_SELL=THRESHOLD_SELL,
+            SCORE_RULE_WEIGHT=SCORE_RULE_WEIGHT,
+            SCORE_AI_WEIGHT=SCORE_AI_WEIGHT,
+            IDEMPOTENCY_TTL_S=IDEMPOTENCY_TTL_S,
+            TIME_DRIFT_LIMIT_MS=TIME_DRIFT_LIMIT_MS,
+            RL_EVALUATE_CALLS=RL_EVALUATE_CALLS,
+            RL_EVALUATE_PERIOD_S=RL_EVALUATE_PERIOD_S,
+            RL_EXECUTE_CALLS=RL_EXECUTE_CALLS,
+            RL_EXECUTE_PERIOD_S=RL_EXECUTE_PERIOD_S,
+            HTTP_TIMEOUT_S=HTTP_TIMEOUT_S,
+            HTTP_RETRIES=HTTP_RETRIES,
+            HTTP_BACKOFF_BASE=HTTP_BACKOFF_BASE,
+            HTTP_BACKOFF_JITTER=HTTP_BACKOFF_JITTER,
+            CB_FAIL_THRESHOLD=CB_FAIL_THRESHOLD,
+            CB_OPEN_SECONDS=CB_OPEN_SECONDS,
+            CB_TIMEOUT_S=CB_TIMEOUT_S,
+            PAPER_COMMISSION_PCT=PAPER_COMMISSION_PCT,
+            PAPER_SLIPPAGE_PCT=PAPER_SLIPPAGE_PCT,
+            DB_PATH=DB_PATH,
+            SAFE_MODE=SAFE_MODE,
+            ENABLE_TRADING=ENABLE_TRADING,
+        )

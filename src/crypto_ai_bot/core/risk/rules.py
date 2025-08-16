@@ -1,108 +1,48 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Tuple, Optional
 
-@dataclass(frozen=True)
-class RuleResult:
-    ok: bool
-    reason: str = ""
-
-# --- Pure, IO-free rule checks ---
-
-def check_time_drift(drift_ms: Optional[int], limit_ms: int) -> RuleResult:
+def check_time_sync(drift_ms: int, limit_ms: int) -> Tuple[bool, str]:
     """
-    Блокируем торговлю, если системные часы «уплыли».
-    Если drift_ms = None (неизвестно) — НЕ блокируем (правило нейтрально).
+    Блокируем торговлю при сильном рассинхроне системных часов.
+    :param drift_ms: измеренный дрейф (мс), |local_utc - reference_utc|
+    :param limit_ms: допустимый порог (мс), например 1000
+    :return: (ok, reason)
     """
-    if drift_ms is None:
-        return RuleResult(True, "")
     try:
         d = int(drift_ms)
         lim = int(limit_ms)
     except Exception:
-        return RuleResult(True, "")
-    if d > lim:
-        return RuleResult(False, f"time_drift_exceeded: {d}ms > {lim}ms")
-    return RuleResult(True, "")
+        # если не можем распарсить значения — лучше блокировать с понятным reason
+        return False, "time_sync:invalid_drift_values"
+    if d <= lim:
+        return True, ""
+    return False, f"time_sync:drift_ms={d}>limit_ms={lim}"
 
-def check_spread(spread_pct: Optional[float], max_spread_pct: float) -> RuleResult:
-    if spread_pct is None:
-        return RuleResult(True, "")
-    try:
-        s = float(spread_pct)
-        lim = float(max_spread_pct)
-    except Exception:
-        return RuleResult(True, "")
-    if s > lim:
-        return RuleResult(False, f"spread_too_wide: {s:.4f}% > {lim:.4f}%")
-    return RuleResult(True, "")
 
-def check_hours(start_hour: int, end_hour: int) -> RuleResult:
+def check_max_exposure(current_exposure: Decimal, max_exposure: Decimal) -> Tuple[bool, str]:
     """
-    Разрешаем торги только в окне [start_hour, end_hour).
-    Если start=0,end=24 — всегда ок.
+    Простая проверка общего объёма риска в позициях.
+    :param current_exposure: текущее экспозиция (в quote), Decimal
+    :param max_exposure: лимит экспозиции (в quote), Decimal
     """
     try:
-        sh = int(start_hour); eh = int(end_hour)
+        if current_exposure <= max_exposure:
+            return True, ""
+        return False, f"exposure:{current_exposure}>{max_exposure}"
     except Exception:
-        return RuleResult(True, "")
-    if sh <= 0 and eh >= 24:
-        return RuleResult(True, "")
+        # в сомнительных случаях безопаснее заблокировать
+        return False, "exposure:invalid_values"
 
-    now_h = datetime.now(timezone.utc).hour
-    if sh <= eh:
-        ok = (sh <= now_h < eh)
-    else:
-        # окно через полночь, например 22..6
-        ok = (now_h >= sh or now_h < eh)
 
-    if not ok:
-        return RuleResult(False, f"out_of_trading_hours: now_utc_hour={now_h}, window=[{sh},{eh})")
-    return RuleResult(True, "")
-
-def check_drawdown(drawdown_pct: Optional[float], max_dd_pct: float) -> RuleResult:
-    if drawdown_pct is None:
-        return RuleResult(True, "")
+def check_seq_losses(loss_streak: int, max_streak: int) -> Tuple[bool, str]:
+    """
+    Ограничение серии убыточных сделок подряд.
+    """
     try:
-        d = float(drawdown_pct)
-        lim = float(max_dd_pct)
+        if int(loss_streak) <= int(max_streak):
+            return True, ""
+        return False, f"seq_losses:{loss_streak}>{max_streak}"
     except Exception:
-        return RuleResult(True, "")
-    if d > lim:
-        return RuleResult(False, f"max_drawdown_exceeded: {d:.4f}% > {lim:.4f}%")
-    return RuleResult(True, "")
-
-def check_seq_losses(seq_losses: Optional[int], max_losses: int) -> RuleResult:
-    if seq_losses is None:
-        return RuleResult(True, "")
-    try:
-        s = int(seq_losses)
-        lim = int(max_losses)
-    except Exception:
-        return RuleResult(True, "")
-    if s > lim:
-        return RuleResult(False, f"too_many_consecutive_losses: {s} > {lim}")
-    return RuleResult(True, "")
-
-def check_max_exposure(exposure_pct: Optional[float], exposure_usd: Optional[float],
-                       max_pct: Optional[float], max_usd: Optional[float]) -> RuleResult:
-    # Проверяем оба лимита, если заданы
-    if max_pct is not None and exposure_pct is not None:
-        try:
-            e = float(exposure_pct)
-            lim = float(max_pct)
-            if e > lim:
-                return RuleResult(False, f"max_exposure_pct_exceeded: {e:.4f}% > {lim:.4f}%")
-        except Exception:
-            pass
-    if max_usd is not None and exposure_usd is not None:
-        try:
-            e = float(exposure_usd)
-            lim = float(max_usd)
-            if e > lim:
-                return RuleResult(False, f"max_exposure_usd_exceeded: {e:.2f} > {lim:.2f}")
-        except Exception:
-            pass
-    return RuleResult(True, "")
+        return False, "seq_losses:invalid_values"
