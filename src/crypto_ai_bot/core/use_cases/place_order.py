@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import json
-import math
+import time
 from decimal import Decimal
 from hashlib import sha256
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from crypto_ai_bot.utils import metrics
-
-# ожидаем, что app.server передаёт сюда idempotency_repo, audit_repo, positions_repo и т.д.
+from crypto_ai_bot.utils import rate_limit as rl
 
 def _short_decision_id(decision: Dict[str, Any]) -> str:
-    """
-    Детализация решения может быть большой; для короткого идентификатора берём устойчивые поля.
-    """
     payload = {
         "action": decision.get("action"),
         "size": str(decision.get("size")),
@@ -27,13 +23,8 @@ def _short_decision_id(decision: Dict[str, Any]) -> str:
     return sha256(raw).hexdigest()[:8]
 
 def _timestamp_minute_iso(ts: Optional[str] = None) -> str:
-    """
-    Возвращает отметку времени, округлённую до минуты, ISO UTC.
-    Берём ts из decision.explain.context.ts, если есть; иначе now().
-    """
     if ts:
         try:
-            # допускаем уже ISO-строку
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
             dt = datetime.now(timezone.utc)
@@ -47,15 +38,26 @@ def _build_idempotency_key(symbol: str, side: str, size: str, ts_minute_iso: str
 
 def place_order(cfg, broker, positions_repo, audit_repo, decision: Dict[str, Any], *, idempotency_repo=None) -> Dict[str, Any]:
     """
-    Идемпотентное размещение ордера + минимальная запись в Аудит/Позиции.
-    Контракт: возвращает словарь с полями order_ref (если исполнено) или duplicate_ref (если дубль).
+    Идемпотентное размещение ордера с rate limit по ключу exec:<symbol>:<side>.
+    Если лимит превышен — возвращаем {"status":"rate_limited", ...} без обращения к брокеру.
     """
     symbol = decision.get("symbol", getattr(cfg, "SYMBOL", "BTC/USDT"))
     side = decision.get("action", "hold")
     if side not in ("buy", "sell"):
         return {"status": "no_action", "reason": f"action={side}"}
 
+    # --- rate limit ---
+    calls = int(getattr(cfg, "RL_EXECUTE_CALLS", 3))
+    per_s = float(getattr(cfg, "RL_EXECUTE_PERIOD_S", 10))
+    rl_key = f"exec:{symbol}:{side}"
+    if not rl.allow(rl_key, calls, per_s):
+        return {"status": "rate_limited", "reason": "exec_rate_limited", "rate_key": rl_key, "calls": calls, "per_s": per_s}
+
     size = str(decision.get("size", "0"))
+    try:
+        amount = Decimal(str(size))
+    except Exception:
+        amount = Decimal("0")
     ts_from_decision = None
     try:
         ts_from_decision = (decision.get("explain") or {}).get("context", {}).get("ts")
@@ -72,25 +74,25 @@ def place_order(cfg, broker, positions_repo, audit_repo, decision: Dict[str, Any
     if idempotency_repo is not None:
         ok_new, existing_ref = idempotency_repo.check_and_store(key, ttl_sec=ttl, payload_json=payload_json)
         if not ok_new:
-            # Дубликат — возвращаем исходный reference, если он есть
             return {"status": "duplicate", "idempotency_key": key, "duplicate_ref": existing_ref}
 
-    # --- Размещаем ордер у брокера ---
-    amount = Decimal(str(size))
-    order_type = "market"
-    price = None
     if amount <= 0:
         return {"status": "no_action", "reason": "size<=0"}
 
+    # --- измерим latency брокера ---
+    t0 = time.perf_counter()
     try:
-        order_ref = broker.create_order(symbol, order_type, side, amount, price)
+        order_ref = broker.create_order(symbol, "market", side, amount, None)
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        try:
+            metrics.observe("broker_create_order_ms", dt_ms, {"exchange": "paper" if getattr(cfg, "MODE", "paper") == "paper" else "live"})
+        except Exception:
+            pass
         order_ref_json = json.dumps(order_ref, separators=(",", ":"), ensure_ascii=False)
-        # commit идемпотентности
         if idempotency_repo is not None:
             idempotency_repo.commit(key, order_ref_json)
         metrics.inc("orders_submitted_total", {"side": side})
     except Exception as e:
-        # не получилось – отпустим ключ, чтобы можно было повторить
         if idempotency_repo is not None:
             try:
                 idempotency_repo.release(key)
@@ -114,7 +116,7 @@ def place_order(cfg, broker, positions_repo, audit_repo, decision: Dict[str, Any
     except Exception:
         pass
 
-    # --- Позиции (best-effort, если есть контракт) ---
+    # --- Позиции (best-effort) ---
     try:
         if positions_repo is not None and hasattr(positions_repo, "upsert"):
             positions_repo.upsert({
