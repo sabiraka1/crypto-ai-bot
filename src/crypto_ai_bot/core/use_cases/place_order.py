@@ -11,14 +11,11 @@ from crypto_ai_bot.core.brokers.base import ExchangeInterface
 from crypto_ai_bot.core.storage.uow import UnitOfWork
 
 
-# лимиты (см. требования)
-EVAL_RATE_PER_MINUTE = 60
-ORDER_RATE_PER_MINUTE = 10
+ORDER_RATE_PER_MINUTE = 10  # спецификация
 
 
 def _make_idem_key(symbol: str, side: str, size: Decimal, decision_id: str | None = None) -> str:
     """
-    Формат строго по спецификации:
     {symbol}:{side}:{size}:{timestamp_minute}:{decision_id[:8]}
     """
     ts_minute = int(time.time() // 60)
@@ -27,9 +24,6 @@ def _make_idem_key(symbol: str, side: str, size: Decimal, decision_id: str | Non
 
 
 def place_order(cfg, broker: ExchangeInterface, uow: UnitOfWork, repos, decision: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    1) idempotency → 2) ордер → 3) audit + позиции  (одна транзакция)
-    """
     t0 = time.perf_counter()
 
     symbol = decision.get("symbol") or cfg.SYMBOL
@@ -47,21 +41,21 @@ def place_order(cfg, broker: ExchangeInterface, uow: UnitOfWork, repos, decision
             inc("order_duplicate_total", {"symbol": symbol, "side": side})
             return {"status": "duplicate", "previous": prev}
 
-        # создаём ордер у брокера
         order = broker.create_order(symbol, "market", side, size, price)
 
-        # репозитории
         trades_repo = repos.trades(tx)
         positions_repo = repos.positions(tx)
         audit_repo = repos.audit(tx)
 
-        # обновим состояние/аудит (упрощённо)
         audit_repo.append("order_submitted", {"symbol": symbol, "side": side, "size": str(size), "order": order})
         positions_repo.upsert_from_order(order)
 
         idem_repo.commit(key, result=json.dumps(order))
         tx.commit()
 
-    observe("order_latency_seconds", time.perf_counter() - t0, {"symbol": symbol, "side": side})
+    latency = time.perf_counter() - t0
+    observe("order_latency_seconds", latency, {"symbol": symbol, "side": side})
+    if latency > getattr(cfg, "ORDER_BUDGET_SECONDS", 2.0):
+        inc("performance_budget_exceeded_total", {"stage": "order"})
     inc("order_submitted_total", {"symbol": symbol, "side": side})
     return {"status": "ok", "order": order}

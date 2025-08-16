@@ -5,34 +5,25 @@ from decimal import Decimal
 from typing import Dict, Any
 
 from .base import ExchangeInterface
-# единый реестр преобразований
 from . import to_exchange_symbol, normalize_symbol, normalize_timeframe
 from crypto_ai_bot.utils.metrics import observe, inc
 
 
 class PaperExchange(ExchangeInterface):
-    """
-    Простейший in-memory брокер для paper-режима.
-    Нормализация символов/таймфреймов перед всеми операциями.
-    """
-
     def __init__(self, cfg):
         self.cfg = cfg
         self._prices: Dict[str, Decimal] = {}
         self._balances = {"USDT": Decimal("100000.00")}
 
-    # --- helpers
     def _now(self) -> float:
         return time.perf_counter()
 
-    # --- интерфейс
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
         t0 = self._now()
         symbol = normalize_symbol(symbol)
         timeframe = normalize_timeframe(timeframe)
         ex_symbol = to_exchange_symbol(symbol)
 
-        # simple synthetic data
         base = float(self._prices.get(ex_symbol, Decimal("50000")))
         out = []
         ts = int(time.time()) - limit * 60
@@ -56,7 +47,6 @@ class PaperExchange(ExchangeInterface):
         ex_symbol = to_exchange_symbol(symbol)
         price = price or self._prices.setdefault(ex_symbol, Decimal("50000"))
         inc("broker_requests_total", {"exchange": "paper", "method": "create_order", "code": "200"})
-
         order = {
             "id": f"paper-{int(time.time()*1000)}",
             "symbol": ex_symbol,

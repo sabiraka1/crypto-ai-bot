@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, Dict
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from crypto_ai_bot.core.settings import Settings
@@ -28,10 +27,8 @@ class TickIn(BaseModel):
 @app.on_event("startup")
 async def _startup() -> None:
     cfg = Settings.build()
-    # миграции (если нужно)
     con = connect(cfg.DB_PATH)
     apply_all(con)
-    # прогрев брокера
     app.state.cfg = cfg
     app.state.broker = create_broker(cfg)
     log.info("app_started", extra={"mode": cfg.MODE})
@@ -47,7 +44,7 @@ async def metrics() -> Any:
 async def health() -> Dict[str, Any]:
     cfg = app.state.cfg
 
-    # DB health
+    # DB
     db_t0 = time.perf_counter()
     try:
         con = connect(cfg.DB_PATH)
@@ -56,7 +53,7 @@ async def health() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         db = {"status": f"error:{type(exc).__name__}"}
 
-    # Broker health (fetch_ticker с коротким таймаутом, если поддерживается)
+    # Broker
     br_t0 = time.perf_counter()
     try:
         _ = app.state.broker.fetch_ticker(cfg.SYMBOL)
@@ -66,9 +63,13 @@ async def health() -> Dict[str, Any]:
 
     # Time drift
     drift, _ = measure_time_drift(urls=cfg.TIME_DRIFT_URLS or None, timeout=2.5)
-    timec = {"status": "ok" if abs(drift) <= cfg.TIME_DRIFT_LIMIT_MS else "error:drift", "drift_ms": drift, "limit_ms": cfg.TIME_DRIFT_LIMIT_MS}
+    timec = {
+        "status": "ok" if abs(drift) <= cfg.TIME_DRIFT_LIMIT_MS else "error:drift",
+        "drift_ms": drift,
+        "limit_ms": cfg.TIME_DRIFT_LIMIT_MS,
+    }
 
-    # Матрица статусов
+    # Матрица
     if db["status"] != "ok" or timec["status"] != "ok":
         status = "unhealthy"
         degradation = "critical"
@@ -82,20 +83,10 @@ async def health() -> Dict[str, Any]:
     return {
         "status": status,
         "degradation_level": degradation,
-        "components": {
-            "mode": cfg.MODE,
-            "db": db,
-            "broker": broker,
-            "time": timec,
-        },
+        "components": {"mode": cfg.MODE, "db": db, "broker": broker, "time": timec},
     }
 
 
 @app.post("/tick")
-async def tick(inp: TickIn) -> Dict[str, Any]:
-    # заглушка: просто живой «пульс», чтобы проверить, что цикл не падает
-    try:
-        _ = inp.dict()
-        return {"status": "ok"}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "error": str(exc)}
+async def tick(_: TickIn) -> Dict[str, Any]:
+    return {"status": "ok"}

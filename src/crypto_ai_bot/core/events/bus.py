@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List
 
 
 @dataclass
@@ -14,10 +14,8 @@ class Event:
 
 class AsyncBus:
     """
-    Async pub/sub со стратегиями backpressure и DLQ.
-    backpressure_strategy можно задавать по типу события.
+    Async pub/sub с backpressure per-event и DLQ.
     """
-
     def __init__(self, max_queue: int = 1000) -> None:
         self.subscribers: Dict[str, List[Callable[[Event], Awaitable[None]]]] = defaultdict(list)
         self.queues: Dict[str, asyncio.Queue[Event]] = defaultdict(lambda: asyncio.Queue(maxsize=max_queue))
@@ -36,11 +34,9 @@ class AsyncBus:
         while True:
             evt = await q.get()
             try:
-                handlers = self.subscribers.get(event_type, [])
-                for h in handlers:
+                for h in self.subscribers.get(event_type, []):
                     await h(evt)
             except Exception as exc:  # noqa: BLE001
-                # в DLQ уходит исходное событие с пометкой ошибки
                 self.dead_letter_queue.append(Event(type="DLQ", payload={"orig_type": event_type, "event": evt.payload, "error": str(exc)}))
             finally:
                 q.task_done()
@@ -77,8 +73,8 @@ class AsyncBus:
                         pass
                 await q.put(event)
             elif strat == "never_drop":
-                await q.put(event)  # фактически block
+                await q.put(event)
             else:
                 await q.put(event)
-        except Exception as exc:  # если даже put упал — DLQ
+        except Exception as exc:
             self.dead_letter_queue.append(Event(type="DLQ", payload={"orig_type": et, "event": event.payload, "error": str(exc)}))

@@ -6,16 +6,11 @@ from typing import Any, Callable, Dict
 
 
 class CircuitBreaker:
-    """
-    Простая реализация CB с расширенной телеметрией.
-    """
-
     def __init__(self) -> None:
-        self.state: Dict[str, str] = {}           # key -> "closed"/"open"/"half-open"
+        self.state: Dict[str, str] = {}
         self.fail_count: Dict[str, int] = {}
         self.open_until: Dict[str, float] = {}
-        # новое: журнал переходов и последние ошибки
-        self.transitions_log: deque[tuple[str, str, str, float]] = deque(maxlen=100)  # (key, from, to, ts)
+        self.transitions_log: deque[tuple[str, str, str, float]] = deque(maxlen=100)
         self.last_errors: Dict[str, str] = {}
 
     def _set_state(self, key: str, new_state: str) -> None:
@@ -28,9 +23,6 @@ class CircuitBreaker:
         return self.state.get(key, "closed")
 
     def get_stats(self, key: str) -> Dict[str, Any]:
-        """
-        Телеметрия для /metrics и /health.
-        """
         return {
             "state": self.get_state(key),
             "fails": self.fail_count.get(key, 0),
