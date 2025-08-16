@@ -1,17 +1,10 @@
-# src/crypto_ai_bot/core/events/__init__.py
-from .bus import Bus
-from .async_bus import AsyncBus
+from .async_bus import AsyncBus, EventPriority, DEFAULT_BACKPRESSURE
 
-__all__ = ["Bus", "AsyncBus"]
+# Recommended defaults per event-domain (can be overridden in Settings)
+DEFAULT_BACKPRESSURE_MAP = {
+    "orders.*": "keep_latest",   # не копим очереди команд, новое важнее старого
+    "metrics.*": "drop_oldest",  # метрики лучше не блокировать, теряем самые старые
+    "audit.*": "block",          # аудит нельзя терять — блокируем издателя
+}
 
-def get_bus(kind: str = "sync", **kwargs):
-    """
-    Фабрика для создания шины.
-    kind: "sync" | "async"
-    kwargs пробрасываются в конструктор.
-    """
-    if kind == "sync":
-        return Bus(**kwargs)
-    elif kind == "async":
-        return AsyncBus(**kwargs)
-    raise ValueError(f"unknown bus kind: {kind!r}")
+__all__ = ["AsyncBus", "EventPriority", "DEFAULT_BACKPRESSURE", "DEFAULT_BACKPRESSURE_MAP"]

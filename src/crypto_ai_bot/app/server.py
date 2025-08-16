@@ -9,13 +9,13 @@ from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
 from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
 from crypto_ai_bot.core.use_cases.get_stats import get_stats as uc_get_stats
-from crypto_ai_bot.core.storage.sqlite_adapter import connect
+from crypto_ai_bot.core.storage.sqlite_adapter import connect, get_db_stats
 from crypto_ai_bot.core.storage.uow import SqliteUnitOfWork
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
 from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 from crypto_ai_bot.core.storage.repositories.idempotency import SqliteIdempotencyRepository
-from crypto_ai_bot.utils.metrics import export as metrics_export, inc, observe
+from crypto_ai_bot.utils.metrics import export as metrics_export
 from crypto_ai_bot.utils import http_client
 from crypto_ai_bot.app.adapters.telegram import handle_update
 
@@ -28,7 +28,6 @@ app = FastAPI(title="crypto-ai-bot")
 
 CFG = Settings.build()
 
-# prepare storage if path given
 CON = None
 if CFG.DB_PATH:
     pathlib.Path(CFG.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +54,8 @@ def health() -> JSONResponse:
             raise RuntimeError("no_db")
         CON.execute("SELECT 1;").fetchone()
         db_lat = int((time.time()-t0)*1000)
-        comp["db"] = {"status": "ok", "latency_ms": db_lat}
+        db_stats = get_db_stats(CON)
+        comp["db"] = {"status": "ok", "latency_ms": db_lat, "size_bytes": db_stats.get("size_bytes"), "fragmentation_pct": db_stats.get("fragmentation_pct")}
     except Exception as e:
         comp["db"] = {"status": f"error:{type(e).__name__}"}
         status = "degraded"
@@ -82,7 +82,6 @@ def health() -> JSONResponse:
     except Exception as e:
         comp["time"] = {"status": f"error:{type(e).__name__}"}
 
-    # degradation level
     degr = "none" if status == "healthy" else "major"
     return JSONResponse({"status": status, "degradation_level": degr, "components": comp})
 
@@ -125,7 +124,6 @@ def debug_why(symbol: str | None = None, timeframe: str | None = None, limit: in
 
 @app.get("/stats")
 def stats():
-    # подключаем репозитории только если есть соединение (даже при ENABLE_TRADING=false — чтение безопасно)
     positions_repo = trades_repo = None
     try:
         if CON is not None:
@@ -151,6 +149,7 @@ async def telegram_webhook(
     update = await request.json()
     http = http_client.get_http_client()
 
+    from crypto_ai_bot.app.adapters.telegram import handle_update
     try:
         msg = await handle_update(update, CFG, BROKER, http)
     except Exception as e:
