@@ -11,8 +11,9 @@ HELP = (
     "/start — помощь\n"
     "/status — текущий сигнал (без исполнения)\n"
     "/why — объяснение сигнала (индикаторы/порог/веса/контекст)\n"
+    "/audit — последние решения (аудит)\n"
     "\n"
-    "Пример: просто отправь /status"
+    "Пример: /audit 5"
 )
 
 def _fmt_pct(x: Optional[float]) -> str:
@@ -77,10 +78,26 @@ def _render_why(decision: Dict[str, Any]) -> str:
             lines.append(f"    - {k}: {v}")
     return "\n".join(lines)
 
+def _render_audit(audit_repo, limit: int = 5) -> str:
+    if audit_repo is None:
+        return "⚠️ audit_repo не настроен"
+    try:
+        items = audit_repo.list_by_type("decision", limit) or []
+    except Exception as e:
+        return f"⚠️ error: {type(e).__name__}: {e}"
+    if not items:
+        return "Журнал пуст."
+    lines = ["🗂 *Audit (последние решения)*"]
+    for it in items:
+        p = it.get("payload") or {}
+        lines.append(
+            f"• {it.get('id')} — action={p.get('action')} score={p.get('score')}"
+        )
+    return "\n".join(lines[:1+limit])
+
 def _send_text(chat_id: int, text: str, cfg) -> Dict[str, Any]:
     token = getattr(cfg, "TELEGRAM_BOT_TOKEN", "")
     if not token:
-        # return as plain data if token not configured (server can log)
         return {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
 
     payload = {
@@ -98,19 +115,13 @@ def _send_text(chat_id: int, text: str, cfg) -> Dict[str, Any]:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 def handle_update(update: Dict[str, Any], cfg, broker, **deps) -> Dict[str, Any]:
-    """
-    Тонкий адаптер команд → use-cases.
-
-    deps (опционально):
-      - positions_repo
-      - trades_repo
-      - snapshots_repo
-    """
     chat_id, text = _pick_text(update)
     if not chat_id:
         return {"ok": False, "error": "no_chat_id"}
 
-    cmd = text.split()[0].lower() if text else ""
+    parts = (text or "").split()
+    cmd = parts[0].lower() if parts else ""
+
     if cmd in ("/start", "/help"):
         return _send_text(chat_id, HELP, cfg)
 
@@ -128,5 +139,11 @@ def handle_update(update: Dict[str, Any], cfg, broker, **deps) -> Dict[str, Any]
         except Exception as e:
             return _send_text(chat_id, f"⚠️ error: {type(e).__name__}: {e}", cfg)
 
-    # Unknown -> help
+    if cmd == "/audit":
+        try:
+            limit = int(parts[1]) if len(parts) > 1 else 5
+        except Exception:
+            limit = 5
+        return _send_text(chat_id, _render_audit(deps.get("audit_repo"), limit), cfg)
+
     return _send_text(chat_id, HELP, cfg)

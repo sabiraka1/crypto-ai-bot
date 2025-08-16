@@ -1,115 +1,87 @@
 from __future__ import annotations
+from typing import Dict, Any, Optional
 
-from typing import Dict, Any, Tuple
-from dataclasses import dataclass
+from . import _build, _fusion
 
-from crypto_ai_bot.core.signals import _build
-from crypto_ai_bot.utils.metrics import inc, observe
-
+# контекст добавляем по возможности (опционально)
 try:
-    # optional enrichment
-    from crypto_ai_bot.core.positions.tracker import enrich_context as _enrich_ctx
+    from crypto_ai_bot.core.positions import tracker as _tracker
 except Exception:
-    _enrich_ctx = None  # type: ignore
+    _tracker = None  # мягкая зависимость
 
-@dataclass
-class Thresholds:
-    buy: float
-    sell: float
+def _thresholds(cfg) -> Dict[str, float]:
+    buy = float(getattr(cfg, "THRESHOLD_BUY", 0.60))
+    sell = float(getattr(cfg, "THRESHOLD_SELL", 0.40))
+    return {"buy": buy, "sell": sell}
 
-def _rule_score(feat: Dict[str, Any]) -> float:
-    ind = feat.get("indicators", {})
-    ema_fast = float(ind.get("ema_fast", 0.0))
-    ema_slow = float(ind.get("ema_slow", 0.0))
-    rsi = float(ind.get("rsi", 50.0))
-    macd_hist = float(ind.get("macd_hist", 0.0))
-
-    score = 0.5
-    if ema_fast > 0 and ema_slow > 0:
-        score += 0.2 if ema_fast > ema_slow else -0.2
-    if 55 <= rsi <= 70:
-        score += 0.15
-    elif rsi < 30:
-        score += 0.10
-    elif rsi > 70:
-        score -= 0.10
-    if macd_hist > 0:
-        score += 0.15
+def _weights(cfg) -> Dict[str, float]:
+    # нормализуем на всякий случай
+    rw = float(getattr(cfg, "SCORE_RULE_WEIGHT", getattr(cfg, "DECISION_RULE_WEIGHT", 0.5)))
+    aw = float(getattr(cfg, "SCORE_AI_WEIGHT", getattr(cfg, "DECISION_AI_WEIGHT", 0.5)))
+    s = rw + aw
+    if s <= 0:
+        rw, aw = 0.5, 0.5
     else:
-        score -= 0.05
-    return max(0.0, min(1.0, score))
+        rw, aw = rw / s, aw / s
+    return {"rule": rw, "ai": aw}
 
-def _combine_scores(rule_score: float | None, ai_score: float | None, cfg) -> float:
-    if rule_score is None and ai_score is None:
-        return 0.5
-    if ai_score is None:
-        return float(rule_score)
-    if rule_score is None:
-        return float(ai_score)
-    w_rule = float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5))
-    w_ai = float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5))
-    s = w_rule + w_ai or 1.0
-    w_rule, w_ai = w_rule/s, w_ai/s
-    return float(max(0.0, min(1.0, w_rule*rule_score + w_ai*ai_score)))
-
-def _action_from_score(score: float, thr: Thresholds) -> str:
-    if score >= thr.buy:
-        return "buy"
-    if score <= thr.sell:
-        return "sell"
-    return "hold"
+def _size_for_action(cfg, action: str) -> str:
+    if action == "buy":
+        return str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0.0"))
+    if action == "sell":
+        return str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0.0"))
+    return "0"
 
 def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int, **kwargs) -> Dict[str, Any]:
-    # 1) Build features
-    f = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+    """
+    Единая точка принятия решения.
+    Сбор фичей/индикаторов делегирован в _build. Слияние rule/ai — в _fusion.
+    Здесь формируем публичное решение + explain.
+    """
+    feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+    rule_score = feats.get("rule_score")
+    ai_score = feats.get("ai_score")
+    score = _fusion.fuse(rule_score, ai_score, cfg)
 
-    # 2) Optional context enrichment from repos (if provided)
+    thr = _thresholds(cfg)
+    w = _weights(cfg)
+
+    action: str
+    if score >= thr["buy"]:
+        action = "buy"
+    elif score <= thr["sell"]:
+        action = "sell"
+    else:
+        action = "hold"
+
+    # базовое объяснение
+    explain: Dict[str, Any] = {
+        "signals": feats.get("indicators", {}),
+        "thresholds": thr,
+        "weights": w,
+        "context": {},
+    }
+
+    # контекст: быстрый путь через трекер, если есть репозитории
     positions_repo = kwargs.get("positions_repo")
     trades_repo = kwargs.get("trades_repo")
-    snapshots_repo = kwargs.get("snapshots_repo")
-    if _enrich_ctx is not None and (positions_repo or trades_repo or snapshots_repo):
+    if _tracker is not None and (positions_repo is not None or trades_repo is not None):
         try:
-            _enrich_ctx(cfg=cfg, broker=broker, features=f, positions_repo=positions_repo, trades_repo=trades_repo, snapshots_repo=snapshots_repo)
+            ctx = _tracker.build_context(cfg, broker, positions_repo=positions_repo, trades_repo=trades_repo)
+            if isinstance(ctx, dict):
+                explain["context"].update(ctx)
         except Exception:
             pass
 
-    # 3) Score/fuse
-    rs = _rule_score(f)
-    f["rule_score"] = rs
-    final_score = _combine_scores(rs, f.get("ai_score"), cfg)
-
-    thr = Thresholds(buy=float(getattr(cfg, "THRESHOLD_BUY", 0.6)),
-                     sell=float(getattr(cfg, "THRESHOLD_SELL", 0.4)))
-    action = _action_from_score(final_score, thr)
-    size = str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0"))
-
-    explain = {
-        "signals": f.get("indicators", {}),
-        "blocks": {},
-        "weights": {
-            "rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)),
-            "ai": float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5)),
-        },
-        "thresholds": {"buy": thr.buy, "sell": thr.sell},
-        "context": f.get("context", {}),
-    }
-
-    decision = {
-        "id": "",
-        "symbol": f.get("symbol"),
-        "timeframe": f.get("timeframe"),
+    decision: Dict[str, Any] = {
+        "symbol": symbol,
+        "timeframe": timeframe,
         "action": action,
-        "size": size,
+        "size": _size_for_action(cfg, action),
         "sl": None,
         "tp": None,
         "trail": None,
-        "score": final_score,
+        "score": float(score) if score is not None else 0.0,
         "explain": explain,
     }
-
-    try:
-        inc("bot_decision_total", {"action": action})
-        observe("decision_score_histogram", final_score, {})
-    except Exception:
-        pass
     return decision

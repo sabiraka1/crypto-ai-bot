@@ -1,226 +1,187 @@
 from __future__ import annotations
-from typing import Dict, Any, Optional, Iterable
-from dataclasses import dataclass
+from typing import Any, Dict, Optional, List
 from decimal import Decimal
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-# --- Lightweight data adapters (duck-typing) ----------------------------------
+def _utc_hour() -> int:
+    return int(datetime.now(tz=timezone.utc).hour)
 
-@dataclass
-class _TradeView:
-    pnl: float
-    ts: int  # ms
+def _get_price_from_ticker(t: Dict[str, Any]) -> Optional[float]:
+    for k in ("last", "close", "price"):
+        v = t.get(k)
+        if isinstance(v, (int, float)):
+            return float(v)
+    # some adapters may return nested structure
+    try:
+        return float(t.get("info", {}).get("last", None))
+    except Exception:
+        return None
 
-    @classmethod
-    def from_obj(cls, obj: Any) -> "_TradeView":
-        # Accept common attribute names
-        pnl = getattr(obj, "pnl", None)
-        if pnl is None:
-            pnl = getattr(obj, "pnl_usd", None)
-        if pnl is None:
-            pnl = getattr(obj, "profit", None)
-        if pnl is None:
-            pnl = getattr(obj, "profit_usd", None)
-        if pnl is None:
-            pnl = getattr(obj, "pnl_amount", 0.0)
+def _spread_pct_from_ticker(t: Dict[str, Any]) -> Optional[float]:
+    try:
+        bid = t.get("bid")
+        ask = t.get("ask")
+        if bid and ask and bid > 0 and ask >= bid:
+            return (ask - bid) / ((ask + bid) / 2.0) * 100.0
+    except Exception:
+        pass
+    return None
+
+def _safe_float(x) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+def _sum_abs(vs: List[float]) -> float:
+    s = 0.0
+    for v in vs:
+        try:
+            s += abs(float(v))
+        except Exception:
+            continue
+    return s
+
+def _fetch_equity_usd_from_balance(broker) -> Optional[float]:
+    try:
+        bal = broker.fetch_balance()
+        # best-effort: many exchanges return total.USD or USDT
+        for k in ("USD", "USDT", "USDC"):
+            wallet = (bal.get("total") or {}).get(k) if isinstance(bal.get("total"), dict) else None
+            if wallet is None and isinstance(bal, dict):
+                wallet = bal.get(k, {}).get("total")
+            if wallet:
+                try:
+                    return float(wallet)
+                except Exception:
+                    continue
+        # fallback: try 'info'->'equity'
+        info = bal.get("info") if isinstance(bal, dict) else None
+        if info and "equity" in info:
+            return float(info["equity"])
+    except Exception:
+        return None
+    return None
+
+def exposure_snapshot(cfg, broker, positions_repo=None, *, symbol: Optional[str]=None) -> Dict[str, Optional[float]]:
+    """
+    Возвращает оценку текущей экспозиции:
+      - exposure_usd: суммарная номинальная стоимость открытых позиций по mark price
+      - exposure_pct: если известен equity (из брокера или cfg.ACCOUNT_EQUITY_USD)
+    Пытается использовать быстрый путь из репозитория (если реализован метод get_open_exposure_fast()).
+    """
+    # 1) быстрый путь через репозиторий (если есть)
+    if positions_repo is not None and hasattr(positions_repo, "get_open_exposure_fast"):
+        try:
+            data = positions_repo.get_open_exposure_fast(symbol=symbol)  # type: ignore[attr-defined]
+            exp_usd = _safe_float(data.get("exposure_usd"))
+            exp_pct = _safe_float(data.get("exposure_pct"))
+            if exp_usd is not None and exp_pct is not None:
+                return {"exposure_usd": exp_usd, "exposure_pct": exp_pct}
+        except Exception:
+            pass
+
+    # 2) универсальный путь: берём открытые позиции и текущую цену
+    price = None
+    try:
+        t = broker.fetch_ticker(symbol or cfg.SYMBOL)
+        price = _get_price_from_ticker(t)
+    except Exception:
+        price = None
+
+    amounts: List[float] = []
+    if positions_repo is not None and hasattr(positions_repo, "get_open"):
+        try:
+            opens = positions_repo.get_open()  # list of positions
+            for p in opens or []:
+                amt = p.get("amount") if isinstance(p, dict) else getattr(p, "amount", None)
+                if amt is None:
+                    continue
+                amounts.append(float(amt))
+        except Exception:
+            pass
+
+    exposure_usd = None
+    if price and amounts:
+        exposure_usd = _sum_abs([price * a for a in amounts])
+
+    # equity
+    equity = None
+    # explicit cfg hint
+    acc_eq = getattr(cfg, "ACCOUNT_EQUITY_USD", None)
+    if acc_eq:
+        equity = _safe_float(acc_eq)
+    if equity is None:
+        equity = _fetch_equity_usd_from_balance(broker)
+
+    exposure_pct = None
+    if exposure_usd is not None and equity and equity > 0:
+        exposure_pct = exposure_usd / equity * 100.0
+
+    return {"exposure_usd": exposure_usd, "exposure_pct": exposure_pct}
+
+def seq_losses(trades_repo=None, limit: int = 20) -> Optional[int]:
+    """
+    Возвращает количество последних подряд убыточных сделок.
+    Если у репозитория есть быстрый метод get_seq_losses_fast() — используем его.
+    Иначе пытаемся прочитать недавние трейды и посчитать по полю pnl(usd).
+    """
+    if trades_repo is not None and hasattr(trades_repo, "get_seq_losses_fast"):
+        try:
+            return int(trades_repo.get_seq_losses_fast(limit=limit))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    #\tfallback
+    try:
+        # ожидаем метод list_recent(limit) -> [{..., 'pnl_usd': float}|{'pnl': float}|...]
+        recent = trades_repo.list_recent(limit=limit)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+    cnt = 0
+    for tr in recent or []:
+        pnl = tr.get("pnl_usd", tr.get("pnl", 0.0)) if isinstance(tr, dict) else getattr(tr, "pnl_usd", getattr(tr, "pnl", 0.0))
         try:
             pnl = float(pnl)
         except Exception:
             pnl = 0.0
-
-        ts = getattr(obj, "ts", None) or getattr(obj, "timestamp", None) or getattr(obj, "time", None)
-        if ts is None:
-            # fallback now
-            ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        return cls(pnl=pnl, ts=int(ts))
-
-@dataclass
-class _PositionView:
-    symbol: str
-    size: Decimal
-
-    @classmethod
-    def from_obj(cls, obj: Any) -> "_PositionView":
-        symbol = getattr(obj, "symbol", "") or getattr(obj, "pair", "")
-        size = getattr(obj, "size", None) or getattr(obj, "amount", None) or 0
-        try:
-            size = Decimal(str(size))
-        except Exception:
-            size = Decimal(0)
-        return cls(symbol=str(symbol), size=size)
-
-# --- Core tracker --------------------------------------------------------------
-
-class PnLTracker:
-    """
-    Собирает вычисляемый контекст для risk-правил и explain:
-      - последовательность лоссов;
-      - дневной дроудаун;
-      - экспозиция в USD и %.
-    Источники:
-      - trades_repo: для seq_losses и дневного PnL;
-      - positions_repo: для открытой экспозиции;
-      - broker: для текущего equity/баланса и цены.
-    Все зависимости опциональны — функции устойчивы к None.
-    """
-    def __init__(self, *, trades_repo=None, positions_repo=None, snapshots_repo=None, broker=None, cfg=None):
-        self.trades_repo = trades_repo
-        self.positions_repo = positions_repo
-        self.snapshots_repo = snapshots_repo
-        self.broker = broker
-        self.cfg = cfg
-
-    # ------------------------ helpers ------------------------
-
-    @staticmethod
-    def _start_of_utc_day_ms(now_ms: int) -> int:
-        dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
-        sod = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
-        return int(sod.timestamp() * 1000)
-
-    def _list_recent_trades(self, limit: int = 200) -> list[_TradeView]:
-        try:
-            trades = self.trades_repo.list_recent(limit)  # type: ignore[attr-defined]
-        except Exception:
-            trades = []
-        out: list[_TradeView] = []
-        for t in trades or []:
-            try:
-                out.append(_TradeView.from_obj(t))
-            except Exception:
-                continue
-        return out
-
-    def _open_positions(self) -> list[_PositionView]:
-        try:
-            pos = self.positions_repo.get_open()  # type: ignore[attr-defined]
-        except Exception:
-            pos = []
-        out: list[_PositionView] = []
-        for p in pos or []:
-            try:
-                out.append(_PositionView.from_obj(p))
-            except Exception:
-                continue
-        return out
-
-    def _equity_usd(self) -> Optional[float]:
-        # Try snapshots repo first (preferred, if present)
-        try:
-            if self.snapshots_repo is not None:
-                eq = self.snapshots_repo.get_current_equity_usd()  # type: ignore[attr-defined]
-                if eq is not None:
-                    return float(eq)
-        except Exception:
-            pass
-        # Fallback to broker balance
-        try:
-            if self.broker is not None:
-                bal = self.broker.fetch_balance()  # ccxt-like
-                # Try common fields
-                for key in ("USDT", "USD", "total"):
-                    v = bal.get("total", {}).get(key) if key != "total" else bal.get("total")
-                    if isinstance(v, dict):
-                        # guess approximate equity as sum
-                        eq = sum(float(x or 0) for x in v.values())
-                        if eq > 0:
-                            return eq
-                    else:
-                        try:
-                            eq = float(v)
-                            if eq > 0:
-                                return eq
-                        except Exception:
-                            continue
-        except Exception:
-            pass
-        return None
-
-    # ------------------------ public API ---------------------
-
-    def consecutive_losses(self, *, lookback: int = 50) -> Optional[int]:
-        trades = self._list_recent_trades(lookback)
-        if not trades:
-            return None
-        cnt = 0
-        for t in reversed(trades):
-            if t.pnl < 0:
-                cnt += 1
-            else:
-                break
-        return cnt
-
-    def day_drawdown_pct(self) -> Optional[float]:
-        # Approach: need today's starting equity and current equity.
-        start_equity = None
-        try:
-            if self.snapshots_repo is not None:
-                start_equity = self.snapshots_repo.get_today_start_equity_usd()  # type: ignore[attr-defined]
-        except Exception:
-            start_equity = None
-        if start_equity is None:
-            return None  # no stable baseline → skip rule, return None
-
-        current = self._equity_usd()
-        if current is None or start_equity <= 0:
-            return None
-        dd = max(0.0, (start_equity - current) / start_equity * 100.0)
-        return dd
-
-    def exposure(self, *, symbol: str, price: float) -> tuple[Optional[float], Optional[float]]:
-        """
-        Returns (exposure_usd, exposure_pct) — both optional if sources unknown.
-        """
-        exp_usd = 0.0
-        positions = self._open_positions()
-        if positions:
-            for p in positions:
-                try:
-                    if p.symbol and p.size:
-                        exp_usd += abs(float(p.size) * float(price))
-                except Exception:
-                    continue
+        if pnl < 0:
+            cnt += 1
         else:
-            # if no repo, we cannot infer; return None to avoid wrong blocks
-            return None, None
+            break
+    return cnt
 
-        equity = self._equity_usd()
-        exp_pct = (exp_usd / equity * 100.0) if equity and equity > 0 else None
-        return exp_usd if exp_usd > 0 else 0.0, exp_pct
-
-# ------------------------ top-level helper ---------------------
-
-def enrich_context(*, cfg, broker, features: Dict[str, Any], trades_repo=None, positions_repo=None, snapshots_repo=None) -> Dict[str, Any]:
+def day_drawdown_pct(trades_repo=None) -> Optional[float]:
     """
-    Computes context fields and merges them into features['context'].
-    Safe to call with repos=None — only fields with available data will be filled.
-    Returns updated context dict (also mutates features in-place).
+    Пытается вернуть текущий дневной дроудаун в % от equity (если доступно).
+    Предпочитает метод репозитория get_pnl_summary(days=1) -> {'day_pnl_usd':..., 'equity_usd':...}
     """
-    ctx = dict(features.get("context") or {})
-    price = float((features.get("market") or {}).get("price") or 0.0)
-    symbol = str(features.get("symbol") or cfg.SYMBOL)
+    if trades_repo is not None and hasattr(trades_repo, "get_pnl_summary"):
+        try:
+            s = trades_repo.get_pnl_summary(days=1)  # type: ignore[attr-defined]
+            pnl = _safe_float((s or {}).get("day_pnl_usd"))
+            eq = _safe_float((s or {}).get("equity_usd"))
+            if pnl is not None and eq and eq > 0:
+                return pnl / eq * 100.0
+        except Exception:
+            pass
+    return None
 
-    tracker = PnLTracker(trades_repo=trades_repo, positions_repo=positions_repo, snapshots_repo=snapshots_repo, broker=broker, cfg=cfg)
-
-    # seq_losses
+def build_context(cfg, broker, positions_repo=None, trades_repo=None) -> Dict[str, Optional[float]]:
+    """Собирает контекст для explain: час, спред, экспозиция, дроудаун, последовательность лоссов."""
     try:
-        ctx["seq_losses"] = tracker.consecutive_losses()
+        t = broker.fetch_ticker(cfg.SYMBOL)
     except Exception:
-        pass
+        t = {}
 
-    # day drawdown
-    try:
-        ctx["day_drawdown_pct"] = tracker.day_drawdown_pct()
-    except Exception:
-        pass
-
-    # exposure
-    try:
-        exp_usd, exp_pct = tracker.exposure(symbol=symbol, price=price)
-        ctx["exposure_usd"] = exp_usd
-        ctx["exposure_pct"] = exp_pct
-    except Exception:
-        pass
-
-    features["context"] = ctx
-    return ctx
+    return {
+        "hour": _utc_hour(),
+        "spread_pct": _spread_pct_from_ticker(t),
+        **exposure_snapshot(cfg, broker, positions_repo=positions_repo),
+        "day_drawdown_pct": day_drawdown_pct(trades_repo),
+        "seq_losses": seq_losses(trades_repo),
+        "price": _get_price_from_ticker(t),
+    }

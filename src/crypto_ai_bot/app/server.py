@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import PlainTextResponse
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
@@ -16,7 +15,7 @@ from crypto_ai_bot.utils.time_sync import measure_time_drift
 # Telegram adapter
 from crypto_ai_bot.app.adapters.telegram import handle_update as tg_handle_update
 
-# Storage (SQLite) real wiring
+# Storage (SQLite) wiring
 from crypto_ai_bot.core.storage.sqlite_adapter import connect as db_connect, in_txn
 from crypto_ai_bot.core.storage.migrations.runner import apply_all as apply_migrations
 from crypto_ai_bot.core.storage.repositories.trades import TradeRepository
@@ -42,11 +41,8 @@ def _ensure_db_and_repos() -> Dict[str, Any]:
     global _db_conn, _repos
     if _repos:
         return _repos
-    # Open connection
     _db_conn = db_connect(cfg.DB_PATH)
-    # Apply SQL migrations
     apply_migrations(_db_conn)
-    # Build repositories
     _repos = {
         "positions_repo": PositionRepository(_db_conn),
         "trades_repo":    TradeRepository(_db_conn),
@@ -77,8 +73,7 @@ async def health() -> Dict[str, Any]:
 
     # DB
     try:
-        repos = _ensure_db_and_repos()
-        # cheap ping
+        _ = _ensure_db_and_repos()
         with in_txn(_db_conn):
             pass
         components["db"] = {"status": "ok", "latency_ms": 0}
@@ -131,6 +126,18 @@ async def http_why(symbol: Optional[str] = None, timeframe: Optional[str] = None
         repos = _ensure_db_and_repos()
         dec = evaluate(cfg, broker, symbol=symbol or cfg.SYMBOL, timeframe=timeframe or cfg.TIMEFRAME, limit=limit, **repos)
         return {"status": "ok", "symbol": dec.get("symbol"), "timeframe": dec.get("timeframe"), "action": dec.get("action"), "score": dec.get("score"), "explain": dec.get("explain")}
+    except Exception as e:
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+@app.get("/debug/audit")
+async def http_audit(type: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    try:
+        repos = _ensure_db_and_repos()
+        audit = repos.get("audit_repo")
+        if audit is None:
+            return {"status": "error", "error": "audit_repo_not_configured"}
+        items = audit.list_by_type(type, limit) if type else audit.list_recent(limit)
+        return {"status": "ok", "items": items}
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
