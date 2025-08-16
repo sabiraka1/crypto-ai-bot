@@ -1,138 +1,67 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+import time
+import uuid
 from decimal import Decimal
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
-from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe, to_exchange_symbol
-from crypto_ai_bot.core.storage.repositories.interfaces import (
-    IdempotencyRepository, TradeRepository, AuditRepository, PositionRepository
-)
-from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.utils.metrics import inc, observe
+from crypto_ai_bot.core.brokers.base import ExchangeInterface
+from crypto_ai_bot.core.storage.uow import UnitOfWork
 
 
-def _utc_minute_epoch(dt: Optional[datetime] = None) -> int:
-    d = (dt or datetime.now(timezone.utc)).replace(second=0, microsecond=0, tzinfo=timezone.utc)
-    return int(d.timestamp())
+# лимиты (см. требования)
+EVAL_RATE_PER_MINUTE = 60
+ORDER_RATE_PER_MINUTE = 10
 
 
-def _make_idem_key(decision: Dict[str, Any]) -> str:
+def _make_idem_key(symbol: str, side: str, size: Decimal, decision_id: str | None = None) -> str:
     """
-    Формат по спецификации:
-      {symbol}:{side}:{size}:{timestamp_minute}:{decision_id[:8]}
+    Формат строго по спецификации:
+    {symbol}:{side}:{size}:{timestamp_minute}:{decision_id[:8]}
     """
-    symbol = str(decision.get("symbol","-"))
-    side = str(decision.get("action","hold"))
-    size = str(decision.get("size","0"))
-    ts_min = _utc_minute_epoch()
-    did = str(decision.get("id",""))[:8]
-    return f"{symbol}:{side}:{size}:{ts_min}:{did}"
+    ts_minute = int(time.time() // 60)
+    did = (decision_id or uuid.uuid4().hex)[:8]
+    return f"{symbol}:{side}:{size}:{ts_minute}:{did}"
 
 
-async def _publish(bus, event: Dict[str, Any]) -> None:
-    try:
-        if bus is not None and hasattr(bus, "publish"):
-            await bus.publish(event)
-    except Exception:
-        # не роняем основной поток заказа
-        pass
-
-
-def place_order(
-    cfg,
-    broker,
-    *,
-    decision: Dict[str, Any],
-    idem_repo: IdempotencyRepository,
-    trades_repo: Optional[TradeRepository] = None,
-    audit_repo: Optional[AuditRepository] = None,
-    positions_repo: Optional[PositionRepository] = None,
-    bus=None,
-) -> Dict[str, Any]:
+def place_order(cfg, broker: ExchangeInterface, uow: UnitOfWork, repos, decision: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Создание рыночного ордера по Decision. Все зависимости передаются снаружи.
-    Никаких прямых импортов реализаций репозиториев.
+    1) idempotency → 2) ордер → 3) audit + позиции  (одна транзакция)
     """
-    # базовая валидация
-    side = str(decision.get("action","hold"))
-    if side not in ("buy","sell"):
-        return {"status":"skip","reason":"non_trade_action"}
+    t0 = time.perf_counter()
 
-    symbol = normalize_symbol(str(decision.get("symbol") or getattr(cfg, "SYMBOL", "BTC/USDT")))
-    timeframe = normalize_timeframe(str(decision.get("timeframe") or getattr(cfg, "TIMEFRAME", "1h")))
-    size = Decimal(str(decision.get("size") or getattr(cfg, "DEFAULT_ORDER_SIZE", "0.01")))
+    symbol = decision.get("symbol") or cfg.SYMBOL
+    side = decision["action"]
+    size = Decimal(str(decision["size"]))
+    price = decision.get("price")
 
-    if not getattr(cfg, "ENABLE_TRADING", False):
-        return {"status":"forbidden","reason":"trading_disabled"}
+    key = _make_idem_key(symbol, side, size, decision.get("id"))
+    payload = json.dumps({"decision": decision}, ensure_ascii=False)
 
-    key = _make_idem_key({**decision, "symbol": symbol})
-    ttl = int(getattr(cfg, "IDEMPOTENCY_TTL_SECONDS", 300))
+    with uow as tx:
+        idem_repo = repos.idempotency(tx)
+        is_new, prev = idem_repo.check_and_store(key, payload, ttl_seconds=cfg.IDEMPOTENCY_TTL_SECONDS)
+        if not is_new:
+            inc("order_duplicate_total", {"symbol": symbol, "side": side})
+            return {"status": "duplicate", "previous": prev}
 
-    # idempotency
-    claimed, original = idem_repo.claim(key, payload=decision, ttl_seconds=ttl)
-    if not claimed:
-        # уже исполняли — вернём оригинал
-        return {"status":"ok","idempotent":True,"original": original}
+        # создаём ордер у брокера
+        order = broker.create_order(symbol, "market", side, size, price)
 
-    # исполняем
-    try:
-        order = broker.create_order(symbol, "market", side, size, None)
-        result = {"status":"ok","idempotent":False,"order":order}
-        metrics.inc("order_submitted_total", {"side": side})
+        # репозитории
+        trades_repo = repos.trades(tx)
+        positions_repo = repos.positions(tx)
+        audit_repo = repos.audit(tx)
 
-        # события (fire-and-forget)
-        import asyncio
-        asyncio.create_task(_publish(bus, {
-            "type": "OrderSubmittedEvent",
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol,
-            "side": side,
-            "size": str(size),
-            "price": order.get("price"),
-            "order_id": order.get("id"),
-            "timeframe": timeframe,
-            "decision_id": decision.get("id"),
-        }))
+        # обновим состояние/аудит (упрощённо)
+        audit_repo.append("order_submitted", {"symbol": symbol, "side": side, "size": str(size), "order": order})
+        positions_repo.upsert_from_order(order)
 
-        # аудит/трейды — опционально
-        if audit_repo is not None:
-            audit_repo.append({
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "type": "order_submitted",
-                "symbol": symbol,
-                "side": side,
-                "size": str(size),
-                "order_id": order.get("id"),
-                "price": order.get("price"),
-                "timeframe": timeframe,
-                "decision_id": decision.get("id"),
-            })
-        if trades_repo is not None and order.get("status") == "closed":
-            trades_repo.insert({
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "symbol": symbol,
-                "side": side,
-                "qty": str(size),
-                "price": str(order.get("price")),
-                "order_id": order.get("id"),
-                "context": {"source":"place_order","decision_id": decision.get("id")},
-            })
+        idem_repo.commit(key, result=json.dumps(order))
+        tx.commit()
 
-        idem_repo.commit(key, result)
-        return result
-    except Exception as e:
-        metrics.inc("order_failed_total", {"reason": type(e).__name__})
-        # событие об ошибке
-        try:
-            import asyncio
-            asyncio.create_task(_publish(bus, {
-                "type": "ErrorEvent",
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "scope": "place_order",
-                "error": type(e).__name__,
-                "details": str(e),
-                "decision_id": decision.get("id"),
-            }))
-        except Exception:
-            pass
-        return {"status":"error","error": f"{type(e).__name__}:{e}"}
+    observe("order_latency_seconds", time.perf_counter() - t0, {"symbol": symbol, "side": side})
+    inc("order_submitted_total", {"symbol": symbol, "side": side})
+    return {"status": "ok", "order": order}

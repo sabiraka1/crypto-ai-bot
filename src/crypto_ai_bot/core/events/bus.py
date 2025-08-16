@@ -1,80 +1,84 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Deque, Optional
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-EventHandler = Callable[[Dict[str, Any]], Awaitable[None]]
 
 @dataclass
+class Event:
+    type: str
+    payload: Dict[str, Any]
+
+
 class AsyncBus:
     """
-    Async pub/sub с per-event backpressure стратегиями и DLQ.
-    strategies: {"OrderFilledEvent": "drop_oldest" | "keep_latest" | "block", ...}
-    queue_sizes: {"OrderFilledEvent": 1000, ...}
-    dlq_max: максимальный размер очереди DLQ (dead-letter).
+    Async pub/sub со стратегиями backpressure и DLQ.
+    backpressure_strategy можно задавать по типу события.
     """
-    strategies: Dict[str, str] = field(default_factory=dict)
-    queue_sizes: Dict[str, int] = field(default_factory=dict)
-    dlq_max: int = 200
 
-    def __post_init__(self) -> None:
-        self._handlers: Dict[str, list[EventHandler]] = {}
-        self._queues: Dict[str, asyncio.Queue] = {}
-        self._dlq: Deque[Dict[str, Any]] = deque(maxlen=self.dlq_max)
+    def __init__(self, max_queue: int = 1000) -> None:
+        self.subscribers: Dict[str, List[Callable[[Event], Awaitable[None]]]] = defaultdict(list)
+        self.queues: Dict[str, asyncio.Queue[Event]] = defaultdict(lambda: asyncio.Queue(maxsize=max_queue))
+        self.backpressure: Dict[str, str] = defaultdict(lambda: "block")  # block|drop_oldest|keep_latest|never_drop
+        self.dead_letter_queue: deque[Event] = deque(maxlen=1000)
+        self._consumers_started = False
 
-    def subscribe(self, event_type: str, handler: EventHandler) -> None:
-        self._handlers.setdefault(event_type, []).append(handler)
-        if event_type not in self._queues:
-            maxsize = int(self.queue_sizes.get(event_type, 1000))
-            self._queues[event_type] = asyncio.Queue(maxsize=maxsize)
+    def set_strategy(self, event_type: str, strategy: str) -> None:
+        self.backpressure[event_type] = strategy
 
-    async def publish(self, event: Dict[str, Any]) -> None:
-        et = str(event.get("type","GenericEvent"))
-        q = self._queues.setdefault(et, asyncio.Queue(maxsize=int(self.queue_sizes.get(et, 1000))))
-        strat = self.strategies.get(et, "block")
-        if strat == "block":
-            await q.put(event)
-        elif strat == "drop_oldest":
-            if q.full():
-                try:
-                    _ = q.get_nowait()
-                    q.task_done()
-                except Exception:
-                    pass
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                self._dlq.append({"reason":"queue_full_after_drop","event":event})
-        elif strat == "keep_latest":
-            if q.full():
-                # очищаем всё и оставляем только новый как "последний"
-                while not q.empty():
-                    try:
-                        _ = q.get_nowait(); q.task_done()
-                    except Exception:
-                        break
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                self._dlq.append({"reason":"queue_full_keep_latest","event":event})
-        else:
-            # неизвестная стратегия — отправим в DLQ
-            self._dlq.append({"reason":"unknown_strategy","strategy":strat,"event":event})
+    def subscribe(self, event_type: str, handler: Callable[[Event], Awaitable[None]]) -> None:
+        self.subscribers[event_type].append(handler)
 
-    async def run_consumer(self, event_type: str) -> None:
-        q = self._queues.setdefault(event_type, asyncio.Queue(maxsize=int(self.queue_sizes.get(event_type, 1000))))
+    async def _consumer(self, event_type: str) -> None:
+        q = self.queues[event_type]
         while True:
-            ev = await q.get()
+            evt = await q.get()
             try:
-                for h in self._handlers.get(event_type, []):
-                    try:
-                        await h(ev)
-                    except Exception as e:
-                        self._dlq.append({"reason":"handler_error","event":ev,"error":type(e).__name__})
+                handlers = self.subscribers.get(event_type, [])
+                for h in handlers:
+                    await h(evt)
+            except Exception as exc:  # noqa: BLE001
+                # в DLQ уходит исходное событие с пометкой ошибки
+                self.dead_letter_queue.append(Event(type="DLQ", payload={"orig_type": event_type, "event": evt.payload, "error": str(exc)}))
             finally:
                 q.task_done()
 
-    def dead_letters(self) -> list[Dict[str, Any]]:
-        return list(self._dlq)
+    async def start(self) -> None:
+        if self._consumers_started:
+            return
+        self._consumers_started = True
+        for etype in list(self.queues.keys()) or ["default"]:
+            asyncio.create_task(self._consumer(etype))
+
+    async def publish(self, event: Event) -> None:
+        et = event.type
+        q = self.queues[et]
+        strat = self.backpressure[et]
+
+        try:
+            if strat == "block":
+                await q.put(event)
+            elif strat == "keep_latest":
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                        q.task_done()
+                    except Exception:
+                        break
+                await q.put(event)
+            elif strat == "drop_oldest":
+                if q.full():
+                    try:
+                        q.get_nowait()
+                        q.task_done()
+                    except Exception:
+                        pass
+                await q.put(event)
+            elif strat == "never_drop":
+                await q.put(event)  # фактически block
+            else:
+                await q.put(event)
+        except Exception as exc:  # если даже put упал — DLQ
+            self.dead_letter_queue.append(Event(type="DLQ", payload={"orig_type": et, "event": event.payload, "error": str(exc)}))

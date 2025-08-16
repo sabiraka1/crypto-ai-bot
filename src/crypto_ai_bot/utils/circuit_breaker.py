@@ -1,71 +1,72 @@
 from __future__ import annotations
 
-import threading
 import time
-from typing import Any, Dict, Optional
+from collections import deque
+from typing import Any, Callable, Dict
+
 
 class CircuitBreaker:
     """
-    Простой circuit breaker с логом переходов, последними ошибками и статистикой.
-    Метод call(fn, *, key, timeout, fail_threshold, open_seconds).
+    Простая реализация CB с расширенной телеметрией.
     """
+
     def __init__(self) -> None:
-        self._lock = threading.RLock()
-        # per-key state
-        self._state: Dict[str, str] = {}  # closed|open|half-open
-        self._fails: Dict[str, int] = {}
-        self._last_open: Dict[str, float] = {}
-        self._last_errors: Dict[str, str] = {}
-        self._transitions: Dict[str, list[tuple[float, str]]] = {}  # (ts, state)
+        self.state: Dict[str, str] = {}           # key -> "closed"/"open"/"half-open"
+        self.fail_count: Dict[str, int] = {}
+        self.open_until: Dict[str, float] = {}
+        # новое: журнал переходов и последние ошибки
+        self.transitions_log: deque[tuple[str, str, str, float]] = deque(maxlen=100)  # (key, from, to, ts)
+        self.last_errors: Dict[str, str] = {}
 
-    def _set_state(self, key: str, state: str) -> None:
-        with self._lock:
-            self._state[key] = state
-            self._transitions.setdefault(key, []).append((time.time(), state))
-            if state == "open":
-                self._last_open[key] = time.time()
+    def _set_state(self, key: str, new_state: str) -> None:
+        old = self.state.get(key, "closed")
+        if old != new_state:
+            self.transitions_log.append((key, old, new_state, time.time()))
+        self.state[key] = new_state
 
-    def get_stats(self, key: Optional[str] = None) -> Dict[str, Any]:
-        with self._lock:
-            if key is not None:
-                return {
-                    "state": self._state.get(key, "closed"),
-                    "fails": self._fails.get(key, 0),
-                    "last_open_ts": self._last_open.get(key),
-                    "last_error": self._last_errors.get(key),
-                    "transitions": list(self._transitions.get(key, [])),
-                }
-            # aggregated
-            return {k: self.get_stats(k) for k in self._state.keys()}
+    def get_state(self, key: str) -> str:
+        return self.state.get(key, "closed")
 
-    def call(self, fn, *, key: str, timeout: float, fail_threshold: int, open_seconds: float) -> Any:
+    def get_stats(self, key: str) -> Dict[str, Any]:
+        """
+        Телеметрия для /metrics и /health.
+        """
+        return {
+            "state": self.get_state(key),
+            "fails": self.fail_count.get(key, 0),
+            "open_until": self.open_until.get(key, 0),
+            "last_error": self.last_errors.get(key),
+            "transitions": [t for t in list(self.transitions_log) if t[0] == key][-10:],
+        }
+
+    def call(
+        self,
+        fn: Callable[[], Any],
+        *,
+        key: str,
+        timeout: float,
+        fail_threshold: int,
+        open_seconds: float,
+    ) -> Any:
         now = time.time()
-        with self._lock:
-            state = self._state.get(key, "closed")
-            if state == "open":
-                opened = self._last_open.get(key, now)
-                if (now - opened) >= open_seconds:
-                    self._state[key] = "half-open"
-                    self._transitions.setdefault(key, []).append((now, "half-open"))
-                else:
-                    raise TimeoutError("circuit_open")
-        # execute
-        t0 = time.perf_counter()
+        if self.get_state(key) == "open" and self.open_until.get(key, 0) > now:
+            raise RuntimeError("circuit_open")
+
+        if self.get_state(key) == "open" and self.open_until.get(key, 0) <= now:
+            self._set_state(key, "half-open")
+
+        start = time.perf_counter()
         try:
-            res = fn()
-            dt = time.perf_counter() - t0
-            if dt > timeout:
-                raise TimeoutError("timeout")
-            # success path
-            with self._lock:
-                self._fails[key] = 0
-                if self._state.get(key, "closed") != "closed":
-                    self._set_state(key, "closed")
-            return res
-        except Exception as e:
-            with self._lock:
-                self._fails[key] = self._fails.get(key, 0) + 1
-                self._last_errors[key] = repr(e)
-                if self._fails[key] >= fail_threshold:
-                    self._set_state(key, "open")
+            result = fn()
+            self.fail_count[key] = 0
+            self._set_state(key, "closed")
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.last_errors[key] = str(exc)
+            self.fail_count[key] = self.fail_count.get(key, 0) + 1
+            if self.fail_count[key] >= fail_threshold:
+                self._set_state(key, "open")
+                self.open_until[key] = now + open_seconds
             raise
+        finally:
+            _ = time.perf_counter() - start

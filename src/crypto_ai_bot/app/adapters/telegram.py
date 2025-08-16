@@ -1,74 +1,81 @@
-
 from __future__ import annotations
 
-import re
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
+from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
+from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_order
+from crypto_ai_bot.utils import charts
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import inc
+# Нормализация символов/таймфреймов: единый реестр
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
 
+log = get_logger(__name__)
 
-_CMD_RE = re.compile(r"^\s*/(\w+)(?:\s+(.*))?$")
+
+def _parse_symbol_timeframe(
+    raw_symbol: str | None,
+    raw_timeframe: str | None,
+    cfg,
+) -> Tuple[str, str]:
+    """
+    Единая нормализация пользовательского ввода.
+    Если параметр не передан — берём дефолт из Settings.
+    """
+    symbol = normalize_symbol(raw_symbol or cfg.SYMBOL)
+    timeframe = normalize_timeframe(raw_timeframe or cfg.TIMEFRAME)
+    return symbol, timeframe
 
 
 async def handle_update(update: Dict[str, Any], cfg, bot, http) -> Dict[str, Any]:
-    """Тонкий адаптер Telegram → use-cases через Bot.
-    Никакой бизнес-логики и прямого доступа к брокеру/БД.
     """
-    text = (
-        update.get("message", {}).get("text")
-        or update.get("edited_message", {}).get("text")
-        or ""
-    )
-    m = _CMD_RE.match(text)
-    if not m:
-        return {"ok": True, "reply": "Команда не распознана. /start, /status, /buy, /sell, /why"}
+    Тонкий адаптер: парсим команду → дергаем use-cases → форматируем ответ.
+    Никакой бизнес-логики здесь нет.
+    """
+    try:
+        text = (update.get("message", {}) or {}).get("text") or ""
+        parts = text.strip().split()
+        cmd = (parts[0] if parts else "").lower()
 
-    cmd, args = m.group(1), (m.group(2) or "").strip()
+        if cmd in ("/start", "/help"):
+            inc("tg_command_total", {"cmd": "help"})
+            return {"text": "Привет! Команды: /status, /why, /buy <size>, /sell <size>."}
 
-    if cmd == "start":
-        return {"ok": True, "reply": "Бот запущен. Команды: /status, /buy <size>, /sell <size>, /why"}
+        if cmd == "/status":
+            inc("tg_command_total", {"cmd": "status"})
+            symbol, timeframe = _parse_symbol_timeframe(None, None, cfg)
+            d = uc_evaluate(cfg, bot.broker, symbol=symbol, timeframe=timeframe, limit=cfg.DECISION_LIMIT)
+            return {"text": f"Status {symbol} {timeframe}: {d['action']} score={d.get('score'):.3f}"}
 
-    if cmd == "status":
-        st = bot.get_status()
-        return {"ok": True, "reply": f"Mode={st['mode']}, {st['symbol']} @ {st['timeframe']}"}
+        if cmd == "/why":
+            inc("tg_command_total", {"cmd": "why"})
+            symbol, timeframe = _parse_symbol_timeframe(None, None, cfg)
+            d = uc_evaluate(cfg, bot.broker, symbol=symbol, timeframe=timeframe, limit=cfg.DECISION_LIMIT)
+            return {"text": f"Explain: {d.get('explain', {})}"}
 
-    if cmd in ("buy", "sell"):
-        side = "buy" if cmd == "buy" else "sell"
-        size = Decimal("0")
-        # формат: "/buy 0.01 BTC/USDT 1h"
-        parts = args.split()
-        if parts:
-            try:
-                size = Decimal(parts[0])
-            except Exception:
-                pass
+        if cmd in ("/buy", "/sell"):
+            side = "buy" if cmd == "/buy" else "sell"
+            inc("tg_command_total", {"cmd": side})
+            size = Decimal(parts[1]) if len(parts) > 1 else Decimal("0")
+            symbol, timeframe = _parse_symbol_timeframe(None, None, cfg)
 
-        symbol = cfg.SYMBOL
-        timeframe = cfg.TIMEFRAME
-        if len(parts) >= 2:
-            symbol = parts[1]
-        if len(parts) >= 3:
-            timeframe = parts[2]
+            decision = {
+                "action": side,
+                "size": size,
+                "sl": None,
+                "tp": None,
+                "trail": None,
+                "score": 1.0,
+                "explain": {"source": "telegram_manual"},
+            }
+            res = uc_place_order(cfg, bot.broker, bot.uow, bot.repos, decision)
+            return {"text": f"Order: {res}"}
 
-        sym = normalize_symbol(symbol)
-        tf = normalize_timeframe(timeframe)
+        # неизвестная команда
+        inc("tg_command_total", {"cmd": "unknown"})
+        return {"text": "Неизвестная команда. /help"}
 
-        decision = {
-            "action": side,
-            "size": str(size),
-            "sl": None,
-            "tp": None,
-            "trail": None,
-            "score": 0.5,
-        }
-        res = bot.execute(decision)
-        return {"ok": True, "reply": f"{side.upper()} {sym} size={size} → {res.get('status','ok')}"}
-
-    if cmd == "why":
-        # просто проксируем evaluate, где policy возвращает explain
-        dec = bot.evaluate()
-        exp = dec.get("explain", {})
-        return {"ok": True, "reply": f"Score={dec.get('score')}\nExplain keys: {', '.join(exp.keys())}"}
-
-    return {"ok": True, "reply": "Неизвестная команда."}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("telegram_adapter_failed", extra={"error": str(exc)})
+        return {"text": f"Ошибка: {exc}"}
