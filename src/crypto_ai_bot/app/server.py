@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.core.settings import Settings
@@ -15,6 +15,8 @@ from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepo
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
 from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 from crypto_ai_bot.core.positions import manager as positions_manager
+from crypto_ai_bot.core.use_cases.place_order import place_order
+from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
 from crypto_ai_bot.utils import metrics
 
 app = FastAPI(title="crypto-ai-bot")
@@ -121,6 +123,69 @@ def health():
             "db_stats": get_db_stats(CON),
         }
     })
+
+@app.get("/positions")
+def get_positions_snapshot():
+    try:
+        snap = positions_manager.get_snapshot()
+        return JSONResponse({"status": "ok", "snapshot": snap})
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": f"positions_snapshot_failed:{type(e).__name__}: {e}"})
+
+def _ensure_trading_enabled():
+    if not getattr(CFG, "ENABLE_TRADING", False):
+        raise HTTPException(status_code=403, detail="Trading is disabled by configuration")
+
+def _build_manual_decision(action: str, size: str, symbol: str | None = None, timeframe: str | None = None) -> Dict[str, Any]:
+    sym = normalize_symbol(symbol or getattr(CFG, "SYMBOL", "BTC/USDT"))
+    tf = normalize_timeframe(timeframe or getattr(CFG, "TIMEFRAME", "1h"))
+    try:
+        # на клиентском уровне передаем число как строку
+        sz = str(size)
+    except Exception:
+        sz = "0"
+    return {
+        "id": f"manual-{action}-{sym}-{tf}",
+        "action": action,
+        "size": sz,
+        "symbol": sym,
+        "timeframe": tf,
+        "explain": {
+            "context": {"id": f"manual-{action}", "source": "manual"},
+            "signals": {},
+            "blocks": {},
+            "weights": {
+                "rule": float(getattr(CFG, "SCORE_RULE_WEIGHT", 0.5)),
+                "ai": float(getattr(CFG, "SCORE_AI_WEIGHT", 0.5)),
+            },
+            "thresholds": {
+                "buy": float(getattr(CFG, "THRESHOLD_BUY", 0.55)),
+                "sell": float(getattr(CFG, "THRESHOLD_SELL", 0.45)),
+            },
+        },
+    }
+
+@app.post("/orders/buy")
+def orders_buy(payload: Dict[str, Any] = Body(...)):
+    _ensure_trading_enabled()
+    size = str(payload.get("size", getattr(CFG, "DEFAULT_ORDER_SIZE", "0.01")))
+    symbol = payload.get("symbol")
+    timeframe = payload.get("timeframe")
+
+    decision = _build_manual_decision("buy", size=size, symbol=symbol, timeframe=timeframe)
+    res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
+    return JSONResponse(res)
+
+@app.post("/orders/sell")
+def orders_sell(payload: Dict[str, Any] = Body(...)):
+    _ensure_trading_enabled()
+    size = str(payload.get("size", getattr(CFG, "DEFAULT_ORDER_SIZE", "0.01")))
+    symbol = payload.get("symbol")
+    timeframe = payload.get("timeframe")
+
+    decision = _build_manual_decision("sell", size=size, symbol=symbol, timeframe=timeframe)
+    res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
+    return JSONResponse(res)
 
 @app.post("/tick")
 async def tick():
