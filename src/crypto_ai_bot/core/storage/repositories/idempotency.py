@@ -1,66 +1,72 @@
+
 from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Any, Dict, Optional, Tuple
-
+from typing import Optional, Tuple
 
 class SqliteIdempotencyRepository:
     """
-    SQLite идемпотентность с авто-миграцией схемы.
-    Поведение claim():
-      - True  — если ключ впервые захвачен ИЛИ существующая запись была просрочена и заменена
-      - False — если ключ уже захвачен и ещё не просрочен
+    Минимальный и предсказуемый репозиторий идемпотентности под unit-тесты.
+
+    Схема (создаётся лениво):
+        idempotency(
+            key TEXT PRIMARY KEY,
+            payload TEXT NULL,
+            result TEXT NULL,
+            created_ms INTEGER NOT NULL,
+            committed INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'claimed',
+            updated_ms INTEGER NULL
+        )
+    Индексы: created_ms для TTL.
     """
+
     def __init__(self, con: sqlite3.Connection) -> None:
         self.con = con
         self._ensure_schema()
 
-    # ---------- schema & migrations ----------
-    def _has_column(self, table: str, col: str) -> bool:
-        cur = self.con.execute(f"PRAGMA table_info({table})")
-        return any(r[1] == col for r in cur.fetchall())
-
+    # --- schema ---------------------------------------------------------
     def _ensure_schema(self) -> None:
-        # Базовая таблица
-        self.con.execute("CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY);")
-        # Эволюция столбцов
-        if not self._has_column("idempotency", "payload"):
-            self.con.execute("ALTER TABLE idempotency ADD COLUMN payload TEXT NULL;")
-        if not self._has_column("idempotency", "result"):
-            self.con.execute("ALTER TABLE idempotency ADD COLUMN result TEXT NULL;")
-        if not self._has_column("idempotency", "created_ms"):
-            self.con.execute("ALTER TABLE idempotency ADD COLUMN created_ms INTEGER NOT NULL DEFAULT 0;")
-            now_ms = int(time.time() * 1000)
-            self.con.execute("UPDATE idempotency SET created_ms = CASE WHEN created_ms=0 THEN ? ELSE created_ms END;", (now_ms,))
-        if not self._has_column("idempotency", "committed"):
-            self.con.execute("ALTER TABLE idempotency ADD COLUMN committed INTEGER NOT NULL DEFAULT 0;")
-        if not self._has_column("idempotency", "updated_ms"):
-            self.con.execute("ALTER TABLE idempotency ADD COLUMN updated_ms INTEGER NULL;")
-        # Индексы
-        try:
-            self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms);")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_committed ON idempotency(committed);")
-        except sqlite3.OperationalError:
-            pass
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency (
+                key TEXT PRIMARY KEY,
+                payload TEXT NULL,
+                result TEXT NULL,
+                created_ms INTEGER NOT NULL,
+                committed INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'claimed',
+                updated_ms INTEGER NULL
+            );
+            """
+        )
+        # добавим недостающие колонки для старых БД
+        cols = {row[1] for row in self.con.execute("PRAGMA table_info(idempotency)").fetchall()}
+        if "state" not in cols:
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN state TEXT NOT NULL DEFAULT 'claimed'")
+        if "updated_ms" not in cols:
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN updated_ms INTEGER NULL")
+        if "payload" not in cols:
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN payload TEXT NULL")
+        if "result" not in cols:
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN result TEXT NULL")
+        if "committed" not in cols:
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN committed INTEGER NOT NULL DEFAULT 0")
+        if "created_ms" not in cols:
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN created_ms INTEGER NOT NULL DEFAULT 0")
 
-    # ---------- primitives ----------
-    def purge_expired(self, ttl_seconds: int) -> int:
-        now_ms = int(time.time() * 1000)
-        threshold = now_ms - ttl_seconds * 1000
-        with self.con:
-            cur = self.con.execute("DELETE FROM idempotency WHERE created_ms < ?", (threshold,))
-            return cur.rowcount or 0
+        self.con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms)"
+        )
 
+    # --- core ops -------------------------------------------------------
     def claim(self, key: str, ttl_seconds: int = 300) -> bool:
         """
-        Пытаемся захватить ключ.
-        - Если нет записи — создаём → True
-        - Если запись есть, но просрочена — заменяем → True
-        - Иначе → False
+        Захват ключа:
+          - если записи нет -> вставка -> True
+          - если запись есть и истек TTL -> заменить created_ms -> True
+          - иначе -> False
         """
         now_ms = int(time.time() * 1000)
         threshold = now_ms - ttl_seconds * 1000
@@ -68,88 +74,64 @@ class SqliteIdempotencyRepository:
         with self.con:
             row = self.con.execute("SELECT created_ms FROM idempotency WHERE key = ?", (key,)).fetchone()
             if row is None:
-                # Вставка новой
                 self.con.execute(
-                    "INSERT INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
+                    "INSERT INTO idempotency(key, created_ms, committed, state) VALUES (?, ?, 0, 'claimed')",
                     (key, now_ms),
                 )
                 return True
-            else:
-                (created_ms,) = row
-                if int(created_ms) < threshold:
-                    # Старая запись просрочена — заменим
-                    self.con.execute("DELETE FROM idempotency WHERE key = ?", (key,))
-                    self.con.execute(
-                        "INSERT INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
-                        (key, now_ms),
-                    )
-                    return True
-                # Иначе ключ уже захвачен и не истёк
-                return False
 
-    def commit(self, key: str, result: Dict[str, Any]) -> None:
+            created_ms = int(row[0])
+            if created_ms < threshold:
+                # просрочено — перехватываем
+                self.con.execute(
+                    "UPDATE idempotency SET created_ms = ?, committed = 0, state = 'claimed', updated_ms = ? WHERE key = ?",
+                    (now_ms, now_ms, key),
+                )
+                return True
+
+            return False
+
+    def commit(self, key: str, result: Optional[str] = None) -> bool:
         now_ms = int(time.time() * 1000)
         with self.con:
-            self.con.execute(
-                "UPDATE idempotency SET result = ?, committed = 1, updated_ms = ? WHERE key = ?",
-                (self._to_json(result), now_ms, key),
+            cur = self.con.execute(
+                "UPDATE idempotency SET committed = 1, state = 'committed', result = COALESCE(?, result), updated_ms = ? WHERE key = ?",
+                (result, now_ms, key),
             )
+            return cur.rowcount > 0
 
-    def release(self, key: str) -> None:
+    def release(self, key: str) -> bool:
+        # Для простоты — удаляем ключ
         with self.con:
-            self.con.execute("DELETE FROM idempotency WHERE key = ?", (key,))
+            cur = self.con.execute("DELETE FROM idempotency WHERE key = ?", (key,))
+            return cur.rowcount > 0
 
-    def get_original(self, key: str) -> Optional[Dict[str, Any]]:
-        row = self.con.execute(
-            "SELECT payload, result, committed, created_ms, updated_ms FROM idempotency WHERE key = ?",
-            (key,),
-        ).fetchone()
-        if not row:
-            return None
-        payload, result, committed, created_ms, updated_ms = row
-        return {
-            "payload": self._from_json(payload),
-            "result": self._from_json(result),
-            "committed": bool(committed),
-            "created_ms": int(created_ms),
-            "updated_ms": int(updated_ms) if updated_ms is not None else None,
-        }
+    def purge_expired(self, ttl_seconds: int) -> int:
+        now_ms = int(time.time() * 1000)
+        threshold = now_ms - ttl_seconds * 1000
+        with self.con:
+            cur = self.con.execute("DELETE FROM idempotency WHERE created_ms < ?", (threshold,))
+            return cur.rowcount
 
-    def check_and_store(self, key: str, payload_json: str, ttl_seconds: int = 300) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    def check_and_store(self, key: str, payload: str, ttl_seconds: int = 300) -> Tuple[bool, Optional[str]]:
+        """
+        Возвращает (is_new, previous_payload).
+          - Если удалось захватить — сохраняем payload и возвращаем (True, None).
+          - Если захват не удался — возвращаем (False, предыдущее payload).
+        """
         if self.claim(key, ttl_seconds=ttl_seconds):
             now_ms = int(time.time() * 1000)
             with self.con:
                 self.con.execute(
                     "UPDATE idempotency SET payload = ?, updated_ms = ? WHERE key = ?",
-                    (payload_json, now_ms, key),
+                    (payload, now_ms, key),
                 )
             return True, None
-        else:
-            return False, self.get_original(key)
 
-    # ---------- helpers ----------
-    @staticmethod
-    def _to_json(obj: Any) -> str:
-        if obj is None:
-            return "null"
-        if isinstance(obj, str):
-            return obj
-        import json
-        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        row = self.con.execute("SELECT payload FROM idempotency WHERE key = ?", (key,)).fetchone()
+        prev = row[0] if row else None
+        return False, prev
 
-    @staticmethod
-    def _from_json(s: Any) -> Any:
-        if s is None:
-            return None
-        if isinstance(s, (bytes, bytearray)):
-            s = s.decode("utf-8", "ignore")
-        if isinstance(s, str):
-            s = s.strip()
-            if s == "" or s == "null":
-                return None
-            import json
-            try:
-                return json.loads(s)
-            except Exception:
-                return s
-        return s
+    def get_original(self, key: str) -> Optional[str]:
+        row = self.con.execute("SELECT payload FROM idempotency WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
