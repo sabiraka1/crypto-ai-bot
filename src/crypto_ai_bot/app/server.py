@@ -147,8 +147,13 @@ async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = N
         tf = timeframe or cfg.TIMEFRAME
 
         summary = build_context(cfg, broker, positions_repo=repos.get("positions_repo"), trades_repo=repos.get("trades_repo"))
-        risk_ok, risk_reason = risk_manager.check(summary, cfg)
+        # ВКЛЮЧАЕМ time drift в summary для risk-правил
+        try:
+            summary.setdefault("time", {})["drift_ms"] = int(measure_time_drift())
+        except Exception:
+            pass
 
+        risk_ok, risk_reason = risk_manager.check(summary, cfg)
         dec = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit, **repos)
 
         return {

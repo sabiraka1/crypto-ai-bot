@@ -1,54 +1,77 @@
 from __future__ import annotations
 
-from typing import Tuple, Dict, Any, Optional
+from typing import Dict, Any, List, Tuple, Optional
 
 from . import rules
 
-def check(features: Dict[str, Any], cfg) -> Tuple[bool, str]:
+def _get(d: Dict[str, Any], path: str, default=None):
+    cur = d
+    for k in path.split("."):
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+def check(summary: Dict[str, Any], cfg) -> Tuple[bool, str]:
     """
-    Последовательная проверка правил. Возвращает (ok, reason).
-    reason в формате "rule: detail", где rule ∈
-      {"disabled","hours","spread","max_drawdown","seq_losses","max_exposure","time_drift"}
-    features может содержать:
-      - "spread_pct"
-      - "day_drawdown_pct"
-      - "seq_losses"
-      - "exposure_pct", "exposure_usd"
+    Агрегация правил риска → финальный вердикт.
+    summary — снепшот контекста (PnL/экспозиция/маркет/время). НЕ делает IO.
+    cfg — Settings.
+
+    Возвращает: (ok: bool, reason: str) — первая причина отказа.
+    Если хотите получить все причины — модифицируйте под возврат списка.
     """
-    # 1) trading disabled
-    ok, detail = rules.check_disabled(safe_mode=bool(getattr(cfg, "SAFE_MODE", False)),
-                                      enable_trading=bool(getattr(cfg, "ENABLE_TRADING", True)))
-    if not ok: return False, f"disabled: {detail}"
+    reasons: List[str] = []
 
-    # 2) time drift
-    ok, detail = rules.check_time_drift(drift_ms_limit=int(getattr(cfg, "TIME_DRIFT_MAX_MS", 1500)))
-    if not ok: return False, f"time_drift: {detail}"
+    # --- TIME DRIFT ---
+    if getattr(cfg, "ENABLE_RISK_TIME_DRIFT", True):
+        drift_ms = _get(summary, "time.drift_ms", None)
+        res = rules.check_time_drift(drift_ms, int(getattr(cfg, "TIME_DRIFT_MAX_MS", 1500)))
+        if not res.ok:
+            reasons.append(res.reason)
 
-    # 3) hours
-    ok, detail = rules.check_hours(start_hour=int(getattr(cfg, "TRADING_START_HOUR", 0)),
-                                   end_hour=int(getattr(cfg, "TRADING_END_HOUR", 24)))
-    if not ok: return False, f"hours: {detail}"
+    # --- SPREAD ---
+    if getattr(cfg, "ENABLE_RISK_SPREAD", True):
+        spread = _get(summary, "market.spread_pct", None)
+        res = rules.check_spread(spread, float(getattr(cfg, "MAX_SPREAD_PCT", 0.25)))
+        if not res.ok:
+            reasons.append(res.reason)
 
-    # 4) spread
-    ok, detail = rules.check_spread(spread_pct=features.get("spread_pct"),
-                                    max_spread_pct=float(getattr(cfg, "MAX_SPREAD_PCT", 0.2)))
-    if not ok: return False, f"spread: {detail}"
+    # --- HOURS ---
+    if getattr(cfg, "ENABLE_RISK_HOURS", True):
+        res = rules.check_hours(int(getattr(cfg, "TRADING_START_HOUR", 0)),
+                                int(getattr(cfg, "TRADING_END_HOUR", 24)))
+        if not res.ok:
+            reasons.append(res.reason)
 
-    # 5) daily drawdown
-    ok, detail = rules.check_max_drawdown(day_drawdown_pct=features.get("day_drawdown_pct"),
-                                          max_drawdown_pct=float(getattr(cfg, "MAX_DRAWDOWN_PCT", 5.0)))
-    if not ok: return False, f"max_drawdown: {detail}"
+    # --- DRAWDOWN ---
+    if getattr(cfg, "ENABLE_RISK_DRAWDOWN", True):
+        # пытаемся достать из разных мест summary
+        dd = _get(summary, "risk.drawdown_pct", None)
+        if dd is None:
+            dd = _get(summary, "stats.drawdown_pct", None)
+        res = rules.check_drawdown(dd, float(getattr(cfg, "MAX_DRAWDOWN_PCT", 5.0)))
+        if not res.ok:
+            reasons.append(res.reason)
 
-    # 6) sequential losses
-    ok, detail = rules.check_seq_losses(seq_losses=features.get("seq_losses"),
-                                        max_seq_losses=int(getattr(cfg, "MAX_SEQ_LOSSES", 3)))
-    if not ok: return False, f"seq_losses: {detail}"
+    # --- SEQ LOSSES ---
+    if getattr(cfg, "ENABLE_RISK_SEQ_LOSSES", True):
+        seq = _get(summary, "stats.seq_losses", _get(summary, "risk.seq_losses", None))
+        res = rules.check_seq_losses(seq, int(getattr(cfg, "MAX_SEQ_LOSSES", 3)))
+        if not res.ok:
+            reasons.append(res.reason)
 
-    # 7) exposure
-    ok, detail = rules.check_max_exposure(exposure_pct=features.get("exposure_pct"),
-                                          max_exposure_pct=getattr(cfg, "MAX_EXPOSURE_PCT", None),
-                                          exposure_usd=features.get("exposure_usd"),
-                                          max_exposure_usd=getattr(cfg, "MAX_EXPOSURE_USD", None))
-    if not ok: return False, f"max_exposure: {detail}"
+    # --- EXPOSURE ---
+    if getattr(cfg, "ENABLE_RISK_EXPOSURE", True):
+        exp_pct = _get(summary, "exposure.pct", None)
+        exp_usd = _get(summary, "exposure.usd", None)
+        res = rules.check_max_exposure(exp_pct, exp_usd,
+                                       getattr(cfg, "MAX_EXPOSURE_PCT", None),
+                                       getattr(cfg, "MAX_EXPOSURE_USD", None))
+        if not res.ok:
+            reasons.append(res.reason)
 
-    return True, ""
+    # Вердикт: если есть причины — блокируем первой
+    if reasons:
+        return (False, reasons[0])
+    return (True, "")
