@@ -1,138 +1,137 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional, Tuple, Any, Dict
-from datetime import datetime, timezone
-import json
-import hashlib
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple, Dict, Any
+
+from crypto_ai_bot.utils import metrics
+
+TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key TEXT PRIMARY KEY,
+    status TEXT NOT NULL,            -- 'pending' | 'committed'
+    order_ref TEXT,                  -- JSON/text reference returned by broker
+    payload TEXT,                    -- optional: JSON snapshot for debug
+    created_at TEXT NOT NULL,        -- ISO UTC
+    expires_at TEXT NOT NULL         -- ISO UTC
+);
+CREATE INDEX IF NOT EXISTS ix_idemp_expires ON idempotency_keys(expires_at);
+"""
+
+@dataclass
+class IdempotencyRecord:
+    key: str
+    status: str
+    order_ref: Optional[str]
+    payload: Optional[str]
+    created_at: str
+    expires_at: str
 
 class IdempotencyRepository:
     """
-    Совместимая с нашей спецификацией реализация идемпотентности.
-    Таблица ожидается как минимум с колонками:
-      key TEXT PRIMARY KEY,
-      payload_json TEXT,
-      created_at_ms INTEGER,
-      committed INTEGER DEFAULT 0,
-      order_json TEXT NULL  -- если нет, будет graceful fallback
-    (названия могут отличаться — используем best-effort UPSERT и try/except)
-
-    API:
-      - build_key(symbol, side, size, decision_id, *, ts_ms=None) -> str
-      - check_and_store(key, payload) -> (is_new: bool, stored_payload: dict|str)
-      - claim(key, payload) -> bool                    (alias для check_and_store()[0])
-      - commit(key, original_order) -> None            (фиксирует исходный ордер)
-      - release(key) -> None                           (по необходимости — очистка)
-      - get_original_order(key) -> dict|None
+    SQLite-backed идемпотентность:
+      - claim(key, ttl_sec) -> bool (true = получили, false = уже есть активная запись)
+      - commit(key, order_ref_json) -> None
+      - release(key) -> None  (удалить pending/просроченное)
+      - get_original_order(key) -> Optional[str]
+      - check_and_store(key, ttl_sec, payload_json) -> (ok_new: bool, existing_ref: Optional[str])
     """
+    def __init__(self, con: sqlite3.Connection) -> None:
+        self._con = con
+        self._ensure_table()
 
-    def __init__(self, conn: sqlite3.Connection, table: str = "idempotency"):
-        self._con = conn
-        self._table = table
+    def _ensure_table(self) -> None:
+        self._con.executescript(TABLE_SQL)
+        self._con.commit()
 
-    # ---------- helpers ----------
-    @staticmethod
-    def _now_ms() -> int:
-        return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-
-    @staticmethod
-    def build_key(symbol: str, side: str, size: str, decision_id: str, *, ts_ms: Optional[int] = None) -> str:
-        """
-        Спецификация ключа:
-          {symbol}:{side}:{size}:{timestamp_minute}:{decision_id[:8]}
-        timestamp_minute = floor((ts_ms or now)/60000)
-        """
-        if ts_ms is None:
-            ts_ms = IdempotencyRepository._now_ms()
-        minute = int(ts_ms // 60000)
-        return f"{symbol}:{side}:{size}:{minute}:{(decision_id or '')[:8]}"
-
-    @staticmethod
-    def _to_json(payload: Any) -> str:
-        if isinstance(payload, str):
-            return json.dumps({"message": payload}, ensure_ascii=False)
+    @contextmanager
+    def _txn(self):
+        cur = self._con.cursor()
         try:
-            return json.dumps(payload, ensure_ascii=False, default=str)
-        except Exception:
-            return json.dumps({"raw": str(payload)}, ensure_ascii=False)
-
-    @staticmethod
-    def _from_json(s: Optional[str]) -> Any:
-        if not s:
-            return None
-        try:
-            return json.loads(s)
-        except Exception:
-            return {"raw": s}
-
-    # ---------- API ----------
-    def check_and_store(self, key: str, payload: Any) -> Tuple[bool, Any]:
-        """
-        Пытается вставить запись с ключом. Если уже есть — возвращает (False, старый payload).
-        Если нет — вставляет и возвращает (True, текущий payload).
-        """
-        data = self._to_json(payload)
-        try:
-            self._con.execute(
-                f"""INSERT INTO {self._table} (key, payload_json, created_at_ms, committed)
-                    VALUES (?, ?, ?, 0)""",
-                (key, data, self._now_ms()),
-            )
-            self._con.commit()
-            return True, payload
-        except Exception:
-            # запись существует — вернуть старую
+            cur.execute("BEGIN IMMEDIATE")
             try:
-                cur = self._con.execute(f"SELECT payload_json FROM {self._table} WHERE key = ?", (key,))
-                row = cur.fetchone()
-                old = self._from_json(row[0]) if row else None
-                return False, old
+                yield cur
+                self._con.commit()
             except Exception:
-                return False, None
-
-    def claim(self, key: str, payload: Any) -> bool:
-        is_new, _ = self.check_and_store(key, payload)
-        return is_new
-
-    def commit(self, key: str, original_order: Any) -> None:
-        """Помечает как зафиксированную и пытается сохранить оригинальный ордер (order_json)."""
-        try:
-            order_json = self._to_json(original_order)
-            # пытаемся обновить committed и order_json (если колонки нет — обновим только committed)
-            try:
-                self._con.execute(
-                    f"UPDATE {self._table} SET committed = 1, order_json = ? WHERE key = ?",
-                    (order_json, key),
-                )
-            except Exception:
-                self._con.execute(
-                    f"UPDATE {self._table} SET committed = 1 WHERE key = ?",
-                    (key,),
-                )
-            self._con.commit()
-        except Exception:
-            try:
                 self._con.rollback()
-            except Exception:
-                pass
+                raise
+        finally:
+            cur.close()
+
+    def purge_expired(self) -> int:
+        """Удаляет просроченные записи (expires_at < now). Возвращает кол-во удалённых."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cur = self._con.execute("DELETE FROM idempotency_keys WHERE expires_at < ?", (now_iso,))
+        n = cur.rowcount if cur.rowcount is not None else 0
+        if n:
+            metrics.inc("idempotency_purged_total", {"count": n})
+        return n
+
+    def fetch(self, key: str) -> Optional[IdempotencyRecord]:
+        row = self._con.execute(
+            "SELECT key, status, order_ref, payload, created_at, expires_at FROM idempotency_keys WHERE key=?",
+            (key,)
+        ).fetchone()
+        if not row:
+            return None
+        return IdempotencyRecord(*row)
+
+    def claim(self, key: str, ttl_sec: int, *, payload_json: Optional[str] = None) -> bool:
+        """
+        Пытается захватить ключ. Возвращает True, если новый claim создан,
+        False — если ключ уже существует и не истёк.
+        """
+        now = datetime.now(timezone.utc)
+        exp = now + timedelta(seconds=max(1, int(ttl_sec)))
+        now_iso, exp_iso = now.isoformat(), exp.isoformat()
+
+        with self._txn() as cur:
+            # удалим истёкшие до попытки
+            cur.execute("DELETE FROM idempotency_keys WHERE expires_at < ?", (now_iso,))
+            # попробуем вставить
+            try:
+                cur.execute(
+                    "INSERT INTO idempotency_keys(key, status, order_ref, payload, created_at, expires_at) "
+                    "VALUES (?, 'pending', NULL, ?, ?, ?)",
+                    (key, payload_json, now_iso, exp_iso)
+                )
+                metrics.inc("idempotency_claim_total", {})
+                return True
+            except sqlite3.IntegrityError:
+                # ключ уже есть => не наш
+                metrics.inc("idempotency_conflicts_total", {})
+                return False
+
+    def commit(self, key: str, order_ref_json: str) -> None:
+        with self._txn() as cur:
+            cur.execute(
+                "UPDATE idempotency_keys SET status='committed', order_ref=? WHERE key=?",
+                (order_ref_json, key)
+            )
+            metrics.inc("idempotency_commit_total", {})
 
     def release(self, key: str) -> None:
-        """Опциональная очистка записи (в большинстве случаев можно оставить запись для истории)."""
-        # По умолчанию ничего не делаем, но поддержим мягкое удаление:
-        try:
-            self._con.execute(f"DELETE FROM {self._table} WHERE key = ?", (key,))
-            self._con.commit()
-        except Exception:
-            try:
-                self._con.rollback()
-            except Exception:
-                pass
+        with self._txn() as cur:
+            cur.execute("DELETE FROM idempotency_keys WHERE key=?", (key,))
+            metrics.inc("idempotency_release_total", {})
 
-    def get_original_order(self, key: str) -> Optional[Dict]:
-        """Возвращает ранее сохранённый ордер, если таблица поддерживает колонку order_json."""
-        try:
-            cur = self._con.execute(f"SELECT order_json FROM {self._table} WHERE key = ?", (key,))
-            row = cur.fetchone()
-            return self._from_json(row[0]) if row and row[0] else None
-        except Exception:
+    def get_original_order(self, key: str) -> Optional[str]:
+        rec = self.fetch(key)
+        if not rec:
             return None
+        return rec.order_ref
+
+    def check_and_store(self, key: str, ttl_sec: int, *, payload_json: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Удобный метод: пытаемся claim; если ок — возвращаем (True, None).
+        Если уже существует — возвращаем (False, order_ref|None).
+        """
+        ok = self.claim(key, ttl_sec, payload_json=payload_json)
+        if ok:
+            return True, None
+        # уже существует
+        ref = self.get_original_order(key)
+        metrics.inc("idempotency_hits_total", {"has_ref": str(ref is not None).lower()})
+        return False, ref

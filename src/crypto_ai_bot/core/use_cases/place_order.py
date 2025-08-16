@@ -1,130 +1,130 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
-from decimal import Decimal
-from datetime import datetime, timezone
 import json
-import hashlib
+import math
+from decimal import Decimal
+from hashlib import sha256
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.rate_limit import rate_limit
 
-def _now_ms() -> int:
-    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+# ожидаем, что app.server передаёт сюда idempotency_repo, audit_repo, positions_repo и т.д.
 
-def _decision_id(decision: Dict[str, Any]) -> str:
-    """Стабильный идентификатор решения (если не задано явно)."""
-    if "id" in decision and decision["id"]:
-        return str(decision["id"])
-    # иначе — хэш основного содержимого
-    base = json.dumps(
-        {
-            "symbol": decision.get("symbol"),
-            "timeframe": decision.get("timeframe"),
-            "action": decision.get("action"),
-            "size": decision.get("size"),
-            "score": decision.get("score"),
-        },
-        ensure_ascii=False, sort_keys=True, default=str,
-    )
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
-
-def _build_idem_key(idem_repo: Any, *, symbol: str, side: str, size: str, decision_id: str, ts_ms: Optional[int]=None) -> str:
-    """Если у репозитория есть build_key — используем спецификацию. Иначе — совместимый фоллбэк."""
-    if hasattr(idem_repo, "build_key"):
-        return idem_repo.build_key(symbol, side, size, decision_id, ts_ms=ts_ms)  # type: ignore[attr-defined]
-    # fallback: {symbol}:{side}:{size}:{minute}:{id8}
-    if ts_ms is None:
-        ts_ms = _now_ms()
-    minute = int(ts_ms // 60000)
-    return f"{symbol}:{side}:{size}:{minute}:{(decision_id or '')[:8]}"
-
-@rate_limit(
-    calls=3, period=10.0,
-    calls_attr="RL_PLACE_ORDER_CALLS", period_attr="RL_PLACE_ORDER_PERIOD",
-    key_fn=lambda *a, **kw: f"place_order:{getattr(a[0],'MODE',None)}",
-)
-def place_order(cfg, broker, positions_repo, audit_repo, idempotency_repo, decision: Dict[str, Any]) -> Dict[str, Any]:
+def _short_decision_id(decision: Dict[str, Any]) -> str:
     """
-    Размещает ордер, используя идемпотентность:
-      - строит key по спецификации;
-      - check_and_store/claim — если дубль, возвращает original_order;
-      - на успехе — commit(key, original_order).
-    Ожидаемые поля decision: action ('buy'|'sell'|'hold'), size (str), symbol (str).
+    Детализация решения может быть большой; для короткого идентификатора берём устойчивые поля.
     """
-    symbol = decision.get("symbol") or cfg.SYMBOL
-    action = str(decision.get("action") or "hold").lower()
-    size_s = str(decision.get("size") or "0")
-    score = float(decision.get("score") or 0.0)
+    payload = {
+        "action": decision.get("action"),
+        "size": str(decision.get("size")),
+        "sl": decision.get("sl"),
+        "tp": decision.get("tp"),
+        "trail": decision.get("trail"),
+        "score": round(float(decision.get("score", 0.0)), 4) if decision.get("score") is not None else None,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(raw).hexdigest()[:8]
 
-    if action not in ("buy", "sell"):
-        return {"status": "skipped", "reason": "non_trade_action", "decision": decision}
-
-    # key
-    d_id = _decision_id(decision)
-    key = _build_idem_key(idempotency_repo, symbol=symbol, side=action, size=size_s, decision_id=d_id)
-
-    # попытка захвата идемпотентности
-    payload = {"decision": decision, "ts_ms": _now_ms()}
-    is_new = True
-    stored_payload = None
-    if hasattr(idempotency_repo, "check_and_store"):
-        is_new, stored_payload = idempotency_repo.check_and_store(key, payload)  # type: ignore[attr-defined]
-    elif hasattr(idempotency_repo, "claim"):
-        is_new = bool(idempotency_repo.claim(key, payload))  # type: ignore[attr-defined]
-    else:
-        # нет репозитория — продолжаем без идемпотентности
-        is_new = True
-
-    if not is_new:
-        orig = None
-        if hasattr(idempotency_repo, "get_original_order"):
-            try:
-                orig = idempotency_repo.get_original_order(key)  # type: ignore[attr-defined]
-            except Exception:
-                orig = None
-        metrics.inc("order_duplicate_total", {"symbol": symbol})
-        return {"status": "duplicate", "key": key, "original_order": orig, "stored": stored_payload}
-
-    # создаём ордер
-    try:
-        amount = Decimal(size_s)
-    except Exception:
-        return {"status": "error", "error": f"invalid_size:{size_s!r}"}
-
-    try:
-        order = broker.create_order(symbol=symbol, type_="market", side=action, amount=amount, price=None)
-        metrics.inc("order_submitted_total", {"side": action})
-    except Exception as e:
-        metrics.inc("order_failed_total", {"reason": type(e).__name__})
-        # отпуск ключа (опционально) — чтобы повторить позже
+def _timestamp_minute_iso(ts: Optional[str] = None) -> str:
+    """
+    Возвращает отметку времени, округлённую до минуты, ISO UTC.
+    Берём ts из decision.explain.context.ts, если есть; иначе now().
+    """
+    if ts:
         try:
-            if hasattr(idempotency_repo, "release"):
-                idempotency_repo.release(key)  # type: ignore[attr-defined]
+            # допускаем уже ISO-строку
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
-            pass
-        return {"status": "error", "error": f"broker_failed:{type(e).__name__}: {e}"}
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    dt = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    return dt.isoformat()
 
-    # фиксация идемпотентности
+def _build_idempotency_key(symbol: str, side: str, size: str, ts_minute_iso: str, decision_id8: str) -> str:
+    return f"{symbol}:{side}:{size}:{ts_minute_iso}:{decision_id8}"
+
+def place_order(cfg, broker, positions_repo, audit_repo, decision: Dict[str, Any], *, idempotency_repo=None) -> Dict[str, Any]:
+    """
+    Идемпотентное размещение ордера + минимальная запись в Аудит/Позиции.
+    Контракт: возвращает словарь с полями order_ref (если исполнено) или duplicate_ref (если дубль).
+    """
+    symbol = decision.get("symbol", getattr(cfg, "SYMBOL", "BTC/USDT"))
+    side = decision.get("action", "hold")
+    if side not in ("buy", "sell"):
+        return {"status": "no_action", "reason": f"action={side}"}
+
+    size = str(decision.get("size", "0"))
+    ts_from_decision = None
     try:
-        if hasattr(idempotency_repo, "commit"):
-            idempotency_repo.commit(key, original_order=order)  # type: ignore[attr-defined]
+        ts_from_decision = (decision.get("explain") or {}).get("context", {}).get("ts")
     except Exception:
-        pass
+        ts_from_decision = None
 
-    # запись в аудит (best-effort)
+    decision_id8 = _short_decision_id(decision)
+    ts_minute = _timestamp_minute_iso(ts_from_decision)
+    key = _build_idempotency_key(symbol, side, size, ts_minute, decision_id8)
+
+    ttl = int(getattr(cfg, "IDEMPOTENCY_TTL_SEC", 600))
+    payload_json = json.dumps({"symbol": symbol, "side": side, "size": size, "decision_id": decision_id8}, separators=(",", ":"), ensure_ascii=False)
+
+    if idempotency_repo is not None:
+        ok_new, existing_ref = idempotency_repo.check_and_store(key, ttl_sec=ttl, payload_json=payload_json)
+        if not ok_new:
+            # Дубликат — возвращаем исходный reference, если он есть
+            return {"status": "duplicate", "idempotency_key": key, "duplicate_ref": existing_ref}
+
+    # --- Размещаем ордер у брокера ---
+    amount = Decimal(str(size))
+    order_type = "market"
+    price = None
+    if amount <= 0:
+        return {"status": "no_action", "reason": "size<=0"}
+
+    try:
+        order_ref = broker.create_order(symbol, order_type, side, amount, price)
+        order_ref_json = json.dumps(order_ref, separators=(",", ":"), ensure_ascii=False)
+        # commit идемпотентности
+        if idempotency_repo is not None:
+            idempotency_repo.commit(key, order_ref_json)
+        metrics.inc("orders_submitted_total", {"side": side})
+    except Exception as e:
+        # не получилось – отпустим ключ, чтобы можно было повторить
+        if idempotency_repo is not None:
+            try:
+                idempotency_repo.release(key)
+            except Exception:
+                pass
+        metrics.inc("orders_failed_total", {"reason": type(e).__name__})
+        raise
+
+    # --- Аудит (best-effort) ---
     try:
         if audit_repo is not None and hasattr(audit_repo, "insert"):
-            audit_repo.insert(event_type="order_submitted", payload={"key": key, "symbol": symbol, "side": action, "size": size_s, "score": score, "order": order})
+            audit_repo.insert({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": "order_submitted",
+                "symbol": symbol,
+                "side": side,
+                "size": str(size),
+                "order_ref": order_ref,
+                "idempotency_key": key,
+            })
     except Exception:
         pass
 
-    # простое обновление позиций (опционально)
+    # --- Позиции (best-effort, если есть контракт) ---
     try:
         if positions_repo is not None and hasattr(positions_repo, "upsert"):
-            pos = {"symbol": symbol, "side": action, "amount": float(amount), "entry_price": float(order.get("price") or 0.0), "status": "open"}
-            positions_repo.upsert(pos)
+            positions_repo.upsert({
+                "symbol": symbol,
+                "side": side,
+                "size": str(size),
+                "order_ref": order_ref,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
     except Exception:
         pass
 
-    return {"status": "submitted", "key": key, "order": order}
+    return {"status": "submitted", "order_ref": order_ref, "idempotency_key": key}
