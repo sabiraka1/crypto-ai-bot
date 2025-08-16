@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pandas>=2.2
+numpy>=1.26
+pydantic>=2.6
+requests>=2.31
+ccxt>=4.1
+pytest>=8.1

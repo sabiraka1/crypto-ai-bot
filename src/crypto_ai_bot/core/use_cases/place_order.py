@@ -1,97 +1,75 @@
-# src/crypto_ai_bot/core/signals/policy.py
+# src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from . import _build, _fusion
-from crypto_ai_bot.core.risk import manager as risk_manager
 from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.core.positions.manager import PositionManager
+from crypto_ai_bot.core.storage.interfaces import (
+    PositionRepository,
+    TradeRepository,
+    AuditRepository,
+    UnitOfWork,
+)
 
 
-def _heuristic_rule_score(features: Dict[str, Any]) -> float:
-    ind = features.get("indicators", {})
-    ema_f = ind.get("ema_fast")
-    ema_s = ind.get("ema_slow")
-    rsi = ind.get("rsi")
-    macd_hist = ind.get("macd_hist")
-    if None in (ema_f, ema_s, rsi, macd_hist):
-        return 0.5
-    score = 0.5
-    score += 0.2 if ema_f > ema_s else -0.2
-    if 45 <= rsi <= 60:
-        score += 0.05
-    elif rsi < 30 or rsi > 70:
-        score -= 0.1
-    score += 0.1 if macd_hist > 0 else -0.1
-    return max(0.0, min(1.0, score))
-
-
-def _position_size_buy(cfg, price: float) -> Decimal:
-    quote_usd = Decimal(str(getattr(cfg, "ORDER_QUOTE_SIZE", "100")))
-    if price <= 0:
+def _to_decimal(x: Any) -> Decimal:
+    if x is None:
         return Decimal("0")
-    return (quote_usd / Decimal(str(price))).quantize(Decimal("0.00000001"))
+    return Decimal(str(x))
 
 
-def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
-    feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+def place_order(
+    cfg: Any,
+    broker: Any,  # оставляем для совместимости сигнатуры, внутри не используем
+    *,
+    positions_repo: PositionRepository,
+    trades_repo: TradeRepository,
+    audit_repo: AuditRepository,
+    uow: UnitOfWork,
+    decision: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Исполнение решения:
+      - buy/sell: открытие или увеличение позиции (через PositionManager)
+      - close: полное закрытие по символу
+      - hold/unknown: пропуск
 
-    if feats.get("rule_score") is None:
-        feats["rule_score"] = _heuristic_rule_score(feats)
+    Вся идемпотентность — на уровне вызывающего (use-case eval_and_execute).
+    """
+    symbol: str = decision.get("symbol") or getattr(cfg, "SYMBOL", "BTC/USDT")
+    action: str = (decision.get("action") or "hold").lower()
 
-    score = _fusion.fuse(feats.get("rule_score"), feats.get("ai_score"), cfg)
-    ok, reason = risk_manager.check(feats, cfg)
+    # hint-цена не обязательна; хранить как Decimal строкой
+    price_hint: Optional[Decimal] = None
+    if "price" in decision and decision["price"] is not None:
+        price_hint = _to_decimal(decision["price"])
 
-    price = float(feats["market"]["price"] or 0.0)
-    atr_pct = float(feats["indicators"]["atr_pct"] or 0.0)
+    size: Decimal = _to_decimal(decision.get("size", "0"))
 
-    BUY_TH = float(getattr(cfg, "SCORE_BUY_MIN", 0.6))
-    SELL_TH = float(getattr(cfg, "SCORE_SELL_MIN", 0.4))
-    SLx = float(getattr(cfg, "SL_ATR_MULT", 1.5))
-    TPx = float(getattr(cfg, "TP_ATR_MULT", 2.5))
+    pm = PositionManager(
+        positions_repo=positions_repo,
+        trades_repo=trades_repo,
+        audit_repo=audit_repo,
+        uow=uow,
+    )
 
-    explain = {
-        "signals": {
-            "ema_fast": feats["indicators"]["ema_fast"],
-            "ema_slow": feats["indicators"]["ema_slow"],
-            "rsi": feats["indicators"]["rsi"],
-            "macd_hist": feats["indicators"]["macd_hist"],
-            "atr_pct": atr_pct,
-        },
-        "blocks": {"risk_ok": ok, "risk_reason": reason},
-        "weights": {
-            "rule": float(getattr(cfg, "DECISION_RULE_WEIGHT", getattr(cfg, "SCORE_RULE_WEIGHT", 0.7))),
-            "ai": float(getattr(cfg, "DECISION_AI_WEIGHT", getattr(cfg, "SCORE_AI_WEIGHT", 0.3))),
-        },
-        "thresholds": {"buy": BUY_TH, "sell": SELL_TH, "sl_atr": SLx, "tp_atr": TPx},
-        "context": {"price": price, "timeframe": timeframe, "symbol": symbol},
-        "rule_score": feats.get("rule_score"),
-        "ai_score": feats.get("ai_score"),
-    }
+    if action in ("hold", "", None):
+        return {"status": "skipped", "reason": "hold"}
 
-    decision: Dict[str, Any] = {
-        "action": "hold",
-        "size": "0",
-        "sl": None,
-        "tp": None,
-        "trail": None,
-        "score": score,
-        "explain": explain,
-    }
+    if action == "close":
+        snap = pm.close_all(symbol)
+        metrics.inc("order_submitted_total", {"side": "close"})
+        return {"status": "ok", "position": snap}
 
-    if not ok:
-        metrics.inc("decide_blocked_total", {"reason": reason})
-        return decision
+    if action not in ("buy", "sell"):
+        return {"status": "skipped", "reason": f"unknown action '{action}'"}
 
-    if score >= BUY_TH and price > 0:
-        size = _position_size_buy(cfg, price)
-        sl = price * (1.0 - (SLx * atr_pct / 100.0)) if atr_pct > 0 else None
-        tp = price * (1.0 + (TPx * atr_pct / 100.0)) if atr_pct > 0 else None
-        decision.update({"action": "buy", "size": str(size), "sl": sl, "tp": tp})
-    elif score <= SELL_TH and price > 0:
-        frac = float(getattr(cfg, "SELL_SIGNAL_FRACTION", 0.5))
-        decision.update({"action": "sell", "size": str(frac), "sl": None, "tp": None})
+    signed_size = size if action == "buy" else (size * Decimal("-1"))
 
-    metrics.inc("bot_decision_total", {"action": decision["action"]})
-    return decision
+    # В PositionManager цена может быть None — возьмётся из брокера/текущего тикера, если реализовано.
+    snap = pm.open_or_add(symbol, signed_size, price_hint)
+
+    metrics.inc("order_submitted_total", {"side": action})
+    return {"status": "ok", "position": snap}
