@@ -7,10 +7,8 @@ from typing import Any, Dict, Optional, Tuple
 
 class SqliteIdempotencyRepository:
     """
-    Реализация идемпотентности поверх SQLite.
-    Обновлена для корректной работы даже если таблица уже существовала в старой схеме.
+    SQLite идемпотентность с авто-миграцией схемы.
     """
-
     def __init__(self, con: sqlite3.Connection) -> None:
         self.con = con
         self._ensure_schema()
@@ -21,21 +19,14 @@ class SqliteIdempotencyRepository:
         return any(r[1] == col for r in cur.fetchall())
 
     def _ensure_schema(self) -> None:
-        # Базовая таблица (если не было вообще)
-        self.con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS idempotency (
-                key TEXT PRIMARY KEY
-            );
-            """
-        )
-        # Эволюция схемы: добавляем недостающие колонки
+        # Базовая таблица
+        self.con.execute("CREATE TABLE IF NOT EXISTS idempotency (key TEXT PRIMARY KEY);")
+        # Эволюция столбцов
         if not self._has_column("idempotency", "payload"):
             self.con.execute("ALTER TABLE idempotency ADD COLUMN payload TEXT NULL;")
         if not self._has_column("idempotency", "result"):
             self.con.execute("ALTER TABLE idempotency ADD COLUMN result TEXT NULL;")
         if not self._has_column("idempotency", "created_ms"):
-            # новый столбец — заполняем текущим временем для существующих записей
             self.con.execute("ALTER TABLE idempotency ADD COLUMN created_ms INTEGER NOT NULL DEFAULT 0;")
             now_ms = int(time.time() * 1000)
             self.con.execute("UPDATE idempotency SET created_ms = CASE WHEN created_ms=0 THEN ? ELSE created_ms END;", (now_ms,))
@@ -43,8 +34,7 @@ class SqliteIdempotencyRepository:
             self.con.execute("ALTER TABLE idempotency ADD COLUMN committed INTEGER NOT NULL DEFAULT 0;")
         if not self._has_column("idempotency", "updated_ms"):
             self.con.execute("ALTER TABLE idempotency ADD COLUMN updated_ms INTEGER NULL;")
-
-        # Индексы могут ссылаться на старые таблицы — оборачиваем в try/except
+        # Индексы
         try:
             self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms);")
         except sqlite3.OperationalError:
@@ -60,24 +50,21 @@ class SqliteIdempotencyRepository:
         threshold = now_ms - ttl_seconds * 1000
         with self.con:
             cur = self.con.execute("DELETE FROM idempotency WHERE created_ms < ?", (threshold,))
-            return cur.rowcount if cur.rowcount is not None else 0
+            return cur.rowcount or 0
 
     def claim(self, key: str, ttl_seconds: int = 300) -> bool:
         """
-        Пытаемся «захватить» ключ. Если он уже существует (и не истёк), вернём False.
-        Перед вставкой чистим истёкшие записи.
+        Пытаемся захватить ключ. True — если запись вставлена впервые.
+        Используем INSERT OR IGNORE, чтобы не падать на IntegrityError.
         """
         self.purge_expired(ttl_seconds)
         now_ms = int(time.time() * 1000)
-        try:
-            with self.con:
-                self.con.execute(
-                    "INSERT INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
-                    (key, now_ms),
-                )
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        with self.con:
+            cur = self.con.execute(
+                "INSERT OR IGNORE INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
+                (key, now_ms),
+            )
+            return (cur.rowcount or 0) == 1
 
     def commit(self, key: str, result: Dict[str, Any]) -> None:
         now_ms = int(time.time() * 1000)
@@ -108,12 +95,7 @@ class SqliteIdempotencyRepository:
         }
 
     def check_and_store(self, key: str, payload_json: str, ttl_seconds: int = 300) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """
-        Удобный метод для сценария "сначала захватить, потом записать входные данные".
-        Возвращает (is_new, prev). Если запись уже существует в пределах TTL, вернёт prev.
-        """
         if self.claim(key, ttl_seconds=ttl_seconds):
-            # сохраним payload сразу, чтобы повтор мог вернуть его
             now_ms = int(time.time() * 1000)
             with self.con:
                 self.con.execute(
@@ -124,7 +106,7 @@ class SqliteIdempotencyRepository:
         else:
             return False, self.get_original(key)
 
-    # простые текстовые сериализаторы (ожидается JSON-строка на вход)
+    # ---------- helpers ----------
     @staticmethod
     def _to_json(obj: Any) -> str:
         if obj is None:
@@ -142,7 +124,7 @@ class SqliteIdempotencyRepository:
             s = s.decode("utf-8", "ignore")
         if isinstance(s, str):
             s = s.strip()
-            if s == "null" or s == "":
+            if s == "" or s == "null":
                 return None
             import json
             try:
