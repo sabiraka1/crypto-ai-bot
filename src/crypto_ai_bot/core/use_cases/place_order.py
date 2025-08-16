@@ -1,126 +1,86 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
 
-import json
-import hashlib
-from dataclasses import dataclass
+import uuid
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from crypto_ai_bot.core.brokers import ExchangeInterface
-from crypto_ai_bot.core.storage.interfaces import (
-    Repositories, StorageError, ConflictError, IdempotencyRepository,
+from crypto_ai_bot.core.positions.manager import PositionManager
+from crypto_ai_bot.core.storage.repositories import (
+    TradeRepositorySQLite,
+    PositionRepositorySQLite,
+    SnapshotRepositorySQLite,
+    AuditRepositorySQLite,
 )
-from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-from crypto_ai_bot.core.utils import metrics  # если utils.metrics в другом месте, поправь импорт
+from crypto_ai_bot.utils import metrics
 
 
-IDEMPOTENCY_TTL_SECONDS_DEFAULT = 3600  # час защищаемся от повторов
+def _to_dec(x: Any, default: str = "0") -> Decimal:
+    try:
+        return x if isinstance(x, Decimal) else Decimal(str(x))
+    except Exception:
+        return Decimal(default)
 
 
-def _make_idempotency_key(decision: Dict[str, Any]) -> str:
-    """
-    Строим стабильный ключ по значимым полям решения.
-    Если ключ уже передан снаружи — используем его (не трогаем).
-    """
-    if "idempotency_key" in decision and decision["idempotency_key"]:
-        return str(decision["idempotency_key"])
-
-    # Список полей можно расширять — важна стабильность
-    material = {
-        "action": decision.get("action"),
-        "symbol": normalize_symbol(decision.get("symbol")),
-        "timeframe": normalize_timeframe(decision.get("timeframe")),
-        "size": str(decision.get("size")),
-        "sl": str(decision.get("sl")),
-        "tp": str(decision.get("tp")),
-        # Важно: не включаем волатильные цены времени, иначе ключ будет «всегда новый»
-    }
-    raw = json.dumps(material, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-@dataclass
-class PlaceOrderResult:
-    status: str             # "ok" | "duplicate" | "error"
-    idempotency_key: str
-    order: Dict[str, Any] | None = None
-    error: str | None = None
+def _client_oid(decision: Dict[str, Any]) -> str:
+    # детерминированный не нужен — достаточно «уникального» для идемпотентности
+    return f"bot-{uuid.uuid4().hex[:16]}"
 
 
 def place_order(
     cfg,
-    broker: ExchangeInterface,
-    repos: Repositories,
+    broker,
+    con,
     decision: Dict[str, Any],
     *,
-    idem_ttl_seconds: int = IDEMPOTENCY_TTL_SECONDS_DEFAULT,
+    client_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Идемпотентное размещение ордера:
-      1) Получает/строит idempotency_key;
-      2) repos.idempotency.claim(key, ttl) — если False → duplicate;
-      3) Пытается создать ордер у брокера и записать аудит/позиции;
-      4) На успех — repos.idempotency.commit(key), на исключение — release(key).
-    Возвращает dict (удобно для Telegram/HTTP-слоя).
+    Исполнить решение бота:
+      - action: buy|sell|hold
+      - size: Decimal|str|float (если нет — DEFAULT_ORDER_SIZE из Settings)
+      - sl/tp/trail: опционально
+    Все операции проводятся через PositionManager (он внутри пишет trade/position/audit в одной транзакции).
     """
-    action = str(decision.get("action") or "").lower()
-    if action not in {"buy", "sell"}:
-        return PlaceOrderResult(status="error", idempotency_key="n/a", error="Unsupported action").__dict__
+    action = str(decision.get("action", "hold")).lower()
+    if action == "hold":
+        metrics.inc("order_skipped_total", {"reason": "hold"})
+        return {"status": "skipped", "reason": "hold", "decision": decision}
 
-    # нормализуем обязательные поля
-    symbol = normalize_symbol(decision.get("symbol") or cfg.SYMBOL)
-    timeframe = normalize_timeframe(decision.get("timeframe") or cfg.TIMEFRAME)
+    symbol = str(decision.get("symbol") or getattr(cfg, "SYMBOL", "BTC/USDT"))
+    size = _to_dec(decision.get("size", getattr(cfg, "DEFAULT_ORDER_SIZE", "0")))
+    if size <= 0:
+        metrics.inc("order_skipped_total", {"reason": "size<=0"})
+        return {"status": "skipped", "reason": "size<=0", "decision": decision}
 
-    size = decision.get("size")
-    try:
-        size = Decimal(str(size))
-        if size <= 0:
-            raise ValueError
-    except Exception:
-        return PlaceOrderResult(status="error", idempotency_key="n/a", error="Invalid size").__dict__
+    sl = decision.get("sl")
+    tp = decision.get("tp")
 
-    # idempotency
-    key = _make_idempotency_key({"action": action, "symbol": symbol, "timeframe": timeframe, "size": str(size),
-                                 "sl": decision.get("sl"), "tp": decision.get("tp")})
+    pm = PositionManager(
+        con=con,
+        broker=broker,
+        trades=TradeRepositorySQLite(con),
+        positions=PositionRepositorySQLite(con),
+        audit=AuditRepositorySQLite(con),
+    )
 
-    idem_repo: IdempotencyRepository = repos.idempotency
-    claimed = idem_repo.claim(key, ttl_seconds=int(idem_ttl_seconds), payload={"symbol": symbol, "action": action})
-    if not claimed:
-        metrics.inc("order_duplicate_total", {"symbol": symbol, "action": action})
-        return PlaceOrderResult(status="duplicate", idempotency_key=key, order=None).__dict__
+    client_order_id = client_order_id or decision.get("client_order_id") or _client_oid(decision)
 
     try:
-        # создаём ордер у брокера
-        order = broker.create_order(
-            symbol=symbol,
-            type_="market",  # можно сделать параметром в decision/cfg
-            side=action,
-            amount=size,
-            price=None,
-            idempotency_key=key,
-            client_order_id=key[:20],  # многие биржи ограничивают длину
-        )
-
-        # журнал/аудит — адаптируй под свой контракт
-        repos.audit.log_event("order_submitted", {
-            "symbol": symbol,
-            "action": action,
-            "size": str(size),
-            "order": order,
-            "idem_key": key,
-        })
-
-        # при необходимости обнови позиции/трейды в твоих репозиториях
-
-        idem_repo.commit(key)
-        metrics.inc("order_submitted_total", {"symbol": symbol, "action": action})
-        return PlaceOrderResult(status="ok", idempotency_key=key, order=order).__dict__
-
+        if action in {"buy", "sell"}:
+            res = pm.open(
+                symbol=symbol,
+                side=action,
+                size=size,
+                sl=_to_dec(sl) if sl is not None else None,
+                tp=_to_dec(tp) if tp is not None else None,
+                client_order_id=client_order_id,
+            )
+            metrics.inc("order_submitted_total", {"side": action})
+            return {"status": "filled", "result": res, "client_order_id": client_order_id}
+        else:
+            metrics.inc("order_skipped_total", {"reason": "unknown_action"})
+            return {"status": "skipped", "reason": "unknown_action", "decision": decision}
     except Exception as e:
-        # очень важно: освободить ключ при неуспехе (иначе «залипнет» до TTL)
-        try:
-            idem_repo.release(key)
-        finally:
-            metrics.inc("order_failed_total", {"symbol": symbol, "action": action})
-        return PlaceOrderResult(status="error", idempotency_key=key, error=str(e)).__dict__
+        metrics.inc("order_failed_total", {"reason": "exception"})
+        return {"status": "error", "error": repr(e), "decision": decision}
