@@ -1,88 +1,87 @@
 from __future__ import annotations
 
-import os
 import sqlite3
-import time
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Iterator, Optional, Dict, Any
 
-from crypto_ai_bot.utils import metrics
+# NOTE: все подключения проходят через этот адаптер. Включаем WAL и таймауты.
 
-# --- Connection ---
+
 def connect(path: str) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
-    con = sqlite3.connect(path, timeout=30.0, isolation_level=None, check_same_thread=False)
+    con = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
-    con.execute("PRAGMA temp_store=MEMORY;")
     con.execute("PRAGMA foreign_keys=ON;")
     con.execute("PRAGMA busy_timeout=5000;")
     return con
 
+
 @contextmanager
-def in_txn(con: sqlite3.Connection):
+def in_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
     """
-    BEGIN IMMEDIATE ... COMMIT/ROLLBACK с метрикой времени транзакции.
+    Контекст менеджер транзакции (BEGIN IMMEDIATE → COMMIT/ROLLBACK).
     """
-    t0 = time.perf_counter()
+    cur = con.cursor()
     try:
-        con.execute("BEGIN IMMEDIATE;")
-        yield con
-        con.execute("COMMIT;")
+        cur.execute("BEGIN IMMEDIATE;")
+        yield cur
+        con.commit()
     except Exception:
-        try:
-            con.execute("ROLLBACK;")
-        except Exception:
-            pass
+        con.rollback()
         raise
     finally:
-        dt_ms = int((time.perf_counter() - t0) * 1000)
+        cur.close()
+
+
+class SqliteUnitOfWork:
+    """
+    Простой UnitOfWork, совместимый с тестами:
+      with SqliteUnitOfWork(con) as cur:
+          cur.execute(...)
+    """
+    def __init__(self, con: sqlite3.Connection):
+        self.con = con
+        self.cur: Optional[sqlite3.Cursor] = None
+
+    def __enter__(self) -> sqlite3.Cursor:
+        self.cur = self.con.cursor()
+        self.cur.execute("BEGIN IMMEDIATE;")
+        return self.cur
+
+    def __exit__(self, exc_type, exc, tb) -> None:
         try:
-            metrics.observe("db_txn_ms", dt_ms, {})
-        except Exception:
-            pass
+            if exc_type is None:
+                self.con.commit()
+            else:
+                self.con.rollback()
+        finally:
+            if self.cur is not None:
+                self.cur.close()
+                self.cur = None
 
-# --- Maintenance / Stats ---
-def perform_maintenance(con: sqlite3.Connection, cfg) -> None:
-    """
-    Лёгкое обслуживание: optimize; при росте файла — ANALYZE/VACUUM.
-    Порог и период берём из Settings, если заданы.
-    """
-    try:
-        con.execute("PRAGMA optimize;")
-    except Exception:
-        pass
-
-    try:
-        cur = con.execute("PRAGMA page_count;")
-        page_count = int(cur.fetchone()[0])
-        cur = con.execute("PRAGMA page_size;")
-        page_size = int(cur.fetchone()[0])
-        db_size_mb = (page_count * page_size) / (1024 * 1024)
-
-        metrics.observe("db_size_mb", db_size_mb, {})
-
-        vacuum_mb = float(getattr(cfg, "DB_VACUUM_THRESHOLD_MB", 256))
-        analyze_every = int(getattr(cfg, "DB_ANALYZE_EVERY_N_OPS", 0))
-
-        if db_size_mb >= vacuum_mb:
-            t0 = time.perf_counter()
-            con.execute("VACUUM;")
-            dt_ms = int((time.perf_counter() - t0) * 1000)
-            metrics.observe("db_vacuum_ms", dt_ms, {})
-    except Exception:
-        pass
 
 def get_db_stats(con: sqlite3.Connection) -> Dict[str, Any]:
     try:
-        page_count = int(con.execute("PRAGMA page_count;").fetchone()[0])
-        page_size = int(con.execute("PRAGMA page_size;").fetchone()[0])
-        wal_autocheck = con.execute("PRAGMA journal_mode;").fetchone()[0]
+        page_count = con.execute("PRAGMA page_count;").fetchone()[0]
+        page_size = con.execute("PRAGMA page_size;").fetchone()[0]
+        wal_autocheckpoint = con.execute("PRAGMA wal_autocheckpoint;").fetchone()[0]
         return {
-            "page_count": page_count,
-            "page_size": page_size,
-            "size_mb": (page_count * page_size) / (1024 * 1024),
-            "journal_mode": wal_autocheck,
+            "page_count": int(page_count),
+            "page_size": int(page_size),
+            "approx_size_bytes": int(page_count) * int(page_size),
+            "wal_autocheckpoint": int(wal_autocheckpoint),
         }
     except Exception:
-        return {"error": "stats_unavailable"}
+        return {"page_count": None, "page_size": None, "approx_size_bytes": None, "wal_autocheckpoint": None}
+
+
+def perform_maintenance(con: sqlite3.Connection) -> Dict[str, Any]:
+    stats_before = get_db_stats(con)
+    try:
+        con.execute("PRAGMA optimize;")
+        con.execute("PRAGMA analysis_limit=400;")
+        con.execute("PRAGMA analyze;")
+    except Exception:
+        pass
+    stats_after = get_db_stats(con)
+    return {"before": stats_before, "after": stats_after}

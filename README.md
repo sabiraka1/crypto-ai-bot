@@ -183,14 +183,27 @@ LOGS_DIR=/data/logs
 
 ## Локальный запуск
 
+Linux/macOS (bash/zsh):
+
 ```
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export PYTHONPATH=src
 uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Должны отвечать GET /health и GET /metrics. Для теста webhook отправляйте POST на /telegram.
+### Быстрый старт (Windows PowerShell)
+
+```
+python -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+pip install -r requirements.txt
+$env:PYTHONPATH="src"
+uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+После запуска должны отвечать `GET /health` и `GET /metrics`. Для теста webhook отправляйте `POST /telegram`.
 
 ---
 
@@ -202,15 +215,11 @@ uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000 --reload
 4. Start Command или Procfile:
 
    * Start Command:
-     gunicorn "crypto\_ai\_bot.app.server\:app" -k uvicorn.workers.UvicornWorker -b 0.0.0.0:\$PORT --workers 2 --timeout 120
-   * Procfile (корень):
-     web: gunicorn "crypto\_ai\_bot.app.server\:app" -k uvicorn.workers.UvicornWorker -b 0.0.0.0:\$PORT --workers 2 --timeout 120
-5. Webhook Telegram:
-
+     gunegram:
    * Публичный домен Railway: [https://SERVICE.up.railway.app](https://SERVICE.up.railway.app)
    * Секрет в TELEGRAM\_SECRET\_TOKEN; регистрация вебхука одной командой:
      curl -X POST [https://api.telegram.org/bot\$TELEGRAM\_BOT\_TOKEN/setWebhook](https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook) -d url=[https://SERVICE.up.railway.app/telegram](https://SERVICE.up.railway.app/telegram) -d secret\_token=\$TELEGRAM\_SECRET\_TOKEN
-6. Проверка: GET /health возвращает матрицу статусов; наблюдайте Logs.
+5. Проверка: GET /health возвращает матрицу статусов; наблюдайте Logs.
 
 ---
 
@@ -236,7 +245,17 @@ Dockerfile: базовый python slim, установка зависимост�
 ## Наблюдаемость и обслуживание
 
 * /metrics (Prometheus): http\_requests\_total, telegram\_updates\_total, broker\_latency\_seconds, broker\_circuit\_state, time\_drift\_ms, order\_\*, risk\_block\_total, SQLite-метрики и др.
-* orchestrator.schedule\_maintenance() выполняет VACUUM и ANALYZE, чистит ключи идемпотентности, контролирует drift.
+* orchestrator.schedule\_maintenance() выполняет VACUUM и ANALYZE, ## Event Bus (очередь событий)
+  Поддерживаются настройки через ENV в двух форматах — JSON или строка `k=v;...`:
+* `BUS_STRATEGIES` — стратегии для каналов (например: `{ "orders": "drop_new", "signals": "block" }` или `orders=drop_new;signals=block`).
+* `BUS_QUEUE_SIZES` — размеры очередей (например: `{ "orders": 1000, "signals": 5000 }` или `orders=1000;signals=5000`).
+* `BUS_DLQ_MAX` — максимальный размер dead-letter очереди (число).
+
+Если канал переполнен и стратегия `drop_new`, новые события отбрасываются с метрикой и записью в DLQ; при `block` — включается backpressure.
+
+---
+
+## Наблюдаемость и обслуживаниеонтролирует drift.
 
 ---
 
