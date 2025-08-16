@@ -8,6 +8,9 @@ from typing import Any, Dict, Optional, Tuple
 class SqliteIdempotencyRepository:
     """
     SQLite идемпотентность с авто-миграцией схемы.
+    Поведение claim():
+      - True  — если ключ впервые захвачен ИЛИ существующая запись была просрочена и заменена
+      - False — если ключ уже захвачен и ещё не просрочен
     """
     def __init__(self, con: sqlite3.Connection) -> None:
         self.con = con
@@ -54,17 +57,35 @@ class SqliteIdempotencyRepository:
 
     def claim(self, key: str, ttl_seconds: int = 300) -> bool:
         """
-        Пытаемся захватить ключ. True — если запись вставлена впервые.
-        Используем INSERT OR IGNORE, чтобы не падать на IntegrityError.
+        Пытаемся захватить ключ.
+        - Если нет записи — создаём → True
+        - Если запись есть, но просрочена — заменяем → True
+        - Иначе → False
         """
-        self.purge_expired(ttl_seconds)
         now_ms = int(time.time() * 1000)
+        threshold = now_ms - ttl_seconds * 1000
+
         with self.con:
-            cur = self.con.execute(
-                "INSERT OR IGNORE INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
-                (key, now_ms),
-            )
-            return (cur.rowcount or 0) == 1
+            row = self.con.execute("SELECT created_ms FROM idempotency WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                # Вставка новой
+                self.con.execute(
+                    "INSERT INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
+                    (key, now_ms),
+                )
+                return True
+            else:
+                (created_ms,) = row
+                if int(created_ms) < threshold:
+                    # Старая запись просрочена — заменим
+                    self.con.execute("DELETE FROM idempotency WHERE key = ?", (key,))
+                    self.con.execute(
+                        "INSERT INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
+                        (key, now_ms),
+                    )
+                    return True
+                # Иначе ключ уже захвачен и не истёк
+                return False
 
     def commit(self, key: str, result: Dict[str, Any]) -> None:
         now_ms = int(time.time() * 1000)
