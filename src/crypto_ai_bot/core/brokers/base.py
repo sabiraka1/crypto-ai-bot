@@ -3,106 +3,68 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol, runtime_checkable, Any, Iterable
-
-# ---- Исключения брокера -----------------------------------------------------
+from typing import Protocol, runtime_checkable, Any
 
 
 class ExchangeError(Exception):
-    """Базовая ошибка брокера."""
+    """Базовая ошибка биржи."""
 
 
 class TransientExchangeError(ExchangeError):
-    """Временная ошибка (retry имеет смысл)."""
+    """Временная ошибка (сеть/таймаут/429/5xx) — можно ретраить."""
 
 
 class PermanentExchangeError(ExchangeError):
-    """Фатальная ошибка (retry не поможет)."""
-
-
-# ---- Контракт брокера --------------------------------------------------------
+    """Постоянная ошибка (валидация/неправильный символ и т.п.)."""
 
 
 @runtime_checkable
 class ExchangeInterface(Protocol):
-    """
-    Единый контракт брокера для live/paper/backtest реализаций.
+    """Единый контракт для брокеров (live/paper/backtest)."""
 
-    ВАЖНО:
-    - Деньги/объёмы: Decimal
-    - Время: UTC-aware datetime в данных, где применимо
-    - Символы/таймфреймы НОРМАЛИЗУЕМ заранее (brokers/symbols.py)
-    """
+    # OHLCV: [[ts_ms, open, high, low, close, volume], ...] по возрастанию ts
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]: ...
 
-    # Маркет-данные
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
-        """Возвращает [[ts_ms, open, high, low, close, volume], ...] длиной <= limit."""
+    # Ticker: словарь с хотя бы last/close/bid/ask
+    def fetch_ticker(self, symbol: str) -> dict: ...
 
-    def fetch_ticker(self, symbol: str) -> dict:
-        """Возвращает текущие котировки/спред/прочее в словаре."""
-
-    # Торговля
+    # Создание ордера (market/limit)
     def create_order(
         self,
         symbol: str,
-        type_: str,  # "market" | "limit"
-        side: str,   # "buy" | "sell"
+        type_: str,
+        side: str,
         amount: Decimal,
         price: Decimal | None = None,
-        *,
-        idempotency_key: str | None = None,
         client_order_id: str | None = None,
-    ) -> dict:
-        """Создаёт ордер и возвращает нормализованный ответ биржи."""
+    ) -> dict: ...
 
-    def cancel_order(self, order_id: str, *, symbol: str | None = None) -> dict:
-        """Отмена ордера."""
+    def cancel_order(self, order_id: str) -> dict: ...
 
-    def fetch_balance(self) -> dict:
-        """Баланс по аккаунту/валютам."""
-
-    # Ресурсы
-    def close(self) -> None:
-        """Освобождение сетевых/IO ресурсов клиента."""
+    def fetch_balance(self) -> dict: ...
 
 
-# ---- Вспомогательные типы ----------------------------------------------------
+# ---- фабрика брокеров ---------------------------------------------------------
 
-
-@dataclass(frozen=True)
-class BrokerInfo:
-    name: str         # 'binance', 'bybit', 'paper', 'backtest', ...
-    mode: str         # 'live' | 'paper' | 'backtest'
-
-
-# ---- Фабрика брокеров --------------------------------------------------------
-
-
-def create_broker(cfg: "Settings") -> ExchangeInterface:
+def create_broker(cfg: Any) -> ExchangeInterface:
     """
-    Единая точка создания брокера по режиму (cfg.MODE).
-    Не импортируем реализации на модульном уровне, чтобы исключить циклы и ускорить cold start.
+    Фабрика, выбирающая реализацию по cfg.MODE:
+    - "live"     → CcxtExchange
+    - "paper"    → PaperExchange
+    - "backtest" → BacktestExchange
     """
-    mode = (getattr(cfg, "MODE", "paper") or "paper").lower()
+    mode = str(getattr(cfg, "MODE", "paper")).lower()
 
     if mode == "live":
-        from .ccxt_exchange import CcxtExchange
+        from .ccxt_exchange import CcxtExchange  # lazy import, чтобы избежать циклов
         return CcxtExchange.from_settings(cfg)
-    elif mode == "paper":
+
+    if mode == "paper":
         from .paper_exchange import PaperExchange
         return PaperExchange.from_settings(cfg)
-    elif mode == "backtest":
+
+    if mode == "backtest":
         from .backtest_exchange import BacktestExchange
         return BacktestExchange.from_settings(cfg)
-    else:
-        raise ValueError(f"Unknown MODE={cfg.MODE!r}. Expected 'live' | 'paper' | 'backtest'.")
 
-
-__all__ = [
-    "ExchangeError",
-    "TransientExchangeError",
-    "PermanentExchangeError",
-    "ExchangeInterface",
-    "BrokerInfo",
-    "create_broker",
-]
+    raise ValueError(f"Unknown MODE: {mode!r}")
