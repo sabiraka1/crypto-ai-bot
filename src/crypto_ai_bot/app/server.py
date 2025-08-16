@@ -23,6 +23,9 @@ from crypto_ai_bot.core.storage.repositories.positions import PositionRepository
 from crypto_ai_bot.core.storage.repositories.snapshots import SnapshotRepository
 from crypto_ai_bot.core.storage.repositories.audit import AuditRepository
 
+# (new) fast summary uses tracker (repo-aware)
+from crypto_ai_bot.core.positions.tracker import build_context
+
 app = FastAPI(title="Crypto AI Bot")
 
 cfg = Settings.build()
@@ -113,10 +116,30 @@ async def get_metrics() -> str:
 
 @app.get("/status")
 async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
+    """
+    Лёгкий status: decision + fast summary (exposure/dd/seq_losses/price/spread) без лишних подробностей.
+    """
     try:
         repos = _ensure_db_and_repos()
-        dec = evaluate(cfg, broker, symbol=symbol or cfg.SYMBOL, timeframe=timeframe or cfg.TIMEFRAME, limit=limit, **repos)
-        return {"status": "ok", "symbol": dec.get("symbol"), "timeframe": dec.get("timeframe"), "decision": dec}
+        sym = symbol or cfg.SYMBOL
+        tf = timeframe or cfg.TIMEFRAME
+
+        # лёгкий контекст для быстрого ответа (не требует тяжёлых индикаторов)
+        summary = build_context(cfg, broker, positions_repo=repos.get("positions_repo"), trades_repo=repos.get("trades_repo"))
+
+        # полное решение (использует индикаторы) — оставляем как было
+        dec = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit, **repos)
+
+        return {
+            "status": "ok",
+            "symbol": sym,
+            "timeframe": tf,
+            "summary": summary,
+            "decision": {
+                "action": dec.get("action"),
+                "score": dec.get("score"),
+            },
+        }
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 

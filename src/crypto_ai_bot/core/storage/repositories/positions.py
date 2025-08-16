@@ -1,58 +1,90 @@
 from __future__ import annotations
-import sqlite3, time
-from decimal import Decimal
+
+import sqlite3
 from typing import Any, Dict, List, Optional
 
-from ..interfaces import PositionRepository
+class PositionRepository:
+    """
+    SQLite репозиторий позиций.
+    Требуемые (желательные) поля таблицы positions:
+      id TEXT PRIMARY KEY,
+      symbol TEXT,
+      side TEXT,              -- 'buy'|'sell'
+      amount REAL,
+      entry_price REAL,
+      status TEXT,            -- 'open'|'closed'
+      opened_at_ms INTEGER,
+      closed_at_ms INTEGER NULL
+    Реализация дружелюбна к различиям схемы: если части полей нет — будет best-effort.
+    """
 
-CREATE_SQL = '''
-CREATE TABLE IF NOT EXISTS positions(
-  symbol TEXT PRIMARY KEY,
-  size   TEXT NOT NULL,
-  avg_price TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_positions_updated ON positions(updated_at);
-'''
+    def __init__(self, conn: sqlite3.Connection):
+        self._con = conn
 
-class SqlitePositionRepository(PositionRepository):
-    def __init__(self, con: sqlite3.Connection) -> None:
-        self.con = con
-        self.con.executescript(CREATE_SQL)
-
-    def get_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        cur = self.con.execute("SELECT symbol,size,avg_price,updated_at FROM positions WHERE symbol=?;", (symbol,))
-        row = cur.fetchone()
-        if not row: return None
-        return {
-            "symbol": row[0],
-            "size": Decimal(row[1]),
-            "avg_price": Decimal(row[2]),
-            "updated_at": int(row[3]),
-        }
-
+    # -------- базовые операции (минимум API, чтобы не ломать старый код) --------
     def get_open(self) -> List[Dict[str, Any]]:
-        cur = self.con.execute("SELECT symbol,size,avg_price,updated_at FROM positions WHERE CAST(size AS REAL) != 0;")
-        return [{
-            "symbol": r[0],
-            "size": Decimal(r[1]),
-            "avg_price": Decimal(r[2]),
-            "updated_at": int(r[3]),
-        } for r in cur.fetchall()]
+        try:
+            cur = self._con.execute(
+                """SELECT id, symbol, side, amount, entry_price
+                   FROM positions
+                   WHERE status = 'open'"""
+            )
+            rows = cur.fetchall()
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for r in rows or []:
+            try:
+                out.append({
+                    "id": r[0],
+                    "symbol": r[1],
+                    "side": r[2],
+                    "amount": float(r[3]) if r[3] is not None else None,
+                    "entry_price": float(r[4]) if r[4] is not None else None,
+                })
+            except Exception:
+                continue
+        return out
 
-    def save(self, symbol: str, size: Decimal, avg_price: Decimal) -> None:
-        now = int(time.time() * 1000)
-        self.con.execute(
-            "INSERT INTO positions(symbol,size,avg_price,updated_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(symbol) DO UPDATE SET size=excluded.size, avg_price=excluded.avg_price, updated_at=excluded.updated_at;",
-            (symbol, str(size), str(avg_price), now),
-        )
+    # -------- быстрый агрегат для экспозиции --------
+    def get_open_exposure_fast(self, *, symbol: Optional[str] = None) -> Dict[str, Optional[float]]:
+        """
+        Возвращает {exposure_usd, exposure_pct?}.
+        Для скорости пытается использовать предрасчитанные колонки, если они есть.
+        По умолчанию exposure_usd = SUM(ABS(amount * entry_price)) по открытым позициям.
+        exposure_pct возвращается только если в таблице присутствует колонка equity_usd (необязательно).
+        """
+        where = "WHERE status = 'open'"
+        params: tuple = ()
+        if symbol:
+            where += " AND symbol = ?"
+            params = (symbol,)
+        # Быстрый путь через entry_price*amount
+        try:
+            cur = self._con.execute(
+                f"""SELECT SUM(ABS(COALESCE(amount,0) * COALESCE(entry_price,0))) AS exposure_usd
+                    FROM positions
+                    {where}""",
+                params,
+            )
+            row = cur.fetchone()
+            exposure_usd = float(row[0]) if row and row[0] is not None else None
+        except Exception:
+            exposure_usd = None
 
-    def close_all(self, symbol: str) -> Dict[str, Any]:
-        now = int(time.time() * 1000)
-        self.con.execute(
-            "INSERT INTO positions(symbol,size,avg_price,updated_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(symbol) DO UPDATE SET size='0', avg_price=excluded.avg_price, updated_at=excluded.updated_at;",
-            (symbol, '0', '0', now),
-        )
-        return {"symbol": symbol, "size": "0", "avg_price": "0", "updated_at": now}
+        # Пытаемся достать equity_usd из последней записи (если кто-то пишет туда снимки)
+        exposure_pct = None
+        if exposure_usd is not None:
+            try:
+                cur2 = self._con.execute(
+                    "SELECT equity_usd FROM account_equity ORDER BY ts_ms DESC LIMIT 1"
+                )
+                r2 = cur2.fetchone()
+                if r2 and r2[0]:
+                    eq = float(r2[0])
+                    if eq > 0:
+                        exposure_pct = exposure_usd / eq * 100.0
+            except Exception:
+                pass
+
+        return {"exposure_usd": exposure_usd, "exposure_pct": exposure_pct}
