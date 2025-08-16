@@ -2,133 +2,266 @@
 from __future__ import annotations
 
 import asyncio
-import random
+import logging
+import signal
 import time
-from dataclasses import dataclass
-from typing import Callable, Optional, Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from .settings import Settings
-from .brokers import create_broker, ExchangeInterface
+from crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.core.brokers import create_broker
+from crypto_ai_bot.core.bot import get_bot
+from crypto_ai_bot.core.storage.sqlite_adapter import connect
+from crypto_ai_bot.core.storage.migrations.runner import apply_all
+from crypto_ai_bot.core.storage.repositories import IdempotencyRepositorySQLite
 from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.core.storage.sqlite_adapter import schedule_maintenance
+
+
+# ────────────────────────────── логгер (без зависимости от utils.logging) ─────
+log = logging.getLogger("orchestrator")
+if not log.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+# ─────────────────────────────────── типы ─────────────────────────────────────
+PeriodicFn = Callable[[], Awaitable[None]]
 
 
 @dataclass
-class _Job:
-    interval_seconds: int
-    fn: Callable[[], Any]                 # sync-функция (выполним в to_thread)
-    jitter_frac: float = 0.1              # 0..1 — доля интервала, разброс ±jitter*interval
-    name: str = "job"
+class _TaskSpec:
+    name: str
+    interval_sec: float
+    jitter_frac: float
+    coro_factory: PeriodicFn
+    task: Optional[asyncio.Task] = None
 
 
+# ───────────────────────────────── Orchestrator ───────────────────────────────
+@dataclass
 class Orchestrator:
-    """
-    Лёгкий планировщик периодических задач для бота:
-      - schedule_every(seconds, fn, jitter=0.1): регистрирует джоб;
-      - start()/stop(): запуск/останов всех фоновых задач;
-      - встроено: плановое обслуживание SQLite (VACUUM/ANALYZE/статистика/очистка идемпотентности).
-    Правила:
-      - никаких блокировок event-loop: все Джобы исполняются через asyncio.to_thread();
-      - метрики: scheduler_job_runs_total / scheduler_job_fail_total / scheduler_job_seconds;
-      - безопасный shutdown (Cancel-aware).
-    """
+    cfg: Settings
+    # следующие поля создаются при старте:
+    con: Any = field(default=None, init=False)
+    broker: Any = field(default=None, init=False)
+    bot: Any = field(default=None, init=False)
+    _tasks: List[_TaskSpec] = field(default_factory=list, init=False)
+    _stopping: bool = field(default=False, init=False)
 
-    def __init__(self, cfg: Settings) -> None:
-        self.cfg = cfg
-        # Брокер создаётся здесь, но оркестратор НЕ должен вызывать его напрямую — только передавать в higher-level циклы.
-        self.broker: ExchangeInterface = create_broker(cfg)
-
-        self._jobs: List[_Job] = []
-        self._tasks: List[asyncio.Task] = []
-        self._running: bool = False
-
-        # --- ВСТРОЕННОЕ ОБСЛУЖИВАНИЕ БД ---
-        # Подключаем периодическое обслуживание SQLite: каждые 6ч, с очисткой протухших ключей идемпотентности.
-        # Можно переопределить периодика через ENV (DB_MAINT_EVERY_HOURS).
-        every_hours = float(getattr(self.cfg, "DB_MAINT_EVERY_HOURS", 6.0))
-        schedule_maintenance(
-            self,
-            db_path=getattr(self.cfg, "DB_PATH", "data/bot.sqlite3"),
-            every_hours=every_hours,
-            purge_idempotency=True,
-            idem_ttl_seconds=int(getattr(self.cfg, "IDEMPOTENCY_TTL_SECONDS", 3600)),
-        )
-
-    # ------------------------------------------------------------------ #
-    #                  API планировщика для других модулей               #
-    # ------------------------------------------------------------------ #
-
-    def schedule_every(self, seconds: int, fn: Callable[[], Any], *, jitter: float = 0.1, name: str = "job") -> None:
-        """
-        Регистрирует периодическую задачу.
-        - seconds: базовый интервал (>= 1 сек)
-        - jitter: доля интервала 0..1; реальная пауза = seconds ± random*jitter*seconds
-        - fn: синхронная функция без аргументов (будет исполнена в рабочем треде)
-        """
-        sec = max(1, int(seconds))
-        jit = float(min(max(jitter, 0.0), 1.0))
-        self._jobs.append(_Job(interval_seconds=sec, fn=fn, jitter_frac=jit, name=name))
+    # ─────────────────────────── публичный API ────────────────────────────────
 
     async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        # стартуем отдельную задачу под каждый зарегистрированный джоб
-        for job in self._jobs:
-            self._tasks.append(asyncio.create_task(self._runner(job)))
-        metrics.inc("scheduler_started_total", {"jobs": str(len(self._jobs))})
+        """
+        Стартует инфраструктуру (БД → миграции → брокер → бот), планирует фоновые задачи.
+        """
+        log.info("Orchestrator starting…")
+
+        # 1) БД (WAL/timeout настраиваются внутри connect() по Settings)
+        t0 = time.perf_counter()
+        self.con = connect(self.cfg.DB_PATH)  # настроит WAL/busy_timeout согласно нашим правилам
+        apply_all(self.con)                   # применяем SQL-версии по порядку
+        metrics.inc("db_migrations_applied_total", {})
+        metrics.observe("db_startup_seconds", time.perf_counter() - t0, {})
+
+        # 2) брокер (live/paper/backtest) — через фабрику
+        self.broker = create_broker(self.cfg)
+        metrics.inc("broker_created_total", {"mode": self.cfg.MODE})
+
+        # 3) фасад бота
+        self.bot = get_bot(cfg=self.cfg, broker=self.broker, con=self.con)
+        metrics.inc("bot_initialized_total", {})
+
+        # 4) планирование фоновых задач
+        self._schedule_every(
+            seconds=float(self.cfg.SCHEDULE_EVAL_SECONDS),
+            name="eval",
+            jitter=0.10,
+            fn=self._job_eval_and_execute,
+        )
+        self._schedule_every(
+            seconds=float(self.cfg.SCHEDULE_MAINTENANCE_SECONDS),
+            name="maintenance",
+            jitter=0.10,
+            fn=self._job_maintenance,
+        )
+
+        # 5) обработчики сигналов (если оркестратор запускается как main)
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.stop()))
+        except NotImplementedError:
+            # Windows/embedded event loop — сигналов может не быть
+            pass
+
+        log.info("Orchestrator started.")
 
     async def stop(self) -> None:
-        if not self._running:
+        """
+        Корректно завершает задачи, освобождает ресурсы.
+        """
+        if self._stopping:
             return
-        self._running = False
-        # корректно отменяем все таски
-        for t in self._tasks:
-            t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
-        metrics.inc("scheduler_stopped_total", {})
+        self._stopping = True
+        log.info("Orchestrator stopping…")
 
-    # ------------------------------------------------------------------ #
-    #                           Внутренняя логика                        #
-    # ------------------------------------------------------------------ #
+        # 1) останавливаем периодические задачи
+        for spec in self._tasks:
+            if spec.task and not spec.task.done():
+                spec.task.cancel()
+        # 2) дожидаемся отмены
+        for spec in self._tasks:
+            if spec.task:
+                try:
+                    await spec.task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    log.warning("Task %s finished with error on stop: %s", spec.name, e)
 
-    async def _runner(self, job: _Job) -> None:
+        # 3) закрываем соединения (брокер/БД)
+        try:
+            if hasattr(self.broker, "close"):
+                await _maybe_await(self.broker.close())
+        except Exception:
+            pass
+
+        try:
+            if self.con is not None:
+                self.con.close()
+        except Exception:
+            pass
+
+        metrics.inc("orchestrator_stopped_total", {})
+        log.info("Orchestrator stopped.")
+
+    def schedule_every(self, seconds: float, fn: PeriodicFn, *, jitter: float = 0.10, name: str = "periodic") -> None:
         """
-        Вечный цикл исполнения одного джоба:
-          1) sleep interval ± jitter
-          2) выполнить fn в рабочем треде
-          3) метрики, защита от исключений, продолжение цикла
+        Публичный метод для регистрации внешних периодических задач, если нужно.
         """
-        # Небольшой рандомный стартовый сдвиг, чтобы «размазать» нагрузку
-        await asyncio.sleep(random.uniform(0.0, min(1.0, job.jitter_frac)) * job.interval_seconds)
+        self._schedule_every(seconds=seconds, name=name, jitter=jitter, fn=fn)
 
-        while self._running:
-            # Расчёт следующей паузы с jitter
-            jitter_span = job.jitter_frac * job.interval_seconds
-            sleep_for = job.interval_seconds + random.uniform(-jitter_span, jitter_span)
-            sleep_for = max(1.0, sleep_for)
-            try:
-                await asyncio.sleep(sleep_for)
+    # ───────────────────────────── приватные методы ───────────────────────────
+
+    def _schedule_every(self, *, seconds: float, name: str, jitter: float, fn: PeriodicFn) -> None:
+        spec = _TaskSpec(name=name, interval_sec=seconds, jitter_frac=jitter, coro_factory=fn)
+        spec.task = asyncio.create_task(self._task_runner(spec), name=f"{name}-runner")
+        self._tasks.append(spec)
+        metrics.inc("orchestrator_task_scheduled_total", {"name": name})
+
+    async def _task_runner(self, spec: _TaskSpec) -> None:
+        """
+        Бесконечный цикл выполнения задания с интервалом и джиттером.
+        """
+        try:
+            # лёгкий сдвиг старта, чтобы не бить всё одновременно
+            await asyncio.sleep(_with_jitter(0.05 * spec.interval_sec, spec.jitter_frac))
+            while True:
                 t0 = time.perf_counter()
-                # Исполняем синхронный джоб в треде, чтобы не блокировать event-loop
-                res = await asyncio.to_thread(job.fn)
-                metrics.inc("scheduler_job_runs_total", {"job": job.name})
-                metrics.observe("scheduler_job_seconds", time.perf_counter() - t0, {"job": job.name, "result": "ok"})
-            except asyncio.CancelledError:
-                # корректный выход
-                break
-            except Exception as e:
-                metrics.inc("scheduler_job_fail_total", {"job": job.name})
-                metrics.observe("scheduler_job_seconds", 0.0, {"job": job.name, "result": "err"})
+                try:
+                    await spec.coro_factory()
+                    metrics.inc("orchestrator_task_success_total", {"name": spec.name})
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.exception("Task %s failed: %s", spec.name, e)
+                    metrics.inc("orchestrator_task_error_total", {"name": spec.name})
+                # спим до следующего запуска
+                elapsed = time.perf_counter() - t0
+                delay = max(0.0, spec.interval_sec - elapsed)
+                await asyncio.sleep(_with_jitter(delay, spec.jitter_frac))
+        except asyncio.CancelledError:
+            metrics.inc("orchestrator_task_cancelled_total", {"name": spec.name})
+            raise
 
-    # ------------------------------------------------------------------ #
-    #         Пример: подключение твоих торговых циклов (опционально)    #
-    # ------------------------------------------------------------------ #
+    # ───────────────────────────── периодические задания ──────────────────────
 
-    def schedule_trading_loop(self, fn: Callable[[], Any], *, every_seconds: int = 30) -> None:
+    async def _job_eval_and_execute(self) -> None:
         """
-        Удобная обёртка: регистрирует твой торговый цикл (evaluate → risk → place_order)
-        как периодическую задачу. Передай сюда уже собранную функцию без аргументов.
+        Основной цикл стратегии: evaluate → (risk) → execute.
+        Запускается с интервалом cfg.SCHEDULE_EVAL_SECONDS.
         """
-        self.schedule_every(every_seconds, fn, jitter=0.1, name="trading-loop")
+        # cpu-bound/блокирующие вещи делаем в thread, чтобы не блокировать event loop
+        def _run():
+            return self.bot.eval_and_execute(
+                symbol=self.cfg.SYMBOL,
+                timeframe=self.cfg.TIMEFRAME,
+                limit=self.cfg.FEATURE_LIMIT,
+            )
+
+        t0 = time.perf_counter()
+        try:
+            res = await asyncio.to_thread(_run)
+            metrics.observe("pipeline_latency_seconds", time.perf_counter() - t0, {})
+            metrics.inc("pipeline_runs_total", {"result": str(res.get('order', {}).get('status', 'unknown'))})
+            # опционально — можно логировать краткий срез
+            log.debug("eval_and_execute result: %s", _safe_short(res))
+        except Exception as e:
+            metrics.inc("pipeline_runs_total", {"result": "exception"})
+            log.exception("eval_and_execute failed: %s", e)
+
+    async def _job_maintenance(self) -> None:
+        """
+        Обслуживание:
+          - чистка истекших ключей идемпотентности
+          - оптимизация SQLite (OPTIMIZE)
+        """
+        def _maint():
+            # 1) чистка идемпотентности
+            idem = IdempotencyRepositorySQLite(self.con)
+            deleted = idem.purge_expired()
+            # 2) оптимизация SQLite (быстрее VACUUM и без полной блокировки)
+            cur = self.con.cursor()
+            try:
+                cur.execute("PRAGMA optimize")
+            finally:
+                cur.close()
+            return deleted
+
+        try:
+            deleted = await asyncio.to_thread(_maint)
+            metrics.inc("idempotency_purged_total", {"deleted": str(deleted)})
+            metrics.inc("db_optimize_total", {})
+        except Exception as e:
+            log.exception("maintenance failed: %s", e)
+            metrics.inc("maintenance_errors_total", {})
+
+
+# ────────────────────────────── утилиты ───────────────────────────────────────
+
+def _with_jitter(base: float, jitter_frac: float) -> float:
+    """
+    Возвращает base ± (base * jitter_frac * U[-0.5; 0.5]).
+    """
+    import random
+    if base <= 0 or jitter_frac <= 0:
+        return max(0.0, base)
+    delta = base * jitter_frac
+    return max(0.0, base + random.uniform(-0.5 * delta, 0.5 * delta))
+
+
+def _safe_short(obj: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        d = dict(obj or {})
+        # урежем «тяжёлые» поля, если появятся
+        for k in ("features", "bars", "ohlcv"):
+            if k in d:
+                d[k] = "<omitted>"
+        return d
+    except Exception:
+        return {"_nonserializable": True}
+
+
+# ────────────────────────────── удобный конструктор ───────────────────────────
+
+async def create_and_start(cfg: Optional[Settings] = None) -> Orchestrator:
+    """
+    Вспомогательная функция: создать оркестратор из Settings.build() и стартовать.
+    Удобно для embed-сценариев/скриптов.
+    """
+    cfg = cfg or Settings.build()
+    orch = Orchestrator(cfg=cfg)
+    await orch.start()
+    return orch

@@ -5,41 +5,58 @@ import sqlite3
 import time
 from typing import Optional
 
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 class IdempotencyRepositorySQLite:
     """
-    Простая таблица ключей идемпотентности:
-      - record(key, ttl_seconds) → True, если новый; False, если ещё живой.
-      - purge_expired() → удаляет протухшие.
+    Простая идемпотентность:
+      record(key, ttl) -> True, если ключ "свежий" и зафиксирован впервые/после истечения
+                        -> False, если для ключа ещё не истёк TTL (дубликат)
+      purge_expired()  -> число удалённых записей
+
+    Таблица (см. миграцию 0003_idempotency.sql):
+      idempotency (key TEXT PRIMARY KEY, created_at_ms INTEGER, ttl_seconds INTEGER, expires_at_ms INTEGER)
     """
 
-    def __init__(self, con: sqlite3.Connection) -> None:
+    def __init__(self, con: sqlite3.Connection):
         self.con = con
 
     def record(self, key: str, ttl_seconds: int) -> bool:
-        now = int(time.time() * 1000)
-        expires = now + int(ttl_seconds * 1000)
-        try:
-            self.con.execute(
-                "INSERT INTO idempotency_keys(key, created_at, expires_at) VALUES(?,?,?);",
-                (key, now, expires),
-            )
-            return True
-        except sqlite3.IntegrityError:
-            # уже существует — проверим не протух ли
-            cur = self.con.execute("SELECT expires_at FROM idempotency_keys WHERE key=?;", (key,))
-            row = cur.fetchone()
-            if not row:
+        now = _now_ms()
+        cur = self.con.cursor()
+
+        # 1) быстрый просмотр текущего состояния
+        cur.execute("SELECT expires_at_ms FROM idempotency WHERE key = ?", (key,))
+        row = cur.fetchone()
+        if row:
+            expires_at = int(row[0])
+            if expires_at > now:
+                # ключ ещё "жив" → это повтор
                 return False
-            if int(row[0]) < now:
-                # протух — перезапишем
-                self.con.execute(
-                    "UPDATE idempotency_keys SET created_at=?, expires_at=? WHERE key=?;",
-                    (now, expires, key),
-                )
-                return True
-            return False
+
+        # 2) либо ключа не было, либо он истёк → записываем/обновляем
+        expires_at_ms = now + ttl_seconds * 1000
+        cur.execute(
+            """
+            INSERT INTO idempotency(key, created_at_ms, ttl_seconds, expires_at_ms)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                created_at_ms=excluded.created_at_ms,
+                ttl_seconds=excluded.ttl_seconds,
+                expires_at_ms=excluded.expires_at_ms
+            """,
+            (key, now, int(ttl_seconds), int(expires_at_ms)),
+        )
+        self.con.commit()
+        return True
 
     def purge_expired(self) -> int:
-        now = int(time.time() * 1000)
-        cur = self.con.execute("DELETE FROM idempotency_keys WHERE expires_at < ?;", (now,))
-        return int(cur.rowcount or 0)
+        now = _now_ms()
+        cur = self.con.cursor()
+        cur.execute("DELETE FROM idempotency WHERE expires_at_ms < ?", (now,))
+        deleted = cur.rowcount or 0
+        self.con.commit()
+        return int(deleted)
