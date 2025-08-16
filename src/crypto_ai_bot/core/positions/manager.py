@@ -5,6 +5,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional, List, Protocol
 
+# uow protocol
+try:
+    from crypto_ai_bot.core.storage.interfaces import UnitOfWork as UnitOfWork  # type: ignore
+except Exception:
+    class UnitOfWork(Protocol):  # fallback
+        def __enter__(self) -> Any: ...
+        def __exit__(self, exc_type, exc, tb) -> None: ...
+
 
 # --- интерфейсы репозиториев (узкая прослойка для типизации) ---
 class PositionsRepo(Protocol):
@@ -26,6 +34,7 @@ class AuditRepo(Protocol):
 _POS_REPO: Optional[PositionsRepo] = None
 _TRD_REPO: Optional[TradesRepo] = None
 _AUDIT_REPO: Optional[AuditRepo] = None
+_UOW: Optional[UnitOfWork] = None
 
 
 def configure_repositories(*, positions_repo: PositionsRepo, trades_repo: Optional[TradesRepo] = None, audit_repo: Optional[AuditRepo] = None) -> None:
@@ -33,6 +42,11 @@ def configure_repositories(*, positions_repo: PositionsRepo, trades_repo: Option
     _POS_REPO = positions_repo
     _TRD_REPO = trades_repo
     _AUDIT_REPO = audit_repo
+
+
+def configure_uow(uow: UnitOfWork) -> None:
+    global _UOW
+    _UOW = uow
 
 
 @dataclass
@@ -44,6 +58,7 @@ class PositionManager:
     positions_repo: PositionsRepo
     trades_repo: Optional[TradesRepo] = None
     audit_repo: Optional[AuditRepo] = None
+    uow: Optional[UnitOfWork] = None
 
     # --- операции ---
     def open(self, symbol: str, side: str, size: Decimal, *, sl: Optional[Decimal] = None, tp: Optional[Decimal] = None) -> Dict[str, Any]:
@@ -58,32 +73,50 @@ class PositionManager:
             "status": "open",
             "opened_at": now,
         }
-        self.positions_repo.upsert(pos)
-        if self.audit_repo:
-            self.audit_repo.append({"ts": now, "type": "position_open", "symbol": symbol, "side": side, "qty": str(size)})
+        if self.uow is not None:
+            with self.uow:
+                self.positions_repo.upsert(pos)
+                if self.audit_repo:
+                    self.audit_repo.append({"ts": now, "type": "position_open", "symbol": symbol, "side": side, "qty": str(size)})
+        else:
+            self.positions_repo.upsert(pos)
+            if self.audit_repo:
+                self.audit_repo.append({"ts": now, "type": "position_open", "symbol": symbol, "side": side, "qty": str(size)})
         return pos
 
     def partial_close(self, pos_id: str, size: Decimal) -> Dict[str, Any]:
-        # минимальная реализация: записываем трейд и оставляем позицию как открытая (реализация закрытия зависит от схемы)
         now = datetime.now(timezone.utc).isoformat()
-        if self.trades_repo:
-            self.trades_repo.insert({"ts": now, "pos_id": pos_id, "qty": str(size), "context": {"action": "partial_close"}})
-        if self.audit_repo:
-            self.audit_repo.append({"ts": now, "type": "position_partial_close", "pos_id": pos_id, "qty": str(size)})
+        if self.uow is not None:
+            with self.uow:
+                if self.trades_repo:
+                    self.trades_repo.insert({"ts": now, "pos_id": pos_id, "qty": str(size), "context": {"action": "partial_close"}})
+                if self.audit_repo:
+                    self.audit_repo.append({"ts": now, "type": "position_partial_close", "pos_id": pos_id, "qty": str(size)})
+        else:
+            if self.trades_repo:
+                self.trades_repo.insert({"ts": now, "pos_id": pos_id, "qty": str(size), "context": {"action": "partial_close"}})
+            if self.audit_repo:
+                self.audit_repo.append({"ts": now, "type": "position_partial_close", "pos_id": pos_id, "qty": str(size)})
         return {"status": "ok", "pos_id": pos_id, "closed_qty": str(size)}
 
     def close(self, pos_id: str) -> Dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
-        try:
-            self.positions_repo.close(pos_id)
-        except Exception:
-            # если в репозитории нет метода close — пометим через upsert
-            pos = self.positions_repo.get_by_id(pos_id) or {"id": pos_id}
-            pos.update({"status": "closed", "closed_at": now})
-            self.positions_repo.upsert(pos)
+        if self.uow is not None:
+            with self.uow:
+                self._do_close(pos_id, now)
+        else:
+            self._do_close(pos_id, now)
         if self.audit_repo:
             self.audit_repo.append({"ts": now, "type": "position_close", "pos_id": pos_id})
         return {"status": "ok", "pos_id": pos_id}
+
+    def _do_close(self, pos_id: str, now: str) -> None:
+        try:
+            self.positions_repo.close(pos_id)
+        except Exception:
+            pos = self.positions_repo.get_by_id(pos_id) or {"id": pos_id}
+            pos.update({"status": "closed", "closed_at": now})
+            self.positions_repo.upsert(pos)
 
     # --- запросы состояния ---
     def get_snapshot(self) -> Dict[str, Any]:
@@ -95,7 +128,7 @@ class PositionManager:
         return Decimal("0")
 
     def get_exposure(self) -> Decimal:
-        # вычисляем экспозицию как сумму |qty| (цена недоступна на уровне репозитория)
+        # вычисляем экспозицию как сумму |qty|
         try:
             total = Decimal("0")
             for p in self.positions_repo.get_open():
@@ -114,30 +147,30 @@ def _require_repo() -> PositionsRepo:
 
 
 def open(symbol: str, side: str, size: Decimal, *, sl: Optional[Decimal] = None, tp: Optional[Decimal] = None) -> Dict[str, Any]:
-    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO)
+    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO, _UOW)
     return mgr.open(symbol, side, size, sl=sl, tp=tp)
 
 
 def partial_close(pos_id: str, size: Decimal) -> Dict[str, Any]:
-    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO)
+    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO, _UOW)
     return mgr.partial_close(pos_id, size)
 
 
 def close(pos_id: str) -> Dict[str, Any]:
-    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO)
+    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO, _UOW)
     return mgr.close(pos_id)
 
 
 def get_snapshot() -> Dict[str, Any]:
-    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO)
+    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO, _UOW)
     return mgr.get_snapshot()
 
 
 def get_pnl() -> Decimal:
-    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO)
+    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO, _UOW)
     return mgr.get_pnl()
 
 
 def get_exposure() -> Decimal:
-    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO)
+    mgr = PositionManager(_require_repo(), _TRD_REPO, _AUDIT_REPO, _UOW)
     return mgr.get_exposure()

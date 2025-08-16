@@ -2,76 +2,138 @@ from __future__ import annotations
 
 import sqlite3
 import time
-import json
-from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Any, Dict, Optional, Tuple
 
-@dataclass
-class IdempotencyRecord:
-    key: str
-    created_ms: int
-    payload: bytes | None = None
-
-def build_key(symbol: str, side: str, size: str, ts_ms: int, decision_id: str) -> str:
-    """
-    Ключ строго по спецификации:
-    {symbol}:{side}:{size}:{timestamp_minute}:{decision_id[:8]}
-    """
-    minute = int(ts_ms // 60000)
-    return f"{symbol}:{side}:{size}:{minute}:{str(decision_id)[:8]}"
 
 class SqliteIdempotencyRepository:
+    """
+    Простейшая реализация идемпотентности поверх SQLite.
+    Таблица:
+      key TEXT PRIMARY KEY
+      payload TEXT NULL         -- что пытались выполнить (решение и т.п.)
+      result  TEXT NULL         -- итог операции (для повторной выдачи)
+      created_ms INTEGER NOT NULL
+      committed INTEGER NOT NULL DEFAULT 0
+      updated_ms INTEGER NULL
+    """
+
     def __init__(self, con: sqlite3.Connection) -> None:
         self.con = con
-        # мягкое создание таблицы, если миграция не прогнана
+        self._ensure_schema()
+
+    # ---------- schema ----------
+    def _ensure_schema(self) -> None:
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency (
+                key TEXT PRIMARY KEY,
+                payload TEXT NULL,
+                result TEXT NULL,
+                created_ms INTEGER NOT NULL,
+                committed INTEGER NOT NULL DEFAULT 0,
+                updated_ms INTEGER NULL
+            );
+            """
+        )
+        # индексы под TTL/поиск
+        self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms);")
+        self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_committed ON idempotency(committed);")
+
+    # ---------- primitives ----------
+    def purge_expired(self, ttl_seconds: int) -> int:
+        now_ms = int(time.time() * 1000)
+        threshold = now_ms - ttl_seconds * 1000
         with self.con:
-            self.con.execute("""
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    key TEXT PRIMARY KEY,
-                    created_ms INTEGER NOT NULL,
-                    payload BLOB
-                );
-            """)
+            cur = self.con.execute("DELETE FROM idempotency WHERE created_ms < ?", (threshold,))
+            return cur.rowcount if cur.rowcount is not None else 0
 
     def claim(self, key: str, ttl_seconds: int = 300) -> bool:
+        """
+        Пытаемся «захватить» ключ. Если он уже существует (и не истёк), вернём False.
+        Перед вставкой чистим истёкшие записи.
+        """
+        self.purge_expired(ttl_seconds)
+        now_ms = int(time.time() * 1000)
+        try:
+            with self.con:
+                self.con.execute(
+                    "INSERT INTO idempotency(key, created_ms, committed) VALUES (?, ?, 0)",
+                    (key, now_ms),
+                )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def commit(self, key: str, result: Dict[str, Any]) -> None:
         now_ms = int(time.time() * 1000)
         with self.con:
-            self.con.execute("DELETE FROM idempotency WHERE created_ms < ?", (now_ms - ttl_seconds * 1000,))
-            cur = self.con.execute("SELECT 1 FROM idempotency WHERE key = ?", (key,))
-            if cur.fetchone():
-                return False
-            self.con.execute("INSERT INTO idempotency(key, created_ms) VALUES(?, ?)", (key, now_ms))
-            return True
-
-    def commit(self, key: str, payload: bytes | None = None) -> None:
-        with self.con:
-            self.con.execute("UPDATE idempotency SET payload = ? WHERE key = ?", (payload, key))
+            self.con.execute(
+                "UPDATE idempotency SET result = ?, committed = 1, updated_ms = ? WHERE key = ?",
+                (self._to_json(result), now_ms, key),
+            )
 
     def release(self, key: str) -> None:
         with self.con:
             self.con.execute("DELETE FROM idempotency WHERE key = ?", (key,))
 
-    def get_original_payload(self, key: str) -> Optional[bytes]:
-        cur = self.con.execute("SELECT payload FROM idempotency WHERE key = ?", (key,))
-        row = cur.fetchone()
+    def get_original(self, key: str) -> Optional[Dict[str, Any]]:
+        row = self.con.execute(
+            "SELECT payload, result, committed, created_ms, updated_ms FROM idempotency WHERE key = ?",
+            (key,),
+        ).fetchone()
         if not row:
             return None
-        return row[0]
+        payload, result, committed, created_ms, updated_ms = row
+        return {
+            "payload": self._from_json(payload),
+            "result": self._from_json(result),
+            "committed": bool(committed),
+            "created_ms": int(created_ms),
+            "updated_ms": int(updated_ms) if updated_ms is not None else None,
+        }
 
-    def get_original_order(self, key: str) -> Optional[dict]:
-        """Попытаться декодировать payload как JSON с исходным ответом брокера/позиции."""
-        blob = self.get_original_payload(key)
-        if not blob:
-            return None
-        try:
-            if isinstance(blob, memoryview):
-                blob = blob.tobytes()
-            return json.loads(blob.decode("utf-8"))
-        except Exception:
-            return None
+    # ---------- helpers ----------
+    def check_and_store(self, key: str, payload_json: str, ttl_seconds: int = 300) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Удобный метод для сценария "сначала захватить, потом записать входные данные".
+        Возвращает (is_new, prev). Если запись уже существует в пределах TTL, вернёт prev.
+        """
+        if self.claim(key, ttl_seconds=ttl_seconds):
+            # сохраним payload сразу, чтобы повтор мог вернуть его
+            now_ms = int(time.time() * 1000)
+            with self.con:
+                self.con.execute(
+                    "UPDATE idempotency SET payload = ?, updated_ms = ? WHERE key = ?",
+                    (payload_json, now_ms, key),
+                )
+            return True, None
+        else:
+            return False, self.get_original(key)
 
-    def check_and_store(self, key: str, payload: bytes | None = None, ttl_seconds: int = 300) -> bool:
-        if not self.claim(key, ttl_seconds=ttl_seconds):
-            return False
-        self.commit(key, payload=payload)
-        return True
+    # простые текстовые сериализаторы (ожидается JSON-строка на вход)
+    @staticmethod
+    def _to_json(obj: Any) -> str:
+        if obj is None:
+            return "null"
+        if isinstance(obj, str):
+            return obj
+        # безопасно, без зависимостей
+        import json
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _from_json(s: Any) -> Any:
+        if s is None:
+            return None
+        if isinstance(s, (bytes, bytearray)):
+            s = s.decode("utf-8", "ignore")
+        if isinstance(s, str):
+            s = s.strip()
+            if s == "null" or s == "":
+                return None
+            import json
+            try:
+                return json.loads(s)
+            except Exception:
+                return s
+        return s
