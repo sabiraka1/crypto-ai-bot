@@ -1,134 +1,108 @@
-# utils/time_sync.py
-# Real-world time drift measurement via multiple HTTP time sources.
-# Uses project HTTP client; no direct 'requests' imports.
+# src/crypto_ai_bot/utils/time_sync.py
 from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from statistics import median
-from typing import Any, Dict, List
+from typing import Iterable, Optional
 
-# We expect the caller to pass an instance returned by utils.http_client.get_http_client()
-# which exposes get_json(url, timeout=..., headers=...).
-# This keeps us compliant with the project's 'HTTP only via utils.http_client' rule.
+# ожидаем, что в проекте есть наш HttpClient
+# (utils/http_client.get_http_client().get_json(url, timeout=...))
+# Но здесь принимаем http из внешнего кода, чтобы легко мокать в тестах.
+
+# Дефолтные источники времени (HTTP JSON)
+_DEFAULT_TIME_URLS: list[str] = [
+    # worldtimeapi: содержит unixtime (секунды) и utc_datetime (ISO)
+    "https://worldtimeapi.org/api/timezone/Etc/UTC",
+    # timeapi.io: отдаёт ISO в полях, формат может меняться — парсим универсально
+    "https://www.timeapi.io/api/Time/current/zone?timeZone=UTC",
+    # дополнительный публичный API (резерв; может меняться)
+    "https://timeapi.app/now",
+]
 
 
-def _parse_remote_utc_ms(payload: Dict[str, Any]) -> int | None:
-    """Extract UTC epoch milliseconds from various common time APIs.
-    Supports:
-      - worldtimeapi.org: {'unixtime': 1699999999}  (seconds)
-      - worldtimeapi.org: {'utc_datetime': '2025-08-16T12:34:56.789+00:00'} (ISO)
-      - timeapi.io:      {'currentUtcDateTime': '2025-08-16T12:34:56.789Z'}  (ISO)
-      - generic:         {'epoch': 1699999999123} (ms)
-    Returns None if unrecognized.
+def _to_unix_ms_from_payload(payload: dict) -> Optional[int]:
     """
-    # epoch (ms)
-    if isinstance(payload.get("epoch"), (int, float)):
-        val = int(payload["epoch"])
-        # Heuristic: if it's too small, maybe it's seconds — normalize to ms.
-        return val if val > 10_000_000_000 else val * 1000
+    Пытаемся вытащить время сервера в миллисекундах из разных форматов.
+    Поддерживаем несколько популярных ключей и ISO-строки.
+    """
+    if not isinstance(payload, dict):
+        return None
 
-    # worldtimeapi: seconds since epoch
-    if isinstance(payload.get("unixtime"), (int, float)):
-        return int(float(payload["unixtime"]) * 1000)
-
-    # worldtimeapi: ISO in 'utc_datetime'
-    iso = payload.get("utc_datetime")
-    if isinstance(iso, str):
-        try:
-            if iso.endswith("Z"):
-                iso = iso.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(iso)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp() * 1000)
-        except Exception:
-            pass
-
-    # timeapi.io: ISO in 'currentUtcDateTime'
-    iso2 = payload.get("currentUtcDateTime")
-    if isinstance(iso2, str):
-        try:
-            if iso2.endswith("Z"):
-                iso2 = iso2.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(iso2)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp() * 1000)
-        except Exception:
-            pass
-
-    # Attempt generic 'datetime' or 'dateTime' shapes (ISO)
-    for key in ("datetime", "dateTime", "utc_datetime_ms"):
-        val = payload.get(key)
-        if isinstance(val, str):
+    # 1) Прямые числа
+    for k in ("unixtime_ms", "epoch_ms", "milliseconds"):
+        if k in payload:
             try:
-                s = val
-                if s.endswith("Z"):
-                    s = s.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return int(dt.timestamp() * 1000)
+                return int(payload[k])
             except Exception:
-                continue
+                pass
 
+    # 2) unixtime (секунды)
+    for k in ("unixtime", "epoch", "seconds"):
+        if k in payload:
+            try:
+                return int(float(payload[k]) * 1000)
+            except Exception:
+                pass
+
+    # 3) Вложенные структуры, встречающиеся в некоторых API
+    # worldtimeapi.org: "unixtime" наверху, но на всякий случай поддержим "utc_datetime"
+    for k in ("utc_datetime", "utcDateTime", "datetime", "dateTime", "currentLocalTime", "time"):
+        if k in payload:
+            val = payload[k]
+            if isinstance(val, str):
+                for candidate in (val, val.replace("Z", "+00:00")):
+                    try:
+                        # fromisoformat не ест "Z", поэтому выше заменяем
+                        dt = datetime.fromisoformat(candidate)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return int(dt.timestamp() * 1000)
+                    except Exception:
+                        continue
+
+    # 4) Ничего не нашли
     return None
 
 
-def _measure_single_source(http, url: str, timeout: float = 2.0) -> Dict[str, Any]:
-    """Measure drift against one source using mid-point technique to reduce RTT bias.
-    Returns:
-      {'url','ok','drift_ms','error'}
+def measure_time_drift(*, http, urls: Optional[Iterable[str]] = None, timeout: float = 2.0) -> Optional[int]:
     """
-    t0 = time.time() * 1000.0  # ms
-    try:
-        payload = http.get_json(url, timeout=timeout)
-    except Exception as e:
-        return {'url': url, 'ok': False, 'drift_ms': None, 'error': f'http_error:{type(e).__name__}:{e}'}
+    Возвращает оценку расхождения локальных часов с сервером (в миллисекундах).
+    Берём медиану по успешно измеренным источникам (с поправкой на половину RTT).
 
-    t1 = time.time() * 1000.0
-    client_mid = (t0 + t1) / 2.0
-
-    try:
-        remote_ms = _parse_remote_utc_ms(payload)
-        if remote_ms is None:
-            return {'url': url, 'ok': False, 'drift_ms': None, 'error': 'unrecognized_payload'}
-        drift = int(remote_ms - client_mid)
-        return {'url': url, 'ok': True, 'drift_ms': drift, 'error': None}
-    except Exception as e:
-        return {'url': url, 'ok': False, 'drift_ms': None, 'error': f'parse_error:{type(e).__name__}:{e}'}
-
-
-def measure_time_drift(http,
-                       urls: list[str] | None = None,
-                       *, timeout: float = 2.0) -> Dict[str, Any]:
-    """Measure drift across multiple sources and return a consolidated view.
-    Args:
-      http: utils.http_client.HttpClient
-      urls: list of time endpoints; if None, use two defaults.
-      timeout: per-request timeout (seconds).
-    Returns:
-      {{
-        'drift_ms': int | None,                 # median across successful sources
-        'per_source': List[{{url, ok, drift_ms, error}}],
-        'ok_count': int,
-        'total': int
-      }}
+    :param http: инстанс HttpClient (ожидаем .get_json(url, timeout=...))
+    :param urls: список URL-ов. Если None/пусто — используем дефолтный список
+    :param timeout: таймаут запроса в секундах
+    :return: |drift_ms| (int) или None, если ни один источник не удался
     """
-    if not urls:
-        urls = [
-            "https://worldtimeapi.org/api/timezone/Etc/UTC",
-            "https://timeapi.io/api/Time/current/zone?timeZone=UTC",
-        ]
+    candidates = list(urls or _DEFAULT_TIME_URLS)
+    drifts: list[int] = []
 
-    results = [_measure_single_source(http, u, timeout=timeout) for u in urls]
-    ok_drifts = [r["drift_ms"] for r in results if r.get("ok") and isinstance(r.get("drift_ms"), (int, float))]
+    for url in candidates:
+        t0 = time.perf_counter()
+        local_ms_before = int(time.time() * 1000)
+        try:
+            payload = http.get_json(url, timeout=timeout)
+        except Exception:
+            continue
+        local_ms_after = int(time.time() * 1000)
+        t1 = time.perf_counter()
 
-    agg = {
-        "drift_ms": int(median(ok_drifts)) if ok_drifts else None,
-        "per_source": results,
-        "ok_count": sum(1 for r in results if r.get("ok")),
-        "total": len(results),
-    }
-    return agg
+        rtt_ms = int((t1 - t0) * 1000)
+        server_ms = _to_unix_ms_from_payload(payload)
+        if server_ms is None:
+            continue
+
+        # считаем, что серверное время соответствует середине запроса
+        midpoint_local_ms = local_ms_after - (rtt_ms // 2)
+        drift_ms = abs(server_ms - midpoint_local_ms)
+        drifts.append(drift_ms)
+
+    if not drifts:
+        return None
+
+    # медиана — устойчивее к выбросам
+    drifts.sort()
+    mid = len(drifts) // 2
+    if len(drifts) % 2 == 1:
+        return int(drifts[mid])
+    return int((drifts[mid - 1] + drifts[mid]) / 2)

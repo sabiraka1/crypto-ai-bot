@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/settings.py
 from __future__ import annotations
 
 # ENV читаем ТОЛЬКО здесь.
@@ -8,11 +9,13 @@ from typing import Any, Dict
 
 
 def _to_bool(v: str | None, default: bool) -> bool:
-    if v is None: 
+    if v is None:
         return default
     v = v.strip().lower()
-    if v in ("1","true","yes","on"): return True
-    if v in ("0","false","no","off"): return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
     return default
 
 
@@ -87,9 +90,15 @@ class Settings:
     DEFAULT_ORDER_SIZE: str = field(default_factory=lambda: os.getenv("DEFAULT_ORDER_SIZE", "0.01"))
     DB_PATH: str = field(default_factory=lambda: os.getenv("DB_PATH", "data/bot.sqlite"))
 
-    # --- риски/метрики пороги ---
+    # --- риски/пороги ---
     IDEMPOTENCY_TTL_SECONDS: int = field(default_factory=lambda: _to_int(os.getenv("IDEMPOTENCY_TTL_SECONDS"), 300))
+
+    # --- time sync / health ---
     TIME_DRIFT_LIMIT_MS: int = field(default_factory=lambda: _to_int(os.getenv("TIME_DRIFT_LIMIT_MS"), 1000))
+    # Через запятую. Можно оставить пустым — дефолты возьмём в utils/time_sync.py
+    TIME_DRIFT_URLS: list[str] = field(
+        default_factory=lambda: [u.strip() for u in os.getenv("TIME_DRIFT_URLS", "").split(",") if u.strip()]
+    )
     HEALTH_TIME_TIMEOUT_S: float = field(default_factory=lambda: _to_float(os.getenv("HEALTH_TIME_TIMEOUT_S"), 2.0))
 
     # --- scoring/thresholds (веса) ---
@@ -98,15 +107,19 @@ class Settings:
     THRESHOLD_BUY: float = field(default_factory=lambda: _to_float(os.getenv("THRESHOLD_BUY"), 0.55))
     THRESHOLD_SELL: float = field(default_factory=lambda: _to_float(os.getenv("THRESHOLD_SELL"), 0.45))
 
-    # --- Event Bus настройки (новое) ---
-    BUS_STRATEGIES: Dict[str, str] = field(default_factory=lambda: _parse_mapping(
-        os.getenv("BUS_STRATEGIES"),
-        {"OrderSubmittedEvent": "drop_oldest", "ErrorEvent": "keep_latest"}
-    ))
-    BUS_QUEUE_SIZES: Dict[str, int] = field(default_factory=lambda: _parse_mapping(
-        os.getenv("BUS_QUEUE_SIZES"),
-        {"OrderSubmittedEvent": 2000, "ErrorEvent": 500}
-    ))
+    # --- Event Bus настройки (если используется async_bus) ---
+    BUS_STRATEGIES: Dict[str, str] = field(
+        default_factory=lambda: _parse_mapping(
+            os.getenv("BUS_STRATEGIES"),
+            {"OrderSubmittedEvent": "drop_oldest", "ErrorEvent": "keep_latest"},
+        )
+    )
+    BUS_QUEUE_SIZES: Dict[str, int] = field(
+        default_factory=lambda: _parse_mapping(
+            os.getenv("BUS_QUEUE_SIZES"),
+            {"OrderSubmittedEvent": 2000, "ErrorEvent": 500},
+        )
+    )
     BUS_DLQ_MAX: int = field(default_factory=lambda: _to_int(os.getenv("BUS_DLQ_MAX"), 500))
 
     # --- Telegram / Secrets (опционально, без падений) ---
@@ -116,18 +129,18 @@ class Settings:
     @classmethod
     def build(cls) -> "Settings":
         s = cls()
-        # Нормализация/валидация мягкая: SAFE_MODE → форсируем выключение торговли
+        # SAFE_MODE → форсируем выключение торговли
         if _to_bool(os.getenv("SAFE_MODE"), False):
             s.ENABLE_TRADING = False
 
-        # Валидация конфликтов весов/порогов — мягкая (без исключений)
+        # Валидация весов (мягкая)
         total_w = float(s.SCORE_RULE_WEIGHT) + float(s.SCORE_AI_WEIGHT)
         if total_w <= 0:
             s.SCORE_RULE_WEIGHT, s.SCORE_AI_WEIGHT = 0.5, 0.5
 
-        # Приведение типов некоторых числовых строк (если надо)
+        # Валидация числа в DEFAULT_ORDER_SIZE (мягко)
         try:
-            Decimal(s.DEFAULT_ORDER_SIZE)  # лишь проверка
+            Decimal(s.DEFAULT_ORDER_SIZE)
         except Exception:
             s.DEFAULT_ORDER_SIZE = "0.01"
 
