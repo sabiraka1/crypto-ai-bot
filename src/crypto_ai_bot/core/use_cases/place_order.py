@@ -7,9 +7,7 @@ import json
 import hashlib
 
 from crypto_ai_bot.utils import metrics
-
-# Мягкие зависимости (репозитории и audit приходят через аргументы)
-# Мы не импортируем конкретные реализации — только используем методы по протоколу (duck typing).
+from crypto_ai_bot.utils.rate_limit import rate_limit
 
 def _now_ms() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
@@ -41,6 +39,11 @@ def _build_idem_key(idem_repo: Any, *, symbol: str, side: str, size: str, decisi
     minute = int(ts_ms // 60000)
     return f"{symbol}:{side}:{size}:{minute}:{(decision_id or '')[:8]}"
 
+@rate_limit(
+    calls=3, period=10.0,
+    calls_attr="RL_PLACE_ORDER_CALLS", period_attr="RL_PLACE_ORDER_PERIOD",
+    key_fn=lambda *a, **kw: f"place_order:{getattr(a[0],'MODE',None)}",
+)
 def place_order(cfg, broker, positions_repo, audit_repo, idempotency_repo, decision: Dict[str, Any]) -> Dict[str, Any]:
     """
     Размещает ордер, используя идемпотентность:

@@ -8,7 +8,13 @@ from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.positions.tracker import build_context
 from crypto_ai_bot.core.risk import manager as risk_manager
 from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.utils.rate_limit import rate_limit
 
+@rate_limit(
+    calls=3, period=10.0,
+    calls_attr="RL_EVAL_EXEC_CALLS", period_attr="RL_EVAL_EXEC_PERIOD",
+    key_fn=lambda *a, **kw: f"eval_exec:{getattr(a[0],'MODE',None)}",
+)
 def eval_and_execute(cfg, broker, *, symbol: Optional[str]=None, timeframe: Optional[str]=None, limit: int=300, **repos) -> Dict[str, Any]:
     """
     Сквозной UC: evaluate -> risk -> place_order (идемпотентно).
