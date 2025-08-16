@@ -1,115 +1,124 @@
-# src/crypto_ai_bot/core/signals/_build.py
 from __future__ import annotations
 
+from typing import Dict, Any, Tuple, Optional
 from decimal import Decimal
-from typing import Any, Dict, Tuple
+from datetime import datetime, timezone
 
-import pandas as pd
+import pandas as pd  # runtime dep ensured in requirements
+import numpy as np
 
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-from crypto_ai_bot.core.indicators import unified as I
-from crypto_ai_bot.core.validators.dataframe import assert_min_len  # require_ohlcv (если есть)
-from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.core.indicators import unified as IND
 
+# ---- helpers -----------------------------------------------------------------
 
-def _to_df(ohlcv: list[list[float]]) -> pd.DataFrame:
-    # ожидаем: [[ts, o, h, l, c, v], ...]
-    df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-    # упорядочим на всякий случай
-    df = df.sort_values("ts").reset_index(drop=True)
-    return df
-
-
-def _last_float(s: pd.Series, default: float | None = None) -> float | None:
+def _safe_last(series: pd.Series, default: float = float("nan")) -> float:
     try:
-        v = s.dropna().iloc[-1]
-        return float(v)
+        return float(series.iloc[-1])
     except Exception:
         return default
 
+def _compute_spread_pct(ticker: Dict[str, Any]) -> Optional[float]:
+    try:
+        bid = float(ticker.get("bid"))
+        ask = float(ticker.get("ask"))
+        if bid > 0 and ask > 0 and ask >= bid:
+            mid = 0.5 * (ask + bid)
+            if mid > 0:
+                return (ask - bid) / mid * 100.0
+    except Exception:
+        pass
+    return None
 
-def _calc_indicators(df: pd.DataFrame, cfg) -> Dict[str, float | None]:
-    # параметры по умолчанию
-    ema_fast = int(getattr(cfg, "EMA_FAST", 20))
-    ema_slow = int(getattr(cfg, "EMA_SLOW", 50))
-    rsi_n = int(getattr(cfg, "RSI_N", 14))
-    macd_fast = int(getattr(cfg, "MACD_FAST", 12))
-    macd_slow = int(getattr(cfg, "MACD_SLOW", 26))
-    macd_sig = int(getattr(cfg, "MACD_SIGNAL", 9))
-    atr_n = int(getattr(cfg, "ATR_N", 14))
+def _ensure_min_len(df: pd.DataFrame, n: int) -> bool:
+    try:
+        return len(df) >= n
+    except Exception:
+        return False
 
-    ema_f = I.ema(df["close"], ema_fast)
-    ema_s = I.ema(df["close"], ema_slow)
-    rsi = I.rsi(df["close"], rsi_n)
-    macd, macd_sig_s, macd_hist = I.macd(df["close"], macd_fast, macd_slow, macd_sig)
-    atr = I.atr(df["high"], df["low"], df["close"], atr_n)
-
-    close = df["close"]
-    atr_pct = (atr / close) * 100.0
-
-    return {
-        "ema_fast": _last_float(ema_f),
-        "ema_slow": _last_float(ema_s),
-        "rsi": _last_float(rsi),
-        "macd": _last_float(macd),
-        "macd_signal": _last_float(macd_sig_s),
-        "macd_hist": _last_float(macd_hist),
-        "atr": _last_float(atr),
-        "atr_pct": _last_float(atr_pct),
-        "close": _last_float(close),
-    }
-
+# ---- public (internal) API ---------------------------------------------------
 
 def build(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
+    """Собирает feature-set: OHLCV → индикаторы → normalize → context.
+    Без обращения к БД. Только broker + векторные индикаторы.
+    Возвращает dict со структурой, пригодной для policy/fusion/risk.
     """
-    Сбор фич: OHLCV → индикаторы → нормализация → market/ticker (spread).
-    Никаких HTTP/ENV — только вызовы брокера + чистые вычисления.
-    """
-    sym = normalize_symbol(symbol)
-    tf = normalize_timeframe(timeframe)
+    sym = normalize_symbol(symbol or cfg.SYMBOL)
+    tf = normalize_timeframe(timeframe or cfg.TIMEFRAME)
 
-    # 1) рыночные бары
-    ohlcv = broker.fetch_ohlcv(sym, tf, int(limit))
-    df = _to_df(ohlcv)
-    min_bars = int(getattr(cfg, "MIN_FEATURE_BARS", 100))
-    assert_min_len(df, min_bars)
+    # Fetch OHLCV
+    raw = broker.fetch_ohlcv(sym, tf, limit)  # [[ts, o, h, l, c, v], ...]
+    if not raw or len(raw) < 50:
+        raise ValueError("not_enough_ohlcv")
 
-    # 2) индикаторы
-    feats = _calc_indicators(df, cfg)
+    df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+    # normalize types
+    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    for col in ("open","high","low","close","volume"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 3) тикер для спреда/последней цены
+    # Indicators (centralized in IND)
+    # Use common defaults
+    ema_fast_n, ema_slow_n = 20, 50
+    rsi_n = 14
+    macd_fast, macd_slow, macd_signal = 12, 26, 9
+    atr_n = 14
+
+    ema_fast = IND.ema(df["close"], ema_fast_n)
+    ema_slow = IND.ema(df["close"], ema_slow_n)
+    rsi = IND.rsi(df["close"], rsi_n)
+    macd_line, macd_signal_s, macd_hist = IND.macd(df["close"], macd_fast, macd_slow, macd_signal)
+    atr = IND.atr(df["high"], df["low"], df["close"], atr_n)
+
+    # Aggregate last values
+    last_close = _safe_last(df["close"])
+    last_ts = df["ts"].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc)
+
+    atr_pct = float("nan")
+    if last_close and last_close > 0 and _ensure_min_len(atr, atr_n):
+        atr_pct = float(_safe_last(atr) / last_close * 100.0)
+
+    # Ticker/spread
+    ticker = {}
     try:
-        tkr = broker.fetch_ticker(sym)
-        bid = float(tkr.get("bid") or tkr.get("last") or feats["close"] or 0.0)
-        ask = float(tkr.get("ask") or tkr.get("last") or feats["close"] or 0.0)
-        price = float(tkr.get("last") or feats["close"] or (bid + ask) / 2.0)
-        spread_pct = float(((ask - bid) / price) * 100.0) if price > 0 else 0.0
+        ticker = broker.fetch_ticker(sym) or {}
     except Exception:
-        # если тикер недоступен — используем close и нулевой спред
-        bid = ask = price = float(feats["close"] or 0.0)
-        spread_pct = 0.0
+        ticker = {}
 
-    metrics.inc("features_built_total", {"tf": tf})
+    spread_pct = _compute_spread_pct(ticker)
 
-    return {
+    # Context
+    ctx = {
+        "hour": last_ts.hour,                         # UTC hour of last candle
+        "spread_pct": spread_pct,                     # None if bid/ask unknown
+        "price": float(last_close),
+        "ts": int(last_ts.timestamp() * 1000),
+        # optional fields (left None for now; can be filled by higher layers)
+        "day_drawdown_pct": None,
+        "seq_losses": None,
+        "exposure_pct": None,
+        "exposure_usd": None,
+    }
+
+    features = {
+        "symbol": sym,
+        "timeframe": tf,
         "indicators": {
-            "ema_fast": feats["ema_fast"],
-            "ema_slow": feats["ema_slow"],
-            "rsi": feats["rsi"],
-            "macd": feats["macd"],
-            "macd_signal": feats["macd_signal"],
-            "macd_hist": feats["macd_hist"],
-            "atr": feats["atr"],
-            "atr_pct": feats["atr_pct"],
+            "ema_fast": float(_safe_last(ema_fast)),
+            "ema_slow": float(_safe_last(ema_slow)),
+            "rsi": float(_safe_last(rsi)),
+            "macd_hist": float(_safe_last(macd_hist)),
+            "atr": float(_safe_last(atr)),
+            "atr_pct": float(atr_pct),
         },
         "market": {
-            "price": price,
-            "bid": bid,
-            "ask": ask,
-            "spread_pct": spread_pct,
-            "timeframe": tf,
-            "symbol": sym,
+            "price": float(last_close),
+            "ts": int(last_ts.timestamp() * 1000),
         },
-        "rule_score": None,  # может быть заполнен в policy при необходимости
-        "ai_score": None,    # если ML блок подключится
+        "context": ctx,
+        # placeholders for scoring layers (policy/_fusion will use them)
+        "rule_score": None,
+        "ai_score": None,
     }
+
+    return features

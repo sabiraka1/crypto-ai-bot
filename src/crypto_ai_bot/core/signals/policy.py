@@ -1,82 +1,121 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional
-from decimal import Decimal
-from uuid import uuid4
 
-from . import _build, _fusion
-from crypto_ai_bot.core.risk import manager as risk_manager
+from typing import Dict, Any, Tuple
+from dataclasses import dataclass
 
-def _as_decimal(x) -> Decimal:
-    try:
-        return Decimal(str(x))
-    except Exception:
-        return Decimal('0')
+from crypto_ai_bot.core.signals import _build
+from crypto_ai_bot.core.signals import _fusion  # if you have a separate fusion, otherwise inline combine
+from crypto_ai_bot.utils.metrics import inc, observe
 
-def decide(cfg, broker, *, symbol: Optional[str], timeframe: Optional[str], limit: Optional[int]) -> Dict[str, Any]:
-    """Public decision point. Returns dict with full explain-schema.
-    Structure:
-      {
-        action, size, sl, tp, trail, score, symbol, timeframe, ts, decision_id,
-        explain: {signals, blocks, weights, thresholds, context}
-      }
+@dataclass
+class Thresholds:
+    buy: float
+    sell: float
+
+def _rule_score(feat: Dict[str, Any]) -> float:
+    """Heuristic, normalized [0..1].
+
+    + EMA fast above slow -> bullish
+
+    + RSI 50..70 moderate bullish; <30 oversold (bullish contrarian), >70 overbought (bearish contrarian)
+
+    + MACD hist > 0 bullish
+
     """
-    feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
-    # signals come from features.indicators etc.
-    signals = feats.get('indicators', {}) | (feats.get('signals', {}) or {})
+    ind = feat.get("indicators", {})
+    ema_fast = float(ind.get("ema_fast", 0.0))
+    ema_slow = float(ind.get("ema_slow", 0.0))
+    rsi = float(ind.get("rsi", 50.0))
+    macd_hist = float(ind.get("macd_hist", 0.0))
 
-    # simple rule score from a couple of indicators (example logic)
-    # you can replace by your more advanced scoring inside _build
-    rule_score = feats.get('rule_score')
-    ai_score = feats.get('ai_score')
-    score = _fusion.fuse(rule_score, ai_score, cfg)
+    score = 0.5  # neutral anchor
+    # EMA cross
+    if ema_fast > 0 and ema_slow > 0:
+        score += 0.2 if ema_fast > ema_slow else -0.2
+    # RSI
+    if rsi >= 55 and rsi <= 70:
+        score += 0.15
+    elif rsi < 30:
+        score += 0.10  # contrarian oversold
+    elif rsi > 70:
+        score -= 0.10  # contrarian overbought
+    # MACD hist
+    if macd_hist > 0:
+        score += 0.15
+    else:
+        score -= 0.05
+    # clamp
+    return max(0.0, min(1.0, score))
 
-    # basic thresholds
-    buy_thr = getattr(cfg, 'THRESHOLD_BUY', 0.55)
-    sell_thr = getattr(cfg, 'THRESHOLD_SELL', 0.45)
+def _combine_scores(rule_score: float | None, ai_score: float | None, cfg) -> float:
+    if rule_score is None and ai_score is None:
+        return 0.5
+    if ai_score is None:
+        return float(rule_score)
+    if rule_score is None:
+        return float(ai_score)
+    # weighted
+    w_rule = float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5))
+    w_ai = float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5))
+    s = w_rule + w_ai or 1.0
+    w_rule, w_ai = w_rule/s, w_ai/s
+    return float(max(0.0, min(1.0, w_rule*rule_score + w_ai*ai_score)))
 
-    action: str = 'hold'
-    size = Decimal('0')
-    if score >= Decimal(str(buy_thr)):
-        action = 'buy'
-        size = _as_decimal(getattr(cfg, 'DEFAULT_ORDER_SIZE', '0.01'))
-    elif score <= Decimal(str(sell_thr)):
-        action = 'sell'
-        size = _as_decimal(getattr(cfg, 'DEFAULT_ORDER_SIZE', '0.01'))
+def _action_from_score(score: float, thr: Thresholds) -> str:
+    if score >= thr.buy:
+        return "buy"
+    if score <= thr.sell:
+        return "sell"
+    return "hold"
 
-    decision = {
-        'action': action,
-        'size': str(size),
-        'sl': None,
-        'tp': None,
-        'trail': None,
-        'score': float(score),
-        'symbol': symbol or getattr(cfg, 'SYMBOL', 'BTC/USDT'),
-        'timeframe': timeframe or getattr(cfg, 'TIMEFRAME', '1h'),
-        'ts': int(feats.get('market', {}).get('ts') or 0),
-        'decision_id': uuid4().hex,
-        'explain': {
-            'signals': signals,
-            'blocks': feats.get('blocks', {}),
-            'weights': {
-                'rule': getattr(cfg, 'SCORE_RULE_WEIGHT', 0.5),
-                'ai': getattr(cfg, 'SCORE_AI_WEIGHT', 0.5),
-            },
-            'thresholds': {
-                'buy': buy_thr,
-                'sell': sell_thr,
-            },
-            'context': {
-                'price': float(feats.get('market', {}).get('price') or 0),
-                'atr': float(signals.get('atr') or 0),
-                'atr_pct': float(signals.get('atr_pct') or 0),
-            }
-        }
+def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
+    f = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+
+    # rule score
+    rs = _rule_score(f)
+    f["rule_score"] = rs
+    # ai_score остаётся None (можно подмешать позже из модели)
+    final_score = _combine_scores(rs, f.get("ai_score"), cfg)
+
+    thr = Thresholds(buy=float(getattr(cfg, "THRESHOLD_BUY", 0.6)),
+                     sell=float(getattr(cfg, "THRESHOLD_SELL", 0.4)))
+    action = _action_from_score(final_score, thr)
+
+    # default size
+    size = str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0"))
+
+    explain = {
+        "signals": f.get("indicators", {}),
+        "blocks": {},  # заполнится risk-менеджером снаружи при отказах
+        "weights": {
+            "rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)),
+            "ai": float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5)),
+        },
+        "thresholds": {
+            "buy": thr.buy,
+            "sell": thr.sell,
+        },
+        "context": f.get("context", {}),
     }
 
-    # risk pre-check right here is optional; main check happens in use-case
-    ok, reason = risk_manager.check(decision, cfg)
-    if not ok:
-        # keep action but annotate
-        decision['explain']['blocks']['risk'] = reason
+    decision = {
+        "id": "",  # может быть заполнен выше по конвейеру, если требуется
+        "symbol": f.get("symbol"),
+        "timeframe": f.get("timeframe"),
+        "action": action,
+        "size": size,
+        "sl": None,
+        "tp": None,
+        "trail": None,
+        "score": final_score,
+        "explain": explain,
+    }
+
+    # metrics
+    try:
+        inc("bot_decision_total", {"action": action})
+        observe("decision_score_histogram", final_score, {})
+    except Exception:
+        pass
 
     return decision
