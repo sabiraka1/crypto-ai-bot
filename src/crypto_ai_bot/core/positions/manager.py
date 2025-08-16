@@ -49,6 +49,17 @@ def configure_uow(uow: UnitOfWork) -> None:
     _UOW = uow
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _find_open_by_symbol(repo: PositionsRepo, symbol: str) -> Optional[Dict[str, Any]]:
+    for p in repo.get_open():
+        if p.get("symbol") == symbol and p.get("status") == "open":
+            return p
+    return None
+
+
 @dataclass
 class PositionManager:
     """
@@ -62,7 +73,7 @@ class PositionManager:
 
     # --- операции ---
     def open(self, symbol: str, side: str, size: Decimal, *, sl: Optional[Decimal] = None, tp: Optional[Decimal] = None) -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
+        now = _now_iso()
         pos = {
             "id": f"pos-{symbol}-{now}",
             "symbol": symbol,
@@ -84,23 +95,77 @@ class PositionManager:
                 self.audit_repo.append({"ts": now, "type": "position_open", "symbol": symbol, "side": side, "qty": str(size)})
         return pos
 
-    def partial_close(self, pos_id: str, size: Decimal) -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
+    def open_or_add(self, symbol: str, qty: Decimal, price: Decimal) -> Dict[str, Any]:
+        """
+        Если есть открытая позиция по символу — увеличиваем qty, иначе открываем новую (side выводим из знака qty).
+        Возвращает снапшот для тестов.
+        """
+        side = "buy" if qty >= 0 else "sell"
+        now = _now_iso()
         if self.uow is not None:
             with self.uow:
+                pos = _find_open_by_symbol(self.positions_repo, symbol)
+                if pos is None:
+                    pos = self.open(symbol, side, abs(qty))
+                else:
+                    new_qty = (Decimal(str(pos.get("qty", "0"))) + abs(qty))
+                    pos["qty"] = str(new_qty)
+                    self.positions_repo.upsert(pos)
                 if self.trades_repo:
-                    self.trades_repo.insert({"ts": now, "pos_id": pos_id, "qty": str(size), "context": {"action": "partial_close"}})
+                    self.trades_repo.insert({"ts": now, "symbol": symbol, "side": side, "price": str(price), "qty": str(abs(qty)), "action": "add"})
                 if self.audit_repo:
-                    self.audit_repo.append({"ts": now, "type": "position_partial_close", "pos_id": pos_id, "qty": str(size)})
+                    self.audit_repo.append({"ts": now, "type": "order_add", "symbol": symbol, "qty": str(abs(qty)), "price": str(price)})
         else:
+            pos = _find_open_by_symbol(self.positions_repo, symbol)
+            if pos is None:
+                pos = self.open(symbol, side, abs(qty))
+            else:
+                new_qty = (Decimal(str(pos.get("qty", "0"))) + abs(qty))
+                pos["qty"] = str(new_qty)
+                self.positions_repo.upsert(pos)
             if self.trades_repo:
-                self.trades_repo.insert({"ts": now, "pos_id": pos_id, "qty": str(size), "context": {"action": "partial_close"}})
+                self.trades_repo.insert({"ts": now, "symbol": symbol, "side": side, "price": str(price), "qty": str(abs(qty)), "action": "add"})
             if self.audit_repo:
-                self.audit_repo.append({"ts": now, "type": "position_partial_close", "pos_id": pos_id, "qty": str(size)})
-        return {"status": "ok", "pos_id": pos_id, "closed_qty": str(size)}
+                self.audit_repo.append({"ts": now, "type": "order_add", "symbol": symbol, "qty": str(abs(qty)), "price": str(price)})
+        return self.get_snapshot()
+
+    def reduce(self, symbol: str, qty: Decimal, price: Decimal) -> Dict[str, Any]:
+        """
+        Снижаем позицию по символу на qty. Если qty >= текущего размера — закрываем.
+        """
+        now = _now_iso()
+        pos = _find_open_by_symbol(self.positions_repo, symbol)
+        if pos is None:
+            # ничего не делаем, возвращаем снапшот
+            return self.get_snapshot()
+
+        cur_qty = Decimal(str(pos.get("qty", "0")))
+        new_qty = cur_qty - abs(qty)
+        if self.uow is not None:
+            with self.uow:
+                if new_qty <= 0:
+                    self._do_close(pos["id"], now)
+                else:
+                    pos["qty"] = str(new_qty)
+                    self.positions_repo.upsert(pos)
+                if self.trades_repo:
+                    self.trades_repo.insert({"ts": now, "symbol": symbol, "price": str(price), "qty": str(abs(qty)), "action": "reduce"})
+                if self.audit_repo:
+                    self.audit_repo.append({"ts": now, "type": "order_reduce", "symbol": symbol, "qty": str(abs(qty)), "price": str(price)})
+        else:
+            if new_qty <= 0:
+                self._do_close(pos["id"], now)
+            else:
+                pos["qty"] = str(new_qty)
+                self.positions_repo.upsert(pos)
+            if self.trades_repo:
+                self.trades_repo.insert({"ts": now, "symbol": symbol, "price": str(price), "qty": str(abs(qty)), "action": "reduce"})
+            if self.audit_repo:
+                self.audit_repo.append({"ts": now, "type": "order_reduce", "symbol": symbol, "qty": str(abs(qty)), "price": str(price)})
+        return self.get_snapshot()
 
     def close(self, pos_id: str) -> Dict[str, Any]:
-        now = datetime.now(timezone.utc).isoformat()
+        now = _now_iso()
         if self.uow is not None:
             with self.uow:
                 self._do_close(pos_id, now)
@@ -124,11 +189,9 @@ class PositionManager:
         return {"open_positions": opens}
 
     def get_pnl(self) -> Decimal:
-        # без цен/истории делаем заглушку
         return Decimal("0")
 
     def get_exposure(self) -> Decimal:
-        # вычисляем экспозицию как сумму |qty|
         try:
             total = Decimal("0")
             for p in self.positions_repo.get_open():

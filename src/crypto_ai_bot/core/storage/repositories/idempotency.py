@@ -7,37 +7,52 @@ from typing import Any, Dict, Optional, Tuple
 
 class SqliteIdempotencyRepository:
     """
-    Простейшая реализация идемпотентности поверх SQLite.
-    Таблица:
-      key TEXT PRIMARY KEY
-      payload TEXT NULL         -- что пытались выполнить (решение и т.п.)
-      result  TEXT NULL         -- итог операции (для повторной выдачи)
-      created_ms INTEGER NOT NULL
-      committed INTEGER NOT NULL DEFAULT 0
-      updated_ms INTEGER NULL
+    Реализация идемпотентности поверх SQLite.
+    Обновлена для корректной работы даже если таблица уже существовала в старой схеме.
     """
 
     def __init__(self, con: sqlite3.Connection) -> None:
         self.con = con
         self._ensure_schema()
 
-    # ---------- schema ----------
+    # ---------- schema & migrations ----------
+    def _has_column(self, table: str, col: str) -> bool:
+        cur = self.con.execute(f"PRAGMA table_info({table})")
+        return any(r[1] == col for r in cur.fetchall())
+
     def _ensure_schema(self) -> None:
+        # Базовая таблица (если не было вообще)
         self.con.execute(
             """
             CREATE TABLE IF NOT EXISTS idempotency (
-                key TEXT PRIMARY KEY,
-                payload TEXT NULL,
-                result TEXT NULL,
-                created_ms INTEGER NOT NULL,
-                committed INTEGER NOT NULL DEFAULT 0,
-                updated_ms INTEGER NULL
+                key TEXT PRIMARY KEY
             );
             """
         )
-        # индексы под TTL/поиск
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms);")
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_committed ON idempotency(committed);")
+        # Эволюция схемы: добавляем недостающие колонки
+        if not self._has_column("idempotency", "payload"):
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN payload TEXT NULL;")
+        if not self._has_column("idempotency", "result"):
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN result TEXT NULL;")
+        if not self._has_column("idempotency", "created_ms"):
+            # новый столбец — заполняем текущим временем для существующих записей
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN created_ms INTEGER NOT NULL DEFAULT 0;")
+            now_ms = int(time.time() * 1000)
+            self.con.execute("UPDATE idempotency SET created_ms = CASE WHEN created_ms=0 THEN ? ELSE created_ms END;", (now_ms,))
+        if not self._has_column("idempotency", "committed"):
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN committed INTEGER NOT NULL DEFAULT 0;")
+        if not self._has_column("idempotency", "updated_ms"):
+            self.con.execute("ALTER TABLE idempotency ADD COLUMN updated_ms INTEGER NULL;")
+
+        # Индексы могут ссылаться на старые таблицы — оборачиваем в try/except
+        try:
+            self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms);")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_committed ON idempotency(committed);")
+        except sqlite3.OperationalError:
+            pass
 
     # ---------- primitives ----------
     def purge_expired(self, ttl_seconds: int) -> int:
@@ -92,7 +107,6 @@ class SqliteIdempotencyRepository:
             "updated_ms": int(updated_ms) if updated_ms is not None else None,
         }
 
-    # ---------- helpers ----------
     def check_and_store(self, key: str, payload_json: str, ttl_seconds: int = 300) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
         Удобный метод для сценария "сначала захватить, потом записать входные данные".
@@ -117,7 +131,6 @@ class SqliteIdempotencyRepository:
             return "null"
         if isinstance(obj, str):
             return obj
-        # безопасно, без зависимостей
         import json
         return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
