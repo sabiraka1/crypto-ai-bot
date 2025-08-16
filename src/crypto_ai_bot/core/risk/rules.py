@@ -1,92 +1,74 @@
 from __future__ import annotations
-from typing import Tuple, Dict, Any, Optional
 
-# ------------------------------
-# Helpers
-# ------------------------------
+from typing import Tuple, Optional, Dict, Any
+from decimal import Decimal
+from datetime import datetime, timezone
 
-def _ctx(decision: Dict[str, Any]) -> Dict[str, Any]:
-    return (decision or {}).get("explain", {}).get("context", {}) or {}
+# внешние зависимости — мягкие (safe import)
+try:
+    from crypto_ai_bot.utils.time_sync import measure_time_drift  # returns float ms
+except Exception:  # pragma: no cover
+    def measure_time_drift() -> float:  # type: ignore
+        return 0.0
 
-def _get(d: Dict[str, Any], key: str, default: Optional[float] = None) -> Optional[float]:
-    v = d.get(key, default)
+# ---------- helpers ----------
+
+def _pct(x) -> float:
     try:
-        return float(v) if v is not None else None
+        return float(x)
     except Exception:
-        return default
+        return 0.0
 
-# ------------------------------
-# Atomic risk checks (pure functions)
-# Each returns (ok: bool, reason: str)
-# If required inputs are missing, return (True, "")
-# ------------------------------
+def _now_hour_utc() -> int:
+    return int(datetime.now(tz=timezone.utc).hour)
 
-def check_time_sync(*, drift_ms: int, limit_ms: int) -> Tuple[bool, str]:
-    """Block trading when local clock drift exceeds limit."""
-    if drift_ms <= limit_ms:
-        return True, ""
-    return False, f"time_drift_exceeded:{drift_ms}>{limit_ms}"
+# ---------- pure checks (return ok, detail) ----------
 
-def check_hours(decision: Dict[str, Any], cfg) -> Tuple[bool, str]:
-    """Optional: allow trading only within [start,end). If not configured -> pass."""
-    start = int(getattr(cfg, "TRADING_START_HOUR", 0))
-    end = int(getattr(cfg, "TRADING_END_HOUR", 24))
-    if start <= 0 and end >= 24:
-        return True, ""
-    hour = _get(_ctx(decision), "hour")
-    if hour is None:
-        return True, ""
-    if start <= int(hour) < end:
-        return True, ""
-    return False, f"blocked_by_hours:{hour}"
-
-def check_spread(decision: Dict[str, Any], cfg) -> Tuple[bool, str]:
-    """Fail if current spread percentage is above limit."""
-    limit = float(getattr(cfg, "MAX_SPREAD_PCT", 0.30))  # percent
-    c = _ctx(decision)
-    spread_pct = _get(c, "spread_pct") or _get(decision, "spread_pct")
-    if spread_pct is None:
-        return True, ""
-    if spread_pct <= limit:
-        return True, ""
-    return False, f"spread_too_wide:{spread_pct:.4f}>{limit:.4f}"
-
-def check_dd(decision: Dict[str, Any], cfg) -> Tuple[bool, str]:
-    """Daily drawdown cap (percentage)."""
-    limit = float(getattr(cfg, "MAX_DRAWDOWN_PCT", 5.0))
-    dd = _get(_ctx(decision), "day_drawdown_pct")
-    if dd is None:
-        return True, ""
-    if dd <= limit:
-        return True, ""
-    return False, f"day_dd_exceeded:{dd:.4f}>{limit:.4f}"
-
-def check_seq_losses(decision: Dict[str, Any], cfg) -> Tuple[bool, str]:
-    """Stop trading after N consecutive losses (rolling)."""
-    limit = int(getattr(cfg, "MAX_SEQ_LOSSES", 5))
-    seq = _get(_ctx(decision), "seq_losses")
-    if seq is None:
-        return True, ""
-    if int(seq) <= limit:
-        return True, ""
-    return False, f"seq_losses_exceeded:{int(seq)}>{limit}"
-
-def check_max_exposure(decision: Dict[str, Any], cfg) -> Tuple[bool, str]:
-    """Cap overall exposure either by pct of equity or absolute USD."""
-    c = _ctx(decision)
-    exp_pct = _get(c, "exposure_pct")
-    exp_usd = _get(c, "exposure_usd")
-    lim_pct = float(getattr(cfg, "MAX_EXPOSURE_PCT", 100.0))  # percent of equity
-    lim_usd = _get(vars(cfg), "MAX_EXPOSURE_USD")  # may be None
-
-    # If nothing known about exposure -> pass
-    if exp_pct is None and exp_usd is None:
-        return True, ""
-
-    if exp_pct is not None and exp_pct > lim_pct:
-        return False, f"exposure_pct_exceeded:{exp_pct:.4f}>{lim_pct:.4f}"
-
-    if lim_usd is not None and exp_usd is not None and exp_usd > float(lim_usd):
-        return False, f"exposure_usd_exceeded:{exp_usd:.2f}>{float(lim_usd):.2f}"
-
+def check_disabled(*, safe_mode: bool, enable_trading: bool) -> Tuple[bool, str]:
+    if safe_mode or not enable_trading:
+        return False, "trading_disabled"
     return True, ""
+
+def check_hours(*, start_hour: int, end_hour: int) -> Tuple[bool, str]:
+    """Торговать только в окне [start_hour, end_hour) в UTC"""
+    h = _now_hour_utc()
+    ok = (h >= int(start_hour)) and (h < int(end_hour))
+    return (ok, f"utc_hour={h}, allowed=[{start_hour},{end_hour})") if not ok else (True, "")
+
+def check_spread(*, spread_pct: Optional[float], max_spread_pct: float) -> Tuple[bool, str]:
+    if spread_pct is None:
+        return True, ""  # нет данных — не блокируем
+    ok = float(spread_pct) <= float(max_spread_pct)
+    return (ok, f"spread_pct={spread_pct:.4f} > max={max_spread_pct:.4f}") if not ok else (True, "")
+
+def check_max_drawdown(*, day_drawdown_pct: Optional[float], max_drawdown_pct: float) -> Tuple[bool, str]:
+    if day_drawdown_pct is None:
+        return True, ""
+    ok = _pct(day_drawdown_pct) <= _pct(max_drawdown_pct)
+    return (ok, f"day_dd_pct={day_drawdown_pct:.4f} > max={max_drawdown_pct:.4f}") if not ok else (True, "")
+
+def check_seq_losses(*, seq_losses: Optional[int], max_seq_losses: int) -> Tuple[bool, str]:
+    if seq_losses is None:
+        return True, ""
+    ok = int(seq_losses) <= int(max_seq_losses)
+    return (ok, f"seq_losses={seq_losses} > max={max_seq_losses}") if not ok else (True, "")
+
+def check_max_exposure(*, exposure_pct: Optional[float], max_exposure_pct: Optional[float],
+                       exposure_usd: Optional[float], max_exposure_usd: Optional[float]) -> Tuple[bool, str]:
+    # приоритет проценту, если и то и то есть
+    if max_exposure_pct is not None and exposure_pct is not None:
+        ok = _pct(exposure_pct) <= _pct(max_exposure_pct)
+        return (ok, f"exposure_pct={exposure_pct:.4f} > max={max_exposure_pct:.4f}") if not ok else (True, "")
+    if max_exposure_usd is not None and exposure_usd is not None:
+        ok = _pct(exposure_usd) <= _pct(max_exposure_usd)
+        return (ok, f"exposure_usd={exposure_usd:.2f} > max={max_exposure_usd:.2f}") if not ok else (True, "")
+    return True, ""
+
+def check_time_drift(*, drift_ms_limit: int) -> Tuple[bool, str]:
+    """Блокирует торговлю при рассинхронизации времени больше лимита (ms)."""
+    try:
+        drift = float(measure_time_drift())
+    except Exception:
+        drift = 0.0
+    ok = drift <= float(drift_ms_limit)
+    return (ok, f"drift_ms={drift:.0f} > limit={drift_ms_limit}") if not ok else (True, "")

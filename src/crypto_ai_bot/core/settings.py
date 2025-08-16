@@ -1,117 +1,103 @@
 from __future__ import annotations
-import os, json
+
+import os
 from decimal import Decimal
-from typing import Dict, Any, Optional
-
-__all__ = ["Settings"]
-
-def _b(s: Optional[str], *, default: bool = False) -> bool:
-    if s is None:
-        return default
-    s = s.strip().lower()
-    return s in ("1", "true", "yes", "y", "on")
-
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 class Settings:
-    """
-    Единственное место чтения ENV. Никаких побочных эффектов.
-    """
-    # ---- Конструктор читает ENV и нормализует значения ----
-    def __init__(self) -> None:
-        # ---------- Режимы/торговля ----------
-        self.MODE: str = os.getenv("MODE", "paper").strip().lower()          # live | paper | backtest
-        self.SAFE_MODE: bool = _b(os.getenv("SAFE_MODE"), default=False)     # при True запрещаем исполнение ордеров
+    # --- mode ---
+    MODE: str
+    PAPER_MODE: bool
 
-        self.ENABLE_TRADING: bool = _b(os.getenv("ENABLE_TRADING"), default=False)
-        if self.SAFE_MODE:
-            self.ENABLE_TRADING = False
+    # --- symbols/time ---
+    SYMBOL: str
+    TIMEFRAME: str
+    TIME_DRIFT_MAX_MS: int
 
-        # ---------- Рынок ----------
-        self.SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
-        self.TIMEFRAME: str = os.getenv("TIMEFRAME", "1h")
+    # --- risk ---
+    MAX_SPREAD_PCT: float
+    MAX_DRAWDOWN_PCT: float
+    MAX_SEQ_LOSSES: int
+    MAX_EXPOSURE_PCT: float | None
+    MAX_EXPOSURE_USD: float | None
+    TRADING_START_HOUR: int
+    TRADING_END_HOUR: int
 
-        self.DEFAULT_ORDER_SIZE: Decimal = Decimal(os.getenv("DEFAULT_ORDER_SIZE", "0"))
-        self.MAX_ORDER_SIZE: Decimal = Decimal(os.getenv("MAX_ORDER_SIZE", "0"))
+    # --- decision thresholds/weights ---
+    THRESHOLD_BUY: float
+    THRESHOLD_SELL: float
+    SCORE_RULE_WEIGHT: float
+    SCORE_AI_WEIGHT: float
+    # backward-compat
+    DECISION_RULE_WEIGHT: float
+    DECISION_AI_WEIGHT: float
 
-        # ---------- Хранилище ----------
-        self.DB_PATH: str = os.getenv("DB_PATH", "data/bot.db")
-        self.DB_PRAGMA_JOURNAL_MODE: str = os.getenv("DB_PRAGMA_JOURNAL_MODE", "WAL")
-        # Пороги обслуживания SQLite
-        self.DB_VACUUM_MB_THRESHOLD: float = float(os.getenv("DB_VACUUM_MB_THRESHOLD", "128"))  # VACUUM если файл > N МБ
-        self.DB_ANALYZE_EVERY_N_CHANGES: int = int(os.getenv("DB_ANALYZE_EVERY_N_CHANGES", "50000"))
+    DEFAULT_ORDER_SIZE: str
 
-        # ---------- Тайминг ----------
-        self.TIME_DRIFT_MAX_MS: int = int(os.getenv("TIME_DRIFT_MAX_MS", "1500"))
-        self.TRADING_START_HOUR: int = int(os.getenv("TRADING_START_HOUR", "0"))
-        self.TRADING_END_HOUR: int = int(os.getenv("TRADING_END_HOUR", "24"))
-        if self.TRADING_START_HOUR < 0 or self.TRADING_START_HOUR > 23:
-            self.TRADING_START_HOUR = 0
-        if self.TRADING_END_HOUR < 1 or self.TRADING_END_HOUR > 24:
-            self.TRADING_END_HOUR = 24
+    # --- storage ---
+    DB_PATH: str
 
-        # ---------- Telegram ----------
-        self.TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.TELEGRAM_SECRET_TOKEN: str = os.getenv("TELEGRAM_SECRET_TOKEN", "")
-        self.TELEGRAM_ENABLED: bool = _b(os.getenv("TELEGRAM_ENABLED"), default=False)
+    # --- telegram ---
+    TELEGRAM_BOT_TOKEN: str
+    TELEGRAM_SECRET_TOKEN: str
 
-        # ---------- Весовые коэффициенты & пороги решений ----------
-        self.SCORE_RULE_WEIGHT: float = float(os.getenv("SCORE_RULE_WEIGHT", "0.5"))
-        self.SCORE_AI_WEIGHT: float = float(os.getenv("SCORE_AI_WEIGHT", "0.5"))
-        s = self.SCORE_RULE_WEIGHT + self.SCORE_AI_WEIGHT
-        if s <= 0:
-            self.SCORE_RULE_WEIGHT, self.SCORE_AI_WEIGHT = 0.5, 0.5
-        else:
-            self.SCORE_RULE_WEIGHT /= s
-            self.SCORE_AI_WEIGHT /= s
+    # --- safety ---
+    SAFE_MODE: bool
 
-        self.THRESHOLD_BUY: float = _clamp(float(os.getenv("THRESHOLD_BUY", "0.6")), 0.0, 1.0)
-        self.THRESHOLD_SELL: float = _clamp(float(os.getenv("THRESHOLD_SELL", "0.4")), 0.0, 1.0)
+    # --- optional hints ---
+    ACCOUNT_EQUITY_USD: float | None
 
-        # ---------- Ограничения риска ----------
-        self.MAX_SPREAD_PCT: float = float(os.getenv("MAX_SPREAD_PCT", "0.30"))        # %
-        self.MAX_DRAWDOWN_PCT: float = float(os.getenv("MAX_DRAWDOWN_PCT", "5.0"))     # %
-        self.MAX_SEQ_LOSSES: int = int(os.getenv("MAX_SEQ_LOSSES", "5"))
-        self.MAX_EXPOSURE_PCT: float = float(os.getenv("MAX_EXPOSURE_PCT", "100.0"))   # % от equity
-        self.MAX_EXPOSURE_USD: Optional[float] = float(os.getenv("MAX_EXPOSURE_USD")) if os.getenv("MAX_EXPOSURE_USD") else None
-
-        # ---------- Rate limits (для декораторов в use_cases) ----------
-        self.RATE_LIMIT_EVAL_AND_EXECUTE_PER_MIN: int = int(os.getenv("RATE_LIMIT_EVAL_AND_EXECUTE_PER_MIN", "20"))
-        self.RATE_BURST_EVAL_AND_EXECUTE: int = int(os.getenv("RATE_BURST_EVAL_AND_EXECUTE", "40"))
-        self.RATE_LIMIT_PLACE_ORDER_PER_MIN: int = int(os.getenv("RATE_LIMIT_PLACE_ORDER_PER_MIN", "30"))
-        self.RATE_BURST_PLACE_ORDER: int = int(os.getenv("RATE_BURST_PLACE_ORDER", "60"))
-
-        # ---------- Брокер (live) ----------
-        # Используется фабрикой create_broker() при MODE=live|paper
-        self.EXCHANGE_ID: str = os.getenv("EXCHANGE_ID", "binance")
-        self.API_KEY: str = os.getenv("API_KEY", "")
-        self.API_SECRET: str = os.getenv("API_SECRET", "")
-        self.API_PASSWORD: str = os.getenv("API_PASSWORD", "")  # для некоторых бирж (OKX/Bybit)
-
-        # ---------- Backpressure для событий ----------
-        bp_json = os.getenv("EVENT_BACKPRESSURE_JSON", "").strip()
-        default_map: Dict[str, str] = {
-            "orders.*": "keep_latest",
-            "metrics.*": "drop_oldest",
-            "audit.*": "block",
-        }
-        if bp_json:
-            try:
-                user = json.loads(bp_json)
-                if isinstance(user, dict):
-                    cleaned = {}
-                    for k, v in user.items():
-                        sv = str(v)
-                        if sv in ("block", "drop_oldest", "keep_latest"):
-                            cleaned[str(k)] = sv
-                    if cleaned:
-                        default_map.update(cleaned)
-            except Exception:
-                pass
-        self.EVENT_BACKPRESSURE_MAP: Dict[str, str] = default_map
-
-    # ---------- Фабрика ----------
     @classmethod
     def build(cls) -> "Settings":
-        return cls()
+        self = cls()
+        env = os.getenv
+
+        self.MODE = env("MODE", "paper").strip().lower()
+        self.PAPER_MODE = self.MODE == "paper"
+
+        self.SYMBOL = env("SYMBOL", "BTC/USDT")
+        self.TIMEFRAME = env("TIMEFRAME", "1h")
+        self.TIME_DRIFT_MAX_MS = int(env("TIME_DRIFT_MAX_MS", "1500"))
+
+        # Risk
+        self.MAX_SPREAD_PCT = float(env("MAX_SPREAD_PCT", "0.25"))
+        self.MAX_DRAWDOWN_PCT = float(env("MAX_DRAWDOWN_PCT", "5.0"))
+        self.MAX_SEQ_LOSSES = int(env("MAX_SEQ_LOSSES", "3"))
+        self.MAX_EXPOSURE_PCT = float(env("MAX_EXPOSURE_PCT", "")) if env("MAX_EXPOSURE_PCT") else None
+        self.MAX_EXPOSURE_USD = float(env("MAX_EXPOSURE_USD", "")) if env("MAX_EXPOSURE_USD") else None
+        self.TRADING_START_HOUR = int(env("TRADING_START_HOUR", "0"))
+        self.TRADING_END_HOUR = int(env("TRADING_END_HOUR", "24"))
+
+        # Decision thresholds
+        self.THRESHOLD_BUY = float(env("THRESHOLD_BUY", "0.60"))
+        self.THRESHOLD_SELL = float(env("THRESHOLD_SELL", "0.40"))
+
+        # Weights (harmonized)
+        # accept both SCORE_* and DECISION_* names; SCORE_* take precedence
+        score_rule = env("SCORE_RULE_WEIGHT")
+        score_ai = env("SCORE_AI_WEIGHT")
+        dec_rule = env("DECISION_RULE_WEIGHT")
+        dec_ai = env("DECISION_AI_WEIGHT")
+
+        self.SCORE_RULE_WEIGHT = float(score_rule) if score_rule else (float(dec_rule) if dec_rule else 0.5)
+        self.SCORE_AI_WEIGHT   = float(score_ai)   if score_ai   else (float(dec_ai)   if dec_ai   else 0.5)
+
+        # keep backward-compatible mirrors
+        self.DECISION_RULE_WEIGHT = self.SCORE_RULE_WEIGHT
+        self.DECISION_AI_WEIGHT   = self.SCORE_AI_WEIGHT
+
+        self.DEFAULT_ORDER_SIZE = env("DEFAULT_ORDER_SIZE", "0.0")
+
+        # Storage
+        self.DB_PATH = env("DB_PATH", "data/bot.sqlite")
+
+        # Telegram
+        self.TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN", "")
+        self.TELEGRAM_SECRET_TOKEN = env("TELEGRAM_SECRET_TOKEN", "")
+
+        # Safety
+        self.SAFE_MODE = env("SAFE_MODE", "true").lower() in ("1","true","yes","on")
+
+        # Optional hints
+        self.ACCOUNT_EQUITY_USD = float(env("ACCOUNT_EQUITY_USD", "")) if env("ACCOUNT_EQUITY_USD") else None
+
+        return self

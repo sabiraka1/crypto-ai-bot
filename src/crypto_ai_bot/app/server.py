@@ -8,6 +8,7 @@ from fastapi.responses import PlainTextResponse
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
 from crypto_ai_bot.core.use_cases.evaluate import evaluate
+from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
 from crypto_ai_bot.utils.time_sync import measure_time_drift
@@ -22,8 +23,12 @@ from crypto_ai_bot.core.storage.repositories.trades import TradeRepository
 from crypto_ai_bot.core.storage.repositories.positions import PositionRepository
 from crypto_ai_bot.core.storage.repositories.snapshots import SnapshotRepository
 from crypto_ai_bot.core.storage.repositories.audit import AuditRepository
+from crypto_ai_bot.core.storage.repositories.idempotency import IdempotencyRepository
 
-# (new) fast summary uses tracker (repo-aware)
+# risk
+from crypto_ai_bot.core.risk import manager as risk_manager
+
+# (summary)
 from crypto_ai_bot.core.positions.tracker import build_context
 
 app = FastAPI(title="Crypto AI Bot")
@@ -51,6 +56,7 @@ def _ensure_db_and_repos() -> Dict[str, Any]:
         "trades_repo":    TradeRepository(_db_conn),
         "snapshots_repo": SnapshotRepository(_db_conn),
         "audit_repo":     AuditRepository(_db_conn),
+        "idempotency_repo": IdempotencyRepository(_db_conn),
     }
     metrics.inc("db_connected_total", {})
     return _repos
@@ -114,20 +120,32 @@ async def get_metrics() -> str:
 # Debug/status endpoints
 # ----------------------------------------------------------------------------
 
+def _limits_from_cfg(cfg) -> Dict[str, Any]:
+    return {
+        "spread_pct": float(getattr(cfg, "MAX_SPREAD_PCT", 0.25)),
+        "drawdown_pct": float(getattr(cfg, "MAX_DRAWDOWN_PCT", 5.0)),
+        "seq_losses": int(getattr(cfg, "MAX_SEQ_LOSSES", 3)),
+        "exposure_pct": getattr(cfg, "MAX_EXPOSURE_PCT", None),
+        "exposure_usd": getattr(cfg, "MAX_EXPOSURE_USD", None),
+        "time_drift_ms": int(getattr(cfg, "TIME_DRIFT_MAX_MS", 1500)),
+        "hours": [int(getattr(cfg, "TRADING_START_HOUR", 0)), int(getattr(cfg, "TRADING_END_HOUR", 24))],
+        "thresholds": {"buy": float(getattr(cfg, "THRESHOLD_BUY", 0.6)), "sell": float(getattr(cfg, "THRESHOLD_SELL", 0.4))},
+        "weights": {"rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)), "ai": float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5))},
+    }
+
 @app.get("/status")
 async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
     """
-    Лёгкий status: decision + fast summary (exposure/dd/seq_losses/price/spread) без лишних подробностей.
+    Лёгкий status: decision + fast summary + risk verdict/limits.
     """
     try:
         repos = _ensure_db_and_repos()
         sym = symbol or cfg.SYMBOL
         tf = timeframe or cfg.TIMEFRAME
 
-        # лёгкий контекст для быстрого ответа (не требует тяжёлых индикаторов)
         summary = build_context(cfg, broker, positions_repo=repos.get("positions_repo"), trades_repo=repos.get("trades_repo"))
+        risk_ok, risk_reason = risk_manager.check(summary, cfg)
 
-        # полное решение (использует индикаторы) — оставляем как было
         dec = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit, **repos)
 
         return {
@@ -135,10 +153,9 @@ async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = N
             "symbol": sym,
             "timeframe": tf,
             "summary": summary,
-            "decision": {
-                "action": dec.get("action"),
-                "score": dec.get("score"),
-            },
+            "risk": {"ok": bool(risk_ok), "reason": risk_reason},
+            "limits": _limits_from_cfg(cfg),
+            "decision": {"action": dec.get("action"), "score": dec.get("score")},
         }
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
