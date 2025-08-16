@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.core.settings import Settings
@@ -140,7 +140,6 @@ def _build_manual_decision(action: str, size: str, symbol: str | None = None, ti
     sym = normalize_symbol(symbol or getattr(CFG, "SYMBOL", "BTC/USDT"))
     tf = normalize_timeframe(timeframe or getattr(CFG, "TIMEFRAME", "1h"))
     try:
-        # на клиентском уровне передаем число как строку
         sz = str(size)
     except Exception:
         sz = "0"
@@ -186,6 +185,14 @@ def orders_sell(payload: Dict[str, Any] = Body(...)):
     decision = _build_manual_decision("sell", size=size, symbol=symbol, timeframe=timeframe)
     res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
     return JSONResponse(res)
+
+@app.get("/why")
+def get_why(symbol: Optional[str] = Query(None), timeframe: Optional[str] = Query(None), limit: Optional[int] = Query(None)):
+    try:
+        dec = BOT.evaluate()  # evaluate уже дергает policy.decide(...)
+        return JSONResponse({"status": "ok", "decision": dec, "explain": dec.get("explain")})
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": f"why_failed: {type(e).__name__}: {e}"})
 
 @app.post("/tick")
 async def tick():
