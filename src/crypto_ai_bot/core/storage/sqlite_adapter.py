@@ -1,138 +1,153 @@
 from __future__ import annotations
-import os, sqlite3, time
-from contextlib import contextmanager
-from typing import Iterator, Dict, Any, Optional
 
-try:
-    from crypto_ai_bot.utils import metrics
-except Exception:  # pragma: no cover
-    class _Dummy:
-        def inc(self, *a, **k): pass
-        def observe(self, *a, **k): pass
-        def export(self): return ""
-    metrics = _Dummy()  # type: ignore
+import os
+import sqlite3
+import time
+from contextlib import contextmanager
+from typing import Any, Dict, Tuple
+
+from crypto_ai_bot.utils import metrics
+
+# ---------------- Connection & TXN ----------------
 
 def connect(path: str) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    con = sqlite3.connect(path, timeout=30, isolation_level=None, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA synchronous=NORMAL;")
-    con.execute("PRAGMA temp_store=MEMORY;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    con.execute("PRAGMA busy_timeout=5000;")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = sqlite3.connect(path, timeout=30.0, isolation_level=None, check_same_thread=False, detect_types=sqlite3.PARSE_DECLTYPES)
+    # PRAGMAs
+    cur = con.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
+    cur.execute("PRAGMA temp_store=MEMORY;")
+    cur.execute("PRAGMA foreign_keys=ON;")
+    cur.close()
     return con
 
 @contextmanager
-def in_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
+def in_txn(con: sqlite3.Connection):
     cur = con.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE;")
-        yield cur
+        yield
         cur.execute("COMMIT;")
     except Exception:
-        cur.execute("ROLLBACK;")
+        try:
+            cur.execute("ROLLBACK;")
+        except Exception:
+            pass
         raise
     finally:
         cur.close()
 
-def _db_file_path(con: sqlite3.Connection) -> Optional[str]:
+# ---------------- Stats & Maintenance ----------------
+
+def _pragma(con: sqlite3.Connection, name: str) -> int:
+    cur = con.cursor()
+    cur.execute(f"PRAGMA {name};")
+    row = cur.fetchone()
+    cur.close()
+    return int(row[0]) if row and row[0] is not None else 0
+
+def get_db_stats(con: sqlite3.Connection, path: str) -> Dict[str, float]:
+    page_count = _pragma(con, "page_count")
+    freelist_count = _pragma(con, "freelist_count")
+    page_size = _pragma(con, "page_size") or 4096
+    file_bytes = os.path.getsize(path) if os.path.exists(path) else page_count * page_size
+    free_bytes = int(freelist_count * page_size)
+    used_bytes = max(0, file_bytes - free_bytes)
+    free_ratio = (free_bytes / file_bytes) if file_bytes > 0 else 0.0
+
+    # export metrics
+    metrics.observe("db_file_bytes_gauge", file_bytes, {})
+    metrics.observe("db_free_bytes_gauge", free_bytes, {})
+    metrics.observe("db_free_ratio_gauge", free_ratio, {})
+
+    return {
+        "page_count": float(page_count),
+        "freelist_count": float(freelist_count),
+        "page_size": float(page_size),
+        "file_bytes": float(file_bytes),
+        "free_bytes": float(free_bytes),
+        "used_bytes": float(used_bytes),
+        "free_ratio": float(free_ratio),
+    }
+
+def vacuum(con: sqlite3.Connection) -> None:
+    t0 = time.perf_counter()
+    cur = con.cursor()
     try:
-        row = con.execute("PRAGMA database_list;").fetchone()
-        if row and len(row) >= 3:
-            return row[2]
-        return None
-    except Exception:
-        return None
+        cur.execute("VACUUM;")
+        metrics.inc("db_vacuum_total", {})
+        metrics.observe("db_vacuum_seconds", time.perf_counter() - t0, {})
+    finally:
+        cur.close()
 
-def get_db_stats(con: sqlite3.Connection) -> Dict[str, Any]:
+def analyze(con: sqlite3.Connection) -> None:
+    t0 = time.perf_counter()
+    cur = con.cursor()
     try:
-        row_pc = con.execute("PRAGMA page_count;").fetchone()
-        row_ps = con.execute("PRAGMA page_size;").fetchone()
-        row_fl = con.execute("PRAGMA freelist_count;").fetchone()
-        page_count = int(row_pc[0] if row_pc else 0)
-        page_size = int(row_ps[0] if row_ps else 4096)
-        freelist = int(row_fl[0] if row_fl else 0)
-        size_bytes_calc = page_count * page_size
-        fp = _db_file_path(con)
-        size_bytes_real = os.path.getsize(fp) if fp and os.path.exists(fp) else size_bytes_calc
-        frag_pct = float(freelist / page_count) if page_count > 0 else 0.0
-        return {
-            "page_count": page_count,
-            "page_size": page_size,
-            "freelist": freelist,
-            "size_bytes": size_bytes_real,
-            "fragmentation_pct": frag_pct,
-            "file_path": fp,
-        }
-    except Exception as e:  # pragma: no cover
-        return {"error": f"{type(e).__name__}: {e}"}
+        cur.execute("ANALYZE;")
+        cur.execute("PRAGMA optimize;")
+        metrics.inc("db_analyze_total", {})
+        metrics.observe("db_analyze_seconds", time.perf_counter() - t0, {})
+    finally:
+        cur.close()
 
-def _ensure_meta(con: sqlite3.Connection) -> None:
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS _meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);"
-    )
-
-def _get_meta(con: sqlite3.Connection, key: str, default: str = "0") -> str:
-    _ensure_meta(con)
-    row = con.execute("SELECT v FROM _meta WHERE k=?;", (key,)).fetchone()
-    return row[0] if row else default
-
-def _set_meta(con: sqlite3.Connection, key: str, value: str) -> None:
-    _ensure_meta(con)
-    con.execute("INSERT INTO _meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v;", (key, value))
-
-def maintenance_maybe_vacuum_analyze(
-    con: sqlite3.Connection,
-    *,
-    max_fragmentation_pct: float = 0.15,
-    min_vacuum_bytes: int = 50 * 1024 * 1024,  # 50MB
-    min_hours_between_vacuum: int = 12,
-    min_hours_between_analyze: int = 6,
-) -> Dict[str, Any]:
-    """Heuristic DB maintenance with throttling.
-
-    Returns dict with actions {'vacuum': bool, 'analyze': bool, 'stats': {...}}.
-
+def perform_maintenance(con: sqlite3.Connection, cfg) -> Dict[str, Any]:
     """
-    stats = get_db_stats(con)
-    now = int(time.time())
+    Решает, требуется ли VACUUM/ANALYZE по порогам из Settings.
+    Возвращает словарь с принятыми действиями.
+    """
+    if not getattr(cfg, "DB_MAINTENANCE_ENABLE", True):
+        return {"enabled": False}
 
-    last_vac = int(_get_meta(con, "last_vacuum_ts", "0"))
-    last_an = int(_get_meta(con, "last_analyze_ts", "0"))
-    hours_since_vac = (now - last_vac) / 3600 if last_vac else 1e9
-    hours_since_an = (now - last_an) / 3600 if last_an else 1e9
+    path = getattr(cfg, "DB_PATH", "data/bot.db")
+    stats_before = get_db_stats(con, path)
 
-    frag = float(stats.get("fragmentation_pct", 0.0))
-    size_b = int(stats.get("size_bytes", 0))
+    min_mb = float(getattr(cfg, "DB_VACUUM_MIN_MB", 64))
+    free_ratio_thr = float(getattr(cfg, "DB_VACUUM_FREE_RATIO", 0.20))
+    analyze_every = int(getattr(cfg, "DB_ANALYZE_EVERY_WRITES", 5000))
+    writes = int(getattr(cfg, "DB_WRITES_SINCE_ANALYZE", 0))
 
-    do_vac = (frag >= max_fragmentation_pct) and (size_b >= min_vacuum_bytes) and (hours_since_vac >= min_hours_between_vacuum)
-    do_an  = (hours_since_an >= min_hours_between_analyze)
+    did_vacuum = False
+    did_analyze = False
+    actions = []
 
-    if do_an:
+    file_mb = stats_before["file_bytes"] / (1024 * 1024)
+    if file_mb >= min_mb and stats_before["free_ratio"] >= free_ratio_thr:
         try:
-            con.execute("ANALYZE;")
-            _set_meta(con, "last_analyze_ts", str(now))
-            try: metrics.inc("db_analyze_total", {"result": "ok"})
-            except Exception: pass
-        except Exception:  # pragma: no cover
-            try: metrics.inc("db_analyze_total", {"result": "error"})
-            except Exception: pass
+            vacuum(con)
+            did_vacuum = True
+            actions.append("vacuum")
+        except Exception as e:
+            metrics.inc("db_maintenance_errors_total", {"op": "vacuum", "err": type(e).__name__})
 
-    if do_vac:
+    if writes >= analyze_every:
         try:
-            con.execute("VACUUM;")
-            _set_meta(con, "last_vacuum_ts", str(now))
-            try: metrics.inc("db_vacuum_total", {"result": "ok"})
-            except Exception: pass
-        except Exception:  # pragma: no cover
-            try: metrics.inc("db_vacuum_total", {"result": "error"})
-            except Exception: pass
+            analyze(con)
+            did_analyze = True
+            actions.append("analyze")
+            # сброс счётчика (в Settings как mutable — опционально)
+            try:
+                cfg.DB_WRITES_SINCE_ANALYZE = 0
+            except Exception:
+                pass
+        except Exception as e:
+            metrics.inc("db_maintenance_errors_total", {"op": "analyze", "err": type(e).__name__})
 
-    # export gauges
-    try:
-        metrics.observe("db_size_bytes_gauge", float(size_b))
-        metrics.observe("db_fragmentation_pct_gauge", float(frag))
-    except Exception:
-        pass
+    if not did_analyze:
+        # легкая оптимизация между анализами
+        try:
+            cur = con.cursor()
+            cur.execute("PRAGMA optimize;")
+            cur.close()
+            metrics.inc("db_optimize_total", {})
+        except Exception:
+            pass
 
-    return {"vacuum": bool(do_vac), "analyze": bool(do_an), "stats": stats}
+    stats_after = get_db_stats(con, path)
+    return {
+        "enabled": True,
+        "actions": actions,
+        "before": stats_before,
+        "after": stats_after,
+    }
