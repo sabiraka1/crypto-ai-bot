@@ -1,137 +1,86 @@
-# src/crypto_ai_bot/app/adapters/telegram.py
 from __future__ import annotations
+from typing import Dict, Any, Optional
+from decimal import Decimal
 
-import html
-import json
-from typing import Any, Dict, Optional, Tuple
-
-from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
 from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
-from crypto_ai_bot.utils import metrics
 
-def _get_chat_and_text(update: Dict[str, Any]) -> Tuple[Optional[int], str]:
-    if not update:
-        return None, ""
-    if "message" in update:
-        msg = update["message"]
-        return msg.get("chat", {}).get("id"), (msg.get("text") or "")
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        msg = cq.get("message", {})
-        return msg.get("chat", {}).get("id"), (cq.get("data") or "")
-    return None, ""
+def _fmt_explain(decision: Dict[str, Any]) -> str:
+    e = decision.get("explain", {}) or {}
+    lines = []
+    lines.append(f"score: {decision.get('score')}")
+    thr = e.get("thresholds", {})
+    if thr:
+        lines.append(f"thresholds: buy={thr.get('buy')} sell={thr.get('sell')}")
+    sig = e.get("signals", {})
+    if sig:
+        top = {k: sig[k] for k in list(sig)[:6]}
+        lines.append("signals: " + ", ".join(f"{k}={v}" for k,v in top.items()))
+    ctx = e.get("context", {})
+    if ctx:
+        lines.append("ctx: " + ", ".join(f"{k}={v}" for k,v in ctx.items()))
+    blk = e.get("blocks", {})
+    if blk:
+        lines.append("blocks: " + str(blk))
+    return "\n".join(lines)
 
-def _parse_command(text: str) -> Tuple[str, str]:
-    t = (text or "").strip()
-    if not t.startswith("/"):
-        return "", ""
-    parts = t.split(maxsplit=1)
-    cmd = parts[0].lstrip("/").split("@", 1)[0].lower()
-    rest = parts[1] if len(parts) > 1 else ""
-    return cmd, rest
+async def handle_update(update: Dict[str, Any], cfg, bot, http) -> Dict[str, Any]:
+    """Тонкий адаптер: парсинг команд и вызов use-cases.
+    Никакой бизнес-логики.
+    Возвращает dict с полями {'chat_id', 'text'} — сервер сам отправит в Telegram API.
+    """
+    message = (update or {}).get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    text = (message.get("text") or "").strip()
 
-def _reply_url(token: str, method: str) -> str:
-    return f"https://api.telegram.org/bot{token}/{method}"
+    # defaults
+    symbol = cfg.SYMBOL
+    timeframe = cfg.TIMEFRAME
+    limit = 300
 
-def _send_text(http, token: str, chat_id: int, text: str, *, thread_id: Optional[int] = None) -> Dict[str, Any]:
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    if thread_id is not None:
-        payload["message_thread_id"] = thread_id
-    return http.post_json(_reply_url(token, "sendMessage"), json=payload)
+    if text.startswith("/start"):
+        reply = "Привет! Доступные команды: /status, /why, /buy <size> (dev), /sell <size> (dev)"
+        return {"chat_id": chat_id, "text": reply}
 
-def _default_sym_tf(cfg, symbol_arg: Optional[str], tf_arg: Optional[str]) -> Tuple[str, str]:
-    sym = normalize_symbol(symbol_arg or getattr(cfg, "SYMBOL", "BTC/USDT"))
-    tf = normalize_timeframe(tf_arg or getattr(cfg, "TIMEFRAME", "1h"))
-    return sym, tf
+    if text.startswith("/status"):
+        # легкая проверка — просто evaluate без исполнения
+        d = uc_evaluate(cfg, bot, symbol=symbol, timeframe=timeframe, limit=limit)
+        reply = f"status: {d.get('action')} score={d.get('score')}\n{_fmt_explain(d)}"
+        return {"chat_id": chat_id, "text": reply}
 
-def _format_decision(dec: Dict[str, Any]) -> str:
-    act = html.escape(str(dec.get("action", "hold")).upper())
-    score = dec.get("score")
-    score_txt = f"{float(score):.3f}" if isinstance(score, (int, float)) else "n/a"
-    ex = dec.get("explain", {}) or {}
-    reason = html.escape(str(ex.get("blocks", {}).get("risk_reason", "")))
-    parts = [
-        f"<b>Decision:</b> {act}",
-        f"<b>Score:</b> {score_txt}",
-        f"<b>Risk:</b> {reason or 'ok'}",
-    ]
-    return "\n".join(parts)
+    if text.startswith("/why"):
+        d = uc_evaluate(cfg, bot, symbol=symbol, timeframe=timeframe, limit=limit)
+        reply = "WHY:\n" + _fmt_explain(d)
+        return {"chat_id": chat_id, "text": reply}
 
-async def handle_update(update: Dict[str, Any], cfg: Any, broker: Any, http) -> Dict[str, Any]:
-    token = getattr(cfg, "TELEGRAM_BOT_TOKEN", None)
-    thread_id = getattr(cfg, "TELEGRAM_THREAD_ID", None)
-    if not token:
-        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN is not set in Settings"}
+    # dev-only manual orders (paper/backtest). Пробуем только если не live.
+    if text.startswith("/buy") or text.startswith("/sell"):
+        if cfg.MODE == "live":
+            return {"chat_id": chat_id, "text": "Недоступно в live режиме."}
+        parts = text.split()
+        if len(parts) < 2:
+            return {"chat_id": chat_id, "text": "Укажи размер: /buy 0.01"}
+        try:
+            amt = Decimal(parts[1])
+        except Exception:
+            return {"chat_id": chat_id, "text": "Неверный размер. Пример: /buy 0.01"}
+        # сформируем подложку решения
+        action = "buy" if text.startswith("/buy") else "sell"
+        decision = {
+            "action": action,
+            "size": str(amt if action == "buy" else -amt),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "ts": 0,
+            "decision_id": "manual",
+            "explain": {"context": {"source": "telegram_dev"}},
+        }
+        res = uc_eval_and_execute(
+            cfg, bot, symbol=symbol, timeframe=timeframe, limit=1,
+            positions_repo=None, trades_repo=None, audit_repo=None, uow=None, idempotency_repo=None,
+        )
+        # В dev-режиме просто подтверждаем — без настоящего исполнения
+        return {"chat_id": chat_id, "text": f"dev {action} {amt}: {res.get('status')}"}
 
-    chat_id, text = _get_chat_and_text(update)
-    if not chat_id:
-        return {"ok": False, "error": "no_chat_id"}
-
-    cmd, rest = _parse_command(text)
-
-    try:
-        if cmd in {"start", "help", ""}:
-            metrics.inc("tg_command_total", {"cmd": "start" if cmd != "help" else "help"})
-            msg = (
-                "<b>Crypto AI Bot</b>\n\n"
-                "Команды:\n"
-                "• /status — режим/символ/TF\n"
-                "• /decide [SYMBOL] [TF] [LIMIT] — решение без исполнения\n"
-                "• /why [SYMBOL] [TF] [LIMIT] — подробный explain\n"
-                "• /trade [SYMBOL] [TF] [LIMIT] — решение+исполнение (см. /tick)\n"
-            )
-            _send_text(http, token, chat_id, msg, thread_id=thread_id)
-            return {"ok": True}
-
-        elif cmd == "status":
-            metrics.inc("tg_command_total", {"cmd": "status"})
-            sym, tf = _default_sym_tf(cfg, None, None)
-            try:
-                tkr = broker.fetch_ticker(sym)
-                px = float(tkr.get("last") or tkr.get("close") or 0.0)
-                px_txt = f"{px:.2f}"
-            except Exception:
-                px_txt = "n/a"
-            msg = f"<b>Status</b>\nMode: <code>{html.escape(getattr(cfg,'MODE','paper'))}</code>\nSymbol: <b>{html.escape(sym)}</b>\nTF: <b>{html.escape(tf)}</b>\nPrice: <b>{px_txt}</b>"
-            _send_text(http, token, chat_id, msg, thread_id=thread_id)
-            return {"ok": True}
-
-        elif cmd == "decide":
-            metrics.inc("tg_command_total", {"cmd": "decide"})
-            parts = rest.split()
-            sym = parts[0] if len(parts) >= 1 else None
-            tf = parts[1] if len(parts) >= 2 else None
-            limit = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else int(getattr(cfg, "FEATURE_LIMIT", 300))
-            sym, tf = _default_sym_tf(cfg, sym, tf)
-            dec = uc_evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit)
-            _send_text(http, token, chat_id, _format_decision(dec), thread_id=thread_id)
-            return {"ok": True}
-
-        elif cmd == "why":
-            metrics.inc("tg_command_total", {"cmd": "why"})
-            parts = rest.split()
-            sym = parts[0] if len(parts) >= 1 else None
-            tf = parts[1] if len(parts) >= 2 else None
-            limit = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else int(getattr(cfg, "FEATURE_LIMIT", 300))
-            sym, tf = _default_sym_tf(cfg, sym, tf)
-            dec = uc_evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit)
-            explain = dec.get("explain") or {}
-            js = html.escape(json.dumps(explain, ensure_ascii=False, indent=2))
-            _send_text(http, token, chat_id, f"<b>Explain</b>\n<code>{js}</code>", thread_id=thread_id)
-            return {"ok": True}
-
-        elif cmd == "trade":
-            metrics.inc("tg_command_total", {"cmd": "trade"})
-            _send_text(http, token, chat_id, "Для реального исполнения используйте HTTP /tick на сервере.", thread_id=thread_id)
-            return {"ok": True}
-
-        else:
-            metrics.inc("tg_command_total", {"cmd": "unknown"})
-            _send_text(http, token, chat_id, "Неизвестная команда. Наберите /help", thread_id=thread_id)
-            return {"ok": True}
-
-    except Exception as e:
-        metrics.inc("tg_errors_total", {"type": type(e).__name__})
-        _send_text(http, token, chat_id, f"Ошибка: <code>{html.escape(str(e))}</code>", thread_id=thread_id)
-        return {"ok": False, "error": str(e)}
+    # fallback
+    return {"chat_id": chat_id, "text": "Неизвестная команда. Есть: /status, /why, /buy <s> (dev), /sell <s> (dev)"} 

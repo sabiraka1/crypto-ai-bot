@@ -1,37 +1,33 @@
-# src/crypto_ai_bot/utils/time_sync.py
 from __future__ import annotations
-
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
+from crypto_ai_bot.utils.http_client import get_http_client
 
-_CACHE: Dict[str, Any] = {"drift_ms": None, "ts": 0, "source": None}
+_LAST_MEASURE_TS = 0.0
+_LAST_DRIFT_MS = 0
 
+def measure_time_drift() -> int:
+    """Measure drift vs public time API. Cached for ~60s by caller if needed."""
+    http = get_http_client()
+    t0 = time.time()
+    data = http.get_json('https://worldtimeapi.org/api/timezone/Etc/UTC', timeout=3.0)
+    t1 = time.time()
+    server_ms = int((data.get('unixtime', int(t1)))*1000)
+    rtt_ms = int((t1 - t0)*1000)
+    local_ms = int(t1 * 1000)
+    drift = abs(local_ms - server_ms)
+    # subtract half RTT as a crude estimate
+    drift = max(0, drift - rtt_ms//2)
+    global _LAST_MEASURE_TS, _LAST_DRIFT_MS
+    _LAST_MEASURE_TS = t1
+    _LAST_DRIFT_MS = drift
+    return drift
 
-def measure_time_drift(http) -> tuple[int, str]:
-    """Запрашиваем эталонное время и считаем смещение (ms) против локального."""
-    t0 = int(time.time() * 1000)
-    data = http.get_json("https://worldtimeapi.org/api/timezone/Etc/UTC")
-    # worldtimeapi возвращает 'unixtime' (сек) и 'utc_datetime'
-    server_ms = int(data.get("unixtime", int(time.time())) * 1000)
-    t1 = int(time.time() * 1000)
-    # половина RTT — грубая коррекция
-    rtt = t1 - t0
-    drift = (server_ms + rtt // 2) - t1
-    return drift, "worldtimeapi"
-
-
-def ensure_recent_measurement(http, max_age_sec: int = 60) -> None:
-    now = int(time.time() * 1000)
-    if (_CACHE["ts"] or 0) + max_age_sec * 1000 > now:
-        return
-    try:
-        dms, src = measure_time_drift(http)
-        _CACHE.update({"drift_ms": int(dms), "ts": now, "source": src})
-    except Exception:
-        # не обновляем на ошибке, оставляем старое значение
-        pass
-
-
-def get_cached_drift_ms(default: int = 0) -> int:
-    v = _CACHE.get("drift_ms")
-    return int(v) if isinstance(v, int) else default
+def get_cached_drift_ms(default: int = 0, max_age_sec: int = 60) -> int:
+    now = time.time()
+    if now - _LAST_MEASURE_TS > max_age_sec:
+        try:
+            return measure_time_drift()
+        except Exception:
+            return default
+    return _LAST_DRIFT_MS
