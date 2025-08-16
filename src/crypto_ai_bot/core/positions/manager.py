@@ -1,77 +1,133 @@
-# src/crypto_ai_bot/core/positions/manager.py
 from __future__ import annotations
+import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from crypto_ai_bot.core.storage.interfaces import PositionRepository, TradeRepository, AuditRepository, UnitOfWork
-from crypto_ai_bot.core.storage.sqlite_adapter import now_ms
 
-
+@dataclass
 class PositionManager:
-    """Управляет агрегированной позицией по символу.
-    Никаких прямых SQL — только вызовы репозиториев.
-    """
+    positions_repo: PositionRepository
+    trades_repo: TradeRepository
+    audit_repo: AuditRepository
+    uow: UnitOfWork
 
-    def __init__(
-        self,
-        *,
-        positions_repo: PositionRepository,
-        trades_repo: TradeRepository,
-        audit_repo: AuditRepository,
-        uow: UnitOfWork,
-    ) -> None:
-        self._positions = positions_repo
-        self._trades = trades_repo
-        self._audit = audit_repo
-        self._uow = uow
+    def _now(self) -> int:
+        return int(time.time() * 1000)
 
-    def _get_pos(self, symbol: str) -> Dict[str, Any]:
-        cur = self._positions.get_open_by_symbol(symbol)
-        return cur or {"symbol": symbol, "size": "0", "avg_price": "0", "updated_ts": now_ms()}
+    def open_or_add(self, symbol: str, delta_size: Decimal, price: Optional[Decimal]) -> Dict[str, Any]:
+        if delta_size == 0:
+            return self.get_snapshot(symbol)
 
-    def snapshot(self, symbol: str) -> Dict[str, Any]:
-        return self._get_pos(symbol)
+        pos = self.positions_repo.get_by_symbol(symbol)
+        if pos is None:
+            if price is None:
+                raise ValueError("price is required for opening a new position")
+            self.uow.begin()
+            try:
+                self.positions_repo.save(symbol, delta_size, price)
+                self.trades_repo.insert({
+                    "ts": self._now(),
+                    "symbol": symbol,
+                    "side": "buy" if delta_size > 0 else "sell",
+                    "size": str(abs(delta_size)),
+                    "price": str(price),
+                    "meta": {"reason": "open_or_add:new"},
+                })
+                self.audit_repo.log("position_opened", {"symbol": symbol, "size": str(delta_size), "price": str(price)})
+                self.uow.commit()
+            except Exception:
+                self.uow.rollback()
+                raise
+            return self.get_snapshot(symbol)
 
-    def exposure(self, symbol: str) -> Decimal:
-        p = self._get_pos(symbol)
-        return Decimal(str(p["size"]))
+        cur_size: Decimal = pos["size"]
+        cur_avg: Decimal = pos["avg_price"]
+        new_size = cur_size + delta_size
 
-    def open_or_add(self, symbol: str, qty: Decimal, price: Decimal) -> Dict[str, Any]:
-        """Увеличение позиции по средневзвешенной цене."""
-        with self._uow.transaction():
-            p = self._get_pos(symbol)
-            cur_qty = Decimal(str(p["size"]))
-            cur_avg = Decimal(str(p["avg_price"]))
-            new_qty = cur_qty + qty
-            if new_qty <= 0:
-                # позиция закрыта
-                self._positions.upsert({"symbol": symbol, "size": "0", "avg_price": "0", "updated_ts": now_ms()})
-                self._audit.record({"type": "position_closed", "symbol": symbol, "ts": now_ms()})
-                return {"symbol": symbol, "size": "0", "avg_price": "0", "updated_ts": now_ms()}
-            # новая средневзвешенная
-            new_avg = ((cur_qty * cur_avg) + (qty * price)) / new_qty if cur_qty > 0 else price
-            self._positions.upsert(
-                {"symbol": symbol, "size": str(new_qty), "avg_price": str(new_avg), "updated_ts": now_ms()}
-            )
-            self._audit.record(
-                {"type": "position_changed", "symbol": symbol, "amount": str(qty), "price": str(price), "ts": now_ms()}
-            )
-            return {"symbol": symbol, "size": str(new_qty), "avg_price": str(new_avg), "updated_ts": now_ms()}
+        if new_size == 0:
+            px = price if price is not None else cur_avg
+            self.uow.begin()
+            try:
+                self.positions_repo.save(symbol, Decimal("0"), cur_avg)
+                self.trades_repo.insert({
+                    "ts": self._now(),
+                    "symbol": symbol,
+                    "side": "sell" if cur_size > 0 else "buy",
+                    "size": str(abs(delta_size)),
+                    "price": str(px),
+                    "meta": {"reason": "open_or_add:close"},
+                })
+                self.audit_repo.log("position_closed", {"symbol": symbol, "close_size": str(delta_size), "price": str(px)})
+                self.uow.commit()
+            except Exception:
+                self.uow.rollback()
+                raise
+            return self.get_snapshot(symbol)
 
-    def reduce(self, symbol: str, qty: Decimal) -> Dict[str, Any]:
-        """Частичное закрытие позиции."""
-        with self._uow.transaction():
-            p = self._get_pos(symbol)
-            cur_qty = Decimal(str(p["size"]))
-            new_qty = max(Decimal("0"), cur_qty - qty)
-            self._positions.upsert(
-                {"symbol": symbol, "size": str(new_qty), "avg_price": str(p["avg_price"]), "updated_ts": now_ms()}
-            )
-            self._audit.record({"type": "position_changed", "symbol": symbol, "amount": str(-qty), "ts": now_ms()})
-            return self._get_pos(symbol)
+        px = price if price is not None else cur_avg
+        if (cur_size > 0 and new_size > 0) or (cur_size < 0 and new_size < 0):
+            new_avg = ((cur_size * cur_avg) + (delta_size * px)) / new_size
+        else:
+            new_avg = px
+
+        self.uow.begin()
+        try:
+            self.positions_repo.save(symbol, new_size, new_avg)
+            self.trades_repo.insert({
+                "ts": self._now(),
+                "symbol": symbol,
+                "side": "buy" if delta_size > 0 else "sell",
+                "size": str(abs(delta_size)),
+                "price": str(px),
+                "meta": {"reason": "open_or_add:adjust"},
+            })
+            self.audit_repo.log("position_adjusted", {
+                "symbol": symbol,
+                "delta": str(delta_size),
+                "price": str(px),
+                "new_size": str(new_size),
+                "new_avg": str(new_avg),
+            })
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
+            raise
+
+        return self.get_snapshot(symbol)
 
     def close_all(self, symbol: str) -> Dict[str, Any]:
-        with self._uow.transaction():
-            self._positions.upsert({"symbol": symbol, "size": "0", "avg_price": "0", "updated_ts": now_ms()})
-            self._audit.record({"type": "position_closed", "symbol": symbol, "ts": now_ms()})
-            return self._get_pos(symbol)
+        pos = self.positions_repo.get_by_symbol(symbol)
+        if not pos or pos["size"] == 0:
+            return {"symbol": symbol, "size": "0", "avg_price": "0"}
+        close_size = -pos["size"]
+        px = pos["avg_price"]
+        self.uow.begin()
+        try:
+            self.positions_repo.save(symbol, Decimal("0"), pos["avg_price"])
+            self.trades_repo.insert({
+                "ts": self._now(),
+                "symbol": symbol,
+                "side": "sell" if close_size < 0 else "buy",
+                "size": str(abs(close_size)),
+                "price": str(px),
+                "meta": {"reason": "close_all"},
+            })
+            self.audit_repo.log("position_closed", {"symbol": symbol, "close_size": str(close_size), "price": str(px)})
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
+            raise
+        return self.get_snapshot(symbol)
+
+    def get_snapshot(self, symbol: str) -> Dict[str, Any]:
+        pos = self.positions_repo.get_by_symbol(symbol)
+        if not pos:
+            return {"symbol": symbol, "size": "0", "avg_price": "0"}
+        return {
+            "symbol": symbol,
+            "size": str(pos["size"]),
+            "avg_price": str(pos["avg_price"]),
+            "updated_at": pos["updated_at"],
+        }

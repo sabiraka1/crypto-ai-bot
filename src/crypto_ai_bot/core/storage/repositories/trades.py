@@ -1,59 +1,56 @@
-# src/crypto_ai_bot/core/storage/repositories/trades.py
 from __future__ import annotations
-import json
+import sqlite3, time, json
 from decimal import Decimal
 from typing import Any, Dict, List
-import sqlite3
 
-from crypto_ai_bot.core.storage.interfaces import Trade, TradeRepository
+from ..interfaces import TradeRepository
 
+CREATE_SQL = '''
+CREATE TABLE IF NOT EXISTS trades(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  side TEXT NOT NULL,
+  size TEXT NOT NULL,
+  price TEXT NOT NULL,
+  meta  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts DESC);
+'''
 
-class SqliteTradeRepository(TradeRepository):  # type: ignore[misc]
+class SqliteTradeRepository(TradeRepository):
     def __init__(self, con: sqlite3.Connection) -> None:
-        self._con = con
+        self.con = con
+        self.con.executescript(CREATE_SQL)
 
-    def insert(self, trade: Trade) -> None:
-        self._con.execute(
-            """
-            INSERT OR REPLACE INTO trades
-            (id, symbol, side, amount, price, cost, fee_currency, fee_cost, ts, client_order_id, meta_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+    def insert(self, trade: Dict[str, Any]) -> None:
+        ts = int(trade.get("ts") or time.time() * 1000)
+        self.con.execute(
+            "INSERT INTO trades(ts,symbol,side,size,price,meta) VALUES(?,?,?,?,?,?);",
             (
-                trade.id,
-                trade.symbol,
-                trade.side,
-                str(trade.amount),
-                str(trade.price),
-                str(trade.cost),
-                trade.fee_currency,
-                str(trade.fee_cost),
-                int(trade.ts),
-                trade.client_order_id,
-                json.dumps(trade.meta or {}, ensure_ascii=False, separators=(",", ":")),
+                ts,
+                trade["symbol"],
+                trade["side"],
+                str(Decimal(str(trade["size"]))),
+                str(Decimal(str(trade["price"]))),
+                json.dumps(trade.get("meta") or {}),
             ),
         )
 
-    def list_by_symbol(self, symbol: str, limit: int = 100) -> List[Trade]:
-        cur = self._con.execute(
-            "SELECT * FROM trades WHERE symbol = ? ORDER BY ts DESC LIMIT ?;",
+    def list_by_symbol(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
+        cur = self.con.execute(
+            "SELECT id,ts,symbol,side,size,price,meta FROM trades WHERE symbol=? ORDER BY ts DESC LIMIT ?;",
             (symbol, int(limit)),
         )
-        out: List[Trade] = []
-        for r in cur.fetchall():
-            out.append(
-                Trade(
-                    id=str(r["id"]),
-                    symbol=str(r["symbol"]),
-                    side=str(r["side"]),
-                    amount=Decimal(str(r["amount"])),
-                    price=Decimal(str(r["price"])),
-                    cost=Decimal(str(r["cost"])),
-                    fee_currency=str(r["fee_currency"]),
-                    fee_cost=Decimal(str(r["fee_cost"])),
-                    ts=int(r["ts"]),
-                    client_order_id=r["client_order_id"],
-                    meta=json.loads(r["meta_json"] or "{}"),
-                )
-            )
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                "id": int(row[0]),
+                "ts": int(row[1]),
+                "symbol": row[2],
+                "side": row[3],
+                "size": row[4],
+                "price": row[5],
+                "meta": json.loads(row[6] or "{}"),
+            })
         return out

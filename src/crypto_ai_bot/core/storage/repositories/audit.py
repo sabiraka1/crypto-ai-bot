@@ -1,32 +1,38 @@
-# src/crypto_ai_bot/core/storage/repositories/audit.py
 from __future__ import annotations
-import json
-from typing import Any, Dict
-import sqlite3
+import sqlite3, time, json
+from typing import Any, Dict, List
 
-from crypto_ai_bot.core.storage.interfaces import AuditRepository
+from ..interfaces import AuditRepository
 
+CREATE_SQL = '''
+CREATE TABLE IF NOT EXISTS audit(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  payload TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts DESC);
+'''
 
-class SqliteAuditRepository(AuditRepository):  # type: ignore[misc]
+class SqliteAuditRepository(AuditRepository):
     def __init__(self, con: sqlite3.Connection) -> None:
-        self._con = con
+        self.con = con
+        self.con.executescript(CREATE_SQL)
 
-    def record(self, event: Dict[str, Any]) -> None:
-        payload = {k: v for k, v in event.items() if k not in {"type", "symbol", "side", "amount", "price", "fee", "client_order_id", "ts"}}
-        self._con.execute(
-            """
-            INSERT INTO audit(type, symbol, side, amount, price, fee, client_order_id, ts, payload_json)
-            VALUES(:type, :symbol, :side, :amount, :price, :fee, :client_order_id, :ts, :payload_json)
-            """,
-            {
-                "type": event.get("type"),
-                "symbol": event.get("symbol"),
-                "side": event.get("side"),
-                "amount": event.get("amount"),
-                "price": event.get("price"),
-                "fee": event.get("fee"),
-                "client_order_id": event.get("client_order_id"),
-                "ts": int(event.get("ts") or 0),
-                "payload_json": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            },
+    def log(self, event_type: str, payload: Dict[str, Any]) -> None:
+        self.con.execute(
+            "INSERT INTO audit(ts,event_type,payload) VALUES(?,?,?);",
+            (int(time.time()*1000), event_type, json.dumps(payload, ensure_ascii=False)),
         )
+
+    def list_recent(self, limit: int = 100) -> List[Dict[str, Any]]:
+        cur = self.con.execute("SELECT id,ts,event_type,payload FROM audit ORDER BY ts DESC LIMIT ?;", (int(limit),))
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                "id": int(row[0]),
+                "ts": int(row[1]),
+                "event_type": row[2],
+                "payload": json.loads(row[3] or "{}"),
+            })
+        return out
