@@ -14,7 +14,14 @@ def _load_ccxt():
         import ccxt  # type: ignore
         return ccxt
     except Exception as e:
-        raise PermanentExchangeError(f"ccxt_not_installed: {e}")
+        raise
+        
+        # update circuit gauge on error
+        try:
+            st = self.cb.get_state(self._cb_key)
+            metrics.set_gauge("circuit_state", self.cb._state_to_value(st))
+        except Exception:
+            pass PermanentExchangeError(f"ccxt_not_installed: {e}")
 
 class CcxtExchange(ExchangeInterface):
     """
@@ -45,6 +52,13 @@ class CcxtExchange(ExchangeInterface):
             metrics.observe("broker_request_ms", dt, {"exchange": self.client.id, "method": name})
             metrics.inc("broker_requests_total", {"exchange": self.client.id, "method": name})
             return res
+        
+        # update circuit gauge
+        try:
+            st = self.cb.get_state(self._cb_key)
+            metrics.set_gauge("circuit_state", self.cb._state_to_value(st))
+        except Exception:
+            pass
         except Exception as e:
             dt = int((time.perf_counter() - t0) * 1000)
             metrics.observe("broker_request_ms", dt, {"exchange": self.client.id, "method": name})
@@ -52,8 +66,22 @@ class CcxtExchange(ExchangeInterface):
             # классификация ошибок
             msg = str(e)
             if "timeout" in msg.lower() or "NetworkError" in msg or "DDoSProtection" in msg:
-                raise TransientExchangeError(msg)
+                raise
+        
+        # update circuit gauge on error
+        try:
+            st = self.cb.get_state(self._cb_key)
+            metrics.set_gauge("circuit_state", self.cb._state_to_value(st))
+        except Exception:
+            pass TransientExchangeError(msg)
             raise
+        
+        # update circuit gauge on error
+        try:
+            st = self.cb.get_state(self._cb_key)
+            metrics.set_gauge("circuit_state", self.cb._state_to_value(st))
+        except Exception:
+            pass
 
     # ---- interface ----
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
@@ -91,7 +119,14 @@ def from_settings(cfg) -> CcxtExchange:
     ex_id = getattr(cfg, "EXCHANGE_ID", "binance")
     klass = getattr(ccxt, ex_id, None)
     if klass is None:
-        raise PermanentExchangeError(f"exchange_unknown: {ex_id}")
+        raise
+        
+        # update circuit gauge on error
+        try:
+            st = self.cb.get_state(self._cb_key)
+            metrics.set_gauge("circuit_state", self.cb._state_to_value(st))
+        except Exception:
+            pass PermanentExchangeError(f"exchange_unknown: {ex_id}")
     args = {
         "apiKey": getattr(cfg, "EXCHANGE_KEY", None),
         "secret": getattr(cfg, "EXCHANGE_SECRET", None),
@@ -107,3 +142,10 @@ def from_settings(cfg) -> CcxtExchange:
     cb_fail = int(getattr(cfg, "CB_FAIL_THRESHOLD", 5))
     cb_open = float(getattr(cfg, "CB_OPEN_SECONDS", 8.0))
     return CcxtExchange(client, timeout_s=timeout_s, cb_fail_threshold=cb_fail, cb_open_seconds=cb_open)
+
+
+    def get_cb_stats(self) -> dict:
+        try:
+            return self.cb.get_stats(self._cb_key)
+        except Exception:
+            return {}

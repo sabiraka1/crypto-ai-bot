@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict
 
 from fastapi import FastAPI
+from crypto_ai_bot.core.events.async_bus import AsyncBus
 from pydantic import BaseModel
 
 from crypto_ai_bot.core.settings import Settings
@@ -31,6 +32,7 @@ async def _startup() -> None:
     apply_all(con)
     app.state.cfg = cfg
     app.state.broker = create_broker(cfg)
+    app.state.bus = AsyncBus()  # initialized async event bus
     log.info("app_started", extra={"mode": cfg.MODE})
     observe("app_start_total", 1.0, {"mode": cfg.MODE})
 
@@ -61,9 +63,15 @@ async def health() -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         broker = {"status": f"error:{type(exc).__name__}", "latency_ms": int((time.perf_counter() - br_t0) * 1000)}
 
+    cb_stats = None
+    try:
+        if hasattr(app.state.broker, "get_cb_stats"):
+            cb_stats = app.state.broker.get_cb_stats()
+    except Exception:
+        cb_stats = None
+
     # Time drift
     drift, _ = measure_time_drift(urls=cfg.TIME_DRIFT_URLS or None, timeout=2.5)
-    # NEW: gauge
     try:
         set_gauge("time_drift_ms", float(drift))
     except Exception:
@@ -88,10 +96,18 @@ async def health() -> Dict[str, Any]:
     return {
         "status": status,
         "degradation_level": degradation,
-        "components": {"mode": cfg.MODE, "db": db, "broker": broker, "time": timec},
+        "components": {"mode": cfg.MODE, "db": db, "broker": {**broker, "circuit": (cb_stats or {})}, "time": timec},
     }
 
 
 @app.post("/tick")
 async def tick(_: TickIn) -> Dict[str, Any]:
     return {"status": "ok"}
+
+
+@app.get("/bus")
+async def bus_stats():
+    bus = getattr(app.state, "bus", None)
+    if bus and hasattr(bus, "stats"):
+        return bus.stats()
+    return {"status": "no_bus"}

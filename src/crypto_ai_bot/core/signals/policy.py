@@ -13,6 +13,15 @@ def _thresholds(cfg) -> Dict[str, float]:
     Единая точка конфигурации порогов.
     Если в Settings нет полей — берём безопасные дефолты.
     """
+    # BUDGET: observe & enforce budget
+    _dt_decide = _build.time_perf_counter() - t0_decide
+    observe("decide_seconds", _dt_decide, {"symbol": symbol, "tf": timeframe})
+    try:
+        if _dt_decide > float(getattr(cfg, "DECIDE_BUDGET_SECONDS", 1.5)):
+            inc("performance_budget_exceeded", {"kind": "decide"})
+    except Exception:
+        pass
+    
     return {
         "buy": float(getattr(cfg, "DECISION_BUY_THRESHOLD", 0.55)),
         "sell": float(getattr(cfg, "DECISION_SELL_THRESHOLD", 0.45)),
@@ -29,6 +38,15 @@ def _weights(cfg) -> Dict[str, float]:
         rule_w, ai_w = 0.5, 0.5
     else:
         rule_w, ai_w = rule_w / s, ai_w / s
+    # BUDGET: observe & enforce budget
+    _dt_decide = _build.time_perf_counter() - t0_decide
+    observe("decide_seconds", _dt_decide, {"symbol": symbol, "tf": timeframe})
+    try:
+        if _dt_decide > float(getattr(cfg, "DECIDE_BUDGET_SECONDS", 1.5)):
+            inc("performance_budget_exceeded", {"kind": "decide"})
+    except Exception:
+        pass
+    
     return {"rule": rule_w, "ai": ai_w}
 
 
@@ -54,6 +72,8 @@ def _size_from_cfg(cfg) -> Decimal:
 
 def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
     """
+    # BUDGET: start decide timer
+    t0_decide = _build.time_perf_counter()
     ЕДИНСТВЕННАЯ публичная точка принятия решений.
     Возвращает dict совместимый с Decision (action/size/sl/tp/trail/score/explain).
     """
@@ -107,6 +127,15 @@ def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str,
     inc("bot_decision_total", {"action": action})
     observe("decision_score_histogram", float(score), {"symbol": symbol, "tf": timeframe})
 
+    # BUDGET: observe & enforce budget
+    _dt_decide = _build.time_perf_counter() - t0_decide
+    observe("decide_seconds", _dt_decide, {"symbol": symbol, "tf": timeframe})
+    try:
+        if _dt_decide > float(getattr(cfg, "DECIDE_BUDGET_SECONDS", 1.5)):
+            inc("performance_budget_exceeded", {"kind": "decide"})
+    except Exception:
+        pass
+    
     return {
         "action": action,
         "size": str(size),         # строкой — безопасно для JSON/Decimal
