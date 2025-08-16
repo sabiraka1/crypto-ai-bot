@@ -14,7 +14,6 @@ class Event:
     payload: Dict[str, Any]
 
 
-# Значения стратегий: block | drop_oldest | keep_latest | never_drop
 _DEFAULT_STRATEGY_BY_EVENT = {
     "OrderFilledEvent": "never_drop",
     "PriceUpdateEvent": "keep_latest",
@@ -24,7 +23,7 @@ _DEFAULT_STRATEGY_BY_EVENT = {
 
 class AsyncBus:
     """
-    Async pub/sub с backpressure per-event и DLQ.
+    Async pub/sub с per-event backpressure и DLQ.
     """
     def __init__(self, max_queue: int = 1000) -> None:
         self.subscribers: Dict[str, List[Callable[[Event], Awaitable[None]]]] = defaultdict(list)
@@ -33,7 +32,6 @@ class AsyncBus:
         self.dead_letter_queue: deque[Event] = deque(maxlen=1000)
         self._consumers_started = False
 
-        # стратегии по умолчанию
         for etype, strat in _DEFAULT_STRATEGY_BY_EVENT.items():
             self.backpressure[etype] = strat
 
@@ -51,7 +49,9 @@ class AsyncBus:
                 for h in self.subscribers.get(event_type, []):
                     await h(evt)
             except Exception as exc:  # noqa: BLE001
-                self.dead_letter_queue.append(Event(type="DLQ", payload={"orig_type": event_type, "event": evt.payload, "error": str(exc)}))
+                self.dead_letter_queue.append(Event(type="DLQ", payload={
+                    "orig_type": event_type, "event": evt.payload, "error": str(exc)
+                }))
                 set_gauge("dlq_depth", float(len(self.dead_letter_queue)))
             finally:
                 q.task_done()
@@ -60,7 +60,6 @@ class AsyncBus:
         if self._consumers_started:
             return
         self._consumers_started = True
-        # поднимем хотя бы один consumer (для известных типов поднимутся по требованию)
         asyncio.create_task(self._consumer("default"))
 
     async def publish(self, event: Event) -> None:
@@ -73,7 +72,6 @@ class AsyncBus:
                 await q.put(event)
 
             elif strat == "keep_latest":
-                # удаляем накопившиеся, оставляем только последний
                 drops = 0
                 while not q.empty():
                     try:
@@ -97,12 +95,24 @@ class AsyncBus:
                 await q.put(event)
 
             elif strat == "never_drop":
-                # ждём место, ничего не дропаем
                 await q.put(event)
 
             else:
                 await q.put(event)
         except Exception as exc:
-            # сбои доставки — в DLQ
-            self.dead_letter_queue.append(Event(type="DLQ", payload={"orig_type": et, "event": event.payload, "error": str(exc)}))
+            self.dead_letter_queue.append(Event(type="DLQ", payload={
+                "orig_type": et, "event": event.payload, "error": str(exc)
+            }))
             set_gauge("dlq_depth", float(len(self.dead_letter_queue)))
+
+    # ---- диагностика
+    def stats(self) -> dict:
+        out = {"events": {}, "dlq_depth": len(self.dead_letter_queue)}
+        for et, q in self.queues.items():
+            out["events"][et] = {
+                "size": q.qsize(),
+                "max": q.maxsize,
+                "strategy": self.backpressure.get(et, "block"),
+                "subscribers": len(self.subscribers.get(et, [])),
+            }
+        return out

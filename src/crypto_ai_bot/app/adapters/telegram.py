@@ -1,73 +1,110 @@
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Any, Dict, Tuple
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
-from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
-from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_order
-from crypto_ai_bot.utils import charts
-from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.core.use_cases.evaluate import evaluate
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-
-log = get_logger(__name__)
-
-
-def _parse_symbol_timeframe(
-    raw_symbol: str | None,
-    raw_timeframe: str | None,
-    cfg,
-) -> Tuple[str, str]:
-    symbol = normalize_symbol(raw_symbol or cfg.SYMBOL)
-    timeframe = normalize_timeframe(raw_timeframe or cfg.TIMEFRAME)
-    return symbol, timeframe
+from crypto_ai_bot.utils.http_client import get_http_client
 
 
-async def handle_update(update: Dict[str, Any], cfg, bot, http) -> Dict[str, Any]:
-    try:
-        text = (update.get("message", {}) or {}).get("text") or ""
-        parts = text.strip().split()
-        cmd = (parts[0] if parts else "").lower()
+@dataclass
+class Args:
+    symbol: str
+    timeframe: str
+    limit: int = 300
+    size: Optional[str] = None
 
-        if cmd in ("/start", "/help"):
-            inc("tg_command_total", {"cmd": "help"})
-            return {"text": "Команды: /status, /why, /buy <size>, /sell <size>."}
 
-        if cmd == "/status":
-            inc("tg_command_total", {"cmd": "status"})
-            symbol, timeframe = _parse_symbol_timeframe(None, None, cfg)
-            d = uc_evaluate(cfg, bot.broker, symbol=symbol, timeframe=timeframe, limit=cfg.DECISION_LIMIT)
-            return {"text": f"{symbol} {timeframe}: {d['action']} score={d.get('score'):.3f}"}
+def _parse_symbol_timeframe(text: str, cfg) -> Args:
+    # Примеры: "/why BTC/USDT 1h", "/status", "/buy 0.01"
+    parts = text.strip().split()
+    symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
+    timeframe = getattr(cfg, "TIMEFRAME", "1h")
+    size = None
 
-        if cmd == "/why":
-            inc("tg_command_total", {"cmd": "why"})
-            symbol, timeframe = _parse_symbol_timeframe(None, None, cfg)
-            d = uc_evaluate(cfg, bot.broker, symbol=symbol, timeframe=timeframe, limit=cfg.DECISION_LIMIT)
-            return {"text": f"Explain: {d.get('explain', {})}"}
+    for p in parts[1:]:
+        if "/" in p or "-" in p:
+            symbol = p
+        elif p.lower().endswith(("m", "h", "d")):
+            timeframe = p
+        else:
+            size = p
 
-        if cmd in ("/buy", "/sell"):
-            side = "buy" if cmd == "/buy" else "sell"
-            inc("tg_command_total", {"cmd": side})
-            size = Decimal(parts[1]) if len(parts) > 1 else Decimal("0")
-            symbol, timeframe = _parse_symbol_timeframe(None, None, cfg)
+    return Args(
+        symbol=normalize_symbol(symbol),
+        timeframe=normalize_timeframe(timeframe),
+        limit=int(getattr(cfg, "BUILD_LIMIT", 300)),
+        size=size,
+    )
 
-            decision = {
-                "action": side,
-                "size": size,
-                "sl": None,
-                "tp": None,
-                "trail": None,
-                "score": 1.0,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "explain": {"source": "telegram_manual"},
-            }
-            res = uc_place_order(cfg, bot.broker, bot.uow, bot.repos, decision)
-            return {"text": f"Order: {res}"}
 
-        inc("tg_command_total", {"cmd": "unknown"})
-        return {"text": "Неизвестная команда. /help"}
+def _format_explain(decision: Dict[str, Any]) -> str:
+    ex = decision.get("explain", {})
+    signals = ex.get("signals", {})
+    blocks = ex.get("blocks", {})
+    weights = ex.get("weights", {})
+    th = ex.get("thresholds", {})
+    ctx = ex.get("context", {})
 
-    except Exception as exc:  # noqa: BLE001
-        log.exception("telegram_adapter_failed", extra={"error": str(exc)})
-        return {"text": f"Ошибка: {exc}"}
+    top = []
+    for key in ("ema20", "ema50", "rsi", "macd_hist", "atr", "atr_pct"):
+        if key in signals:
+            top.append(f"{key}: {signals[key]}")
+
+    risk_block = blocks.get("risk", {})
+    risk_line = "OK" if risk_block.get("ok") else f"BLOCKED: {risk_block.get('reason', 'n/a')}"
+
+    lines = [
+        f"Action: *{decision.get('action', 'hold').upper()}*   Score: *{decision.get('score', 0):.3f}*",
+        f"Symbol: {ctx.get('symbol','?')}  TF: {ctx.get('timeframe','?')}",
+        "",
+        "*Signals*:",
+        ("; ".join(top) or "—"),
+        "",
+        "*Risk*: " + risk_line,
+        "",
+        "*Weights*: rule={weights[rule]:.2f} ai={weights[ai]:.2f}".format(weights=weights),
+        "*Thresholds*: buy={buy:.2f} sell={sell:.2f} hold_band=±{hold:.2f}".format(
+            buy=th.get("buy", 0.55), sell=th.get("sell", 0.45), hold=th.get("hold_band", 0.04)
+        ),
+    ]
+    return "\n".join(lines)
+
+
+async def handle_update(update: dict, cfg, bot, http=None) -> dict:
+    """
+    Тонкий адаптер: парсим команды, вызываем use-cases.
+    """
+    http = http or get_http_client()
+
+    msg = update.get("message") or update.get("edited_message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    text = (msg.get("text") or "").strip()
+
+    if not text:
+        return {"ok": True}
+
+    if text.startswith("/start"):
+        body = "Привет! Доступно: /status, /why [SYMBOL] [TF], /buy SIZE, /sell SIZE"
+    elif text.startswith("/status"):
+        body = "✅ Бот запущен. Попробуй /why BTC/USDT 1h"
+    elif text.startswith("/why"):
+        args = _parse_symbol_timeframe(text, cfg)
+        decision = evaluate(cfg, broker=bot.broker, symbol=args.symbol, timeframe=args.timeframe, limit=args.limit)
+        body = _format_explain(decision if isinstance(decision, dict) else decision.model_dump())  # на всякий
+    else:
+        body = "Команда не распознана. /why BTC/USDT 1h"
+
+    if chat_id:
+        try:
+            await http.post_json(
+                f"https://api.telegram.org/bot{cfg.TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": body, "parse_mode": "Markdown"},
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+    return {"ok": True}
