@@ -1,202 +1,160 @@
 # src/crypto_ai_bot/utils/circuit_breaker.py
 from __future__ import annotations
 
-import asyncio
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
-import threading
+from typing import Any, Callable, Dict, Optional
 
-from . import metrics
-
-
-class CircuitOpenError(RuntimeError):
-    """Запрос коротко замкнут: цепь открыта (open)."""
+try:
+    # метрики опциональны — не рушим импорт, если их нет
+    from . import metrics  # type: ignore
+except Exception:  # pragma: no cover
+    class _Dummy:
+        def inc(self, *a, **k): ...
+        def observe(self, *a, **k): ...
+        def export(self) -> str: return ""
+    metrics = _Dummy()  # type: ignore
 
 
 @dataclass
-class _Entry:
-    state: str = "closed"          # "closed" | "open" | "half-open"
+class _State:
+    state: str = "closed"          # closed | open | half-open
     failures: int = 0
-    opened_at: float = 0.0         # epoch when transitioned to open
-    half_open_in_flight: int = 0   # для ограничения кол-ва проб в half-open
+    opened_at: float = 0.0         # when transitioned to open
+    half_open_probe: bool = False  # единственный пробный вызов в half-open
+
+
+class CircuitOpenError(RuntimeError):
+    """Поднимается, когда предохранитель в состоянии OPEN и окно ещё не истекло."""
 
 
 class CircuitBreaker:
     """
-    Лёгкий circuit breaker:
-      - closed: пропускает вызовы; при N подряд ошибках → open.
-      - open: немедленно отклоняет до истечения open_seconds.
-      - half-open: допускает до half_open_max_calls проб; на успех → closed; на ошибку → open.
-    Поддерживает sync/async вызовы и опциональный timeout.
+    Устойчивый к ошибочным вызовам интерфейс (поддерживает и *args, и **kwargs).
+    Контракты:
+      - call(fn, key=..., timeout=?, fail_threshold=?, open_seconds=?, args=(), kwargs={})
+      - call(fn, "key", timeout=?, ...)
+      - call(fn, key="key")     # классическая форма
+    Любые дублирующиеся 'key' корректно разбираются (берём именованный приоритетно).
     """
 
     def __init__(
         self,
         *,
-        fail_threshold: int = 5,
-        open_seconds: float = 30.0,
-        half_open_max_calls: int = 1,
-        on_state_change: Optional[Callable[[str, str, str], None]] = None,  # (key, old, new)
-        transient_exceptions: Tuple[type[BaseException], ...] = (Exception,),
+        default_fail_threshold: int = 3,
+        default_open_seconds: float = 30.0,
+        default_timeout: Optional[float] = None,  # тут не применяем, таймаут должен быть в самом fn
     ) -> None:
-        self.fail_threshold = int(fail_threshold)
-        self.open_seconds = float(open_seconds)
-        self.half_open_max_calls = int(half_open_max_calls)
-        self.on_state_change = on_state_change
-        self.transient_exceptions = transient_exceptions
+        self._lock = threading.RLock()
+        self._states: Dict[str, _State] = {}
+        self._def_fail_threshold = int(default_fail_threshold)
+        self._def_open_seconds = float(default_open_seconds)
+        self._def_timeout = default_timeout
 
-        self._lock = threading.Lock()
-        self._map: Dict[str, _Entry] = {}
-        self._pool = ThreadPoolExecutor(max_workers=16)
-
-    # ---------------------- общая внутренняя логика ----------------------
-
+    # --------- API ---------
     def get_state(self, key: str) -> str:
         with self._lock:
-            return self._map.get(key, _Entry()).state
+            st = self._states.get(key)
+            return st.state if st else "closed"
 
-    def _set_state(self, key: str, new_state: str) -> None:
-        with self._lock:
-            entry = self._map.setdefault(key, _Entry())
-            old = entry.state
-            if old == new_state:
-                return
-            entry.state = new_state
-            if new_state == "open":
-                entry.opened_at = time.time()
-                entry.half_open_in_flight = 0
-            elif new_state == "closed":
-                entry.failures = 0
-                entry.half_open_in_flight = 0
-            elif new_state == "half-open":
-                entry.half_open_in_flight = 0
-
-        # метрики и колбэк — вне локов
-        metrics.inc("broker_circuit_transition_total", {"key": key, "from": old, "to": new_state})
-        if self.on_state_change:
-            try:
-                self.on_state_change(key, old, new_state)
-            except Exception:
-                pass
-
-    def _should_open(self, entry: _Entry) -> bool:
-        return entry.failures >= self.fail_threshold
-
-    def _before_call(self, key: str) -> str:
-        with self._lock:
-            entry = self._map.setdefault(key, _Entry())
-            now = time.time()
-            if entry.state == "open":
-                if (now - entry.opened_at) >= self.open_seconds:
-                    # истёк период open → пробуем half-open
-                    entry.state = "half-open"
-                    entry.half_open_in_flight = 0
-                else:
-                    return "open"
-
-            if entry.state == "half-open":
-                if entry.half_open_in_flight >= self.half_open_max_calls:
-                    return "open"  # считаем перегруз и режем
-                entry.half_open_in_flight += 1
-                return "half-open"
-
-            return "closed"
-
-    def _after_success(self, key: str, phase: str) -> None:
-        with self._lock:
-            entry = self._map.setdefault(key, _Entry())
-            entry.failures = 0
-            if phase == "half-open":
-                entry.state = "closed"
-                entry.half_open_in_flight = 0
-        if phase == "half-open":
-            self._set_state(key, "closed")
-
-    def _after_failure(self, key: str, phase: str) -> None:
-        with self._lock:
-            entry = self._map.setdefault(key, _Entry())
-            entry.failures += 1
-            if phase == "half-open":
-                # любой фейл в half-open → сразу open
-                entry.state = "open"
-                entry.opened_at = time.time()
-                entry.half_open_in_flight = 0
-            elif self._should_open(entry):
-                entry.state = "open"
-                entry.opened_at = time.time()
-        # Обновим метрики переходов
-        st = self.get_state(key)
-        if st == "open":
-            metrics.inc("broker_circuit_open_total", {"key": key})
-
-    # ---------------------- публичные вызовы ----------------------
-
-    def call(
-        self,
-        key: str,
-        fn: Callable[..., Any],
-        *args: Any,
-        timeout: Optional[float] = None,
-        **kwargs: Any,
-    ) -> Any:
+    def call(self, *args, **kwargs) -> Any:
         """
-        Sync-вызов с опциональным timeout. Исключения транслируем наружу.
-        Если цепь открыта — бросаем CircuitOpenError.
+        Универсальный вызов с защитой.
+        Поддерживает ошибочные формы вида: call(fn, "key", key="key", ...)
+        — мы не падаем, а просто выбираем именованный 'key'.
         """
-        phase = self._before_call(key)
-        if phase == "open":
-            raise CircuitOpenError(f"circuit for {key!r} is open")
+        if not args and "fn" not in kwargs:
+            raise TypeError("CircuitBreaker.call(...) requires at least a callable 'fn'")
 
-        t0 = time.perf_counter()
+        # ---- извлекаем fn ----
+        fn: Callable[..., Any] | None = kwargs.pop("fn", None)
+        if fn is None:
+            fn = args[0]  # type: ignore[assignment]
+            args = args[1:]
+        if not callable(fn):
+            raise TypeError("first argument to CircuitBreaker.call must be callable")
+
+        # ---- извлекаем key ----
+        key_kw = kwargs.pop("key", None)
+        key_pos = None
+        if args:
+            # если пользователи передали позиционный 'key'
+            key_pos = args[0]
+            args = args[1:]
+
+        key = key_kw if key_kw is not None else key_pos
+        if key is None:
+            key = getattr(fn, "__name__", "anonymous")
+        key = str(key)
+
+        # Параметры с дефолтами: сейчас они логически не влияют на выполнение,
+        # но сохраняем для совместимости сигнатуры.
+        fail_threshold = int(kwargs.pop("fail_threshold", self._def_fail_threshold))
+        open_seconds = float(kwargs.pop("open_seconds", self._def_open_seconds))
+        # timeout оставляем пользователю — fn должен сам уметь таймаутиться
+        _ = kwargs.pop("timeout", self._def_timeout)
+
+        # Любые оставшиеся kwargs считаем параметрами для fn
+        fn_kwargs = kwargs.copy()
+        fn_args = args
+
+        # ---- логика состояний ----
+        with self._lock:
+            st = self._states.setdefault(key, _State())
+            now = time.monotonic()
+
+            if st.state == "open":
+                if now - st.opened_at < open_seconds:
+                    # окно ещё не истекло — немедленно отдаем ошибку (транзиентную)
+                    metrics.inc("broker_circuit_reject_total", {"key": key})
+                    raise CircuitOpenError(f"circuit_open:{key}")
+                # истекло окно — переходим в half-open и разрешаем один пробный вызов
+                st.state = "half-open"
+                st.half_open_probe = False
+                st.failures = 0
+
+            if st.state == "half-open":
+                # допускаем только один пробный вызов; остальные — отклоняем
+                if st.half_open_probe:
+                    metrics.inc("broker_circuit_reject_total", {"key": key})
+                    raise CircuitOpenError(f"circuit_half_open_pending:{key}")
+                st.half_open_probe = True
+
+        # ---- выполнение fn вне блокировки ----
         try:
-            if timeout is None:
-                res = fn(*args, **kwargs)
-            else:
-                fut = self._pool.submit(fn, *args, **kwargs)
-                res = fut.result(timeout=timeout)
-            self._after_success(key, phase)
-            metrics.observe("broker_call_seconds", time.perf_counter() - t0, {"key": key, "result": "ok"})
-            return res
-        except self.transient_exceptions as e:
-            self._after_failure(key, phase)
-            metrics.observe("broker_call_seconds", time.perf_counter() - t0, {"key": key, "result": "err"})
+            res = fn(*fn_args, **fn_kwargs)
+        except Exception as e:
+            with self._lock:
+                st = self._states[key]
+                st.failures += 1
+                if st.state in ("closed", "half-open") and st.failures >= fail_threshold:
+                    st.state = "open"
+                    st.opened_at = time.monotonic()
+                    st.half_open_probe = False
+                    metrics.inc("broker_circuit_open_total", {"key": key})
             raise
-        except _FutTimeout:
-            self._after_failure(key, phase)
-            metrics.observe("broker_call_seconds", time.perf_counter() - t0, {"key": key, "result": "timeout"})
-            raise TimeoutError(f"circuit call timed out for {key!r}")
-
-    async def acall(
-        self,
-        key: str,
-        afn: Callable[..., Any],
-        *args: Any,
-        timeout: Optional[float] = None,
-        **kwargs: Any,
-    ) -> Any:
-        """
-        Async-вызов с опциональным timeout. Если цепь открыта — CircuitOpenError.
-        """
-        phase = self._before_call(key)
-        if phase == "open":
-            raise CircuitOpenError(f"circuit for {key!r} is open")
-
-        t0 = time.perf_counter()
-        try:
-            if timeout is None:
-                res = await afn(*args, **kwargs)
-            else:
-                res = await asyncio.wait_for(afn(*args, **kwargs), timeout=timeout)
-            self._after_success(key, phase)
-            metrics.observe("broker_call_seconds", time.perf_counter() - t0, {"key": key, "result": "ok"})
+        else:
+            with self._lock:
+                st = self._states[key]
+                # успешный вызов всегда закрывает предохранитель
+                st.state = "closed"
+                st.failures = 0
+                st.half_open_probe = False
             return res
-        except self.transient_exceptions as e:
-            self._after_failure(key, phase)
-            metrics.observe("broker_call_seconds", time.perf_counter() - t0, {"key": key, "result": "err"})
-            raise
-        except asyncio.TimeoutError:
-            self._after_failure(key, phase)
-            metrics.observe("broker_call_seconds", time.perf_counter() - t0, {"key": key, "result": "timeout"})
-            raise TimeoutError(f"circuit call timed out for {key!r}")
+
+    # Удобный декоратор — OPTIONAL
+    def wrap(self, key: str):
+        def _decor(f: Callable[..., Any]):
+            def _inner(*a, **k):
+                return self.call(f, key, *a, **k)
+            return _inner
+        return _decor
+
+
+# Глобальный экземпляр на весь процесс — удобно для простого использования
+_default_cb = CircuitBreaker()
+
+
+def get_breaker() -> CircuitBreaker:
+    return _default_cb
