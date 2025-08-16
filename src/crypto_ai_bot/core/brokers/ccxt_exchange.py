@@ -2,174 +2,360 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from .base import ExchangeInterface, TransientExchangeError, PermanentExchangeError
-from .symbols import to_exchange_symbol
+from .base import (
+    ExchangeInterface,
+    ExchangeError,
+    TransientExchangeError,
+    PermanentExchangeError,
+)
+from .symbols import normalize_symbol, normalize_timeframe, to_exchange_symbol
+from crypto_ai_bot.utils.retry import retry
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker, CircuitOpenError
-from crypto_ai_bot.utils.rate_limit import rate_limit
-from crypto_ai_bot.utils.retry import retry  # предполагается, что у тебя уже есть utils/retry.py
 
 
+# --- мягкая зависимость от ccxt ------------------------------------------------
 try:
     import ccxt  # type: ignore
-except Exception as e:  # pragma: no cover
-    ccxt = None
-    _import_error = e
+    _HAS_CCXT = True
+except Exception as _e:
+    ccxt = None  # type: ignore
+    _HAS_CCXT = False
+    _IMPORT_ERROR = _e
 
 
-@dataclass
+# --- вспомогательные вещи ------------------------------------------------------
+
+def _to_float(x: Any) -> float:
+    if isinstance(x, Decimal):
+        return float(x)
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _labels(method: str, exchange: str, code: Optional[int] = None) -> Dict[str, str]:
+    lab = {"method": method, "exchange": (exchange or "").lower()}
+    if code is not None:
+        lab["code"] = str(code)
+    return lab
+
+
+# --- CcxtExchange --------------------------------------------------------------
+
 class CcxtExchange(ExchangeInterface):
     """
-    Адаптер ccxt к ExchangeInterface.
-    Поддерживает circuit breaker, rate limits и retry/backoff.
+    Реализация интерфейса биржи поверх CCXT.
+    Все вызовы сети идут через retry + circuit breaker и пишут метрики.
     """
-    client: Any
-    exchange_name: str
-    contract: str  # 'spot' | 'linear' | 'inverse'
-    breaker: CircuitBreaker
 
-    # -------------------------- Фабрика --------------------------
+    def __init__(self, ccxt_client: Any, *, exchange_name: str, cfg: Any):
+        self._x = ccxt_client
+        self._name = exchange_name
+        self._cfg = cfg
+
+        # circuit breaker (значения можно вынести в Settings при желании)
+        self._cb = CircuitBreaker()
+
+        # настройки повторов/таймаутов из Settings
+        self._retries = int(getattr(cfg, "HTTP_RETRIES", 2))
+        self._backoff_base = float(getattr(cfg, "HTTP_BACKOFF_BASE_SEC", 0.2))
+        self._jitter = float(getattr(cfg, "HTTP_BACKOFF_JITTER_SEC", 0.1))
+        self._timeout_sec = float(getattr(cfg, "HTTP_TIMEOUT_SEC", 10.0))
+
+    # ---- фабричный конструктор ------------------------------------------------
 
     @classmethod
-    def from_settings(cls, cfg) -> "CcxtExchange":
-        if ccxt is None:
-            raise RuntimeError(f"ccxt import failed: {_import_error!r}")
+    def from_settings(cls, cfg: Any) -> "CcxtExchange":
+        if not _HAS_CCXT:
+            raise PermanentExchangeError(
+                f"ccxt is not installed: {_IMPORT_ERROR!r}. Please add 'ccxt' to requirements."
+            )
 
-        name = getattr(cfg, "EXCHANGE", "bybit").lower()
-        contract = getattr(cfg, "CONTRACT_TYPE", "spot").lower()
+        exchange_name = str(getattr(cfg, "EXCHANGE", "binance")).lower()
+        if not hasattr(ccxt, exchange_name):
+            raise PermanentExchangeError(f"Unknown exchange for ccxt: {exchange_name!r}")
 
-        # Инициализация клиента ccxt
-        if not hasattr(ccxt, name):
-            raise RuntimeError(f"Unsupported exchange for ccxt: {name}")
-
-        klass = getattr(ccxt, name)
-        client = klass({
-            "apiKey": getattr(cfg, "API_KEY", None),
-            "secret": getattr(cfg, "API_SECRET", None),
-            "enableRateLimit": True,
-            "timeout": int(getattr(cfg, "BROKER_TIMEOUT_MS", 15_000)),
-            # proxy/headers здесь, если нужно
-        })
-
-        breaker = CircuitBreaker(
-            fail_threshold=int(getattr(cfg, "BROKER_BREAKER_FAILS", 5)),
-            open_seconds=float(getattr(cfg, "BROKER_BREAKER_OPEN_SECONDS", 30)),
-            half_open_max_calls=int(getattr(cfg, "BROKER_HALF_OPEN_CALLS", 1)),
+        # инициализируем инстанс ccxt.<exchange>() без чтения ENV
+        klass = getattr(ccxt, exchange_name)
+        client = klass(
+            {
+                "enableRateLimit": True,
+                "timeout": int(float(getattr(cfg, "HTTP_TIMEOUT_SEC", 10.0)) * 1000),
+                # proxy, verbose и прочее можно прокинуть через cfg.EXTRA при желании
+            }
         )
 
-        return cls(client=client, exchange_name=name, contract=contract, breaker=breaker)
+        # API-ключи (если заданы)
+        api_key = getattr(cfg, "CCXT_API_KEY", None)
+        api_secret = getattr(cfg, "CCXT_API_SECRET", None)
+        password = getattr(cfg, "CCXT_PASSWORD", None)
+        uid = getattr(cfg, "CCXT_UID", None)
 
-    # -------------------------- Нормализатор --------------------------
+        if api_key:
+            client.apiKey = api_key
+        if api_secret:
+            client.secret = api_secret
+        if password:
+            client.password = password
+        if uid:
+            client.uid = uid
 
-    def _ex_symbol(self, symbol: str) -> str:
-        return to_exchange_symbol(self.exchange_name, symbol, contract=self.contract)  # канон → биржа
+        return cls(client, exchange_name=exchange_name, cfg=cfg)
 
-    # -------------------------- Обёртки вызовов --------------------------
+    # ---- публичный API (ExchangeInterface) -----------------------------------
 
-    def _wrap_call(self, key: str, fn, *args, **kwargs):
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
         """
-        Единая точка: circuit breaker + retry/backoff + метрики.
+        Возвращает список баров в формате CCXT:
+          [[ts_ms, open, high, low, close, volume], ...] (по возрастанию времени)
         """
-        timeout = float(kwargs.pop("_timeout", getattr(self.client, "timeout", 15_000)) or 15_000) / 1000.0
+        sym = normalize_symbol(symbol)
+        tf = normalize_timeframe(timeframe)
+        ex_sym = to_exchange_symbol(sym, self._name)
 
         @retry(
-            retries=int(kwargs.pop("_retries", 3)),
-            backoff=float(kwargs.pop("_backoff", 0.5)),
-            jitter=float(kwargs.pop("_jitter", 0.2)),
-            on=(Exception,),  # ccxt кидает свои исключения от Exception; при желании сузить
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=self._transient_errors_tuple(),
+            on_retry=lambda i, e: metrics.inc(
+                "broker_retry_total", _labels("fetch_ohlcv", self._name)
+            ),
         )
         def _do():
             t0 = time.perf_counter()
             try:
-                res = self.breaker.call(key, fn, *args, timeout=timeout, **kwargs)
-                metrics.observe("broker_latency_seconds", time.perf_counter() - t0, {"op": key, "result": "ok"})
-                return res
-            except CircuitOpenError as e:
-                metrics.inc("broker_circuit_short_total", {"op": key})
-                raise TransientExchangeError(str(e))
+                rows = self._cb.call(
+                    lambda: self._x.fetch_ohlcv(ex_sym, timeframe=tf, limit=int(limit)),
+                    key=f"{self._name}:ohlcv:{ex_sym}:{tf}",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=10.0,
+                )
+                metrics.inc("broker_requests_total", _labels("fetch_ohlcv", self._name, 200))
+                return rows
             except Exception as e:
-                # простая классификация: HTTP 5xx/429 → Transient, остальное → Permanent
-                msg = str(e).lower()
-                transient = any(tok in msg for tok in ("429", "timed out", "timeout", "temporarily", "server error", "5"))
-                metrics.observe("broker_latency_seconds", time.perf_counter() - t0, {"op": key, "result": "err"})
-                if transient:
-                    raise TransientExchangeError(str(e))
-                raise PermanentExchangeError(str(e))
+                metrics.inc("broker_requests_total", _labels("fetch_ohlcv", self._name, 599))
+                raise e
+            finally:
+                dur = time.perf_counter() - t0
+                metrics.observe("broker_latency_seconds", dur, _labels("fetch_ohlcv", self._name))
 
-        return _do()
+        rows = _do()  # type: ignore[assignment]
+        # CCXT возвращает уже по возрастанию, но перестрахуемся:
+        rows.sort(key=lambda r: r[0])
+        # приводим числа к float
+        out: List[List[float]] = []
+        for r in rows:
+            ts = float(r[0])
+            o, h, l, c, v = map(_to_float, r[1:6])
+            out.append([ts, o, h, l, c, v])
+        return out
 
-    # -------------------------- Реализация интерфейса --------------------------
-
-    @rate_limit(key=lambda self, symbol, timeframe, limit: f"{self.exchange_name}:ohlcv", max_calls=60, window_seconds=60.0)
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
-        ex_symbol = self._ex_symbol(symbol)
-        key = f"{self.exchange_name}.fetch_ohlcv"
-        data = self._wrap_call(key, self.client.fetch_ohlcv, ex_symbol, timeframe, limit, _retries=3)
-        # ccxt возвращает список списков [ms, o, h, l, c, v]
-        return data
-
-    @rate_limit(key=lambda self, symbol: f"{self.exchange_name}:ticker", max_calls=120, window_seconds=60.0)
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        ex_symbol = self._ex_symbol(symbol)
-        key = f"{self.exchange_name}.fetch_ticker"
-        return self._wrap_call(key, self.client.fetch_ticker, ex_symbol, _retries=2)
+        sym = normalize_symbol(symbol)
+        ex_sym = to_exchange_symbol(sym, self._name)
 
-    @rate_limit(key=lambda self, symbol, type_, side, amount, price=None, **kw: f"{self.exchange_name}:orders", max_calls=60, window_seconds=60.0)
+        @retry(
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=self._transient_errors_tuple(),
+            on_retry=lambda i, e: metrics.inc(
+                "broker_retry_total", _labels("fetch_ticker", self._name)
+            ),
+        )
+        def _do():
+            t0 = time.perf_counter()
+            try:
+                data = self._cb.call(
+                    lambda: self._x.fetch_ticker(ex_sym),
+                    key=f"{self._name}:ticker:{ex_sym}",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=10.0,
+                )
+                metrics.inc("broker_requests_total", _labels("fetch_ticker", self._name, 200))
+                return data
+            except Exception as e:
+                metrics.inc("broker_requests_total", _labels("fetch_ticker", self._name, 599))
+                raise e
+            finally:
+                dur = time.perf_counter() - t0
+                metrics.observe("broker_latency_seconds", dur, _labels("fetch_ticker", self._name))
+
+        data = _do()
+        # нормализуем минимальный контракт: last/close/bid/ask
+        last = data.get("last") or data.get("close")
+        return {
+            "symbol": sym,
+            "exchange_symbol": ex_sym,
+            "last": _to_float(last),
+            "close": _to_float(data.get("close")),
+            "bid": _to_float(data.get("bid")),
+            "ask": _to_float(data.get("ask")),
+            "timestamp": int(data.get("timestamp") or data.get("datetime") or _now_ms()),
+            "raw": data,
+        }
+
     def create_order(
         self,
         symbol: str,
         type_: str,
         side: str,
         amount: Decimal,
-        price: Optional[Decimal] = None,
-        *,
-        idempotency_key: str | None = None,
+        price: Decimal | None = None,
         client_order_id: str | None = None,
     ) -> Dict[str, Any]:
-        ex_symbol = self._ex_symbol(symbol)
-        key = f"{self.exchange_name}.create_order"
+        sym = normalize_symbol(symbol)
+        ex_sym = to_exchange_symbol(sym, self._name)
+        typ = str(type_).lower()
+        sd = str(side).lower()
 
-        params = {}
+        if typ not in {"market", "limit"}:
+            raise PermanentExchangeError(f"Unsupported order type: {type_!r}")
+        if sd not in {"buy", "sell"}:
+            raise PermanentExchangeError(f"Unsupported side: {side!r}")
+
+        params: Dict[str, Any] = {}
         if client_order_id:
-            # bybit/okx/bn — разные ключи; ccxt нормализует как 'clientOrderId' для поддерживаемых
+            # большинство бирж CCXT уважают clientOrderId в params
             params["clientOrderId"] = client_order_id
 
-        # ccxt хочет float — аккуратнее приводим
-        amount_f = float(amount)
-        price_f = float(price) if price is not None else None
+        amt = _to_float(amount)
+        prc = None if price is None else _to_float(price)
 
-        order = self._wrap_call(
-            key,
-            self.client.create_order,
-            ex_symbol,
-            type_,
-            side,
-            amount_f,
-            price_f,
-            params,
-            _retries=3,
+        @retry(
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=self._transient_errors_tuple(),
+            on_retry=lambda i, e: metrics.inc(
+                "broker_retry_total", _labels("create_order", self._name)
+            ),
         )
-        return order
+        def _do():
+            t0 = time.perf_counter()
+            try:
+                order = self._cb.call(
+                    lambda: self._x.create_order(ex_sym, typ, sd, amt, prc, params),
+                    key=f"{self._name}:order:{ex_sym}:{sd}:{typ}",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=10.0,
+                )
+                metrics.inc("broker_requests_total", _labels("create_order", self._name, 200))
+                return order
+            except Exception as e:
+                metrics.inc("broker_requests_total", _labels("create_order", self._name, 599))
+                raise e
+            finally:
+                dur = time.perf_counter() - t0
+                metrics.observe("broker_latency_seconds", dur, _labels("create_order", self._name))
 
-    @rate_limit(key=lambda self: f"{self.exchange_name}:balance", max_calls=60, window_seconds=60.0)
+        return _do()
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        if not order_id:
+            raise PermanentExchangeError("order_id is required")
+
+        @retry(
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=self._transient_errors_tuple(),
+            on_retry=lambda i, e: metrics.inc(
+                "broker_retry_total", _labels("cancel_order", self._name)
+            ),
+        )
+        def _do():
+            t0 = time.perf_counter()
+            try:
+                res = self._cb.call(
+                    lambda: self._x.cancel_order(order_id),
+                    key=f"{self._name}:cancel:{order_id}",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=10.0,
+                )
+                metrics.inc("broker_requests_total", _labels("cancel_order", self._name, 200))
+                return res
+            except Exception as e:
+                metrics.inc("broker_requests_total", _labels("cancel_order", self._name, 599))
+                raise e
+            finally:
+                dur = time.perf_counter() - t0
+                metrics.observe("broker_latency_seconds", dur, _labels("cancel_order", self._name))
+
+        return _do()
+
     def fetch_balance(self) -> Dict[str, Any]:
-        key = f"{self.exchange_name}.fetch_balance"
-        return self._wrap_call(key, self.client.fetch_balance, _retries=2)
+        @retry(
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=self._transient_errors_tuple(),
+            on_retry=lambda i, e: metrics.inc(
+                "broker_retry_total", _labels("fetch_balance", self._name)
+            ),
+        )
+        def _do():
+            t0 = time.perf_counter()
+            try:
+                res = self._cb.call(
+                    lambda: self._x.fetch_balance(),
+                    key=f"{self._name}:balance",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=10.0,
+                )
+                metrics.inc("broker_requests_total", _labels("fetch_balance", self._name, 200))
+                return res
+            except Exception as e:
+                metrics.inc("broker_requests_total", _labels("fetch_balance", self._name, 599))
+                raise e
+            finally:
+                dur = time.perf_counter() - t0
+                metrics.observe("broker_latency_seconds", dur, _labels("fetch_balance", self._name))
 
-    def cancel_order(self, order_id: str, *, symbol: str | None = None) -> Dict[str, Any]:
-        key = f"{self.exchange_name}.cancel_order"
-        if symbol:
-            ex_symbol = self._ex_symbol(symbol)
-            return self._wrap_call(key, self.client.cancel_order, order_id, ex_symbol, _retries=2)
-        return self._wrap_call(key, self.client.cancel_order, order_id, _retries=2)
+        return _do()
+
+    # ---- необязательное закрытие ресурсов ------------------------------------
 
     def close(self) -> None:
         try:
-            if hasattr(self.client, "close"):
-                self.client.close()
+            if hasattr(self._x, "close"):
+                self._x.close()
         except Exception:
             pass
+
+    # ---- классификация ошибок для retry --------------------------------------
+
+    @staticmethod
+    def _transient_errors_tuple():
+        """
+        Набор исключений, при которых имеет смысл ретраить вызовы.
+        Если ccxt недоступен (теоретически), используем общий Exception — но это маловероятно.
+        """
+        if not _HAS_CCXT:
+            return (Exception,)  # fallback
+
+        transient = (
+            ccxt.RequestTimeout,
+            ccxt.NetworkError,
+            ccxt.DDoSProtection,
+            ccxt.ExchangeNotAvailable,
+            ccxt.RateLimitExceeded,
+            ccxt.OnMaintenance,
+        )
+        # также считаем наш TransientExchangeError ретраибл
+        return transient + (TransientExchangeError,)

@@ -1,107 +1,210 @@
 # src/crypto_ai_bot/core/brokers/backtest_exchange.py
 from __future__ import annotations
 
-import csv
 import time
-from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_FLOOR
-from typing import Any, Dict, Iterable, List, Optional
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .base import ExchangeInterface, PermanentExchangeError
-from .symbols import split_symbol, to_exchange_symbol
+import pandas as pd
+
+from .base import (
+    ExchangeInterface,
+    PermanentExchangeError,
+)
+from .symbols import normalize_symbol, normalize_timeframe, split_symbol
+from crypto_ai_bot.utils import metrics
 
 
-def _to_dec(x: Any) -> Decimal:
+# ───────────────────────────── helpers ────────────────────────────────────────
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _to_float(x: Any, default: float = 0.0) -> float:
     if isinstance(x, Decimal):
-        return x
-    return Decimal(str(x))
+        try:
+            return float(x)
+        except Exception:
+            return default
+    try:
+        return float(x)
+    except Exception:
+        return default
 
+
+def _labels(method: str) -> Dict[str, str]:
+    return {"method": method, "exchange": "backtest"}
+
+
+_OHLCV_CANDIDATES = {
+    "time": {"time", "timestamp", "ts", "datetime", "date"},
+    "open": {"open", "o"},
+    "high": {"high", "h"},
+    "low": {"low", "l"},
+    "close": {"close", "c"},
+    "volume": {"volume", "vol", "v"},
+}
+
+
+def _find_col(df: pd.DataFrame, logical: str) -> str:
+    lowmap = {str(c).lower(): c for c in df.columns}
+    for cand in _OHLCV_CANDIDATES.get(logical, {logical}):
+        if cand in lowmap:
+            return lowmap[cand]
+    raise KeyError(f"Required column not found for '{logical}'. Available: {list(df.columns)}")
+
+
+# ───────────────────────────── state ─────────────────────────────────────────
 
 @dataclass
+class _State:
+    df: pd.DataFrame
+    time_col: str
+    open_col: str
+    high_col: str
+    low_col: str
+    close_col: str
+    volume_col: Optional[str]
+    cursor: int  # индекс текущего бара (включительно)
+    base_ccy: str
+    quote_ccy: str
+    balances: Dict[str, Dict[str, float]]  # {'USDT': {'free':..,'used':..,'total':..}, ...}
+    fee_pct: float
+    slip_pct: float
+
+
+# ───────────────────────────── broker ────────────────────────────────────────
+
 class BacktestExchange(ExchangeInterface):
     """
-    Реплей исторических OHLCV.
-    - Данные подаются заранее (csv/dataframe/list[OHLCV]).
-    - Текущая точка времени = индекс i; fetch_ohlcv возвращает хвост до i включительно.
-    - create_order исполняет по close[i] ± slippage.
-    - Балансы живут локально, комиссии удерживаются в quote.
-    - Движение времени управляется через tick(step) снаружи тестового цикла.
+    Исторический брокер (backtest):
+      - читает OHLCV из CSV (cfg.BACKTEST_CSV)
+      - внешняя логика (раннер) может двигать курсор методами `advance()`/`set_cursor()`
+      - API совместим с ExchangeInterface; все вызовы без сети
     """
 
-    exchange_name: str = "backtest"
-    contract: str = "spot"
-    ohlcv: List[List[float]] = field(default_factory=list)  # [ts, o, h, l, c, v]
-    i: int = 0
-    slippage_bps: int = 0
-    fee_pct: Decimal = Decimal("0.0005")  # 0.05% для backtest
-    balances: Dict[str, Decimal] = field(default_factory=dict)
+    def __init__(self, *, cfg: Any):
+        self._cfg = cfg
+        csv_path = getattr(cfg, "BACKTEST_CSV", None)
+        if not csv_path:
+            raise PermanentExchangeError("BACKTEST_CSV is not set in Settings")
 
-    # ------------------- инициализация -------------------
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception as e:
+            raise PermanentExchangeError(f"Failed to read BACKTEST_CSV at {csv_path!r}: {e}")
 
-    @classmethod
-    def from_csv(cls, path: str, *, slippage_bps: int = 0, fee_pct: str = "0.0005", balances: Optional[Dict[str, Any]] = None) -> "BacktestExchange":
-        rows: List[List[float]] = []
-        with open(path, "r", encoding="utf-8") as f:
-            r = csv.reader(f)
-            for row in r:
-                if not row or row[0].startswith("#"):
-                    continue
-                # ожидаем: ts, open, high, low, close, volume
-                ts, o, h, l, c, v = row[:6]
-                rows.append([float(ts), float(o), float(h), float(l), float(c), float(v)])
-        bal = {k: _to_dec(v) for k, v in (balances or {"USDT": "10000"}).items()}
-        return cls(ohlcv=rows, slippage_bps=int(slippage_bps), fee_pct=_to_dec(fee_pct), balances=bal)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise PermanentExchangeError(f"BACKTEST_CSV {csv_path!r} is empty or invalid")
 
-    @classmethod
-    def from_ohlcv(cls, rows: Iterable[Iterable[float]], *, slippage_bps: int = 0, fee_pct: str = "0.0005", balances: Optional[Dict[str, Any]] = None) -> "BacktestExchange":
-        data = [[float(a), float(b), float(c), float(d), float(e), float(f)] for a, b, c, d, e, f in rows]
-        bal = {k: _to_dec(v) for k, v in (balances or {"USDT": "10000"}).items()}
-        return cls(ohlcv=data, slippage_bps=int(slippage_bps), fee_pct=_to_dec(fee_pct), balances=bal)
+        # locate columns
+        tcol = _find_col(df, "time")
+        ocol = _find_col(df, "open")
+        hcol = _find_col(df, "high")
+        lcol = _find_col(df, "low")
+        ccol = _find_col(df, "close")
+        try:
+            vcol = _find_col(df, "volume")
+        except Exception:
+            vcol = None
 
-    # ------------------- управление временем -------------------
+        # normalize time to int ms
+        ts = df[tcol]
+        if pd.api.types.is_datetime64_any_dtype(ts):
+            df["_ts_ms_"] = (ts.astype("int64") // 10**6).astype("int64")
+        else:
+            # попытка привести к datetime → иначе предполагаем уже миллисекунды/секунды
+            try:
+                parsed = pd.to_datetime(ts, utc=True, errors="raise")
+                df["_ts_ms_"] = (parsed.astype("int64") // 10**6).astype("int64")
+            except Exception:
+                # пробуем угадать секунды/миллисекунды
+                s = pd.to_numeric(ts, errors="coerce").fillna(0).astype("int64")
+                # если значения выглядят как секунды (10^10), домножим
+                df["_ts_ms_"] = s.where(s > 10**12, s * 1000)
 
-    def tick(self, step: int = 1) -> None:
-        """Сдвинуть «текущее время» на step баров вперёд."""
-        self.i = max(0, min(len(self.ohlcv) - 1, self.i + int(step)))
+        # сортировка по времени по возрастанию
+        df = df.sort_values("_ts_ms_").reset_index(drop=True)
 
-    # ------------------- утилиты -------------------
+        # стартовые балансы: пополняем котируемую валюту
+        sym = normalize_symbol(getattr(cfg, "SYMBOL", "BTC/USDT"))
+        base, quote = split_symbol(sym)
+        initial_quote = _to_float(getattr(cfg, "BACKTEST_INITIAL_BALANCE", 10000.0))
+        balances = {
+            base: {"free": 0.0, "used": 0.0, "total": 0.0},
+            quote: {"free": initial_quote, "used": 0.0, "total": initial_quote},
+        }
 
-    def _cur_close(self) -> Decimal:
-        if not self.ohlcv:
-            raise PermanentExchangeError("no OHLCV loaded")
-        ts, o, h, l, c, v = self.ohlcv[self.i]
-        return _to_dec(c)
+        self._st = _State(
+            df=df,
+            time_col=tcol,
+            open_col=ocol,
+            high_col=hcol,
+            low_col=lcol,
+            close_col=ccol,
+            volume_col=vcol,
+            cursor=max(0, int(getattr(cfg, "MIN_FEATURE_BARS", 100)) - 1),  # чтобы с первого вызова хватало истории
+            base_ccy=base,
+            quote_ccy=quote,
+            balances=balances,
+            fee_pct=float(getattr(cfg, "BACKTEST_FEE_PCT", 0.0005)),
+            slip_pct=float(getattr(cfg, "BACKTEST_SLIPPAGE_PCT", 0.0002)),
+        )
 
-    def _price_with_slippage(self, last: Decimal, side: str) -> Decimal:
-        bps = Decimal(self.slippage_bps) / Decimal(10_000)
-        if side.lower() == "buy":
-            return (last * (Decimal("1") + bps)).quantize(Decimal("0.00000001"), rounding=ROUND_FLOOR)
-        return (last * (Decimal("1") - bps)).quantize(Decimal("0.00000001"), rounding=ROUND_FLOOR)
+        # рамки курсора
+        self._st.cursor = min(max(self._st.cursor, 0), len(self._st.df) - 1)
 
-    # ------------------- интерфейс -------------------
+        metrics.inc("broker_created_total", {"mode": "backtest"})
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
-        if not self.ohlcv:
-            raise PermanentExchangeError("no OHLCV loaded")
-        end = self.i + 1
-        start = max(0, end - int(limit))
-        return self.ohlcv[start:end]
+    # ─────────────────────────── ExchangeInterface ─────────────────────────────
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
+        sym = normalize_symbol(symbol)
+        normalize_timeframe(timeframe)  # валидируем формально; бэктест читает из CSV и не ресемплит
+
+        t0 = time.perf_counter()
+        try:
+            end = self._st.cursor
+            start = max(0, end - int(limit) + 1)
+            sl = self._st.df.iloc[start : end + 1]
+            out: List[List[float]] = []
+            for _, r in sl.iterrows():
+                ts = int(r["_ts_ms_"])
+                o = float(r[self._st.open_col])
+                h = float(r[self._st.high_col])
+                l = float(r[self._st.low_col])
+                c = float(r[self._st.close_col])
+                v = float(r[self._st.volume_col]) if self._st.volume_col else 0.0
+                out.append([ts, o, h, l, c, v])
+            metrics.inc("broker_requests_total", _labels("fetch_ohlcv") | {"code": "200"})
+            return out
+        finally:
+            metrics.observe("broker_latency_seconds", time.perf_counter() - t0, _labels("fetch_ohlcv"))
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        if not self.ohlcv:
-            raise PermanentExchangeError("no OHLCV loaded")
-        ts, o, h, l, c, v = self.ohlcv[self.i]
-        return {
-            "symbol": to_exchange_symbol(self.exchange_name, symbol, contract=self.contract),
-            "timestamp": int(ts),
-            "last": float(c),
-            "open": float(o),
-            "high": float(h),
-            "low": float(l),
-            "close": float(c),
-            "volume": float(v),
-            "provider": "backtest",
-        }
+        sym = normalize_symbol(symbol)
+        r = self._st.df.iloc[self._st.cursor]
+        last = float(r[self._st.close_col])
+        # небольшой синтетический спред (±1 bps), чтобы логика, рассчитывающая spread, не падала на нуле
+        bid = last * (1.0 - 0.0001)
+        ask = last * (1.0 + 0.0001)
+        ts = int(r["_ts_ms_"])
+        t0 = time.perf_counter()
+        try:
+            out = {
+                "symbol": sym,
+                "last": last,
+                "close": last,
+                "bid": bid,
+                "ask": ask,
+                "timestamp": ts,
+            }
+            metrics.inc("broker_requests_total", _labels("fetch_ticker") | {"code": "200"})
+            return out
+        finally:
+            metrics.observe("broker_latency_seconds", time.perf_counter() - t0, _labels("fetch_ticker"))
 
     def create_order(
         self,
@@ -109,62 +212,117 @@ class BacktestExchange(ExchangeInterface):
         type_: str,
         side: str,
         amount: Decimal,
-        price: Optional[Decimal] = None,
-        *,
-        idempotency_key: str | None = None,
+        price: Decimal | None = None,
         client_order_id: str | None = None,
     ) -> Dict[str, Any]:
-        base, quote = split_symbol(symbol)
-        amt = _to_dec(amount)
-        if amt <= 0:
-            raise PermanentExchangeError("amount must be positive")
+        sym = normalize_symbol(symbol)
+        typ = str(type_).lower()
+        sd = str(side).lower()
+        if typ not in {"market", "limit"}:
+            raise PermanentExchangeError(f"Unsupported order type: {type_!r}")
+        if sd not in {"buy", "sell"}:
+            raise PermanentExchangeError(f"Unsupported side: {side!r}")
 
-        last = self._cur_close()
-        fill_price = self._price_with_slippage(last, side)
-        if type_.lower() == "limit" and price is not None:
-            p = _to_dec(price)
-            if side.lower() == "buy":
-                fill_price = min(fill_price, p)
-            else:
-                fill_price = max(fill_price, p)
+        # текущая котировка (исполняем сразу)
+        r = self._st.df.iloc[self._st.cursor]
+        last = float(r[self._st.close_col])
+        bid = last * (1.0 - 0.0001)
+        ask = last * (1.0 + 0.0001)
 
-        fee = (fill_price * amt * self.fee_pct).quantize(Decimal("0.00000001"))
-        cost = (fill_price * amt).quantize(Decimal("0.00000001"))
+        amt = _to_float(amount)
+        if amt <= 0.0:
+            raise PermanentExchangeError("amount must be > 0")
 
-        if side.lower() == "buy":
-            q = self.balances.get(quote, Decimal("0"))
-            need = cost + fee
-            if q < need:
-                raise PermanentExchangeError("insufficient quote balance")
-            self.balances[quote] = q - need
-            self.balances[base] = self.balances.get(base, Decimal("0")) + amt
+        # цена исполнения с проскальзыванием
+        if typ == "market":
+            exec_price = ask * (1.0 + self._st.slip_pct) if sd == "buy" else bid * (1.0 - self._st.slip_pct)
+        else:  # limit — исполняем сразу по лимитной цене
+            exec_price = _to_float(price, default=last)
+
+        fee = exec_price * amt * self._st.fee_pct
+
+        base, quote = self._st.base_ccy, self._st.quote_ccy
+        # проверка и изменение балансов
+        if sd == "buy":
+            cost = exec_price * amt + fee
+            if self._st.balances[quote]["free"] + 1e-12 < cost:
+                raise PermanentExchangeError("insufficient funds (quote)")
+            self._st.balances[quote]["free"] -= cost
+            self._st.balances[quote]["total"] -= cost
+            self._st.balances[base]["free"] += amt
+            self._st.balances[base]["total"] += amt
         else:
-            b = self.balances.get(base, Decimal("0"))
-            if b < amt:
-                raise PermanentExchangeError("insufficient base balance")
-            self.balances[base] = b - amt
-            self.balances[quote] = self.balances.get(quote, Decimal("0")) + (cost - fee)
+            if self._st.balances[base]["free"] + 1e-12 < amt:
+                raise PermanentExchangeError("insufficient funds (base)")
+            proceeds = exec_price * amt - fee
+            self._st.balances[base]["free"] -= amt
+            self._st.balances[base]["total"] -= amt
+            self._st.balances[quote]["free"] += proceeds
+            self._st.balances[quote]["total"] += proceeds
 
-        oid = f"bt-{int(time.time()*1000)}-{self.i}"
-        return {
-            "id": oid,
-            "symbol": to_exchange_symbol(self.exchange_name, symbol, contract=self.contract),
-            "type": type_,
-            "side": side,
-            "amount": float(amt),
-            "price": float(fill_price),
-            "filled": float(amt),
+        # формируем ответ
+        order_id = f"backtest-{int(time.time()*1000)}"
+        res = {
+            "id": order_id,
+            "clientOrderId": client_order_id,
+            "symbol": sym,
+            "type": typ,
+            "side": sd,
             "status": "closed",
-            "fee": {"currency": quote, "cost": float(fee)},
-            "timestamp": int(self.ohlcv[self.i][0]),
+            "filled": amt,
+            "price": exec_price,
+            "cost": exec_price * amt,
+            "fee": {"currency": quote, "cost": fee, "rate": self._st.fee_pct},
+            "timestamp": _now_ms(),
         }
+        metrics.inc("broker_requests_total", _labels("create_order") | {"code": "200"})
+        return res
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        # «ожидающих» ордеров в этой реализации нет
+        metrics.inc("broker_requests_total", _labels("cancel_order") | {"code": "200"})
+        return {"id": order_id, "status": "canceled", "timestamp": _now_ms()}
 
     def fetch_balance(self) -> Dict[str, Any]:
-        total = {k: float(v) for k, v in self.balances.items()}
-        return {"total": total, "free": total, "used": {k: 0.0 for k in total.keys()}}
+        free = {k: round(v["free"], 12) for k, v in self._st.balances.items()}
+        total = {k: round(v["total"], 12) for k, v in self._st.balances.items()}
+        used = {k: round(total[k] - free[k], 12) for k in total.keys()}
+        metrics.inc("broker_requests_total", _labels("fetch_balance") | {"code": "200"})
+        return {"free": free, "used": used, "total": total}
 
-    def cancel_order(self, order_id: str, *, symbol: str | None = None) -> Dict[str, Any]:
-        return {"id": order_id, "status": "canceled", "note": "backtest immediate or cancel"}
+    # ─────────────────────────── дополнительные API ───────────────────────────
+    # не часть ExchangeInterface, но удобно для бэктест-раннера
 
-    def close(self) -> None:
-        pass
+    def advance(self, steps: int = 1) -> int:
+        """
+        Сдвинуть курсор на N баров вперёд. Возвращает новый индекс курсора.
+        """
+        self._st.cursor = min(self._st.cursor + int(steps), len(self._st.df) - 1)
+        return self._st.cursor
+
+    def set_cursor(self, idx_or_ts: Union[int, float, int]) -> int:
+        """
+        Установить курсор по индексу или timestamp (ms/seconds).
+        """
+        if isinstance(idx_or_ts, int) and 0 <= idx_or_ts < len(self._st.df):
+            self._st.cursor = idx_or_ts
+            return self._st.cursor
+
+        ts = int(idx_or_ts)
+        # если похоже на секунды → переведём в миллисекунды
+        if ts < 10**12:
+            ts *= 1000
+
+        # бинарный поиск по времени
+        s = self._st.df["_ts_ms_"].values
+        lo, hi = 0, len(s) - 1
+        pos = hi
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if s[mid] <= ts:
+                pos = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        self._st.cursor = int(pos)
+        return self._st.cursor

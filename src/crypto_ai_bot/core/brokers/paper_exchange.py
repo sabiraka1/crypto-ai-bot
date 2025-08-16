@@ -2,110 +2,226 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_FLOOR
-from typing import Any, Dict, Optional
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
-from .base import ExchangeInterface, TransientExchangeError, PermanentExchangeError
-from .symbols import split_symbol, to_exchange_symbol
+from .base import (
+    ExchangeInterface,
+    ExchangeError,
+    TransientExchangeError,
+    PermanentExchangeError,
+)
+from .symbols import normalize_symbol, normalize_timeframe, to_exchange_symbol, split_symbol
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
+from crypto_ai_bot.utils.retry import retry
 from crypto_ai_bot.utils import metrics
 
-# Для рыночных котировок используем любой реальный источник (ccxt-адаптер) в режиме read-only
+# --- мягкая зависимость от ccxt: для рыночных данных (тикер/ohlcv) ------------
 try:
-    from .ccxt_exchange import CcxtExchange  # type: ignore
-except Exception:
-    CcxtExchange = None  # type: ignore
+    import ccxt  # type: ignore
+    _HAS_CCXT = True
+except Exception as _e:
+    ccxt = None  # type: ignore
+    _HAS_CCXT = False
+    _IMPORT_ERROR = _e
 
 
-def _to_dec(x: Any) -> Decimal:
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _to_float(x: Any, default: float = 0.0) -> float:
     if isinstance(x, Decimal):
-        return x
-    return Decimal(str(x))
+        try:
+            return float(x)
+        except Exception:
+            return default
+    try:
+        return float(x)
+    except Exception:
+        return default
 
 
-@dataclass
+def _labels(method: str, exchange: str, code: Optional[int] = None) -> Dict[str, str]:
+    lab = {"method": method, "exchange": (exchange or "paper").lower()}
+    if code is not None:
+        lab["code"] = str(code)
+    return lab
+
+
 class PaperExchange(ExchangeInterface):
     """
-    Симулятор сделок поверх живых котировок (через реальный MD-провайдер).
-    - Балансы и PnL считаются локально.
-    - Заявки исполняются немедленно по last ± slippage.
-    - Комиссия удерживается в котируемой валюте (quote).
-    - Idempotency: по client_order_id защищаемся от повторов.
+    Бумажная биржа (paper):
+    - Балансы/исполнение — целиком в памяти процесса.
+    - Рыночные данные — через ccxt (если установлен) анонимно (enableRateLimit=True).
+      Если ccxt недоступен → бросаем PermanentExchangeError (для paper нужна цена).
     """
 
-    exchange_name: str
-    contract: str = "spot"
-    md: Any = None  # market-data provider (ExchangeInterface совместимый)
-    fee_pct: Decimal = Decimal("0.001")           # 0.1% по умолчанию
-    slippage_bps: int = 5                         # 5 bps = 0.05%
-    balances: Dict[str, Decimal] = field(default_factory=dict)
-    _orders: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    _seq: int = 0
+    def __init__(self, *, cfg: Any):
+        self._cfg = cfg
+        self._name = "paper"
+        self._cb = CircuitBreaker()
 
-    # -------------------------- Фабрика --------------------------
+        # тайминги/ретраи
+        self._timeout_sec = float(getattr(cfg, "HTTP_TIMEOUT_SEC", 10.0))
+        self._retries = int(getattr(cfg, "HTTP_RETRIES", 2))
+        self._backoff_base = float(getattr(cfg, "HTTP_BACKOFF_BASE_SEC", 0.2))
+        self._jitter = float(getattr(cfg, "HTTP_BACKOFF_JITTER_SEC", 0.1))
 
-    @classmethod
-    def from_settings(cls, cfg) -> "PaperExchange":
-        ex_name = getattr(cfg, "EXCHANGE", "bybit").lower()
-        contract = getattr(cfg, "CONTRACT_TYPE", "spot").lower()
+        # торговые параметры
+        self._fee_pct = Decimal(getattr(cfg, "PAPER_FEE_PCT", Decimal("0.001")))
+        self._slip_pct = Decimal(getattr(cfg, "PAPER_SLIPPAGE_PCT", Decimal("0.0005")))
+        self._latency_ms = int(getattr(cfg, "PAPER_LATENCY_MS", 50))
 
-        md_provider = None
-        if CcxtExchange is not None:
-            md_provider = CcxtExchange.from_settings(cfg)
+        # стартовый баланс: используем BACKTEST_INITIAL_BALANCE как источник истины
+        initial_quote = Decimal(getattr(cfg, "BACKTEST_INITIAL_BALANCE", Decimal("10000")))
 
-        # стартовые балансы
-        init_balances = {}
-        # Ожидаем либо словарь, либо пары валют
-        if hasattr(cfg, "PAPER_BALANCES") and isinstance(cfg.PAPER_BALANCES, dict):
-            init_balances = {k: _to_dec(v) for k, v in cfg.PAPER_BALANCES.items()}
-        else:
-            # дефолт: 10_000 USDT, 0 базовой
-            quote = getattr(cfg, "QUOTE_ASSET", "USDT")
-            init_balances[quote] = _to_dec(getattr(cfg, "PAPER_QUOTE_INIT", "10000"))
-            base = getattr(cfg, "BASE_ASSET", None)
-            if base:
-                init_balances[base] = _to_dec(getattr(cfg, "PAPER_BASE_INIT", "0"))
+        self._balances: Dict[str, Dict[str, float]] = {}  # {'USDT': {'free':..., 'used':..., 'total':...}, 'BTC': {...}}
+        self._client = None  # ccxt client (lazy)
 
-        fee = _to_dec(getattr(cfg, "PAPER_FEE_PCT", "0.001"))
-        slp = int(getattr(cfg, "PAPER_SLIPPAGE_BPS", 5))
+        # локальная защита от дублей client_order_id (на всякий случай)
+        self._seen_client_oids: set[str] = set()
 
-        return cls(exchange_name=ex_name, contract=contract, md=md_provider, fee_pct=fee, slippage_bps=slp, balances=init_balances)
+        # при первом запросе с символом инициализируем валюты
+        self._init_done_for: set[str] = set()  # символы, для которых инициализировали баланс
 
-    # -------------------------- Вспомогательные --------------------------
+        # сохраняем последнюю котировку для fallback
+        self._last_ticker: Dict[str, Dict[str, Any]] = {}
 
-    def _price_with_slippage(self, last: Decimal, side: str) -> Decimal:
-        # side=buy → цена чуть хуже (выше), side=sell → ниже
-        bps = Decimal(self.slippage_bps) / Decimal(10_000)
-        if side.lower() == "buy":
-            return (last * (Decimal("1") + bps)).quantize(Decimal("0.00000001"), rounding=ROUND_FLOOR)
-        return (last * (Decimal("1") - bps)).quantize(Decimal("0.00000001"), rounding=ROUND_FLOOR)
+        metrics.inc("broker_created_total", {"mode": "paper"})
 
-    def _next_id(self) -> str:
-        self._seq += 1
-        return f"paper-{int(time.time()*1000)}-{self._seq}"
+    # ────────────────────────── вспомогательные вещи ───────────────────────────
 
-    def _last_price(self, symbol: str) -> Decimal:
-        if self.md is None:
-            raise TransientExchangeError("no market data provider configured for PaperExchange")
-        t = self.md.fetch_ticker(symbol)
-        p = t.get("last") or t.get("close") or t.get("price")
-        if p is None:
-            raise TransientExchangeError("ticker has no price")
-        return _to_dec(p)
+    def _ensure_symbol_wallets(self, symbol: str) -> Tuple[str, str]:
+        """Ленивая инициализация кошельков базовой/котируемой валют по символу."""
+        base, quote = split_symbol(symbol)  # 'BTC/USDT' -> ('BTC', 'USDT')
+        if symbol in self._init_done_for:
+            return base, quote
 
-    # -------------------------- Интерфейс --------------------------
+        # если неизвестны валюты — создаём кошельки с нулём
+        for cur in (base, quote):
+            if cur not in self._balances:
+                self._balances[cur] = {"free": 0.0, "used": 0.0, "total": 0.0}
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
-        if self.md is None:
-            raise TransientExchangeError("no market data provider configured for PaperExchange")
-        return self.md.fetch_ohlcv(symbol, timeframe, limit)
+        # пополняем КОТИРУЕМУЮ валюту стартовым балансом (если ещё пусто)
+        if self._balances[quote]["total"] == 0.0:
+            q0 = _to_float(getattr(self._cfg, "BACKTEST_INITIAL_BALANCE", 10000))
+            self._balances[quote]["free"] = q0
+            self._balances[quote]["total"] = q0
+
+        self._init_done_for.add(symbol)
+        return base, quote
+
+    def _get_ccxt(self):
+        if self._client is not None:
+            return self._client
+        if not _HAS_CCXT:
+            raise PermanentExchangeError(
+                f"ccxt is not installed: {_IMPORT_ERROR!r}. Install 'ccxt' to run paper-mode with market data."
+            )
+        ex_name = str(getattr(self._cfg, "EXCHANGE", "binance")).lower()
+        if not hasattr(ccxt, ex_name):
+            raise PermanentExchangeError(f"Unknown exchange for ccxt: {ex_name!r}")
+        klass = getattr(ccxt, ex_name)
+        self._client = klass({"enableRateLimit": True, "timeout": int(self._timeout_sec * 1000)})
+        return self._client
+
+    def _maybe_sleep_latency(self):
+        if self._latency_ms > 0:
+            time.sleep(self._latency_ms / 1000.0)
+
+    # ───────────────────────────── публичный API ───────────────────────────────
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
+        sym = normalize_symbol(symbol)
+        tf = normalize_timeframe(timeframe)
+        ex_sym = to_exchange_symbol(sym, str(getattr(self._cfg, "EXCHANGE", "binance")).lower())
+
+        # нужен ccxt для данных
+        x = self._get_ccxt()
+
+        @retry(
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=(Exception,),
+            on_retry=lambda i, e: metrics.inc("broker_retry_total", _labels("fetch_ohlcv", self._name)),
+        )
+        def _do():
+            t0 = time.perf_counter()
+            try:
+                rows = self._cb.call(
+                    lambda: x.fetch_ohlcv(ex_sym, timeframe=tf, limit=int(limit)),
+                    key=f"paper:ohlcv:{ex_sym}:{tf}",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=5.0,
+                )
+                metrics.inc("broker_requests_total", _labels("fetch_ohlcv", self._name, 200))
+                return rows
+            except Exception as e:
+                metrics.inc("broker_requests_total", _labels("fetch_ohlcv", self._name, 599))
+                raise e
+            finally:
+                metrics.observe("broker_latency_seconds", time.perf_counter() - t0, _labels("fetch_ohlcv", self._name))
+
+        rows = _do()
+        rows.sort(key=lambda r: r[0])
+        out: List[List[float]] = []
+        for r in rows:
+            ts = _to_float(r[0])
+            o, h, l, c, v = map(_to_float, r[1:6])
+            out.append([ts, o, h, l, c, v])
+        return out
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        if self.md is None:
-            raise TransientExchangeError("no market data provider configured for PaperExchange")
-        t = self.md.fetch_ticker(symbol)
-        t["provider"] = "paper/md"
-        return t
+        sym = normalize_symbol(symbol)
+        ex_sym = to_exchange_symbol(sym, str(getattr(self._cfg, "EXCHANGE", "binance")).lower())
+        x = self._get_ccxt()
+
+        @retry(
+            retries=self._retries,
+            backoff_base=self._backoff_base,
+            jitter=self._jitter,
+            retry_on=(Exception,),
+            on_retry=lambda i, e: metrics.inc("broker_retry_total", _labels("fetch_ticker", self._name)),
+        )
+        def _do():
+            t0 = time.perf_counter()
+            try:
+                data = self._cb.call(
+                    lambda: x.fetch_ticker(ex_sym),
+                    key=f"paper:ticker:{ex_sym}",
+                    timeout=self._timeout_sec,
+                    fail_threshold=5,
+                    open_seconds=5.0,
+                )
+                metrics.inc("broker_requests_total", _labels("fetch_ticker", self._name, 200))
+                return data
+            except Exception as e:
+                metrics.inc("broker_requests_total", _labels("fetch_ticker", self._name, 599))
+                raise e
+            finally:
+                metrics.observe("broker_latency_seconds", time.perf_counter() - t0, _labels("fetch_ticker", self._name))
+
+        data = _do()
+        last = _to_float(data.get("last") or data.get("close") or 0.0)
+        bid = _to_float(data.get("bid") or last)
+        ask = _to_float(data.get("ask") or last)
+        ts = int(data.get("timestamp") or _now_ms())
+
+        out = {
+            "symbol": sym,
+            "exchange_symbol": ex_sym,
+            "last": last,
+            "close": _to_float(data.get("close") or last),
+            "bid": bid,
+            "ask": ask,
+            "timestamp": ts,
+            "raw": data,
+        }
+        self._last_ticker[sym] = out
+        return out
 
     def create_order(
         self,
@@ -113,78 +229,129 @@ class PaperExchange(ExchangeInterface):
         type_: str,
         side: str,
         amount: Decimal,
-        price: Optional[Decimal] = None,
-        *,
-        idempotency_key: str | None = None,
+        price: Decimal | None = None,
         client_order_id: str | None = None,
     ) -> Dict[str, Any]:
-        # идемпотентность
-        if client_order_id and client_order_id in self._orders:
-            return self._orders[client_order_id]
+        sym = normalize_symbol(symbol)
+        typ = str(type_).lower()
+        sd = str(side).lower()
+        if typ not in {"market", "limit"}:
+            raise PermanentExchangeError(f"Unsupported order type: {type_!r}")
+        if sd not in {"buy", "sell"}:
+            raise PermanentExchangeError(f"Unsupported side: {side!r}")
 
-        base, quote = split_symbol(symbol)
-        amt = _to_dec(amount)
-        if amt <= 0:
-            raise PermanentExchangeError("amount must be positive")
-
-        last = self._last_price(symbol)
-        fill_price = self._price_with_slippage(last, side)
-        if type_.lower() == "limit" and price is not None:
-            # симулируем исполнение лимита сразу, если «лучше» рынка
-            p = _to_dec(price)
-            if side.lower() == "buy":
-                fill_price = min(fill_price, p)
-            else:
-                fill_price = max(fill_price, p)
-
-        # комиссия в котируемой валюте
-        fee = (fill_price * amt * self.fee_pct).quantize(Decimal("0.00000001"))
-        cost = (fill_price * amt).quantize(Decimal("0.00000001"))
-
-        if side.lower() == "buy":
-            # нужно достаточно quote
-            q = self.balances.get(quote, Decimal("0"))
-            need = cost + fee
-            if q < need:
-                raise PermanentExchangeError("insufficient quote balance")
-            self.balances[quote] = q - need
-            self.balances[base] = self.balances.get(base, Decimal("0")) + amt
-        else:
-            # sell: достаточно base
-            b = self.balances.get(base, Decimal("0"))
-            if b < amt:
-                raise PermanentExchangeError("insufficient base balance")
-            self.balances[base] = b - amt
-            self.balances[quote] = self.balances.get(quote, Decimal("0")) + (cost - fee)
-
-        oid = client_order_id or self._next_id()
-        order = {
-            "id": oid,
-            "symbol": to_exchange_symbol(self.exchange_name, symbol, contract=self.contract),
-            "type": type_,
-            "side": side,
-            "amount": float(amt),
-            "price": float(fill_price),
-            "filled": float(amt),
-            "status": "closed",
-            "fee": {"currency": quote, "cost": float(fee)},
-            "timestamp": int(time.time() * 1000),
-        }
+        # локальная идемпотентность (дополнительно к use-case)
+        if client_order_id and client_order_id in self._seen_client_oids:
+            return {
+                "id": f"dup-{client_order_id}",
+                "clientOrderId": client_order_id,
+                "symbol": sym,
+                "status": "duplicate",
+                "filled": 0.0,
+                "price": _to_float(price) if price is not None else None,
+                "timestamp": _now_ms(),
+            }
         if client_order_id:
-            self._orders[client_order_id] = order
-        return order
+            self._seen_client_oids.add(client_order_id)
+
+        base, quote = self._ensure_symbol_wallets(sym)
+
+        # получаем лучшую котировку
+        try:
+            tkr = self.fetch_ticker(sym)
+        except Exception:
+            # если не получилось — попробуем последний кэш
+            tkr = self._last_ticker.get(sym)
+            if not tkr:
+                raise TransientExchangeError("no market data available for paper execution")
+
+        bid = _to_float(tkr.get("bid") or tkr.get("last") or 0.0)
+        ask = _to_float(tkr.get("ask") or tkr.get("last") or 0.0)
+        last = _to_float(tkr.get("last") or 0.0)
+
+        amt = _to_float(amount)
+        if amt <= 0.0:
+            raise PermanentExchangeError("amount must be > 0")
+
+        # симулируем цену исполнения
+        exec_price: float
+        if typ == "market":
+            if sd == "buy":
+                exec_price = (ask or last) * (1.0 + float(self._slip_pct))
+            else:
+                exec_price = (bid or last) * (1.0 - float(self._slip_pct))
+        else:  # limit
+            limit_price = _to_float(price, default=0.0)
+            # если лимит «пересекает» рынок — исполняем по лимитной
+            if sd == "buy":
+                if limit_price >= (ask or last):
+                    exec_price = limit_price
+                else:
+                    # не маркетируемая заявка — для простоты исполним по лимитной (см. примечание)
+                    exec_price = limit_price
+            else:
+                if limit_price <= (bid or last):
+                    exec_price = limit_price
+                else:
+                    exec_price = limit_price
+
+        # комиссия
+        fee = exec_price * amt * _to_float(self._fee_pct, 0.0)
+
+        # проверяем и обновляем балансы
+        if sd == "buy":
+            cost = exec_price * amt + fee
+            if self._balances[quote]["free"] + 1e-12 < cost:
+                raise PermanentExchangeError("insufficient funds (quote)")
+            self._balances[quote]["free"] -= cost
+            self._balances[quote]["total"] -= cost
+            self._balances[base]["free"] += amt
+            self._balances[base]["total"] += amt
+        else:  # sell
+            if self._balances[base]["free"] + 1e-12 < amt:
+                raise PermanentExchangeError("insufficient funds (base)")
+            proceeds = exec_price * amt - fee
+            self._balances[base]["free"] -= amt
+            self._balances[base]["total"] -= amt
+            self._balances[quote]["free"] += proceeds
+            self._balances[quote]["total"] += proceeds
+
+        # имитируем сетевую задержку
+        self._maybe_sleep_latency()
+
+        order_id = f"paper-{int(time.time()*1000)}"
+        res = {
+            "id": order_id,
+            "clientOrderId": client_order_id,
+            "symbol": sym,
+            "type": typ,
+            "side": sd,
+            "status": "closed",
+            "filled": amt,
+            "price": exec_price,
+            "cost": exec_price * amt,
+            "fee": {"currency": quote, "cost": fee, "rate": _to_float(self._fee_pct)},
+            "timestamp": _now_ms(),
+        }
+        metrics.inc("broker_requests_total", _labels("create_order", self._name, 200))
+        return res
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        # В этой простой реализации «ожидающих» ордеров нет — все исполняются сразу.
+        # Отмена — no-op.
+        metrics.inc("broker_requests_total", _labels("cancel_order", self._name, 200))
+        return {"id": order_id, "status": "canceled", "timestamp": _now_ms()}
 
     def fetch_balance(self) -> Dict[str, Any]:
-        total = {k: float(v) for k, v in self.balances.items()}
-        return {"total": total, "free": total, "used": {k: 0.0 for k in total.keys()}}
-
-    def cancel_order(self, order_id: str, *, symbol: str | None = None) -> Dict[str, Any]:
-        # все ордера исполняются немедленно → отменять нечего
-        return {"id": order_id, "status": "canceled", "note": "paper immediate or cancel"}
+        free = {k: round(v["free"], 12) for k, v in self._balances.items()}
+        total = {k: round(v["total"], 12) for k, v in self._balances.items()}
+        used = {k: round(total[k] - free[k], 12) for k in total.keys()}
+        metrics.inc("broker_requests_total", _labels("fetch_balance", self._name, 200))
+        return {"free": free, "used": used, "total": total}
 
     def close(self) -> None:
         try:
-            if self.md and hasattr(self.md, "close"):
-                self.md.close()
+            if self._client and hasattr(self._client, "close"):
+                self._client.close()
         except Exception:
             pass
