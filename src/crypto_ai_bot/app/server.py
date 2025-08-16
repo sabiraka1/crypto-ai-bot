@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
-from crypto_ai_bot.utils.metrics import export as metrics_export, observe
+from crypto_ai_bot.utils.metrics import export as metrics_export, observe, set_gauge
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time_sync import measure_time_drift
 from crypto_ai_bot.core.storage.sqlite_adapter import connect
@@ -63,6 +63,11 @@ async def health() -> Dict[str, Any]:
 
     # Time drift
     drift, _ = measure_time_drift(urls=cfg.TIME_DRIFT_URLS or None, timeout=2.5)
+    # NEW: gauge
+    try:
+        set_gauge("time_drift_ms", float(drift))
+    except Exception:
+        pass
     timec = {
         "status": "ok" if abs(drift) <= cfg.TIME_DRIFT_LIMIT_MS else "error:drift",
         "drift_ms": drift,
