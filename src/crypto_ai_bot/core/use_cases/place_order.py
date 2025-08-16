@@ -29,6 +29,15 @@ def _make_idem_key(decision: Dict[str, Any]) -> str:
     return f"{symbol}:{side}:{size}:{ts_min}:{did}"
 
 
+async def _publish(bus, event: Dict[str, Any]) -> None:
+    try:
+        if bus is not None and hasattr(bus, "publish"):
+            await bus.publish(event)
+    except Exception:
+        # не роняем основной поток заказа
+        pass
+
+
 def place_order(
     cfg,
     broker,
@@ -38,6 +47,7 @@ def place_order(
     trades_repo: Optional[TradeRepository] = None,
     audit_repo: Optional[AuditRepository] = None,
     positions_repo: Optional[PositionRepository] = None,
+    bus=None,
 ) -> Dict[str, Any]:
     """
     Создание рыночного ордера по Decision. Все зависимости передаются снаружи.
@@ -70,6 +80,20 @@ def place_order(
         result = {"status":"ok","idempotent":False,"order":order}
         metrics.inc("order_submitted_total", {"side": side})
 
+        # события (fire-and-forget)
+        import asyncio
+        asyncio.create_task(_publish(bus, {
+            "type": "OrderSubmittedEvent",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "side": side,
+            "size": str(size),
+            "price": order.get("price"),
+            "order_id": order.get("id"),
+            "timeframe": timeframe,
+            "decision_id": decision.get("id"),
+        }))
+
         # аудит/трейды — опционально
         if audit_repo is not None:
             audit_repo.append({
@@ -98,5 +122,17 @@ def place_order(
         return result
     except Exception as e:
         metrics.inc("order_failed_total", {"reason": type(e).__name__})
-        # освобождать ключ не обязательно — TTL защитит от шторма повторов
+        # событие об ошибке
+        try:
+            import asyncio
+            asyncio.create_task(_publish(bus, {
+                "type": "ErrorEvent",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "scope": "place_order",
+                "error": type(e).__name__,
+                "details": str(e),
+                "decision_id": decision.get("id"),
+            }))
+        except Exception:
+            pass
         return {"status":"error","error": f"{type(e).__name__}:{e}"}

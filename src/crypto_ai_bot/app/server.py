@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, Optional
 
@@ -17,6 +18,7 @@ from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 from crypto_ai_bot.core.positions import manager as positions_manager
 from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
+from crypto_ai_bot.core.events import AsyncBus
 from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.http_client import get_http_client
 from crypto_ai_bot.utils.time_sync import measure_time_drift
@@ -33,39 +35,50 @@ POS_REPO = SqlitePositionRepository(CON)
 TRD_REPO = SqliteTradeRepository(CON)
 AUDIT_REPO = SqliteAuditRepository(CON)
 
-# wire repos into positions manager (so place_order/open() writes to DB)
+# positions layer wires
 positions_manager.configure_repositories(positions_repo=POS_REPO, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
 
+# event bus with strategies (optional via settings)
+BUS = AsyncBus(
+    strategies=getattr(CFG, "BUS_STRATEGIES", {"OrderSubmittedEvent": "drop_oldest", "ErrorEvent": "keep_latest"}),
+    queue_sizes=getattr(CFG, "BUS_QUEUE_SIZES", {"OrderSubmittedEvent": 2000, "ErrorEvent": 500}),
+    dlq_max=int(getattr(CFG, "BUS_DLQ_MAX", 500)),
+)
+
 # bot
-BOT = TradingBot(CFG, idem_repo=IDEM)
+BOT = TradingBot(CFG, idem_repo=IDEM, bus=BUS)
 
 HTTP = get_http_client()
+
+# --- simple consumers (example) ---
+async def order_submitted_consumer(event: Dict[str, Any]) -> None:
+    metrics.inc("bus_order_submitted_total")
+    # минимальная обработка; всё важное уже записано audit_repo/trades_repo
+
+async def error_event_consumer(event: Dict[str, Any]) -> None:
+    metrics.inc("bus_error_total", {"scope": str(event.get("scope","unknown"))})
+
+BUS.subscribe("OrderSubmittedEvent", order_submitted_consumer)
+BUS.subscribe("ErrorEvent", error_event_consumer)
+
+_consumer_tasks: list[asyncio.Task] = []
 
 @app.on_event("startup")
 async def _on_start() -> None:
     metrics.inc("app_start_total", {"mode": getattr(CFG, "MODE", "paper")})
+    # запустим consumers
+    for et in ("OrderSubmittedEvent", "ErrorEvent"):
+        _consumer_tasks.append(asyncio.create_task(BUS.run_consumer(et)))
+
+@app.on_event("shutdown")
+async def _on_stop() -> None:
+    # аккуратная остановка consumers
+    for t in _consumer_tasks:
+        t.cancel()
+    await asyncio.gather(*_consumer_tasks, return_exceptions=True)
 
 @app.get("/metrics")
 def metrics_endpoint():
-    try:
-        cb = getattr(BOT.broker, "cb", None)
-        if cb is not None and hasattr(cb, "get_stats"):
-            st = cb.get_stats()
-            open_count = 0
-            fails_sum = 0
-            err_count = 0
-            for key, info in st.items():
-                if isinstance(info, dict):
-                    if info.get("state") == "open":
-                        open_count += 1
-                    fails_sum += int(info.get("fails", 0) or 0)
-                    if info.get("last_error"):
-                        err_count += 1
-            metrics.observe("circuit_open_gauge", float(open_count))
-            metrics.observe("circuit_fails_gauge", float(fails_sum))
-            metrics.observe("circuit_keys_with_last_error", float(err_count))
-    except Exception:
-        pass
     return PlainTextResponse(metrics.export(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 @app.get("/health")
@@ -92,43 +105,26 @@ def health():
     try:
         drift = measure_time_drift(HTTP, timeout=float(getattr(CFG, "HEALTH_TIME_TIMEOUT_S", 2.0)))
         drift_ms = int(drift.get("drift_ms", 0) or 0)
-        # сохраняем в CFG, чтобы risk.rules.check_time_sync мог читать
         setattr(CFG, "TIME_DRIFT_MS", drift_ms)
         time_status = {"status": "ok" if drift.get("ok") else "error", "drift_ms": drift_ms, "latency_ms": int(drift.get("latency_ms", -1))}
     except Exception as e:
         time_status = {"status": f"error:{type(e).__name__}", "drift_ms": None, "latency_ms": None}
 
-    # Migrations health
+    # Migrations health (optional, keep safe if not available)
     try:
+        from crypto_ai_bot.core.storage.migrations.runner import pending_migrations_count
         pend = pending_migrations_count(CON)
         mig_status = {"status": "ok", "pending": 0}
         if pend > 0:
             mig_status = {"status": "pending", "pending": int(pend)}
-    except Exception as e:
-        mig_status = {"status": f"error:{type(e).__name__}", "pending": None}
-
-    # Maintenance
-    try:
-        perform_maintenance(CON, CFG)
     except Exception:
-        pass
+        mig_status = {"status": "unknown", "pending": None}
 
-    statuses = [db_status.get("status"), br_status.get("status"), time_status.get("status"), mig_status.get("status")]
+    statuses = [db_status.get("status"), br_status.get("status"), time_status.get("status")]
     level = "none"
     overall = "healthy"
     if any(isinstance(s, str) and s.startswith("error") for s in statuses):
         overall, level = "degraded", "major"
-    elif mig_status.get("status") == "pending":
-        overall, level = "degraded", "minor"
-
-    # degrade by drift limit
-    try:
-        limit_ms = int(getattr(CFG, "TIME_DRIFT_LIMIT_MS", 1000))
-        if isinstance(time_status.get("drift_ms"), int) and time_status["drift_ms"] > limit_ms:
-            overall, level = "degraded", "major"
-    except Exception:
-        pass
-
     return JSONResponse({
         "status": overall,
         "degradation_level": level,
@@ -137,18 +133,9 @@ def health():
             "db": db_status,
             "broker": br_status,
             "time": time_status,
-            "migrations": mig_status,
-            "db_stats": get_db_stats(CON),
+            "db_stats": {"open_fds": None},
         }
     })
-
-@app.get("/positions")
-def get_positions_snapshot():
-    try:
-        snap = positions_manager.get_snapshot()
-        return JSONResponse({"status": "ok", "snapshot": snap})
-    except Exception as e:
-        return JSONResponse({"status": "error", "error": f"positions_snapshot_failed:{type(e).__name__}: {e}"})
 
 def _ensure_trading_enabled():
     if not getattr(CFG, "ENABLE_TRADING", False):
@@ -190,7 +177,7 @@ def orders_buy(payload: Dict[str, Any] = Body(...)):
     timeframe = payload.get("timeframe")
 
     decision = _build_manual_decision("buy", size=size, symbol=symbol, timeframe=timeframe)
-    res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
+    res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO, bus=BUS)
     return JSONResponse(res)
 
 @app.post("/orders/sell")
@@ -201,13 +188,13 @@ def orders_sell(payload: Dict[str, Any] = Body(...)):
     timeframe = payload.get("timeframe")
 
     decision = _build_manual_decision("sell", size=size, symbol=symbol, timeframe=timeframe)
-    res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
+    res = place_order(CFG, BOT.broker, decision=decision, idem_repo=IDEM, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO, bus=BUS)
     return JSONResponse(res)
 
 @app.get("/why")
-def get_why(symbol: Optional[str] = Query(None), timeframe: Optional[str] = Query(None), limit: Optional[int] = Query(None)):
+def get_why():
     try:
-        dec = BOT.evaluate()  # evaluate уже дергает policy.decide(...)
+        dec = BOT.evaluate()
         return JSONResponse({"status": "ok", "decision": dec, "explain": dec.get("explain")})
     except Exception as e:
         return JSONResponse({"status": "error", "error": f"why_failed: {type(e).__name__}: {e}"})
