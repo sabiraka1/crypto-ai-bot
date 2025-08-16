@@ -1,42 +1,45 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+
 import json
-from datetime import datetime, timezone
+import sqlite3
+from typing import Any, Dict, List
 
-from .base import _WriteCountingRepo
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    type TEXT NOT NULL,
+    payload TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
+"""
 
-class AuditRepository(_WriteCountingRepo):
-    """
-    Ожидаем схему:
-      audit(id INTEGER PK, ts INTEGER, event_type TEXT, payload TEXT)
-      индексы по (event_type, ts)
-    """
+def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "ts": row["ts"],
+        "type": row["type"],
+        "payload": json.loads(row["payload"]) if row["payload"] else None,
+    }
 
-    def insert(self, event_type: str, payload: Dict[str, Any], ts: Optional[int] = None) -> None:
-        ts = int(ts or datetime.now(tz=timezone.utc).timestamp())
-        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        cur = self._con.cursor()
-        try:
-            cur.execute("INSERT INTO audit(ts, event_type, payload) VALUES (?, ?, ?)", (ts, event_type, data))
-            self._inc_writes("audit", 1)
-        finally:
-            cur.close()
+class SqliteAuditRepository:
+    def __init__(self, con: sqlite3.Connection) -> None:
+        self.con = con
+        self.con.row_factory = sqlite3.Row
+        with self.con:
+            self.con.executescript(_SCHEMA)
 
-    def recent(self, event_type: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        cur = self._con.cursor()
-        try:
-            if event_type:
-                cur.execute("SELECT id, ts, event_type, payload FROM audit WHERE event_type=? ORDER BY ts DESC LIMIT ?", (event_type, int(limit)))
-            else:
-                cur.execute("SELECT id, ts, event_type, payload FROM audit ORDER BY ts DESC LIMIT ?", (int(limit),))
-            rows = cur.fetchall()
-            out = []
-            for r in rows:
-                try:
-                    payload = json.loads(r[3])
-                except Exception:
-                    payload = None
-                out.append({"id": r[0], "ts": r[1], "event_type": r[2], "payload": payload})
-            return out
-        finally:
-            cur.close()
+    def append(self, event: Dict[str, Any]) -> int:
+        with self.con:
+            cur = self.con.execute(
+                "INSERT INTO audit(ts, type, payload) VALUES(:ts, :type, :payload)",
+                {"ts": event.get("ts"), "type": event.get("type"), "payload": json.dumps(event)},
+            )
+            return int(cur.lastrowid)
+
+    def list_recent(self, limit: int = 200) -> List[Dict[str, Any]]:
+        cur = self.con.execute(
+            "SELECT * FROM audit ORDER BY ts DESC LIMIT ?",
+            (int(limit),),
+        )
+        return [_row_to_dict(r) for r in cur.fetchall()]

@@ -11,6 +11,10 @@ from crypto_ai_bot.core.bot import TradingBot
 from crypto_ai_bot.core.storage.sqlite_adapter import connect, get_db_stats, perform_maintenance
 from crypto_ai_bot.core.storage.migrations.runner import pending_migrations_count
 from crypto_ai_bot.core.storage.repositories.idempotency import SqliteIdempotencyRepository
+from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
+from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
+from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
+from crypto_ai_bot.core.positions import manager as positions_manager
 from crypto_ai_bot.utils import metrics
 
 app = FastAPI(title="crypto-ai-bot")
@@ -18,8 +22,17 @@ app = FastAPI(title="crypto-ai-bot")
 CFG = Settings.build()
 DB_PATH = getattr(CFG, "DB_PATH", "data/bot.sqlite")
 CON = connect(DB_PATH)
+
+# repositories
 IDEM = SqliteIdempotencyRepository(CON)
-# При желании позже сюда же добавим positions_repo/audit_repo
+POS_REPO = SqlitePositionRepository(CON)
+TRD_REPO = SqliteTradeRepository(CON)
+AUDIT_REPO = SqliteAuditRepository(CON)
+
+# wire repos into positions manager (so place_order/open() writes to DB)
+positions_manager.configure_repositories(positions_repo=POS_REPO, trades_repo=TRD_REPO, audit_repo=AUDIT_REPO)
+
+# bot
 BOT = TradingBot(CFG, idem_repo=IDEM)
 
 @app.on_event("startup")
@@ -28,11 +41,10 @@ async def _on_start() -> None:
 
 @app.get("/metrics")
 def metrics_endpoint():
-    # Дополнительно: экспорт простых статов CiсcuitBreaker, если есть
     try:
         cb = getattr(BOT.broker, "cb", None)
         if cb is not None and hasattr(cb, "get_stats"):
-            st = cb.get_stats()  # dict per-key
+            st = cb.get_stats()
             open_count = 0
             fails_sum = 0
             err_count = 0
@@ -47,7 +59,6 @@ def metrics_endpoint():
             metrics.observe("circuit_fails_gauge", float(fails_sum))
             metrics.observe("circuit_keys_with_last_error", float(err_count))
     except Exception:
-        # не ломаем /metrics на ошибках
         pass
     return PlainTextResponse(metrics.export(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
@@ -90,7 +101,6 @@ def health():
     except Exception:
         pass
 
-    # Derive overall
     statuses = [db_status.get("status"), br_status.get("status"), time_status.get("status"), mig_status.get("status")]
     level = "none"
     overall = "healthy"
