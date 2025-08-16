@@ -2,61 +2,73 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 from decimal import Decimal
 
-from crypto_ai_bot.core.positions.manager import PositionManager
-from crypto_ai_bot.core.storage.idempotency_helper import make_idempotency_key, check_and_store
+from crypto_ai_bot.core.storage.interfaces import (
+    PositionRepository, TradeRepository, AuditRepository, UnitOfWork, IdempotencyRepository
+)
+from crypto_ai_bot.core.brokers.symbols import normalize_symbol
+from crypto_ai_bot.core.storage.repositories.idempotency import build_idempotency_key
+
+def _dec(x: Any, default: str = "0") -> Decimal:
+    try:
+        return Decimal(str(x))
+    except Exception:
+        return Decimal(default)
 
 def place_order(
     cfg,
     broker,
-    positions_repo,
-    trades_repo,
-    audit_repo,
-    uow,
-    idempotency_repo,
+    *,
+    positions_repo: Optional[PositionRepository] = None,
+    trades_repo: Optional[TradeRepository] = None,
+    audit_repo: Optional[AuditRepository] = None,
+    uow: Optional[UnitOfWork] = None,
+    idempotency_repo: Optional[IdempotencyRepository] = None,
     decision: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Execute order atomically with idempotency. Returns execution result dict.
-    Assumes decision fields: action ('buy'|'sell'|'hold'), size (Decimal-like), price (optional),
-    symbol, ts (ms, optional), decision_id.
-    """
-    action = str(decision.get('action') or 'hold').lower()
-    symbol = decision.get('symbol') or getattr(cfg, 'SYMBOL', 'BTC/USDT')
-    size = Decimal(str(decision.get('size') or '0'))
-    ts_ms = int(decision.get('ts') or 0)
-    decision_id = str(decision.get('decision_id') or 'missing')
+    action = (decision.get("action") or "hold").lower()
+    if action == "hold" or not cfg.ENABLE_TRADING:
+        return {"status": "skipped", "reason": "no_execution", "decision": decision}
 
-    if action == 'hold' or size == 0:
-        return {'status': 'skipped', 'reason': 'hold', 'decision_id': decision_id}
+    side = "buy" if action == "buy" else ("sell" if action == "sell" else None)
+    if side is None:
+        return {"status": "skipped", "reason": "unknown_action", "decision": decision}
 
-    side = 'buy' if size > 0 else 'sell'
-    key = make_idempotency_key(symbol=symbol, side=side, size=abs(size), ts_ms=ts_ms, decision_id=decision_id)
+    symbol = normalize_symbol(decision.get("symbol") or cfg.SYMBOL)
+    size = _dec(decision.get("size") or cfg.DEFAULT_ORDER_SIZE)
+    if size <= 0:
+        return {"status": "skipped", "reason": "zero_size", "decision": decision}
 
-    claimed = check_and_store(idempotency_repo, key)
-    if not claimed:
-        return {'status': 'duplicate', 'key': key, 'decision_id': decision_id}
+    decision_id = str(decision.get("id") or "")
+    key = build_idempotency_key(symbol=symbol, side=side, size=str(size), decision_id=decision_id)
+    if idempotency_repo is not None:
+        prev = idempotency_repo.check_and_store(key, {"decision": decision})
+        if prev is not None:
+            return {"status": "duplicate", "original": prev}
 
-    pm = PositionManager(positions_repo=positions_repo, trades_repo=trades_repo, audit_repo=audit_repo, uow=uow)
+    order = broker.create_order(symbol, "market", side, size, None) if broker else {"status": "no_broker"}
 
-    # For simplicity we let exchange adapter calculate price when None (market order)
-    price = decision.get('price')
-    if price is not None:
-        price = Decimal(str(price))
-
-    # Execute via exchange adapter
-    # For a paper/backtest exchange, broker.create_order should behave deterministically
-    order_resp = broker.create_order(symbol=symbol, type_='market', side=side, amount=abs(size), price=price)
-
-    # Update local storage/position snapshot
-    # We choose executed price from adapter response if available, otherwise 'price'
-    executed_price = Decimal(str(order_resp.get('price') or price or 0))
-    pm.open_or_add(symbol, Decimal(str(size if side == 'buy' else -abs(size) if size > 0 else size)), executed_price)
-
-    # persist idempotent result
-    try:
+    if uow is not None:
+        with uow:
+            if audit_repo is not None:
+                try:
+                    audit_repo.append({"type": "audit.order_submitted", "symbol": symbol, "side": side, "size": str(size), "order": order})
+                except Exception:
+                    pass
+            if positions_repo is not None:
+                try:
+                    positions_repo.upsert({"symbol": symbol, "qty": str(size if side=="buy" else -size), "avg_price": order.get("price")})
+                except Exception:
+                    pass
+            if idempotency_repo is not None:
+                try:
+                    idempotency_repo.commit(key, {"order": order})
+                except Exception:
+                    pass
+    else:
         if idempotency_repo is not None:
-            idempotency_repo.commit(key, {'order': order_resp})
-    except Exception:
-        # do not fail the whole call if commit fails; consistency is eventual
-        pass
+            try:
+                idempotency_repo.commit(key, {"order": order})
+            except Exception:
+                pass
 
-    return {'status': 'ok', 'key': key, 'order': order_resp, 'decision_id': decision_id}
+    return {"status": "submitted", "order": order}
