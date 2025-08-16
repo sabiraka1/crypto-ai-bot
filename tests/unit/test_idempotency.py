@@ -9,20 +9,10 @@ from crypto_ai_bot.core.storage.repositories.idempotency import SqliteIdempotenc
 
 
 def _mk_con() -> sqlite3.Connection:
+    """Создаём соединение и позволяем репозиторию самому создать схему"""
     con = sqlite3.connect(":memory:")
     con.row_factory = sqlite3.Row
-    con.executescript(
-        """
-        PRAGMA journal_mode=WAL;
-        CREATE TABLE IF NOT EXISTS idempotency (
-            key TEXT PRIMARY KEY,
-            state TEXT NOT NULL,
-            expires_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            payload_json TEXT
-        );
-        """
-    )
+    con.execute("PRAGMA journal_mode=WAL")
     return con
 
 
@@ -54,9 +44,9 @@ def test_check_and_store_and_duplicate():
     # повтор за TTL — дубликат
     is_new, prev = repo.check_and_store(key, '{"decision":{}}', ttl_seconds=1)
     assert is_new is False
-    assert prev is not None or prev is None  # допускаем отсутствие сохранённого payload на этом этапе
+    assert prev == '{"decision":{}}'  # теперь должен вернуть сохранённый payload
 
-    # после commit — get_original_order()*должен* вернуть финальный payload
+    # после commit — get_original_order() должен вернуть финальный payload
     repo.commit(key, payload_json='{"order":{"id":"77"}}')
     got = repo.get_original_order(key)
     assert got is not None and '"77"' in got
@@ -66,7 +56,33 @@ def test_purge_expired():
     con = _mk_con()
     repo = SqliteIdempotencyRepository(con)
 
+    # Создаём запись с очень коротким TTL
     assert repo.claim("K:1", ttl_seconds=0) is True
+    
+    # Ждём немного
     time.sleep(0.01)
+    
+    # Удаляем просроченные записи
     purged = repo.purge_expired()
     assert purged >= 1
+    
+    # Проверяем, что запись удалена
+    assert repo.get_original("K:1") is None
+
+
+def test_ttl_expiration_allows_reclaim():
+    """Тест на то, что после истечения TTL можно снова захватить ключ"""
+    con = _mk_con()
+    repo = SqliteIdempotencyRepository(con)
+    
+    key = "TEMP:key"
+    
+    # Первый захват с очень коротким TTL
+    assert repo.claim(key, ttl_seconds=0) is True
+    
+    # Немедленная попытка захвата должна провалиться, если TTL=0 означает "истекает сразу"
+    # но наша реализация проверяет expires_at > now_ms, так что при TTL=0 он сразу истекает
+    time.sleep(0.001)  # минимальная задержка
+    
+    # Теперь должны мочь захватить снова
+    assert repo.claim(key, ttl_seconds=1) is True
