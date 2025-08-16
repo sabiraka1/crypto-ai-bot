@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -42,6 +43,8 @@ _db_conn = None
 _repos: Dict[str, Any] = {}
 _maint_task: Optional[asyncio.Task] = None
 
+_last_idemp_purge = {"deleted": 0, "duration_ms": 0}
+
 def _ensure_db_and_repos() -> Dict[str, Any]:
     global _db_conn, _repos
     if _repos:
@@ -66,7 +69,22 @@ async def _startup_event() -> None:
         interval = int(getattr(cfg, "DB_MAINTENANCE_INTERVAL_SEC", 900))
         while True:
             try:
+                # DB maintenance (VACUUM/ANALYZE/etc.)
                 perform_maintenance(_db_conn, cfg)
+            except Exception:
+                pass
+            # Idempotency purge with metrics
+            try:
+                repo = _repos.get("idempotency_repo")
+                if repo is not None:
+                    t0 = time.perf_counter()
+                    deleted = repo.purge_expired()
+                    dt_ms = int((time.perf_counter() - t0) * 1000)
+                    _last_idemp_purge["deleted"] = int(deleted)
+                    _last_idemp_purge["duration_ms"] = dt_ms
+                    metrics.observe("idempotency_purge_ms", dt_ms, {})
+                    if deleted:
+                        metrics.inc("idempotency_purge_deleted_total", {"count": deleted})
             except Exception:
                 pass
             await asyncio.sleep(max(5, interval))
@@ -93,6 +111,7 @@ async def _shutdown_event() -> None:
 async def health() -> Dict[str, Any]:
     components: Dict[str, Any] = {"mode": cfg.MODE}
 
+    # DB
     try:
         _ = _ensure_db_and_repos()
         with in_txn(_db_conn):
@@ -101,17 +120,36 @@ async def health() -> Dict[str, Any]:
     except Exception as e:
         components["db"] = {"status": f"error:{type(e).__name__}", "detail": str(e), "latency_ms": 0}
 
+    # Broker
     try:
         _ = broker.fetch_ticker(cfg.SYMBOL)
         components["broker"] = {"status": "ok", "latency_ms": 0}
     except Exception as e:
         components["broker"] = {"status": f"error:{type(e).__name__}", "detail": str(e), "latency_ms": 0}
 
+    # Time
     try:
         drift_ms = int(measure_time_drift())
     except Exception:
         drift_ms = 0
     components["time"] = {"status": "ok", "drift_ms": drift_ms, "limit_ms": int(getattr(cfg, "TIME_DRIFT_MAX_MS", 1500))}
+
+    # Idempotency
+    try:
+        repo = _repos.get("idempotency_repo")
+        active = int(repo.count_active()) if repo is not None else 0
+    except Exception:
+        active = 0
+    components["idempotency"] = {
+        "active_keys": active,
+        "last_purge_deleted": int(_last_idemp_purge.get("deleted", 0)),
+        "last_purge_duration_ms": int(_last_idemp_purge.get("duration_ms", 0)),
+    }
+    # record metric as observation (acts like a gauge)
+    try:
+        metrics.observe("idempotency_active_keys", active, {})
+    except Exception:
+        pass
 
     status = "healthy"
     degradation = "none"
@@ -126,19 +164,6 @@ async def health() -> Dict[str, Any]:
 async def get_metrics() -> str:
     return metrics.export()
 
-def _limits_from_cfg(cfg) -> Dict[str, Any]:
-    return {
-        "spread_pct": float(getattr(cfg, "MAX_SPREAD_PCT", 0.25)),
-        "drawdown_pct": float(getattr(cfg, "MAX_DRAWDOWN_PCT", 5.0)),
-        "seq_losses": int(getattr(cfg, "MAX_SEQ_LOSSES", 3)),
-        "exposure_pct": getattr(cfg, "MAX_EXPOSURE_PCT", None),
-        "exposure_usd": getattr(cfg, "MAX_EXPOSURE_USD", None),
-        "time_drift_ms": int(getattr(cfg, "TIME_DRIFT_MAX_MS", 1500)),
-        "hours": [int(getattr(cfg, "TRADING_START_HOUR", 0)), int(getattr(cfg, "TRADING_END_HOUR", 24))],
-        "thresholds": {"buy": float(getattr(cfg, "THRESHOLD_BUY", 0.6)), "sell": float(getattr(cfg, "THRESHOLD_SELL", 0.4))},
-        "weights": {"rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)), "ai": float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5))},
-    }
-
 @app.get("/status")
 async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
     try:
@@ -147,7 +172,6 @@ async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = N
         tf = timeframe or cfg.TIMEFRAME
 
         summary = build_context(cfg, broker, positions_repo=repos.get("positions_repo"), trades_repo=repos.get("trades_repo"))
-        # ВКЛЮЧАЕМ time drift в summary для risk-правил
         try:
             summary.setdefault("time", {})["drift_ms"] = int(measure_time_drift())
         except Exception:
@@ -162,16 +186,35 @@ async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = N
             "timeframe": tf,
             "summary": summary,
             "risk": {"ok": bool(risk_ok), "reason": risk_reason},
-            "limits": _limits_from_cfg(cfg),
             "decision": {"action": dec.get("action"), "score": dec.get("score")},
         }
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
-@app.get("/debug/db_stats")
-async def db_stats() -> Dict[str, Any]:
-    _ = _ensure_db_and_repos()
-    return get_db_stats(_db_conn, cfg.DB_PATH)
+@app.get("/why")
+async def http_why(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
+    """
+    REST-вариант explain (аналог команды /why в Telegram).
+    """
+    try:
+        repos = _ensure_db_and_repos()
+        sym = symbol or cfg.SYMBOL
+        tf = timeframe or cfg.TIMEFRAME
+
+        summary = build_context(cfg, broker, positions_repo=repos.get("positions_repo"), trades_repo=repos.get("trades_repo"))
+        ok, reason = risk_manager.check(summary, cfg)
+        dec = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit, risk_reason=(None if ok else reason), **repos)
+        return {
+            "status": "ok",
+            "symbol": sym,
+            "timeframe": tf,
+            "risk": {"ok": bool(ok), "reason": reason},
+            "explain": dec.get("explain", {}),
+            "score": dec.get("score"),
+            "action": dec.get("action"),
+        }
+    except Exception as e:
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
 @app.post("/execute")
 async def http_execute(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
