@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from crypto_ai_bot.core.use_cases.evaluate import evaluate
+from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute
+from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.positions.tracker import build_context
 from crypto_ai_bot.core.risk import manager as risk_manager
 
@@ -20,9 +22,12 @@ def _fmt_usd(x) -> str:
 
 def handle_update(update: Dict[str, Any], cfg, broker, **repos) -> Dict[str, Any]:
     """
-    Минимальный Telegram-адаптер с командами:
-     - /status — сводка (exposure/dd/seq_losses/price/spread) + решение + risk verdict/limits
-     - /audit [N] — последние N записей "decision" (если audit_repo настроен)
+    Команды:
+     - /status — сводка (exposure/dd/seq_losses/price/spread) + decision + risk verdict
+     - /exec — eval -> risk -> place_order (идемпотентно)
+     - /buy [size] — ручная покупка (идемпотентно), size как строка (по умолчанию cfg.DEFAULT_ORDER_SIZE)
+     - /sell [size] — ручная продажа (идемпотентно)
+     - /audit [N] — последние N записей decision
     """
     message = (update or {}).get("message") or {}
     text = (message.get("text") or "").strip()
@@ -48,6 +53,27 @@ def handle_update(update: Dict[str, Any], cfg, broker, **repos) -> Dict[str, Any
             f"RISK: {'OK' if risk_ok else 'BLOCKED'}  REASON: {risk_reason or '-'}",
         ]
         return {"ok": True, "chat_id": chat_id, "text": "\n".join(lines)}
+
+    if cmd in ("/exec", "/execute"):
+        res = eval_and_execute(cfg, broker, symbol=cfg.SYMBOL, timeframe=cfg.TIMEFRAME, limit=300, **repos)
+        order = res.get("order") or {}
+        text = (
+            f"EXECUTE: status={res.get('status')} action={res.get('decision',{}).get('action')} "
+            f"score={res.get('decision',{}).get('score')} key={order.get('key','-')}"
+        )
+        return {"ok": True, "chat_id": chat_id, "text": text}
+
+    if cmd in ("/buy", "/sell"):
+        side = cmd[1:]  # buy|sell
+        size = parts[1] if len(parts) > 1 else str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0.0"))
+        decision = {"symbol": cfg.SYMBOL, "timeframe": cfg.TIMEFRAME, "action": side, "size": size, "score": 1.0}
+        res = place_order(cfg, broker,
+                          positions_repo=repos.get("positions_repo"),
+                          audit_repo=repos.get("audit_repo"),
+                          idempotency_repo=repos.get("idempotency_repo"),
+                          decision=decision)
+        text = f"{side.upper()} {size}: {res.get('status')} key={res.get('key','-')}"
+        return {"ok": True, "chat_id": chat_id, "text": text}
 
     if cmd.startswith("/audit"):
         try:

@@ -8,6 +8,7 @@ from fastapi.responses import PlainTextResponse
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
 from crypto_ai_bot.core.use_cases.evaluate import evaluate
+from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute
 from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
@@ -159,6 +160,18 @@ async def http_status(symbol: Optional[str] = None, timeframe: Optional[str] = N
         }
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+@app.post("/execute")
+async def http_execute(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
+    """
+    Сквозной UC: evaluate -> risk -> place_order (идемпотентно).
+    """
+    try:
+        repos = _ensure_db_and_repos()
+        res = eval_and_execute(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
+        return {"status": "ok", **res}
+    except Exception as e:
+        return {"status": "error", "error": f"execute_failed: {type(e).__name__}: {e}"}
 
 @app.get("/debug/why")
 async def http_why(symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:

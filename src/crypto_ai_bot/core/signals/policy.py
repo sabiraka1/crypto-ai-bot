@@ -1,87 +1,159 @@
 from __future__ import annotations
-from typing import Dict, Any, Optional
 
+from typing import Any, Dict, Tuple, Optional
+from decimal import Decimal
+
+# приватные сборщики/фьюзер
 from . import _build, _fusion
 
-# контекст добавляем по возможности (опционально)
-try:
-    from crypto_ai_bot.core.positions import tracker as _tracker
-except Exception:
-    _tracker = None  # мягкая зависимость
+def _safe_float(x, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
 
-def _thresholds(cfg) -> Dict[str, float]:
-    buy = float(getattr(cfg, "THRESHOLD_BUY", 0.60))
-    sell = float(getattr(cfg, "THRESHOLD_SELL", 0.40))
-    return {"buy": buy, "sell": sell}
+def _rule_score(features: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
+    """
+    Простая интерпретируемая rule-схема в [0..1], + разложение по компонентам.
+    Использует RSI, EMA-кросс и знак MACD-гистограммы.
+    """
+    ind = (features.get("indicators") or {})
+    ema_fast = _safe_float(ind.get("ema_fast"))
+    ema_slow = _safe_float(ind.get("ema_slow"))
+    rsi = _safe_float(ind.get("rsi"))
+    macd_hist = _safe_float(ind.get("macd_hist"))
 
-def _weights(cfg) -> Dict[str, float]:
-    # нормализуем на всякий случай
-    rw = float(getattr(cfg, "SCORE_RULE_WEIGHT", getattr(cfg, "DECISION_RULE_WEIGHT", 0.5)))
-    aw = float(getattr(cfg, "SCORE_AI_WEIGHT", getattr(cfg, "DECISION_AI_WEIGHT", 0.5)))
-    s = rw + aw
-    if s <= 0:
-        rw, aw = 0.5, 0.5
+    parts: Dict[str, float] = {}
+
+    # 1) RSI в коридоре [30..70]: 0.5 по центру, ближе к 70 — buy, ближе к 30 — sell
+    if rsi <= 30:
+        rsi_s = 0.0
+    elif rsi >= 70:
+        rsi_s = 1.0
     else:
-        rw, aw = rw / s, aw / s
-    return {"rule": rw, "ai": aw}
+        rsi_s = (rsi - 30.0) / 40.0  # 30→0.0; 70→1.0
+    parts["rsi"] = rsi_s
 
-def _size_for_action(cfg, action: str) -> str:
-    if action == "buy":
-        return str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0.0"))
-    if action == "sell":
-        return str(getattr(cfg, "DEFAULT_ORDER_SIZE", "0.0"))
-    return "0"
+    # 2) EMA-кросс: чем больше (ema_fast - ema_slow) относительно |ema_slow|, тем ближе к 1.0 (buy)
+    cross_raw = 0.0
+    if abs(ema_slow) > 1e-12:
+        cross_raw = (ema_fast - ema_slow) / abs(ema_slow)
+    cross_s = max(0.0, min(1.0, 0.5 + 2.0 * cross_raw))  # около 0.5 при равных EMA
+    parts["ema_cross"] = cross_s
 
-def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int, **kwargs) -> Dict[str, Any]:
+    # 3) MACD hist: >0 → buy bias, <0 → sell bias; нормируем симметрично
+    macd_s = 0.5 + max(-0.5, min(0.5, macd_hist)) * 0.5  # мягкое сжатие
+    parts["macd_hist"] = macd_s
+
+    # усредняем части (равные веса внутри rule)
+    rule_score = sum(parts.values()) / max(1, len(parts))
+    return max(0.0, min(1.0, rule_score)), {"components": parts}
+
+def decide(cfg, broker, *, symbol: str, timeframe: str, limit: int, **repos) -> Dict[str, Any]:
     """
-    Единая точка принятия решения.
-    Сбор фичей/индикаторов делегирован в _build. Слияние rule/ai — в _fusion.
-    Здесь формируем публичное решение + explain.
+    Единая точка решений.
+    Возвращает словарь с полями:
+      - action: 'buy'|'sell'|'hold'
+      - size: str|None
+      - sl|tp|trail: Decimal|None (пока None — задаются на уровне исполнителя/стратегии)
+      - score: float [0..1]
+      - explain: {signals, blocks, weights, thresholds, context}
     """
-    feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
-    rule_score = feats.get("rule_score")
-    ai_score = feats.get("ai_score")
-    score = _fusion.fuse(rule_score, ai_score, cfg)
+    blocks: Dict[str, Any] = {}
 
-    thr = _thresholds(cfg)
-    w = _weights(cfg)
+    # 1) сбор фич
+    try:
+        feats = _build.build(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, **repos)
+    except Exception as e:
+        # если не удалось собрать фичи — удержание позиции с объяснением
+        return {
+            "symbol": symbol, "timeframe": timeframe,
+            "action": "hold", "size": None, "sl": None, "tp": None, "trail": None,
+            "score": 0.5,
+            "explain": {
+                "signals": {},
+                "blocks": {"build_failed": f"{type(e).__name__}: {e}"},
+                "weights": {"rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)),
+                            "ai":   float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5))},
+                "thresholds": {"buy": float(getattr(cfg, "THRESHOLD_BUY", 0.60)),
+                               "sell": float(getattr(cfg, "THRESHOLD_SELL", 0.40))},
+                "context": {},
+            },
+        }
 
-    action: str
-    if score >= thr["buy"]:
+    ind = feats.get("indicators") or {}
+    market = feats.get("market") or {}
+
+    # 2) rule score + разложение
+    rule_s, rule_detail = _rule_score(feats)
+
+    # 3) ai_score (если где-то посчитан заранее) — мягкая интеграция
+    ai_s: Optional[float] = None
+    if feats.get("ai_score") is not None:
+        try:
+            ai_s = float(feats["ai_score"])
+        except Exception:
+            ai_s = None
+
+    # 4) объединяем rule + ai через фьюзер
+    score = _fusion.fuse(rule_s, ai_s, cfg)
+    score = max(0.0, min(1.0, float(score)))
+
+    # 5) пороги и действие
+    thr_buy = float(getattr(cfg, "THRESHOLD_BUY", 0.60))
+    thr_sell = float(getattr(cfg, "THRESHOLD_SELL", 0.40))
+
+    if score >= thr_buy:
         action = "buy"
-    elif score <= thr["sell"]:
+    elif score <= thr_sell:
         action = "sell"
     else:
         action = "hold"
 
-    # базовое объяснение
-    explain: Dict[str, Any] = {
-        "signals": feats.get("indicators", {}),
-        "thresholds": thr,
-        "weights": w,
-        "context": {},
+    # 6) собрать explain
+    signals = {
+        "ema_fast": ind.get("ema_fast"),
+        "ema_slow": ind.get("ema_slow"),
+        "rsi": ind.get("rsi"),
+        "macd_hist": ind.get("macd_hist"),
+        "atr": ind.get("atr"),
+        "atr_pct": ind.get("atr_pct"),
+        **(feats.get("signals") or {}),  # если билдер даёт доп. сигналы
     }
 
-    # контекст: быстрый путь через трекер, если есть репозитории
-    positions_repo = kwargs.get("positions_repo")
-    trades_repo = kwargs.get("trades_repo")
-    if _tracker is not None and (positions_repo is not None or trades_repo is not None):
-        try:
-            ctx = _tracker.build_context(cfg, broker, positions_repo=positions_repo, trades_repo=trades_repo)
-            if isinstance(ctx, dict):
-                explain["context"].update(ctx)
-        except Exception:
-            pass
+    context = {
+        "price": market.get("price"),
+        "ts": market.get("ts"),
+        "spread_pct": market.get("spread_pct"),
+        "vol": market.get("volume"),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "limit": limit,
+    }
 
-    decision: Dict[str, Any] = {
+    explain = {
+        "signals": signals,
+        "blocks": blocks,
+        "weights": {
+            "rule": float(getattr(cfg, "SCORE_RULE_WEIGHT", 0.5)),
+            "ai":   float(getattr(cfg, "SCORE_AI_WEIGHT", 0.5)),
+        },
+        "thresholds": {
+            "buy": thr_buy,
+            "sell": thr_sell,
+        },
+        "rule_detail": rule_detail,
+        "context": context,
+    }
+
+    return {
         "symbol": symbol,
         "timeframe": timeframe,
         "action": action,
-        "size": _size_for_action(cfg, action),
+        "size": None,
         "sl": None,
         "tp": None,
         "trail": None,
-        "score": float(score) if score is not None else 0.0,
+        "score": score,
         "explain": explain,
     }
-    return decision
