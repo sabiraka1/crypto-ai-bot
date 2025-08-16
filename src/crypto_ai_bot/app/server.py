@@ -2,7 +2,7 @@ from __future__ import annotations
 import os, time, json, pathlib
 from typing import Any, Dict
 
-from fastapi import FastAPI, Body, Request, Header
+from fastapi import FastAPI, Body, Request, Header, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.core.settings import Settings
@@ -123,7 +123,7 @@ def debug_why(symbol: str | None = None, timeframe: str | None = None, limit: in
         return JSONResponse({"error": f"debug_why_failed: {type(e).__name__}: {e}"}, status_code=500)
 
 @app.get("/stats")
-def stats():
+def stats(days: int = Query(default=1, ge=1, le=365), symbol: str | None = None):
     positions_repo = trades_repo = None
     try:
         if CON is not None:
@@ -132,7 +132,7 @@ def stats():
     except Exception:
         positions_repo = trades_repo = None
     try:
-        res = uc_get_stats(CFG, BROKER, positions_repo=positions_repo, trades_repo=trades_repo)
+        res = uc_get_stats(CFG, BROKER, positions_repo=positions_repo, trades_repo=trades_repo, symbol=symbol or CFG.SYMBOL, window_days=days)
         return JSONResponse({"status": "ok", "stats": res, "storage": CON is not None})
     except Exception as e:
         return JSONResponse({"status": "error", "error": f"stats_failed: {type(e).__name__}: {e}"} , status_code=200)
@@ -149,7 +149,6 @@ async def telegram_webhook(
     update = await request.json()
     http = http_client.get_http_client()
 
-    from crypto_ai_bot.app.adapters.telegram import handle_update
     try:
         msg = await handle_update(update, CFG, BROKER, http)
     except Exception as e:
@@ -162,8 +161,8 @@ async def telegram_webhook(
     try:
         chat_id = msg.get("chat_id")
         text = msg.get("text", "")
-        http.post_json(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=5.0)
+        http.post_json(f\"https://api.telegram.org/bot{token}/sendMessage\", json={\"chat_id\": chat_id, \"text\": text}, timeout=5.0)
     except Exception as e:
-        return JSONResponse({"ok": False, "error": f"telegram_send_failed:{type(e).__name__}:{e}", "reply": msg}, status_code=200)
+        return JSONResponse({\"ok\": False, \"error\": f\"telegram_send_failed:{type(e).__name__}:{e}\", \"reply\": msg}, status_code=200)
 
-    return JSONResponse({"ok": True, "reply": msg}, status_code=200)
+    return JSONResponse({\"ok\": True, \"reply\": msg}, status_code=200)
