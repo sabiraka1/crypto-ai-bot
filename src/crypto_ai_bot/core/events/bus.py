@@ -1,157 +1,80 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
-from enum import IntEnum
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, Deque, Optional
 
-try:
-    from crypto_ai_bot.utils import metrics
-except Exception:  # pragma: no cover
-    class _Dummy:
-        def inc(self, *a, **k): pass
-        def observe(self, *a, **k): pass
-        def export(self): return ""
-    metrics = _Dummy()  # type: ignore
+EventHandler = Callable[[Dict[str, Any]], Awaitable[None]]
 
-Handler = Callable[[dict], Awaitable[None]] | Callable[[dict], None]
-
-class EventPriority(IntEnum):
-    HIGH = 0
-    NORMAL = 1
-    LOW = 2
-
-# Default strategy if no match
-DEFAULT_BACKPRESSURE = "block"
-
-def _match_strategy(overrides: Dict[str, str], event_type: str) -> str:
-    """Longest-prefix '*' matcher.
-    Exact match wins. Then prefix like 'orders.*' wins (longest).
-    Fallback to DEFAULT_BACKPRESSURE.
-    """
-    if event_type in overrides:
-        return overrides[event_type]
-    best_len = -1
-    best = None
-    for pat, strat in overrides.items():
-        if pat.endswith('*'):
-            pref = pat[:-1]
-            if event_type.startswith(pref) and len(pref) > best_len:
-                best = strat
-                best_len = len(pref)
-    return best or DEFAULT_BACKPRESSURE
-
+@dataclass
 class AsyncBus:
-    """Async in-proc event bus with per-type backpressure strategies and priorities.
-    API:
-      subscribe(event_type, handler)
-      publish(event: dict, *, priority=EventPriority.NORMAL)
-      start(); stop()
-      health() -> dict
-
-    Notes:
-      - event MUST contain 'type' (str)
-      - handlers can be sync or async; sync handlers run in the loop's default executor
     """
-    def __init__(
-        self,
-        *,
-        max_queue: int = 1000,
-        backpressure_overrides: Optional[Dict[str, str]] = None,
-    ) -> None:
-        self._queue: asyncio.PriorityQueue[Tuple[int, int, dict]] = asyncio.PriorityQueue(max_queue)
-        self._subs: Dict[str, List[Handler]] = {}
-        self._task: Optional[asyncio.Task] = None
-        self._running: bool = False
-        self._drops_total: int = 0
-        self._drops_latest: int = 0
-        self._drops_oldest: int = 0
-        self._seq: int = 0  # tie-breaker to preserve FIFO inside same priority
-        self._overrides = backpressure_overrides or {}
+    Async pub/sub с per-event backpressure стратегиями и DLQ.
+    strategies: {"OrderFilledEvent": "drop_oldest" | "keep_latest" | "block", ...}
+    queue_sizes: {"OrderFilledEvent": 1000, ...}
+    dlq_max: максимальный размер очереди DLQ (dead-letter).
+    """
+    strategies: Dict[str, str] = field(default_factory=dict)
+    queue_sizes: Dict[str, int] = field(default_factory=dict)
+    dlq_max: int = 200
 
-    def subscribe(self, event_type: str, handler: Handler) -> None:
-        self._subs.setdefault(event_type, []).append(handler)
+    def __post_init__(self) -> None:
+        self._handlers: Dict[str, list[EventHandler]] = {}
+        self._queues: Dict[str, asyncio.Queue] = {}
+        self._dlq: Deque[Dict[str, Any]] = deque(maxlen=self.dlq_max)
 
-    async def publish(self, event: dict, *, priority: EventPriority = EventPriority.NORMAL) -> None:
-        et = str(event.get("type") or "*")
-        strat = _match_strategy(self._overrides, et)
-        item = (int(priority), self._seq, event)
-        self._seq += 1
-        if not self._queue.full():
-            await self._queue.put(item)
-            return
-        # queue is full
+    def subscribe(self, event_type: str, handler: EventHandler) -> None:
+        self._handlers.setdefault(event_type, []).append(handler)
+        if event_type not in self._queues:
+            maxsize = int(self.queue_sizes.get(event_type, 1000))
+            self._queues[event_type] = asyncio.Queue(maxsize=maxsize)
+
+    async def publish(self, event: Dict[str, Any]) -> None:
+        et = str(event.get("type","GenericEvent"))
+        q = self._queues.setdefault(et, asyncio.Queue(maxsize=int(self.queue_sizes.get(et, 1000))))
+        strat = self.strategies.get(et, "block")
         if strat == "block":
-            await self._queue.put(item)  # apply backpressure to publisher
-            return
-        if strat == "drop_oldest":
-            try:
-                _ = self._queue.get_nowait()  # drop one (oldest within current priority ordering)
-                self._queue.task_done()
-                self._drops_total += 1
-                self._drops_oldest += 1
+            await q.put(event)
+        elif strat == "drop_oldest":
+            if q.full():
                 try:
-                    metrics.inc("bus_drop_total", {"strategy": "drop_oldest", "type": et})
+                    _ = q.get_nowait()
+                    q.task_done()
                 except Exception:
                     pass
-            except asyncio.QueueEmpty:
-                pass
-            await self._queue.put(item)
-            return
-        if strat == "keep_latest":
-            # we keep backlog; drop the new one
-            self._drops_total += 1
-            self._drops_latest += 1
             try:
-                metrics.inc("bus_drop_total", {"strategy": "keep_latest", "type": et})
-            except Exception:
-                pass
-            return
-        # default
-        await self._queue.put(item)
-
-    async def _run(self) -> None:
-        loop = asyncio.get_running_loop()
-        while self._running:
-            prio, _, event = await self._queue.get()
-            et = str(event.get("type") or "*")
-            handlers = (self._subs.get(et) or []) + (self._subs.get("*") or [])
-            for h in handlers:
-                try:
-                    if asyncio.iscoroutinefunction(h):  # type: ignore[arg-type]
-                        await h(event)  # type: ignore[misc]
-                    else:
-                        await loop.run_in_executor(None, h, event)  # type: ignore[misc]
-                except Exception:  # pragma: no cover
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                self._dlq.append({"reason":"queue_full_after_drop","event":event})
+        elif strat == "keep_latest":
+            if q.full():
+                # очищаем всё и оставляем только новый как "последний"
+                while not q.empty():
                     try:
-                        metrics.inc("bus_handler_errors_total", {"type": et})
+                        _ = q.get_nowait(); q.task_done()
                     except Exception:
-                        pass
-            self._queue.task_done()
-
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._run())
-
-    async def stop(self) -> None:
-        if not self._running:
-            return
-        self._running = False
-        if self._task:
-            self._task.cancel()
+                        break
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                self._dlq.append({"reason":"queue_full_keep_latest","event":event})
+        else:
+            # неизвестная стратегия — отправим в DLQ
+            self._dlq.append({"reason":"unknown_strategy","strategy":strat,"event":event})
 
-    def health(self) -> dict:
-        return {
-            "queue_size": self._queue.qsize(),
-            "drops_total": self._drops_total,
-            "drops_latest": self._drops_latest,
-            "drops_oldest": self._drops_oldest,
-            "subs": {k: len(v) for k, v in self._subs.items()},
-            "overrides": dict(self._overrides),
-        }
+    async def run_consumer(self, event_type: str) -> None:
+        q = self._queues.setdefault(event_type, asyncio.Queue(maxsize=int(self.queue_sizes.get(event_type, 1000))))
+        while True:
+            ev = await q.get()
+            try:
+                for h in self._handlers.get(event_type, []):
+                    try:
+                        await h(ev)
+                    except Exception as e:
+                        self._dlq.append({"reason":"handler_error","event":ev,"error":type(e).__name__})
+            finally:
+                q.task_done()
+
+    def dead_letters(self) -> list[Dict[str, Any]]:
+        return list(self._dlq)
