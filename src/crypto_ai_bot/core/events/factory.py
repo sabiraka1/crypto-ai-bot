@@ -1,20 +1,43 @@
+# src/crypto_ai_bot/core/events/factory.py
 from __future__ import annotations
 from typing import Dict
 
 from .async_bus import AsyncBus
-from . import DEFAULT_BACKPRESSURE_MAP
+
+# Рекомендованные дефолты backpressure для типов событий
+# (можно переопределить через Settings.EVENT_BACKPRESSURE_MAP)
+_DEFAULTS: Dict[str, Dict[str, str | int]] = {
+    "DecisionEvaluated": {"strategy": "keep_latest", "maxsize": 100},  # высокочастотные, держим только свежие
+    "FlowFinished":      {"strategy": "drop_oldest", "maxsize": 1000}, # телеметрия
+    "OrderExecuted":     {"strategy": "block",       "maxsize": 100},  # важные события — не теряем
+    "OrderFailed":       {"strategy": "block",       "maxsize": 100},
+}
 
 def build_bus(cfg) -> AsyncBus:
-    """Factory for AsyncBus using strategies from Settings (if provided).
-    cfg.EVENT_BACKPRESSURE_MAP may override domain defaults.
     """
-    overrides: Dict[str, str] = {}
+    Фабрика асинхронной шины с конфигурируемым backpressure:
+      - дефолты из _DEFAULTS
+      - затем пользовательские overrides из Settings.EVENT_BACKPRESSURE_MAP
+    """
+    bus = AsyncBus()
+
+    # собрать карту настроек
+    overrides: Dict[str, Dict[str, str | int]] = {}
+    overrides.update(_DEFAULTS)
     try:
-        # start with recommended defaults
-        overrides.update(DEFAULT_BACKPRESSURE_MAP)
-        # apply user overrides from settings (validated there)
         user_map = getattr(cfg, "EVENT_BACKPRESSURE_MAP", None) or {}
-        overrides.update(user_map)
+        # ожидаем формат: {event_type: {"strategy": "...", "maxsize": N}}
+        for et, conf in dict(user_map).items():
+            if isinstance(conf, dict):
+                overrides[et] = {**overrides.get(et, {}), **conf}
     except Exception:
         pass
-    return AsyncBus(backpressure_overrides=overrides)
+
+    # применить конфигурацию
+    for et, conf in overrides.items():
+        bus.configure_backpressure(et,
+            strategy=str(conf.get("strategy", "block")),
+            maxsize=int(conf.get("maxsize", 1000))
+        )
+
+    return bus

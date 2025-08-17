@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.utils import metrics
 
-# корректный импорт декоратора
 try:
     from crypto_ai_bot.utils.rate_limit import rate_limit
 except Exception:
@@ -16,7 +15,6 @@ except Exception:
             return fn
         return _wrap
 
-# используем наш PositionManager (ожидается наличие методов open_or_add / reduce_or_close)
 from crypto_ai_bot.core.positions.manager import PositionManager
 
 
@@ -34,23 +32,23 @@ def place_order(
     bus: Optional[Any] = None,
     idem_repo: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    action = str(decision.get("action", "hold"))
+    action = str(decision.get("action", "hold")).lower()  # buy|sell|hold
+    side = action if action in ("buy", "sell") else "hold"
     size = Decimal(str(decision.get("size", "0")))
-    if action == "hold" or size == Decimal("0"):
+    if side == "hold" or size == Decimal("0"):
         metrics.inc("order_skip_total", {"reason": "hold"})
         return {"status": "skipped", "reason": "hold"}
 
-    # идемпотентность (мягко)
+    # идемпотентность (соответствие спецификации по ключу: symbol:side:size:minute:decision_id[:8])
     if idem_repo is not None:
         minute = int(int(decision.get("ts_ms", 0) or 0) // 60000)
         did = str(decision.get("id", ""))[:8]
-        key = f"{symbol}:{action}:{size}:{minute}:{did}"
+        key = f"{symbol}:{side}:{size}:{minute}:{did}"
         is_new, prev = idem_repo.check_and_store(key, payload=str(decision))
         if not is_new and prev:
             metrics.inc("order_duplicate_total")
             return {"status": "duplicate", "prev": prev}
 
-    # менеджер позиций
     pm = PositionManager(
         positions_repo=positions_repo,
         trades_repo=trades_repo,
@@ -63,16 +61,24 @@ def place_order(
     if px <= 0:
         return {"status": "error", "error": "invalid_price"}
 
-    if action == "buy":
+    if side == "buy":
         snap = pm.open_or_add(symbol, size, px)
-    elif action == "sell":
+    elif side == "sell":
         snap = pm.reduce_or_close(symbol, size, px)
     else:
         return {"status": "error", "error": f"unknown_action:{action}"}
 
     if bus:
         try:
-            bus.publish({"type": "OrderExecuted", "symbol": symbol, "action": action, "size": str(size), "price": str(px)})
+            bus.publish({
+                "type": "OrderExecuted",
+                "symbol": symbol,
+                "timeframe": getattr(cfg, "TIMEFRAME", ""),
+                "side": side,                      # <-- важное выравнивание
+                "qty": str(size),                  # <-- ожидание в bus_wiring
+                "price": str(px),
+                "latency_ms": decision.get("latency_ms"),
+            })
         except Exception:
             pass
 
