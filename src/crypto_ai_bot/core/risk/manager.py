@@ -1,30 +1,49 @@
+# src/crypto_ai_bot/core/risk/manager.py
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple, List
+from typing import Any, Callable, Dict, List, Tuple
 
-from . import rules
+from crypto_ai_bot.core.risk import rules
+from crypto_ai_bot.utils import metrics
+
+
+RuleFn = Callable[[Dict[str, Any], Any], Tuple[bool, str]]
+
+# порядок проверок: сначала время, затем остальные
+_DEFAULT_RULE_ORDER: List[str] = [
+    "check_time_sync",
+    "check_hours",
+    "check_spread",
+    "check_dd",
+    "check_seq_losses",
+    "check_max_exposure",
+]
+
+
+def _resolve_rule(name: str) -> RuleFn | None:
+    fn = getattr(rules, name, None)
+    if callable(fn):
+        return fn  # type: ignore
+    return None
 
 
 def check(features: Dict[str, Any], cfg) -> Tuple[bool, str]:
     """
-    Проверяем набор правил. Возвращаем общий вердикт и свёртку причин.
+    Пробегаемся по правилам. На первом отказе — стоп.
     """
-    context = features.get("context", {}) if isinstance(features, dict) else {}
-    bars = context.get("bars")
-    drift_ms = context.get("time_drift_ms")
+    for name in _DEFAULT_RULE_ORDER:
+        fn = _resolve_rule(name)
+        if fn is None:
+            continue
+        ok, reason = (True, "ok")
+        try:
+            ok, reason = fn(features, cfg)
+        except Exception as e:
+            metrics.inc("risk_rule_errors_total", {"rule": name, "type": type(e).__name__})
+            ok, reason = False, f"rule_error:{name}:{type(e).__name__}"
 
-    reasons: List[str] = []
+        if not ok:
+            metrics.inc("risk_block_total", {"rule": name})
+            return False, reason
 
-    # 1) рассинхронизация времени
-    ok1, r1 = rules.check_time_sync(drift_ms, getattr(cfg, "TIME_DRIFT_LIMIT_MS", 1000))
-    if not ok1:
-        reasons.append(r1)
-
-    # 2) минимальная история
-    ok2, r2 = rules.check_min_history(bars, getattr(cfg, "MIN_HISTORY_BARS", 100))
-    if not ok2:
-        reasons.append(r2)
-
-    if reasons:
-        return False, ";".join(reasons)
     return True, "ok"

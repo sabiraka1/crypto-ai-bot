@@ -1,92 +1,81 @@
+# src/crypto_ai_bot/core/brokers/paper_exchange.py
 from __future__ import annotations
-
 import time
-from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from crypto_ai_bot.core.events import BusProtocol
-from crypto_ai_bot.core.settings import Settings
+from crypto_ai_bot.core.brokers.base import ExchangeInterface
+from crypto_ai_bot.core.brokers.symbols import to_exchange_symbol
 from crypto_ai_bot.utils import metrics
 
-# Минимальная paper-имплементация (для событий и /health достаточно)
-@dataclass
-class _Order:
-    id: str
-    symbol: str
-    side: str
-    type: str
-    amount: Decimal
-    price: Optional[Decimal]
-    ts: float
 
+class PaperExchange(ExchangeInterface):
+    """
+    Упрощённый paper-режим.
+    - fetch_ticker: возвращает синтетическую цену
+    - fetch_ohlcv: генерирует синтетические свечи (линейный дрейф + шум ~ 0)
+    - create_order: регистрирует ордер в памяти
+    """
+    def __init__(self, cfg) -> None:
+        self.cfg = cfg
+        self._orders: List[Dict[str, Any]] = []
 
-class PaperExchange:
-    def __init__(self) -> None:
-        self._bus: Optional[BusProtocol] = None
-        self._orders: Dict[str, _Order] = {}
-        self._balances: Dict[str, Any] = {"USDT": {"free": 10_000, "used": 0, "total": 10_000}}
+    # ---- helpers ----
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000)
 
-    @classmethod
-    def from_settings(cls, cfg: Settings) -> "PaperExchange":
-        return cls()
+    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        exch_sym = to_exchange_symbol(symbol)
+        # синтетическая цена вокруг 100
+        px = 100.0 + (time.time() % 10)
+        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "fetch_ticker", "code": "200"})
+        return {"symbol": exch_sym, "last": px, "timestamp": self._now_ms()}
 
-    def set_bus(self, bus: Optional[BusProtocol]) -> None:
-        self._bus = bus
-
-    # ───────────────────────────────────── API ─────────────────────────────────────
-
-    def fetch_ticker(self, symbol: str) -> dict:
-        # Детирминированный «тикер»
-        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "fetch_ticker"})
-        return {"symbol": symbol, "price": 50_000.0, "ts": int(time.time() * 1000)}
-
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
-        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "fetch_ohlcv"})
-        now = int(time.time() * 1000)
-        # простая «ступенька» OHLCV
-        out: list[list[float]] = []
-        base = 50_000.0
-        for i in range(limit):
-            t = now - (limit - i) * 60_000
-            o = base + i * 5
-            h = o + 10
-            l = o - 10
-            c = o + 2
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
+        exch_sym = to_exchange_symbol(symbol)
+        # простая генерация OHLCV (не для реальной торговли, но достаточная для теста пайплайна)
+        now = self._now_ms()
+        base = 100.0
+        tf_ms = 60_000  # 1m как базовая; реально игнорируем timeframe
+        out: List[List[float]] = []
+        for i in range(limit, 0, -1):
+            t = now - i * tf_ms
+            o = base + (i % 50) * 0.1
+            h = o + 0.2
+            l = o - 0.2
+            c = o + 0.05
             v = 1.0
             out.append([t, o, h, l, c, v])
+        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "fetch_ohlcv", "code": "200"})
         return out
 
-    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Decimal | None = None) -> dict:
-        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "create_order"})
-        order_id = f"paper_{int(time.time() * 1e6)}"
-        order = _Order(order_id, symbol, side, type_, amount, price, time.time())
-        self._orders[order_id] = order
+    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Optional[Decimal] = None) -> Dict[str, Any]:
+        exch_sym = to_exchange_symbol(symbol)
+        oid = f"paper-{len(self._orders)+1}"
+        order = {
+            "id": oid,
+            "symbol": exch_sym,
+            "type": type_,
+            "side": side,
+            "amount": float(amount),
+            "price": float(price) if price is not None else None,
+            "timestamp": self._now_ms(),
+            "status": "filled",  # paper → сразу filled
+        }
+        self._orders.append(order)
+        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "create_order", "code": "200"})
+        return order
 
-        # Публикуем события, если подключена шина
-        if self._bus:
-            try:
-                self._bus.publish({"type": "OrderSubmitted", "order_id": order_id, "symbol": symbol, "side": side, "amount": str(amount)})
-                self._bus.publish({"type": "OrderFilled", "order_id": order_id, "symbol": symbol, "side": side, "amount": str(amount), "price": str(price or Decimal("0"))})
-            except Exception:
-                pass
-
-        return {"id": order_id, "status": "filled", "symbol": symbol, "side": side, "amount": str(amount), "price": str(price or Decimal("0"))}
-
-    def cancel_order(self, order_id: str) -> dict:
-        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "cancel_order"})
-        self._orders.pop(order_id, None)
-        if self._bus:
-            try:
-                self._bus.publish({"type": "OrderCanceled", "order_id": order_id})
-            except Exception:
-                pass
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        # paper: считаем отменённым если найден
+        for o in self._orders:
+            if o["id"] == order_id:
+                o["status"] = "canceled"
+                break
+        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "cancel_order", "code": "200"})
         return {"id": order_id, "status": "canceled"}
 
-    def fetch_balance(self) -> dict:
-        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "fetch_balance"})
-        return self._balances
-
-    # На будущее – аккуратное закрытие
-    def close(self) -> None:  # pragma: no cover
-        pass
+    def fetch_balance(self) -> Dict[str, Any]:
+        # фиктивный баланс
+        metrics.inc("broker_requests_total", {"exchange": "paper", "method": "fetch_balance", "code": "200"})
+        return {"total": {"USDT": 10_000.0}}

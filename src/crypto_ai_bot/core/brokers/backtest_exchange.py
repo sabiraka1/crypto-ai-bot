@@ -1,85 +1,66 @@
 # src/crypto_ai_bot/core/brokers/backtest_exchange.py
 from __future__ import annotations
-
-import csv
-import os
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+import time
 
+from crypto_ai_bot.core.brokers.base import ExchangeInterface
 from crypto_ai_bot.core.brokers.symbols import to_exchange_symbol
+from crypto_ai_bot.utils import metrics
 
 
-class BacktestExchange:
+class BacktestExchange(ExchangeInterface):
     """
-    Простой CSV-реплей:
-      - fetch_ohlcv читает последние N баров из CSV (ts,open,high,low,close,volume)
-      - fetch_ticker возвращает last из последнего close
-      - create_order эмулирует немедленный fill
-    Ожидается путь к CSV: cfg.BACKTEST_CSV_PATH (по умолчанию data/backtest.csv)
+    Простой backtest-адаптер.
+    Если не передан источник OHLCV, отдаёт синтетические данные (как paper),
+    чтобы не рушить пайплайн.
     """
 
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, ohlcv_source: Optional[List[List[float]]] = None) -> None:
         self.cfg = cfg
-        self._cache: Dict[str, List[List[float]]] = {}
+        self._ohlcv_source = ohlcv_source or []
 
-    @classmethod
-    def from_settings(cls, cfg) -> "BacktestExchange":
-        return cls(cfg)
-
-    def _csv_path(self) -> str:
-        return getattr(self.cfg, "BACKTEST_CSV_PATH", "data/backtest.csv")
-
-    def _load_csv(self, path: str) -> List[List[float]]:
-        rows: List[List[float]] = []
-        if not os.path.exists(path):
-            return rows
-        with open(path, "r", newline="", encoding="utf-8") as f:
-            r = csv.DictReader(f)
-            # ожидаем колонки: ts,open,high,low,close,volume
-            for row in r:
-                try:
-                    rows.append([
-                        float(row["ts"]),
-                        float(row["open"]),
-                        float(row["high"]),
-                        float(row["low"]),
-                        float(row["close"]),
-                        float(row["volume"]),
-                    ])
-                except Exception:
-                    continue
-        return rows
-
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int):
-        # timeframe игнорируем — CSV один, задача — отдать limit последних баров
-        path = self._csv_path()
-        key = f"{path}"
-        if key not in self._cache:
-            self._cache[key] = self._load_csv(path)
-        data = self._cache[key]
-        return data[-int(limit):] if limit else data
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000)
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        data = self.fetch_ohlcv(symbol, timeframe="1m", limit=1)
-        last = float(data[-1][4]) if data else 0.0
-        return {"symbol": symbol, "last": last}
+        exch_sym = to_exchange_symbol(symbol)
+        px = 100.0 + (time.time() % 5)
+        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "fetch_ticker", "code": "200"})
+        return {"symbol": exch_sym, "last": px, "timestamp": self._now_ms()}
 
-    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Decimal | None = None) -> Dict[str, Any]:
-        """
-        Эмуляция моментального исполнения по цене last (или указанной price).
-        """
-        last = Decimal(str(self.fetch_ticker(symbol)["last"]))
-        fill_price = price if (price and price > 0) else last
-        return {
-            "id": f"bt_{symbol}_{side}_{amount}",
-            "symbol": symbol,
-            "status": "filled",
-            "filled": float(amount),
-            "price": float(fill_price),
-        }
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
+        exch_sym = to_exchange_symbol(symbol)
+        if self._ohlcv_source:
+            data = self._ohlcv_source[-limit:]
+        else:
+            # синтетика если источник не передан
+            now = self._now_ms()
+            tf_ms = 60_000
+            base = 100.0
+            data = []
+            for i in range(limit, 0, -1):
+                t = now - i * tf_ms
+                o = base + (i % 30) * 0.15
+                h = o + 0.25
+                l = o - 0.15
+                c = o + 0.05
+                v = 1.0
+                data.append([t, o, h, l, c, v])
+        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "fetch_ohlcv", "code": "200"})
+        return data
 
-    def fetch_balance(self) -> Dict[str, Any]:
-        return {"free": {"USDT": 1_000_000}, "used": {}, "total": {"USDT": 1_000_000}}
+    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Optional[Decimal] = None) -> Dict[str, Any]:
+        exch_sym = to_exchange_symbol(symbol)
+        # в бэктесте обычно нет реального исполнения — возвращаем событийную заглушку
+        oid = f"bt-{int(time.time()*1000)}"
+        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "create_order", "code": "200"})
+        return {"id": oid, "symbol": exch_sym, "status": "accepted", "type": type_, "side": side, "amount": float(amount), "price": float(price) if price else None}
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "cancel_order", "code": "200"})
         return {"id": order_id, "status": "canceled"}
+
+    def fetch_balance(self) -> Dict[str, Any]:
+        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "fetch_balance", "code": "200"})
+        return {"total": {"USDT": 1_000_000.0}}

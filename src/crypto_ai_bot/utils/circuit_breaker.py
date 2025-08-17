@@ -1,172 +1,151 @@
 # src/crypto_ai_bot/utils/circuit_breaker.py
 from __future__ import annotations
+
 import time
-import threading
-from typing import Any, Callable, Dict, Optional, Tuple, List
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
+from dataclasses import dataclass, field
+from typing import Any, Callable, Deque, Dict, List, Optional
+from collections import deque
+
+from crypto_ai_bot.utils import metrics
+
+
+@dataclass
+class _CBState:
+    state: str = "closed"                 # closed | open | half-open
+    failures: int = 0
+    opened_at: float = 0.0                # when switched to open
+    half_open_inflight: bool = False
+    transitions: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=32))
+    last_errors: Deque[str] = field(default_factory=lambda: deque(maxlen=16))
 
 
 class CircuitBreaker:
     """
-    Простая реализация Circuit Breaker со статусами:
-      - closed     : вызовы проходят, считаем фейлы
-      - open       : вызовы блокируются на open_seconds
-      - half-open  : пробная попытка; успех -> closed, фейл -> open
-
-    Совместима с существующим вызовом:
-      breaker.call(fn, *, key="broker.fetch_ticker", timeout=2.0, fail_threshold=3, open_seconds=30, ...)
+    Простой Circuit Breaker:
+    - closed    → обычная работа
+    - open      → все вызовы немедленно отклоняются до истечения open_seconds
+    - half-open → одиночная проба; успех → closed, ошибка → open
     """
 
-    def __init__(self, default_fail_threshold: int = 3, default_open_seconds: float = 30.0):
-        self._lock = threading.Lock()
-        self._state: Dict[str, Dict[str, Any]] = {}
-        self._default_fail_threshold = default_fail_threshold
-        self._default_open_seconds = default_open_seconds
-        # агрегированные метрики
-        self._counters: Dict[str, Dict[str, int]] = {}  # per key: attempts/successes/failures/opens/half_opens
-        # краткий лог переходов (per key)
-        self._transitions: Dict[str, List[Tuple[float, str, str]]] = {}  # (ts, from, to)
-        # последние ошибки
-        self._last_errors: Dict[str, str] = {}
+    def __init__(self) -> None:
+        self._state: Dict[str, _CBState] = {}
+        self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cb")
 
-    # ---------- внутренние помощники ----------
-    def _now(self) -> float:
-        return time.time()
+    # ====== helpers ======
+    def _get(self, key: str) -> _CBState:
+        st = self._state.get(key)
+        if st is None:
+            st = _CBState()
+            self._state[key] = st
+        return st
 
-    def _ensure_key(self, key: str) -> None:
-        if key not in self._state:
-            self._state[key] = {
-                "state": "closed",
-                "failures": 0,
-                "opened_at": None,          # float|None
-                "last_transition": self._now(),
-                "fail_threshold": self._default_fail_threshold,
-                "open_seconds": self._default_open_seconds,
-            }
-            self._counters[key] = {"attempts": 0, "successes": 0, "failures": 0, "opens": 0, "half_opens": 0}
-            self._transitions[key] = []
+    def _transition(self, key: str, new_state: str, reason: str) -> None:
+        st = self._get(key)
+        if st.state != new_state:
+            st.transitions.append({
+                "ts": time.time(),
+                "from": st.state,
+                "to": new_state,
+                "reason": reason,
+            })
+            metrics.inc("circuit_transitions_total", {"key": key, "from": st.state, "to": new_state})
+            st.state = new_state
+            if new_state == "open":
+                st.opened_at = time.time()
+                st.half_open_inflight = False
+            elif new_state == "closed":
+                st.failures = 0
+                st.half_open_inflight = False
+            elif new_state == "half-open":
+                st.half_open_inflight = False
 
-    def _transition(self, key: str, to_state: str) -> None:
-        st = self._state[key]
-        frm = st["state"]
-        if frm == to_state:
-            return
-        st["state"] = to_state
-        st["last_transition"] = self._now()
-        if to_state == "open":
-            st["opened_at"] = self._now()
-            self._counters[key]["opens"] += 1
-        elif to_state == "half-open":
-            self._counters[key]["half_opens"] += 1
-        # лог переходов (держим компактно)
-        log = self._transitions[key]
-        log.append((self._now(), frm, to_state))
-        if len(log) > 32:
-            del log[: len(log) - 32]
-
-    # ---------- публичное API ----------
-    def get_stats(self) -> Dict[str, Any]:
-        """Снимок состояния по всем ключам для health/details и метрик."""
-        with self._lock:
-            out = {}
-            for key, st in self._state.items():
-                out[key] = {
-                    "state": st["state"],
-                    "failures": st["failures"],
-                    "fail_threshold": st["fail_threshold"],
-                    "open_seconds": st["open_seconds"],
-                    "opened_at": st["opened_at"],
-                    "last_transition": st["last_transition"],
-                    "counters": dict(self._counters.get(key, {})),
-                    "last_error": self._last_errors.get(key),
-                    "transitions": list(self._transitions.get(key, [])),
-                }
-            return out
-
+    # ====== public API ======
     def call(
         self,
-        fn: Callable[..., Any],
+        fn: Callable[[], Any],
         *,
         key: str,
-        timeout: Optional[float] = None,
-        fail_threshold: Optional[int] = None,
-        open_seconds: Optional[float] = None,
-        **kwargs: Any,
+        timeout: float = 10.0,
+        fail_threshold: int = 5,
+        open_seconds: float = 30.0,
     ) -> Any:
         """
-        Выполняет вызов под контролем предохранителя.
-        - Если breaker открыт и время не истекло — бросит RuntimeError (или вернёт fallback, если передан через kwargs).
-        - Поддерживает кастомные пороги per-call через параметры.
-
-        Пример:
-            breaker.call(client.fetch_ticker, key="broker.fetch_ticker", timeout=2.0)
+        Оборачивает вызов fn() политикой CB + таймаут через ThreadPool.
         """
-        fallback = kwargs.pop("fallback", None)
+        st = self._get(key)
 
-        with self._lock:
-            self._ensure_key(key)
-            st = self._state[key]
-            if fail_threshold is not None:
-                st["fail_threshold"] = int(fail_threshold)
-            if open_seconds is not None:
-                st["open_seconds"] = float(open_seconds)
+        # OPEN → проверяем, можно ли в half-open
+        if st.state == "open":
+            if (time.time() - st.opened_at) >= open_seconds:
+                self._transition(key, "half-open", "cooldown_elapsed")
+            else:
+                metrics.inc("circuit_blocked_total", {"key": key, "state": "open"})
+                raise RuntimeError("circuit_open")
 
-            state = st["state"]
+        # HALF-OPEN → пропускаем ровно одну пробу
+        if st.state == "half-open":
+            if st.half_open_inflight:
+                metrics.inc("circuit_blocked_total", {"key": key, "state": "half-open"})
+                raise RuntimeError("probe_inflight")
+            st.half_open_inflight = True
 
-            # Если открыт — проверяем, не истёк ли таймер
-            if state == "open":
-                opened_at = st["opened_at"] or 0.0
-                if self._now() - opened_at < st["open_seconds"]:
-                    # ещё открыт
-                    if fallback is not None:
-                        return fallback()
-                    raise RuntimeError("circuit_open")
-                else:
-                    # пробуем half-open
-                    self._transition(key, "half-open")
-
-            self._counters[key]["attempts"] += 1
-
-        # Вызов без блокировки
-        err: Optional[BaseException] = None
-        result: Any = None
+        # Вызов с таймаутом
+        fut = self._pool.submit(fn)
         try:
-            if timeout is not None:
-                # простая обёртка таймаута: для sync-IO делаем мягкий подход
-                # (ожидание таймаута как часть операции — реальный таймаут должен быть в клиенте)
-                result = fn(**kwargs)
+            res = fut.result(timeout=timeout)
+        except _Timeout as e:
+            fut.cancel()
+            self._on_error(key, e, fail_threshold, open_seconds, err_tag="timeout")
+            raise
+        except Exception as e:
+            self._on_error(key, e, fail_threshold, open_seconds, err_tag=type(e).__name__)
+            raise
+
+        # успех
+        if st.state == "half-open":
+            self._transition(key, "closed", "probe_success")
+        else:
+            # остаёмся closed
+            st.failures = 0
+        metrics.inc("circuit_calls_total", {"key": key, "result": "ok"})
+        return res
+
+    def _on_error(self, key: str, e: Exception, fail_threshold: int, open_seconds: float, err_tag: str) -> None:
+        st = self._get(key)
+        st.last_errors.append(f"{time.time():.3f}:{err_tag}:{repr(e)}")
+        metrics.inc("circuit_calls_total", {"key": key, "result": "error", "type": err_tag})
+
+        if st.state == "half-open":
+            # проба провалилась → назад в open
+            self._transition(key, "open", "probe_failed")
+            return
+
+        # closed: считаем фейлы
+        st.failures += 1
+        if st.failures >= fail_threshold:
+            self._transition(key, "open", f"fail_threshold:{fail_threshold}")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Возвращает агрегированные статистики по всем ключам.
+        """
+        now = time.time()
+        out: Dict[str, Any] = {"keys": {}, "total": {"open": 0, "closed": 0, "half_open": 0}}
+        for k, st in self._state.items():
+            if st.state == "open":
+                out["total"]["open"] += 1
+            elif st.state == "closed":
+                out["total"]["closed"] += 1
             else:
-                result = fn(**kwargs)
+                out["total"]["half_open"] += 1
 
-        except BaseException as e:
-            err = e
-
-        with self._lock:
-            self._ensure_key(key)
-            st = self._state[key]
-
-            if err is None:
-                # успех
-                st["failures"] = 0
-                if st["state"] in ("half-open", "open"):
-                    self._transition(key, "closed")
-                self._counters[key]["successes"] += 1
-                return result
-
-            # ошибка
-            self._counters[key]["failures"] += 1
-            self._last_errors[key] = f"{type(err).__name__}: {err}"
-
-            st["failures"] += 1
-            if st["state"] == "half-open":
-                # неудачная проба — обратно в open
-                self._transition(key, "open")
-            else:
-                # closed: проверяем порог
-                if st["failures"] >= st["fail_threshold"]:
-                    self._transition(key, "open")
-
-        # если есть fallback — используем
-        if fallback is not None:
-            return fallback()
-
-        raise err  # пробрасываем оригинальную ошибку
+            out["keys"][k] = {
+                "state": st.state,
+                "failures": st.failures,
+                "opened_for_sec": (now - st.opened_at) if st.opened_at else 0.0,
+                "half_open_inflight": st.half_open_inflight,
+                "transitions": list(st.transitions),
+                "last_errors": list(st.last_errors),
+            }
+        return out
