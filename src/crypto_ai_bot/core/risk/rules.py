@@ -66,3 +66,19 @@ def check_max_exposure(current_exposure: Optional[Decimal], cfg) -> RuleResult:
 
 def check_seq_losses(losses_count: Optional[int], cfg) -> RuleResult:
     return RuleResult(ok=True, reason="seq_losses_ok")
+
+# --- Time sync rule ---------------------------------------------------------
+from crypto_ai_bot.utils.time_sync import get_last_drift_ms
+
+def check_time_sync(cfg) -> tuple[bool, str]:
+    """
+    Блокирует торговлю, если |drift| > TIME_DRIFT_LIMIT_MS.
+    Берём последнее измерение из utils.time_sync.
+    """
+    limit = int(getattr(cfg, "TIME_DRIFT_LIMIT_MS", 1000))
+    drift = int(get_last_drift_ms() or 0)
+    ok = abs(drift) <= limit
+    if ok:
+        return True, ""
+    return False, f"time_drift_exceeded: drift_ms={drift} limit_ms={limit}"
+

@@ -1,39 +1,44 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple, List
+from typing import Tuple, Callable, Any
 
-from crypto_ai_bot.utils import metrics
-from . import rules
+from . import rules  # noqa: F401
 
 
-def check(features: Dict[str, Any], cfg) -> Tuple[bool, str]:
+def _call_rule(fn: Callable[..., Tuple[bool, str]], features: dict, cfg) -> Tuple[bool, str]:
     """
-    Единая точка агрегации risk-правил.
-    Возвращает (ok, reason). Первый фэйл — останавливаемся.
-    Порядок важен: time_sync — самый первый.
+    Поддерживаем разные сигнатуры правил:
+      - rule(features, cfg)
+      - rule(features)
+      - rule(cfg)
     """
-    sequence = [
-        ("time_sync", lambda: rules.check_time_sync(cfg)),
-        # Ниже — оставлены заглушки/пример вызовов. При необходимости включайте.
-        # ("hours",      lambda: rules.check_hours(features, cfg)),
-        # ("spread",     lambda: rules.check_spread(features, cfg)),
-        # ("exposure",   lambda: rules.check_max_exposure(features.get("exposure"), cfg)),
-        # ("seq_losses", lambda: rules.check_seq_losses(features.get("seq_losses"), cfg)),
+    try:
+        return fn(features, cfg)        # type: ignore[misc]
+    except TypeError:
+        try:
+            return fn(features)         # type: ignore[misc]
+        except TypeError:
+            return fn(cfg)              # type: ignore[misc]
+
+
+def check(features: dict, cfg) -> Tuple[bool, str]:
+    """
+    Агрегатор правил → первый FAIL останавливает конвейер.
+    Порядок важен: time_sync сначала, чтобы быстро отрубать торговлю.
+    """
+    order = [
+        "check_time_sync",       # новый критичный стоп
+        "check_spread",
+        "check_hours",
+        "check_dd",
+        "check_seq_losses",
+        "check_max_exposure",
     ]
 
-    for name, fn in sequence:
-        res = fn()
-        if not res.ok:
-            # метрики и понятная причина отказа
-            try:
-                metrics.inc("risk_verdict_total", {"rule": name, "result": "blocked"})
-            except Exception:
-                pass
-            return False, res.reason
+    for name in order:
+        if hasattr(rules, name):
+            ok, reason = _call_rule(getattr(rules, name), features, cfg)
+            if not ok:
+                return False, reason or name
 
-    try:
-        metrics.inc("risk_verdict_total", {"rule": "all", "result": "ok"})
-    except Exception:
-        pass
-
-    return True, "ok"
+    return True, ""

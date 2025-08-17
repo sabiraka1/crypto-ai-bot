@@ -1,78 +1,65 @@
 from __future__ import annotations
 
-import os
-import re
-import sqlite3
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterable
+import sqlite3
 
-_MIG_RE = re.compile(r"^(\d{4})_.*\.sql$", re.IGNORECASE)
 
-def _versions_dir(default: Path | None = None) -> Path:
-    if default is None:
-        default = Path(__file__).with_name("versions")
-    return default
+def _versions_dir() -> Path:
+    return Path(__file__).parent / "versions"
 
-def list_migration_files(versions_dir: str | os.PathLike | None = None) -> List[Tuple[int, Path]]:
-    """Возвращает список (version_number, path), отсортированный по номеру."""
-    vdir = Path(versions_dir) if versions_dir else _versions_dir()
-    files: List[Tuple[int, Path]] = []
-    if not vdir.exists():
-        return files
-    for p in vdir.iterdir():
-        if not p.is_file():
+
+def latest_version() -> int:
+    """Берём макс. префикс из файлов вида 0001_*.sql"""
+    mx = 0
+    for p in _versions_dir().glob("*.sql"):
+        try:
+            v = int(p.stem.split("_", 1)[0])
+            mx = max(mx, v)
+        except Exception:
             continue
-        m = _MIG_RE.match(p.name)
-        if not m:
-            continue
-        ver = int(m.group(1))
-        files.append((ver, p))
-    files.sort(key=lambda x: x[0])
-    return files
+    return mx
+
 
 def get_current_version(con: sqlite3.Connection) -> int:
-    """Читает текущую версию схемы из таблицы schema_version (если есть)."""
+    """
+    Пытаемся прочитать user_version, иначе — таблицу schema_version.
+    """
     try:
-        cur = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")
-        if not cur.fetchone():
-            return 0
-        cur = con.execute("SELECT version FROM schema_version LIMIT 1")
-        row = cur.fetchone()
-        if not row:
-            return 0
-        return int(row[0])
+        row = con.execute("PRAGMA user_version").fetchone()
+        if row is not None:
+            v = int(row[0])
+            if v:
+                return v
+    except Exception:
+        pass
+
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)")
+        row = con.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").fetchone()
+        return int(row[0]) if row else 0
     except Exception:
         return 0
 
-def pending_migrations_count(con: sqlite3.Connection, versions_dir: str | os.PathLike | None = None) -> int:
-    """Считает количество неподтвержденных миграций (файлы с номером > current_version)."""
-    current = get_current_version(con)
-    files = list_migration_files(versions_dir)
-    pending = [ver for (ver, _) in files if ver > current]
-    return len(pending)
 
-# Ниже опциональная функция применения всех миграций, если понадобится в будущих шагах.
-def apply_all(con: sqlite3.Connection, versions_dir: str | os.PathLike | None = None) -> int:
-    """Применяет все миграции строго по порядку. Возвращает количество примененных миграций.
-    Требует наличия таблицы schema_version (создаёт при необходимости)."""
-    files = list_migration_files(versions_dir)
-    with con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER NOT NULL
-            );
-        """)
-        cur = con.execute("SELECT version FROM schema_version LIMIT 1")
-        row = cur.fetchone()
-        current = int(row[0]) if row else 0
-        applied = 0
-        for ver, path in files:
-            if ver <= current:
-                continue
-            sql = path.read_text(encoding="utf-8")
+def apply_all(con: sqlite3.Connection) -> None:
+    cur = get_current_version(con)
+    target = latest_version()
+    if cur >= target:
+        return
+
+    versions = sorted(_versions_dir().glob("*.sql"))
+    for p in versions:
+        v = int(p.stem.split("_", 1)[0])
+        if v <= cur:
+            continue
+        sql = p.read_text(encoding="utf-8")
+        with con:
             con.executescript(sql)
-            con.execute("DELETE FROM schema_version")
-            con.execute("INSERT INTO schema_version(version) VALUES (?)", (ver,))
-            current = ver
-            applied += 1
-        return applied
+            # фиксируем и в user_version, и (на всякий) в schema_version
+            con.execute(f"PRAGMA user_version = {v}")
+            con.execute("INSERT INTO schema_version(version) VALUES (?)", (v,))
+
+
+def is_up_to_date(con: sqlite3.Connection) -> bool:
+    return get_current_version(con) >= latest_version()
