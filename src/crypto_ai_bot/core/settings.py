@@ -127,6 +127,10 @@ class Settings:
     )
     BUS_DLQ_MAX: int = field(default_factory=lambda: _to_int(os.getenv("BUS_DLQ_MAX"), 500))
 
+    # как часто обновлять метрики позиций (сек)
+    METRICS_REFRESH_SEC: int = field(default_factory=lambda: _to_int(os.getenv("METRICS_REFRESH_SEC"), 30))
+
+
     # --- Telegram / Secrets (опционально, без падений) ---
     TELEGRAM_BOT_TOKEN: str | None = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN"))
     TELEGRAM_SECRET_TOKEN: str | None = field(default_factory=lambda: os.getenv("TELEGRAM_SECRET_TOKEN"))
