@@ -1,110 +1,96 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from crypto_ai_bot.core.use_cases.evaluate import evaluate
-from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-from crypto_ai_bot.utils.http_client import get_http_client
+from crypto_ai_bot.core.signals import policy
+from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
 
 
-@dataclass
-class Args:
-    symbol: str
-    timeframe: str
-    limit: int = 300
-    size: Optional[str] = None
+def _reply(chat_id: int | str, text: str) -> Dict[str, Any]:
+    return {
+        "method": "sendMessage",
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
 
 
-def _parse_symbol_timeframe(text: str, cfg) -> Args:
-    # Примеры: "/why BTC/USDT 1h", "/status", "/buy 0.01"
-    parts = text.strip().split()
-    symbol = getattr(cfg, "SYMBOL", "BTC/USDT")
-    timeframe = getattr(cfg, "TIMEFRAME", "1h")
-    size = None
+def _format_explain(explain: Dict[str, Any]) -> str:
+    sig = explain.get("signals", {})
+    blocks = explain.get("blocks", {})
+    weights = explain.get("weights", {})
+    thr = explain.get("thresholds", {})
+    ctx = explain.get("context", {})
 
-    for p in parts[1:]:
-        if "/" in p or "-" in p:
-            symbol = p
-        elif p.lower().endswith(("m", "h", "d")):
-            timeframe = p
-        else:
-            size = p
+    parts = []
+    parts.append("<b>Последнее решение — объяснение</b>")
+    parts.append(f"symbol/timeframe: <code>{ctx.get('symbol')}</code> / <code>{ctx.get('timeframe')}</code>")
+    parts.append(f"mode: <code>{ctx.get('mode')}</code>")
+    parts.append("")
+    parts.append("<b>Signals</b>")
+    for k in ("ema_fast", "ema_slow", "rsi", "macd", "macd_signal", "macd_hist", "atr", "atr_pct", "price"):
+        if k in sig and sig[k] is not None:
+            parts.append(f"• {k}: <code>{sig[k]}</code>")
+    parts.append("")
+    parts.append("<b>Weights</b>")
+    parts.append(f"rule={weights.get('rule', 0):.2f}, ai={weights.get('ai', 0):.2f}")
+    parts.append("")
+    parts.append("<b>Thresholds</b>")
+    parts.append(f"entry_min={thr.get('entry_min', 0):.2f}, exit_max={thr.get('exit_max', 0):.2f}, reduce_below={thr.get('reduce_below', 0):.2f}")
+    parts.append("")
+    parts.append("<b>Blocks</b>")
+    parts.append(f"risk: <code>{blocks.get('risk') or 'ok'}</code>; data: <code>{blocks.get('data') or 'ok'}</code>")
 
-    return Args(
-        symbol=normalize_symbol(symbol),
-        timeframe=normalize_timeframe(timeframe),
-        limit=int(getattr(cfg, "BUILD_LIMIT", 300)),
-        size=size,
+    return "\n".join(parts)
+
+
+async def handle_update(update: Dict[str, Any], cfg: Any, bot: Any, http: Any) -> Dict[str, Any]:
+    """
+    Тонкий адаптер:
+      - /why        → объяснение последнего решения (из policy.get_last_decision)
+      - /why_last   → синоним /why
+      - /symbol SYMBOL TF → нормализует и подтверждает ввод
+      - иначе — краткая подсказка
+    Никакой бизнес-логики, ни доступа к брокеру/БД.
+    """
+    msg = (update.get("message") or update.get("edited_message")) or {}
+    chat_id = msg.get("chat", {}).get("id") or msg.get("from", {}).get("id")
+    text: str = msg.get("text") or ""
+
+    if not chat_id:
+        return {"ok": True}  # некого уведомлять
+
+    tokens = text.strip().split()
+    cmd = tokens[0].lower() if tokens else ""
+
+    # /why и /why_last
+    if cmd in ("/why", "/why_last"):
+        last = policy.get_last_decision()
+        if not last:
+            return _reply(chat_id, "Пока нет принятых решений в этом процессе. Запусти торговый цикл или вызови /tick.")
+        # аккуратно отформатируем
+        score = float(last.get("score", 0.0))
+        action = last.get("action", "hold")
+        explain = last.get("explain", {})
+        head = f"<b>Decision</b>: <code>{action}</code>, score=<code>{score:.3f}</code>"
+        body = _format_explain(explain)
+        return _reply(chat_id, f"{head}\n\n{body}")
+
+    # /symbol <SYMBOL> [TF] — нормализация ввода пользователя (для удобства)
+    if cmd == "/symbol":
+        if len(tokens) < 2:
+            return _reply(chat_id, "Формат: <code>/symbol BTC/USDT 1h</code>")
+        sym = normalize_symbol(tokens[1])
+        tf = normalize_timeframe(tokens[2]) if len(tokens) > 2 else getattr(cfg, "TIMEFRAME", "1h")
+        return _reply(chat_id, f"Нормализовано:\n • symbol = <code>{sym}</code>\n • timeframe = <code>{tf}</code>")
+
+    # help по умолчанию
+    help_text = (
+        "<b>Команды</b>\n"
+        "• /why — показать объяснение последнего решения\n"
+        "• /why_last — синоним /why\n"
+        "• /symbol SYMBOL [TF] — нормализовать ввод (например, /symbol btcusdt 1h)\n"
     )
-
-
-def _format_explain(decision: Dict[str, Any]) -> str:
-    ex = decision.get("explain", {})
-    signals = ex.get("signals", {})
-    blocks = ex.get("blocks", {})
-    weights = ex.get("weights", {})
-    th = ex.get("thresholds", {})
-    ctx = ex.get("context", {})
-
-    top = []
-    for key in ("ema20", "ema50", "rsi", "macd_hist", "atr", "atr_pct"):
-        if key in signals:
-            top.append(f"{key}: {signals[key]}")
-
-    risk_block = blocks.get("risk", {})
-    risk_line = "OK" if risk_block.get("ok") else f"BLOCKED: {risk_block.get('reason', 'n/a')}"
-
-    lines = [
-        f"Action: *{decision.get('action', 'hold').upper()}*   Score: *{decision.get('score', 0):.3f}*",
-        f"Symbol: {ctx.get('symbol','?')}  TF: {ctx.get('timeframe','?')}",
-        "",
-        "*Signals*:",
-        ("; ".join(top) or "—"),
-        "",
-        "*Risk*: " + risk_line,
-        "",
-        "*Weights*: rule={weights[rule]:.2f} ai={weights[ai]:.2f}".format(weights=weights),
-        "*Thresholds*: buy={buy:.2f} sell={sell:.2f} hold_band=±{hold:.2f}".format(
-            buy=th.get("buy", 0.55), sell=th.get("sell", 0.45), hold=th.get("hold_band", 0.04)
-        ),
-    ]
-    return "\n".join(lines)
-
-
-async def handle_update(update: dict, cfg, bot, http=None) -> dict:
-    """
-    Тонкий адаптер: парсим команды, вызываем use-cases.
-    """
-    http = http or get_http_client()
-
-    msg = update.get("message") or update.get("edited_message") or {}
-    chat_id = (msg.get("chat") or {}).get("id")
-    text = (msg.get("text") or "").strip()
-
-    if not text:
-        return {"ok": True}
-
-    if text.startswith("/start"):
-        body = "Привет! Доступно: /status, /why [SYMBOL] [TF], /buy SIZE, /sell SIZE"
-    elif text.startswith("/status"):
-        body = "✅ Бот запущен. Попробуй /why BTC/USDT 1h"
-    elif text.startswith("/why"):
-        args = _parse_symbol_timeframe(text, cfg)
-        decision = evaluate(cfg, broker=bot.broker, symbol=args.symbol, timeframe=args.timeframe, limit=args.limit)
-        body = _format_explain(decision if isinstance(decision, dict) else decision.model_dump())  # на всякий
-    else:
-        body = "Команда не распознана. /why BTC/USDT 1h"
-
-    if chat_id:
-        try:
-            await http.post_json(
-                f"https://api.telegram.org/bot{cfg.TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": body, "parse_mode": "Markdown"},
-                timeout=5,
-            )
-        except Exception:
-            pass
-
-    return {"ok": True}
+    return _reply(chat_id, help_text)
