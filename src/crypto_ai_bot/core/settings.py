@@ -26,8 +26,14 @@ class Settings:
     SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
     TIMEFRAME: str = os.getenv("TIMEFRAME", "1h")
     LIMIT_BARS: int = int(os.getenv("LIMIT_BARS", "300"))
+    # исторический алиас, который встречается в коде
+    LOOKBACK_LIMIT: int = LIMIT_BARS
+
     ENABLE_TRADING: bool = os.getenv("ENABLE_TRADING", "false").lower() in {"1", "true", "yes"}
     SAFE_MODE: bool = os.getenv("SAFE_MODE", "true").lower() in {"1", "true", "yes"}
+
+    # --- пути/БД ---
+    DB_PATH: str = os.getenv("DB_PATH", "crypto.db")
 
     # --- оркестратор ---
     TICK_PERIOD_SEC: int = int(os.getenv("TICK_PERIOD_SEC", "60"))
@@ -35,11 +41,8 @@ class Settings:
     MAINTENANCE_SEC: int = int(os.getenv("MAINTENANCE_SEC", "60"))
 
     # --- Rate limits (use-cases) ---
-    # Базовые имена
     RL_EVALUATE_PER_MIN: int = int(os.getenv("RL_EVALUATE_PER_MIN", "60"))
     RL_ORDERS_PER_MIN: int = int(os.getenv("RL_ORDERS_PER_MIN", "10"))
-    # Дополнительные лимиты (опционально)
-    RL_MARKET_CONTEXT_PER_HOUR: int = int(os.getenv("RL_MARKET_CONTEXT_PER_HOUR", "100"))
 
     # --- брокер (ccxt/paper/backtest) ---
     EXCHANGE: str = os.getenv("EXCHANGE", "binance")
@@ -47,25 +50,20 @@ class Settings:
     API_SECRET: Optional[str] = os.getenv("API_SECRET") or None
     SUBACCOUNT: Optional[str] = os.getenv("SUBACCOUNT") or None
 
-    # --- база данных ---
-    DB_PATH: str = os.getenv("DB_PATH", "data/bot.sqlite")
-
-    # --- Telegram ---
-    TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN") or None
-    TELEGRAM_SECRET_TOKEN: Optional[str] = os.getenv("TELEGRAM_SECRET_TOKEN") or None
-
     # --- идемпотентность ---
     IDEMPOTENCY_TTL_SEC: int = int(os.getenv("IDEMPOTENCY_TTL_SEC", "300"))
 
     # --- time sync / drift ---
-    TIME_DRIFT_LIMIT_MS: int = int(
-        os.getenv("TIME_DRIFT_LIMIT_MS", os.getenv("MAX_TIME_DRIFT_MS", "1000"))
-    )
+    TIME_DRIFT_LIMIT_MS: int = int(os.getenv("TIME_DRIFT_LIMIT_MS", "1000"))  # 1s
+    # можно задать CSV в ENV, иначе подставим безопасные дефолты
     TIME_DRIFT_URLS: List[str] = [
-        u.strip()
-        for u in (os.getenv("TIME_DRIFT_URLS") or "").split(",")
-        if u.strip()
-    ] or ["https://worldtimeapi.org/api/timezone/Etc/UTC"]
+        u.strip() for u in os.getenv("TIME_DRIFT_URLS", "").split(",") if u.strip()
+    ] or [
+        "https://worldtimeapi.org/api/timezone/Etc/UTC",
+        "https://timeapi.io/api/Time/current/zone?timeZone=UTC",
+        "https://www.google.com",
+        "https://www.cloudflare.com",
+    ]
 
     # --- бэктест ---
     BACKTEST_CSV_PATH: str = os.getenv("BACKTEST_CSV_PATH", "data/backtest.csv")
@@ -75,6 +73,9 @@ class Settings:
     STOP_LOSS_PCT: float | None = float(os.getenv("STOP_LOSS_PCT")) if os.getenv("STOP_LOSS_PCT") else None
     TAKE_PROFIT_PCT: float | None = float(os.getenv("TAKE_PROFIT_PCT")) if os.getenv("TAKE_PROFIT_PCT") else None
     TRAILING_PCT: float | None = float(os.getenv("TRAILING_PCT")) if os.getenv("TRAILING_PCT") else None
+
+    # --- Telegram / webhooks ---
+    TELEGRAM_WEBHOOK_SECRET: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET") or None
 
     # --- профиль решений (новое) ---
     # Если задать DECISION_PROFILE, то применяются веса/пороги из профиля.
@@ -175,25 +176,11 @@ class Settings:
             "thresholds": {"buy": buy, "sell": sell},
         }
 
-    # Фабрика: доп. валидации/алиасы
+    # Фабрика: можно будет расширять (валидация, кросс-проверки)
     @classmethod
     def build(cls) -> "Settings":
         s = cls()
-
-        # Алиасы из README/Word для совместимости старых конфигов
-        if os.getenv("RATE_LIMIT_EVALUATE_PER_MINUTE"):
-            s.RL_EVALUATE_PER_MIN = int(os.getenv("RATE_LIMIT_EVALUATE_PER_MINUTE", "60"))
-        if os.getenv("RATE_LIMIT_PLACE_ORDER_PER_MINUTE"):
-            s.RL_ORDERS_PER_MIN = int(os.getenv("RATE_LIMIT_PLACE_ORDER_PER_MINUTE", "10"))
-        if os.getenv("MAX_TIME_DRIFT_MS") and not os.getenv("TIME_DRIFT_LIMIT_MS"):
-            s.TIME_DRIFT_LIMIT_MS = int(os.getenv("MAX_TIME_DRIFT_MS", "1000"))
-
-        # Безопасный режим запрещает реальную торговлю
+        # SAFE_MODE всегда выключает реальную торговлю
         if s.SAFE_MODE:
             s.ENABLE_TRADING = False
-
-        # Гарантированный дефолт для источников времени
-        if not s.TIME_DRIFT_URLS:
-            s.TIME_DRIFT_URLS = ["https://worldtimeapi.org/api/timezone/Etc/UTC"]
-
         return s
