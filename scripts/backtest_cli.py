@@ -1,14 +1,7 @@
 # scripts/backtest_cli.py
-"""
-Простой CLI для локального бэктеста на CSV.
-Пример:
-  PYTHONPATH=src python scripts/backtest_cli.py --csv data/BTCUSDT-1h.csv --symbol BTC/USDT --timeframe 1h --limit 500
-"""
-
 from __future__ import annotations
 import argparse
 import csv
-from decimal import Decimal
 from typing import List, Dict, Any
 
 from crypto_ai_bot.core.settings import Settings
@@ -33,21 +26,23 @@ def main():
     ap.add_argument("--symbol", default="BTC/USDT")
     ap.add_argument("--timeframe", default="1h")
     ap.add_argument("--limit", type=int, default=300)
+    ap.add_argument("--fee-bps", type=float, default=5.0, help="Комиссия, б.п.")
+    ap.add_argument("--slippage-bps", type=float, default=5.0, help="Проскальзывание, б.п.")
     args = ap.parse_args()
 
-    # Настройки в режиме backtest
     class BT(Settings): ...
     cfg = BT.build()
     setattr(cfg, "MODE", "backtest")
-    setattr(cfg, "SYMBOL", args.symbol)
-    setattr(cfg, "TIMEFRAME", args.timeframe)
-    setattr(cfg, "LIMIT", args.limit)
+    setattr(cfg, "SYMBOL", normalize_symbol(args.symbol))
+    setattr(cfg, "TIMEFRAME", normalize_timeframe(args.timeframe))
+    setattr(cfg, "LIMIT", int(args.limit))
+    # настройки для симулятора (читаются реализацией backtest/paper, если поддерживает)
+    setattr(cfg, "FEE_BPS", float(args.fee_bps))
+    setattr(cfg, "SLIPPAGE_BPS", float(args.slippage_bps))
 
-    # Брокер (backtest)
     breaker = CircuitBreaker()
     broker = create_broker(mode="backtest", settings=cfg, circuit_breaker=breaker)
 
-    # Хранилище (SQLite)
     con = connect(getattr(cfg, "DB_PATH", "crypto.db"))
     repos = type("Repos", (), {})()
     repos.positions = SqlitePositionRepository(con)
@@ -55,22 +50,17 @@ def main():
     repos.audit = SqliteAuditRepository(con)
     repos.decisions = SqliteDecisionsRepository(con) if SqliteDecisionsRepository else None
 
-    # Грубый реплей: читаем CSV и по каждому шагу запускаем eval_and_execute.
-    # Ожидаемый CSV: time,open,high,low,close,volume
-    # Реальный backtest_exchange у тебя уже есть/будет — это просто минимальный CLI для отладки.
+    # простой проход по CSV для прогрева, сам broker/backtest должен читать из своих источников;
+    # тут нам важен сам цикл eval_and_execute, чтобы проверить логику end-to-end
     with open(args.csv, "r", newline="") as f:
-        rdr = csv.DictReader(f)
-        rows = list(rdr)
+        _ = list(csv.reader(f))  # не используем далее: источник данных — сам broker.backtest
 
-    # Для простоты — ограничимся N последними барами
-    rows = rows[-args.limit:]
+    steps = 0
+    for _ in range(int(args.limit)):
+        eval_and_execute(cfg, broker, repos, symbol=cfg.SYMBOL, timeframe=cfg.TIMEFRAME, limit=cfg.LIMIT)
+        steps += 1
 
-    decisions = 0
-    for i in range(len(rows)):
-        res = eval_and_execute(cfg, broker, repos, symbol=args.symbol, timeframe=args.timeframe, limit=min(i + 1, args.limit))
-        decisions += 1
-
-    print(f"Бэктест завершён. Пройдено шагов: {decisions}")
+    print(f"Бэктест завершён. Шагов: {steps}, SYMBOL={cfg.SYMBOL}, TF={cfg.TIMEFRAME}, fee={args.fee_bps}bps, slip={args.slippage_bps}bps")
 
 
 if __name__ == "__main__":

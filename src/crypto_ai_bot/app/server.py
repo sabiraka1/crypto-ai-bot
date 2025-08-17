@@ -1,11 +1,10 @@
-# src/crypto_ai_bot/app/server.py
 from __future__ import annotations
 
 import os
 import json
 import time
 from typing import Any, Dict, Optional, List
-from fastapi import FastAPI, Request, Body, Query
+from fastapi import FastAPI, Request, Body, Query, Header
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.core.settings import Settings
@@ -13,16 +12,15 @@ from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 
-# фабрика брокера и нормализация
+from crypto_ai_bot.app.adapters import telegram as tg_adapter
+
 from crypto_ai_bot.core.brokers.base import create_broker
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
 
-# use-cases
 from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
 from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_order
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
 
-# storage (sqlite + репозитории)
 from crypto_ai_bot.core.storage.sqlite_adapter import connect
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
@@ -30,40 +28,66 @@ from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 try:
     from crypto_ai_bot.core.storage.repositories.decisions import SqliteDecisionsRepository
 except Exception:
-    SqliteDecisionsRepository = None  # опционально
+    SqliteDecisionsRepository = None
 
-# опционально — проверка дрифта времени
+# time drift
 try:
     from crypto_ai_bot.utils.time_sync import measure_time_drift
 except Exception:
     def measure_time_drift(urls: Optional[List[str]] = None, timeout: float = 1.5) -> Dict[str, Any]:
         return {"drift_ms": 0, "limit_ms": 0, "sources": [], "status": "unknown"}
 
+# optional tracker
+try:
+    from crypto_ai_bot.core.positions.tracker import PositionTracker
+except Exception:
+    PositionTracker = None
+
 
 app = FastAPI(title="crypto-ai-bot")
 init_logging()
 
-# --- singletons ---
 CFG: Settings = Settings.build()
 BREAKER = CircuitBreaker()
 CONN = connect(getattr(CFG, "DB_PATH", "crypto.db"))
+
 REPOS = type("Repos", (), {})()
 REPOS.positions = SqlitePositionRepository(CONN)
 REPOS.trades = SqliteTradeRepository(CONN)
 REPOS.audit = SqliteAuditRepository(CONN)
 REPOS.decisions = SqliteDecisionsRepository(CONN) if SqliteDecisionsRepository else None
 
-BROKER = create_broker(
-    mode=getattr(CFG, "MODE", "paper"),
-    settings=CFG,
-    circuit_breaker=BREAKER,
-)
+if PositionTracker:
+    try:
+        REPOS.tracker = PositionTracker(REPOS.positions, REPOS.trades)
+    except Exception:
+        REPOS.tracker = None
+else:
+    REPOS.tracker = None
+
+BROKER = create_broker(mode=getattr(CFG, "MODE", "paper"), settings=CFG, circuit_breaker=BREAKER)
 
 metrics.inc("app_start_total", {"mode": getattr(CFG, "MODE", "unknown")})
 metrics.inc("broker_created_total", {"mode": getattr(CFG, "MODE", "unknown")})
 
 
-# ------------ helpers ------------
+class APIBot:
+    def __init__(self, cfg, broker, repos):
+        self.cfg = cfg
+        self.broker = broker
+        self.repos = repos
+
+    def evaluate(self, *, symbol: str, timeframe: str, limit: int):
+        return uc_evaluate(self.cfg, self.broker, symbol=symbol, timeframe=timeframe, limit=limit)
+
+    def execute(self, decision: Dict[str, Any]):
+        return uc_place_order(self.cfg, self.broker, self.repos.positions, self.repos.trades, self.repos.audit, decision)
+
+    def get_status(self) -> Dict[str, Any]:
+        return {"mode": getattr(self.cfg, "MODE", "unknown")}
+
+BOT = APIBot(CFG, BROKER, REPOS)
+
 
 SAFE_PREFIXES = ("API_", "SECRET", "TOKEN", "PASSWORD", "WEBHOOK", "TELEGRAM")
 
@@ -89,7 +113,6 @@ def _health_matrix(components: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         st = c.get("status", "ok")
         if st != "ok":
             bad += 1
-
     if bad == 0:
         return {"status": "healthy", "degradation_level": "none"}
     if bad == 1:
@@ -99,12 +122,9 @@ def _health_matrix(components: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     return {"status": "unhealthy", "degradation_level": "critical"}
 
 
-# ------------ endpoints ------------
-
 @app.get("/health")
 def health() -> JSONResponse:
     t0 = time.time()
-    # DB ping
     db_ok = True
     try:
         CONN.execute("SELECT 1")
@@ -114,7 +134,6 @@ def health() -> JSONResponse:
         db_latency_ms = int((time.time() - t0) * 1000)
         db_error = f"{type(e).__name__}: {e}"
 
-    # broker ping
     b0 = time.time()
     broker_ok = True
     broker_detail = None
@@ -131,11 +150,7 @@ def health() -> JSONResponse:
         broker_detail = f"{type(e).__name__}: {e}"
     broker_latency_ms = int((time.time() - b0) * 1000)
 
-    # time drift
-    drift = measure_time_drift(
-        urls=getattr(CFG, "TIME_DRIFT_URLS", []) or None,
-        timeout=1.5,
-    )
+    drift = measure_time_drift(urls=getattr(CFG, "TIME_DRIFT_URLS", []) or None, timeout=1.5)
     drift_status = "ok"
     if isinstance(drift, dict):
         limit = int(drift.get("limit_ms", getattr(CFG, "TIME_DRIFT_LIMIT_MS", 1000)))
@@ -144,8 +159,8 @@ def health() -> JSONResponse:
 
     comps = {
         "mode": getattr(CFG, "MODE", "unknown"),
-        "db": {"status": "ok" if db_ok else f"error", "latency_ms": db_latency_ms, **({"detail": db_error} if not db_ok else {})},
-        "broker": {"status": "ok" if broker_ok else f"error", "latency_ms": broker_latency_ms, **({"detail": broker_detail} if not broker_ok else {})},
+        "db": {"status": "ok" if db_ok else "error", "latency_ms": db_latency_ms, **({"detail": db_error} if not db_ok else {})},
+        "broker": {"status": "ok" if broker_ok else "error", "latency_ms": broker_latency_ms, **({"detail": broker_detail} if not broker_ok else {})},
         "time": {"status": drift_status, **drift},
     }
     rollup = _health_matrix({k: v for k, v in comps.items() if isinstance(v, dict)})
@@ -154,31 +169,23 @@ def health() -> JSONResponse:
 
 @app.get("/health/details")
 def health_details() -> JSONResponse:
-    return JSONResponse({
-        "breakers": BREAKER.get_stats(),
-    })
+    return JSONResponse({"breakers": BREAKER.get_stats()})
 
 
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
     base = metrics.export()
-    # динамически добавим состояния предохранителей
-    # state: closed=0, half-open=1, open=2
     state_map = {"closed": 0, "half-open": 1, "open": 2}
-    extra_lines: List[str] = []
+    extra: List[str] = []
     stats = BREAKER.get_stats()
     for key, st in stats.items():
-        st_name = st.get("state", "closed")
-        extra_lines.append(f'breaker_state{{key="{key}"}} {state_map.get(st_name, 0)}')
+        sname = st.get("state", "closed")
+        extra.append(f'breaker_state{{key="{key}"}} {state_map.get(sname, 0)}')
         counters = st.get("counters") or {}
         for cname, val in counters.items():
-            extra_lines.append(f'breaker_{cname}_total{{key="{key}"}} {int(val)}')
-        if st.get("last_error"):
-            # Для текстов лучше не дублировать каждый раз — но дадим флаг наличия
-            extra_lines.append(f'breaker_last_error_flag{{key="{key}"}} 1')
-        else:
-            extra_lines.append(f'breaker_last_error_flag{{key="{key}"}} 0')
-    payload = base.rstrip() + ("\n" if base and not base.endswith("\n") else "") + "\n".join(extra_lines) + "\n"
+            extra.append(f'breaker_{cname}_total{{key="{key}"}} {int(val)}')
+        extra.append(f'breaker_last_error_flag{{key="{key}"}} {1 if st.get("last_error") else 0}')
+    payload = base.rstrip() + ("\n" if base and not base.endswith("\n") else "") + "\n".join(extra) + "\n"
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
@@ -221,9 +228,23 @@ def orders_recent(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
 
 @app.post("/alerts/test")
 def alerts_test(message: Optional[str] = Query(None)) -> JSONResponse:
-    """
-    Пробный хук для будущей интеграции алёртов/мониторинга.
-    Пока просто увеличивает метрику и возвращает echo.
-    """
     metrics.inc("alerts_test_total", {"mode": getattr(CFG, "MODE", "unknown")})
     return JSONResponse({"status": "ok", "echo": message or "pong"})
+
+
+@app.post("/telegram")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
+) -> JSONResponse:
+    secret = getattr(CFG, "TELEGRAM_WEBHOOK_SECRET", None)
+    if secret and x_telegram_bot_api_secret_token != secret:
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+
+    try:
+        update = await request.json()
+    except Exception:
+        update = {}
+
+    resp = await tg_adapter.handle_update(update, CFG, BOT, repos=REPOS)
+    return JSONResponse(resp)
