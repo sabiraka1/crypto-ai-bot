@@ -61,3 +61,79 @@ def snapshot_metrics(con: sqlite3.Connection) -> Dict[str, Any]:
         "file_size_bytes": file_size,
         "fragmentation_percent": fragmentation,
     }
+
+# --- Backward-compatible exports expected by core.storage.__init__ ---
+from contextlib import contextmanager
+
+@contextmanager
+def in_txn(con: "sqlite3.Connection"):
+    """
+    Transaction context manager for SQLite.
+    Commits on success, rolls back on exception.
+    """
+    try:
+        con.execute("BEGIN")
+        yield con
+        con.commit()
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        raise
+
+
+class SqliteUnitOfWork:
+    """
+    Minimal Unit of Work wrapper over a SQLite connection.
+    Usage:
+        with SqliteUnitOfWork(con) as uow:
+            con.execute(...)
+    """
+    def __init__(self, con: "sqlite3.Connection"):
+        self.con = con
+
+    def __enter__(self):
+        self.con.execute("BEGIN")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            try:
+                self.con.commit()
+            finally:
+                return False
+        else:
+            try:
+                self.con.rollback()
+            finally:
+                return False
+
+
+def get_db_stats(con: "sqlite3.Connection") -> dict:
+    """Return lightweight DB stats similar to snapshot_metrics, but without gauges."""
+    try:
+        page_size = int(con.execute("PRAGMA page_size;").fetchone()[0])
+        page_count = int(con.execute("PRAGMA page_count;").fetchone()[0])
+        freelist = int(con.execute("PRAGMA freelist_count;").fetchone()[0])
+    except Exception:
+        page_size = page_count = freelist = 0
+    file_size = page_size * page_count
+    fragmentation = (freelist / page_count * 100.0) if page_count > 0 else 0.0
+    return {
+        "page_size": page_size,
+        "page_count": page_count,
+        "freelist_pages": freelist,
+        "file_size_bytes": file_size,
+        "fragmentation_percent": fragmentation,
+    }
+
+
+def perform_maintenance(con: "sqlite3.Connection") -> dict:
+    """Perform a safe maintenance step (PRAGMA optimize) and return post-stats."""
+    try:
+        con.execute("PRAGMA optimize;")
+    except Exception:
+        # ignore if not supported
+        pass
+    return get_db_stats(con)
