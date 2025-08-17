@@ -1,91 +1,86 @@
 # src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
-
-import time
 from decimal import Decimal
 from typing import Any, Dict
 
-from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.core.brokers.base import ExchangeInterface, TransientExchangeError, PermanentExchangeError
+from crypto_ai_bot.utils.metrics import inc, observe, set_gauge
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
-from crypto_ai_bot.core.brokers.symbols import to_exchange_symbol
 
-class CcxtExchange:
-    """
-    Лёгкий адаптер ccxt к нашему интерфейсу.
-    Сделан устойчивым: ретраи/CB и метрики без нарушения try/except потоков.
-    """
+def _import_ccxt():
+    try:
+        import ccxt  # type: ignore
+        return ccxt
+    except Exception as e:
+        raise PermanentExchangeError(f"ccxt not installed: {e}")
 
-    def __init__(self, cfg) -> None:
-        self.cfg = cfg
-        self.cb = CircuitBreaker()
-        self._ccxt = None
+class CcxtExchange(ExchangeInterface):
+    def __init__(self, instance, circuit: CircuitBreaker, exchange_name: str = "binance"):
+        self._ccxt = instance
+        self._cb = circuit
+        self._name = exchange_name
 
     @classmethod
     def from_settings(cls, cfg) -> "CcxtExchange":
-        return cls(cfg)
+        ccxt = _import_ccxt()
+        exchange_name = getattr(cfg, "EXCHANGE", "binance")
+        kwargs = {
+            "apiKey": getattr(cfg, "API_KEY", None),
+            "secret": getattr(cfg, "API_SECRET", None),
+            "enableRateLimit": True,
+            "options": {"adjustForTimeDifference": True},
+        }
+        instance = getattr(ccxt, exchange_name) (kwargs)
+        circuit = CircuitBreaker()
+        return cls(instance, circuit, exchange_name)
 
-    # lazy import ccxt
-    def _client(self):
-        if self._ccxt is None:
-            import ccxt  # type: ignore
-            ex_name = getattr(self.cfg, "EXCHANGE", "binance")
-            ex = getattr(ccxt, ex_name)()
-            ex.enableRateLimit = True
-            self._ccxt = ex
-        return self._ccxt
-
-    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        ex_sym = to_exchange_symbol(symbol, getattr(self.cfg, "EXCHANGE", "binance"))
-        t0 = time.perf_counter()
+    # ---- helpers ----
+    def _cb_call(self, method_name: str, fn, *args, **kwargs):
+        """
+        Обёртка через circuit-breaker + метрики.
+        """
+        inc("broker_requests_total", {"exchange": self._name, "method": method_name})
         try:
-            def _fn():
-                return self._client().fetch_ticker(ex_sym)
-            res = self.cb.call(_fn, key=f"fetch_ticker:{ex_sym}", timeout=5.0, fail_threshold=5, open_seconds=15.0)
-            latency = int((time.perf_counter() - t0) * 1000)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": "fetch_ticker", "code": "200"})
-            metrics.observe("broker_latency_ms", latency, {"method": "fetch_ticker"})
+            def _inner():
+                return fn(*args, **kwargs)
+
+            res = self._cb.call(
+                _inner,
+                key=f"{self._name}:{method_name}",
+                timeout=10.0,
+                fail_threshold=5,
+                open_seconds=30.0,
+            )
             return res
         except Exception as e:
-            latency = int((time.perf_counter() - t0) * 1000)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": "fetch_ticker", "code": "599"})
-            metrics.observe("broker_latency_ms", latency, {"method": "fetch_ticker"})
-            raise
+            # классифицируем
+            inc("broker_errors_total", {"exchange": self._name, "method": method_name, "type": type(e).__name__})
+            if isinstance(e, PermanentExchangeError):
+                raise
+            # простая эвристика: сетевые/429/5xx считаем transient
+            raise TransientExchangeError(str(e))
 
+    # ---- interface ----
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int):
-        ex_sym = to_exchange_symbol(symbol, getattr(self.cfg, "EXCHANGE", "binance"))
-        t0 = time.perf_counter()
-        try:
-            def _fn():
-                return self._client().fetch_ohlcv(ex_sym, timeframe=timeframe, limit=limit)
-            res = self.cb.call(_fn, key=f"fetch_ohlcv:{ex_sym}:{timeframe}", timeout=10.0, fail_threshold=5, open_seconds=15.0)
-            latency = int((time.perf_counter() - t0) * 1000)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": "fetch_ohlcv", "code": "200"})
-            metrics.observe("broker_latency_ms", latency, {"method": "fetch_ohlcv"})
-            return res
-        except Exception:
-            latency = int((time.perf_counter() - t0) * 1000)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": "fetch_ohlcv", "code": "599"})
-            metrics.observe("broker_latency_ms", latency, {"method": "fetch_ohlcv"})
-            raise
+        ccxt = _import_ccxt()
+        m = "fetch_ohlcv"
+        return self._cb_call(m, self._ccxt.fetch_ohlcv, symbol, timeframe, limit)
 
-    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Decimal | None = None):
-        ex_sym = to_exchange_symbol(symbol, getattr(self.cfg, "EXCHANGE", "binance"))
-        t0 = time.perf_counter()
-        params = {"type": type_, "side": side, "amount": float(amount)}
-        if price is not None:
-            params["price"] = float(price)
-        try:
-            def _fn():
-                if price is not None:
-                    return self._client().create_order(ex_sym, type_, side, float(amount), float(price))
-                return self._client().create_order(ex_sym, type_, side, float(amount))
-            res = self.cb.call(_fn, key=f"create_order:{ex_sym}", timeout=10.0, fail_threshold=5, open_seconds=15.0)
-            latency = int((time.perf_counter() - t0) * 1000)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": "create_order", "code": "200"})
-            metrics.observe("broker_latency_ms", latency, {"method": "create_order"})
-            return res
-        except Exception:
-            latency = int((time.perf_counter() - t0) * 1000)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": "create_order", "code": "599"})
-            metrics.observe("broker_latency_ms", latency, {"method": "create_order"})
-            raise
+    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        m = "fetch_ticker"
+        return self._cb_call(m, self._ccxt.fetch_ticker, symbol)
+
+    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Decimal | None = None) -> Dict[str, Any]:
+        m = "create_order"
+        # ccxt принимает float; аккуратно приводим
+        _amount = float(amount)
+        _price = float(price) if price is not None else None
+        return self._cb_call(m, self._ccxt.create_order, symbol, type_, side, _amount, _price)
+
+    def fetch_balance(self) -> Dict[str, Any]:
+        m = "fetch_balance"
+        return self._cb_call(m, self._ccxt.fetch_balance)
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        m = "cancel_order"
+        return self._cb_call(m, self._ccxt.cancel_order, order_id)
