@@ -101,6 +101,14 @@ class Settings:
     PERF_BUDGET_ORDER_P99_MS: int = int(os.getenv("PERF_BUDGET_ORDER_P99_MS", "0"))
     PERF_BUDGET_FLOW_P99_MS: int = int(os.getenv("PERF_BUDGET_FLOW_P99_MS", "0"))
 
+    # --- Market Context ---
+    CONTEXT_ENABLE: bool = os.getenv("CONTEXT_ENABLE", "true").lower() in {"1", "true", "yes"}
+    CONTEXT_CACHE_TTL_SEC: int = int(os.getenv("CONTEXT_CACHE_TTL_SEC", "300"))
+    CONTEXT_HTTP_TIMEOUT_SEC: float = float(os.getenv("CONTEXT_HTTP_TIMEOUT_SEC", "2.0"))
+    CONTEXT_BTC_DOMINANCE_URL: str = os.getenv("CONTEXT_BTC_DOMINANCE_URL", "https://api.coingecko.com/api/v3/global")
+    CONTEXT_FEAR_GREED_URL: str = os.getenv("CONTEXT_FEAR_GREED_URL", "https://api.alternative.me/fng/?limit=1")
+    CONTEXT_DXY_URL: str = os.getenv("CONTEXT_DXY_URL", "")  # опционально
+
     # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {
         "conservative": _DecisionProfile("conservative", 0.75, 0.25, 0.65, 0.35),

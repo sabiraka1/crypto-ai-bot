@@ -44,6 +44,9 @@ except Exception:
 # bus wiring + квантили
 from crypto_ai_bot.app.bus_wiring import build_bus, snapshot_quantiles
 
+# market context
+from crypto_ai_bot.market_context.snapshot import build_snapshot as build_market_context
+
 # orchestrator (опционально)
 try:
     from crypto_ai_bot.core.orchestrator import Orchestrator, set_global_orchestrator
@@ -362,22 +365,13 @@ def bus_dlq(limit: int = Query(50, ge=1, le=1000)) -> JSONResponse:
     return JSONResponse({"status": "ok", "items": items})
 
 
-@app.post("/telegram")
-async def telegram_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
-) -> JSONResponse:
-    secret = getattr(CFG, "TELEGRAM_WEBHOOK_SECRET", None)
-    if secret and x_telegram_bot_api_secret_token != secret:
-        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
-
+@app.get("/context")
+def get_market_context() -> JSONResponse:
     try:
-        update = await request.json()
-    except Exception:
-        update = {}
-
-    resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
-    return JSONResponse(resp)
+        ctx = build_market_context(CFG, HTTP, BREAKER)
+        return JSONResponse({"status": "ok", "context": ctx})
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": f"{type(e).__name__}: {e}"}, status_code=500)
 
 
 @app.get("/status/extended")
@@ -387,26 +381,23 @@ def status_extended() -> JSONResponse:
 
     snap = snapshot_quantiles()
 
-    # ключи квантилей из bus_wiring.snapshot_quantiles()
     key_dec = f"decision:{sym}:{tf}"
     key_flow = f"flow:{sym}:{tf}"
-    # order имеет раздельные ключи по стороне — берём максимум по buy/sell
     key_ord_buy = f"order:{sym}:{tf}:buy"
     key_ord_sell = f"order:{sym}:{tf}:sell"
 
-    def _pp(d, k, p):
+    def _pp(k, p):
         try:
             v = snap.get(k, {}).get(p)
             return float(v) if v is not None else None
         except Exception:
             return None
 
-    dec_p95, dec_p99 = _pp(snap, key_dec, "p95"), _pp(snap, key_dec, "p99")
-    flow_p95, flow_p99 = _pp(snap, key_flow, "p95"), _pp(snap, key_flow, "p99")
-    ord_p95 = max([x for x in (_pp(snap, key_ord_buy, "p95"), _pp(snap, key_ord_sell, "p95")) if x is not None], default=None)
-    ord_p99 = max([x for x in (_pp(snap, key_ord_buy, "p99"), _pp(snap, key_ord_sell, "p99")) if x is not None], default=None)
+    dec_p95, dec_p99 = _pp(key_dec, "p95"), _pp(key_dec, "p99")
+    flow_p95, flow_p99 = _pp(key_flow, "p95"), _pp(key_flow, "p99")
+    ord_p95 = max([x for x in (_pp(key_ord_buy, "p95"), _pp(key_ord_sell, "p95")) if x is not None], default=None)
+    ord_p99 = max([x for x in (_pp(key_ord_buy, "p99"), _pp(key_ord_sell, "p99")) if x is not None], default=None)
 
-    # бюджеты p99 из Settings (в миллисекундах — оставляем так же, как в /metrics)
     b_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0) or 0)
     b_ord = int(getattr(CFG, "PERF_BUDGET_ORDER_P99_MS", 0) or 0)
     b_flow = int(getattr(CFG, "PERF_BUDGET_FLOW_P99_MS", 0) or 0)
@@ -416,12 +407,13 @@ def status_extended() -> JSONResponse:
             return None
         return float(v) > float(b)
 
-    # открытые позиции (мягко)
+    # открытые позиции
     try:
-        open_positions = REPOS.positions.get_open() or []
-        open_count = len(open_positions)
+        open_count = len(REPOS.positions.get_open() or [])
     except Exception:
         open_count = None
+
+    context = build_market_context(CFG, HTTP, BREAKER)
 
     return JSONResponse({
         "mode": getattr(CFG, "MODE", "unknown"),
@@ -441,5 +433,23 @@ def status_extended() -> JSONResponse:
             "order_p99_exceeded": _exceeded(ord_p99, b_ord),
             "flow_p99_exceeded": _exceeded(flow_p99, b_flow),
         },
+        "context": context,
     })
 
+
+@app.post("/telegram")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
+) -> JSONResponse:
+    secret = getattr(CFG, "TELEGRAM_WEBHOOK_SECRET", None)
+    if secret and x_telegram_bot_api_secret_token != secret:
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+
+    try:
+        update = await request.json()
+    except Exception:
+        update = {}
+
+    resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
+    return JSONResponse(resp)
