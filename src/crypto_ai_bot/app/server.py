@@ -185,7 +185,7 @@ async def tick(request: Request) -> JSONResponse:
     limit = int(body.get("limit", cfg.LIMIT_BARS))
 
     try:
-        decision = uc_evaluate(cfg, _broker, symbol=symbol, timeframe=timeframe, limit=limit)
+        decision = uc_evaluate(cfg, _broker, symbol=symbol, timeframe=timeframe, limit=limit, bus=_bus)
         return JSONResponse({"status": "evaluated", "symbol": symbol, "timeframe": timeframe, "decision": decision})
     except Exception as e:
         metrics.inc("tick_error_total", {"type": type(e).__name__})
