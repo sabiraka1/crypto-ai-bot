@@ -92,10 +92,14 @@ class Settings:
     ALERT_DLQ_EVERY_SEC: int = int(os.getenv("ALERT_DLQ_EVERY_SEC", "300"))
 
     ALERT_ON_LATENCY: bool = os.getenv("ALERT_ON_LATENCY", "false").lower() in {"1", "true", "yes"}
-    # Пороги p99 (мс). Можно задавать глобально; при 0 — отключить конкретный тип
     DECISION_LATENCY_P99_ALERT_MS: int = int(os.getenv("DECISION_LATENCY_P99_ALERT_MS", "0"))
     ORDER_LATENCY_P99_ALERT_MS: int = int(os.getenv("ORDER_LATENCY_P99_ALERT_MS", "0"))
     FLOW_LATENCY_P99_ALERT_MS: int = int(os.getenv("FLOW_LATENCY_P99_ALERT_MS", "0"))
+
+    # --- Performance budgets (p99), только метрики/health-бейджи ---
+    PERF_BUDGET_DECISION_P99_MS: int = int(os.getenv("PERF_BUDGET_DECISION_P99_MS", "0"))
+    PERF_BUDGET_ORDER_P99_MS: int = int(os.getenv("PERF_BUDGET_ORDER_P99_MS", "0"))
+    PERF_BUDGET_FLOW_P99_MS: int = int(os.getenv("PERF_BUDGET_FLOW_P99_MS", "0"))
 
     # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {

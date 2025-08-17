@@ -1,87 +1,63 @@
+# src/crypto_ai_bot/core/storage/sqlite_adapter.py
 from __future__ import annotations
 
+import os
 import sqlite3
-from contextlib import contextmanager
-from typing import Iterator, Optional, Dict, Any
+from typing import Dict, Any
 
-# NOTE: все подключения проходят через этот адаптер. Включаем WAL и таймауты.
+from crypto_ai_bot.utils import metrics
+
+
+def _ensure_dir(path: str) -> None:
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
 
 
 def connect(path: str) -> sqlite3.Connection:
-    con = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    """
+    Подключение SQLite с безопасными прагмами + WAL.
+    """
+    _ensure_dir(path or "crypto.db")
+    con = sqlite3.connect(path or "crypto.db", check_same_thread=False)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
+    con.execute("PRAGMA temp_store=MEMORY;")
     con.execute("PRAGMA foreign_keys=ON;")
-    con.execute("PRAGMA busy_timeout=5000;")
     return con
 
 
-@contextmanager
-def in_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
+def snapshot_metrics(con: sqlite3.Connection) -> Dict[str, Any]:
     """
-    Контекст менеджер транзакции (BEGIN IMMEDIATE → COMMIT/ROLLBACK).
+    Снимает ключевые метрики состояния БД и выставляет gauge’и:
+      - sqlite_page_size_bytes
+      - sqlite_page_count
+      - sqlite_freelist_pages
+      - sqlite_fragmentation_percent
+      - sqlite_file_size_bytes
+    Возвращает словарь этих значений.
     """
-    cur = con.cursor()
     try:
-        cur.execute("BEGIN IMMEDIATE;")
-        yield cur
-        con.commit()
+        page_size = int(con.execute("PRAGMA page_size;").fetchone()[0])
+        page_count = int(con.execute("PRAGMA page_count;").fetchone()[0])
+        freelist = int(con.execute("PRAGMA freelist_count;").fetchone()[0])
     except Exception:
-        con.rollback()
-        raise
-    finally:
-        cur.close()
+        # если что-то не получилось — не ломаем экспорт
+        page_size = page_count = freelist = 0
 
+    file_size = page_size * page_count
+    fragmentation = (freelist / page_count * 100.0) if page_count > 0 else 0.0
 
-class SqliteUnitOfWork:
-    """
-    Простой UnitOfWork, совместимый с тестами:
-      with SqliteUnitOfWork(con) as cur:
-          cur.execute(...)
-    """
-    def __init__(self, con: sqlite3.Connection):
-        self.con = con
-        self.cur: Optional[sqlite3.Cursor] = None
+    metrics.gauge("sqlite_page_size_bytes", float(page_size))
+    metrics.gauge("sqlite_page_count", float(page_count))
+    metrics.gauge("sqlite_freelist_pages", float(freelist))
+    metrics.gauge("sqlite_fragmentation_percent", float(fragmentation))
+    metrics.gauge("sqlite_file_size_bytes", float(file_size))
 
-    def __enter__(self) -> sqlite3.Cursor:
-        self.cur = self.con.cursor()
-        self.cur.execute("BEGIN IMMEDIATE;")
-        return self.cur
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        try:
-            if exc_type is None:
-                self.con.commit()
-            else:
-                self.con.rollback()
-        finally:
-            if self.cur is not None:
-                self.cur.close()
-                self.cur = None
-
-
-def get_db_stats(con: sqlite3.Connection) -> Dict[str, Any]:
-    try:
-        page_count = con.execute("PRAGMA page_count;").fetchone()[0]
-        page_size = con.execute("PRAGMA page_size;").fetchone()[0]
-        wal_autocheckpoint = con.execute("PRAGMA wal_autocheckpoint;").fetchone()[0]
-        return {
-            "page_count": int(page_count),
-            "page_size": int(page_size),
-            "approx_size_bytes": int(page_count) * int(page_size),
-            "wal_autocheckpoint": int(wal_autocheckpoint),
-        }
-    except Exception:
-        return {"page_count": None, "page_size": None, "approx_size_bytes": None, "wal_autocheckpoint": None}
-
-
-def perform_maintenance(con: sqlite3.Connection) -> Dict[str, Any]:
-    stats_before = get_db_stats(con)
-    try:
-        con.execute("PRAGMA optimize;")
-        con.execute("PRAGMA analysis_limit=400;")
-        con.execute("PRAGMA analyze;")
-    except Exception:
-        pass
-    stats_after = get_db_stats(con)
-    return {"before": stats_before, "after": stats_after}
+    return {
+        "page_size": page_size,
+        "page_count": page_count,
+        "freelist_pages": freelist,
+        "file_size_bytes": file_size,
+        "fragmentation_percent": fragmentation,
+    }

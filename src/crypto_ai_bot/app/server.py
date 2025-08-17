@@ -23,7 +23,7 @@ from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timef
 
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
 
-from crypto_ai_bot.core.storage.sqlite_adapter import connect
+from crypto_ai_bot.core.storage.sqlite_adapter import connect, snapshot_metrics as sqlite_snapshot
 from crypto_ai_bot.core.storage.uow import SqliteUnitOfWork
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
@@ -109,36 +109,28 @@ async def _on_shutdown() -> None:
 
 
 async def _alerts_runner() -> None:
-    """
-    - DLQ: если DLQ > 0 и включены алерты — отправляем раз в ALERT_DLQ_EVERY_SEC.
-    - LATENCY p99: если включено ALERT_ON_LATENCY и p99 превышает порог — шлём алерт (кулдаун общий 5 мин).
-    """
     cooldown_dlq = int(getattr(CFG, "ALERT_DLQ_EVERY_SEC", 300))
     cooldown_p99 = 300  # 5 минут
     while True:
         try:
-            # --- DLQ ---
+            # DLQ
             if getattr(CFG, "ALERT_ON_DLQ", True):
                 size = 0
                 try:
                     h = BUS.health()
-                    # поддержим разные ключи
                     size = int(h.get("dlq_size") or h.get("dlq_len") or h.get("dlq", 0) or 0)
                 except Exception:
                     size = 0
-
                 if size > 0 and _ALERTS.should_send("dlq", cooldown_sec=cooldown_dlq, value=size):
                     _try_alert(f"⚠️ <b>DLQ</b>: {size} сообщений в очереди ошибок.")
 
-            # --- LATENCY p99 ---
+            # LATENCY p99
             if getattr(CFG, "ALERT_ON_LATENCY", False):
                 snap = snapshot_quantiles()
-                # Глобальные пороги в мс; 0 — отключено
                 thr_dec = int(getattr(CFG, "DECISION_LATENCY_P99_ALERT_MS", 0))
                 thr_ord = int(getattr(CFG, "ORDER_LATENCY_P99_ALERT_MS", 0))
                 thr_flow = int(getattr(CFG, "FLOW_LATENCY_P99_ALERT_MS", 0))
 
-                # decision
                 if thr_dec > 0:
                     for key, vv in snap.items():
                         if not key.startswith("decision:"):
@@ -147,7 +139,6 @@ async def _alerts_runner() -> None:
                         if p99 and p99 > thr_dec and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
                             _try_alert(f"⏱️ <b>Decision p99</b> {key} = {int(p99)}ms > {thr_dec}ms")
 
-                # order
                 if thr_ord > 0:
                     for key, vv in snap.items():
                         if not key.startswith("order:"):
@@ -156,7 +147,6 @@ async def _alerts_runner() -> None:
                         if p99 and p99 > thr_ord and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
                             _try_alert(f"⏱️ <b>Order p99</b> {key} = {int(p99)}ms > {thr_ord}ms")
 
-                # flow
                 if thr_flow > 0:
                     for key, vv in snap.items():
                         if not key.startswith("flow:"):
@@ -164,11 +154,9 @@ async def _alerts_runner() -> None:
                         p99 = float(vv.get("p99", 0.0))
                         if p99 and p99 > thr_flow and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
                             _try_alert(f"⏱️ <b>Flow p99</b> {key} = {int(p99)}ms > {thr_flow}ms")
-
         except asyncio.CancelledError:
             break
         except Exception:
-            # не ломаем сервер из-за алерт-петли
             pass
         await asyncio.sleep(5)
 
@@ -180,12 +168,6 @@ def _try_alert(text: str) -> None:
     if token and chat_id:
         ok = send_telegram_alert(HTTP, token, chat_id, text)
     metrics.inc("alerts_sent_total", {"ok": "1" if ok else "0"})
-    try:
-        # полезно иметь копию в логах
-        from logging import getLogger
-        getLogger("alerts").warning(text)
-    except Exception:
-        pass
 
 
 def _safe_config(cfg: Settings) -> Dict[str, Any]:
@@ -235,9 +217,7 @@ def health() -> JSONResponse:
     broker_ok = True
     broker_detail = None
     try:
-        BRECKER_CALL = lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT"))
-        # краткий вызов через breaker, без fallback-параметров
-        BREAKER.call(BRECKER_CALL, key="broker.fetch_ticker", timeout=2.0)
+        BREAKER.call(lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT")), key="broker.fetch_ticker", timeout=2.0)
     except Exception as e:
         broker_ok = False
         broker_detail = f"{type(e).__name__}: {e}"
@@ -267,7 +247,71 @@ def health() -> JSONResponse:
 
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
-    base = metrics.export()
+    """
+    Перед экспортом:
+      - Снимаем SQLite-метрики
+      - Выставляем events_dead_letter_total
+      - Считаем performance budgets по p99 из шины
+    """
+    # SQLite snapshot → gauges
+    try:
+        _ = sqlite_snapshot(CONN)
+    except Exception:
+        pass
+
+    # events DLQ → gauge
+    try:
+        h = BUS.health()
+        dlq = int(h.get("dlq_size") or h.get("dlq_len") or h.get("dlq", 0) or 0)
+        metrics.gauge("events_dead_letter_total", float(dlq))
+    except Exception:
+        metrics.gauge("events_dead_letter_total", 0.0)
+
+    # performance budgets (p99)
+    try:
+        snap = snapshot_quantiles()
+        thr_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0))
+        thr_ord = int(getattr(CFG, "PERF_BUDGET_ORDER_P99_MS", 0))
+        thr_flow = int(getattr(CFG, "PERF_BUDGET_FLOW_P99_MS", 0))
+
+        # агрегированный флаг «есть превышения»
+        exceeded_any = False
+
+        if thr_dec > 0:
+            for key, vv in snap.items():
+                if key.startswith("decision:"):
+                    p99 = float(vv.get("p99", 0.0))
+                    if p99 and p99 > thr_dec:
+                        metrics.gauge("performance_budget_exceeded", 1.0, {"type": "decision", "key": key})
+                        exceeded_any = True
+                    else:
+                        metrics.gauge("performance_budget_exceeded", 0.0, {"type": "decision", "key": key})
+
+        if thr_ord > 0:
+            for key, vv in snap.items():
+                if key.startswith("order:"):
+                    p99 = float(vv.get("p99", 0.0))
+                    if p99 and p99 > thr_ord:
+                        metrics.gauge("performance_budget_exceeded", 1.0, {"type": "order", "key": key})
+                        exceeded_any = True
+                    else:
+                        metrics.gauge("performance_budget_exceeded", 0.0, {"type": "order", "key": key})
+
+        if thr_flow > 0:
+            for key, vv in snap.items():
+                if key.startswith("flow:"):
+                    p99 = float(vv.get("p99", 0.0))
+                    if p99 and p99 > thr_flow:
+                        metrics.gauge("performance_budget_exceeded", 1.0, {"type": "flow", "key": key})
+                        exceeded_any = True
+                    else:
+                        metrics.gauge("performance_budget_exceeded", 0.0, {"type": "flow", "key": key})
+
+        metrics.gauge("performance_budget_exceeded_any", 1.0 if exceeded_any else 0.0)
+    except Exception:
+        pass
+
+    # breaker state series
     state_map = {"closed": 0, "half-open": 1, "open": 2}
     extra: List[str] = []
     stats = BREAKER.get_stats()
@@ -278,6 +322,8 @@ def metrics_export() -> PlainTextResponse:
         for cname, val in counters.items():
             extra.append(f'breaker_{cname}_total{{key="{key}"}} {int(val)}')
         extra.append(f'breaker_last_error_flag{{key="{key}"}} {1 if st.get("last_error") else 0}')
+
+    base = metrics.export()
     payload = base.rstrip() + ("\n" if base and not base.endswith("\n") else "") + "\n".join(extra) + "\n"
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
@@ -285,24 +331,6 @@ def metrics_export() -> PlainTextResponse:
 @app.get("/config")
 def config_public() -> JSONResponse:
     return JSONResponse(_safe_config(CFG))
-
-
-@app.get("/alerts/status")
-def alerts_status() -> JSONResponse:
-    """
-    Показать текущие пороги и факт включения алертов.
-    """
-    return JSONResponse({
-        "on_dlq": getattr(CFG, "ALERT_ON_DLQ", True),
-        "dlq_every_sec": getattr(CFG, "ALERT_DLQ_EVERY_SEC", 300),
-        "on_latency": getattr(CFG, "ALERT_ON_LATENCY", False),
-        "p99_thresholds_ms": {
-            "decision": getattr(CFG, "DECISION_LATENCY_P99_ALERT_MS", 0),
-            "order": getattr(CFG, "ORDER_LATENCY_P99_ALERT_MS", 0),
-            "flow": getattr(CFG, "FLOW_LATENCY_P99_ALERT_MS", 0),
-        },
-        "telegram_chat_id_set": bool(getattr(CFG, "ALERT_TELEGRAM_CHAT_ID", None)),
-    })
 
 
 @app.post("/tick")
