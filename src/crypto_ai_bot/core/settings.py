@@ -111,6 +111,21 @@ class Settings:
     SCORE_AI_WEIGHT: float = field(default_factory=lambda: _to_float(os.getenv("SCORE_AI_WEIGHT"), 0.5))
     THRESHOLD_BUY: float = field(default_factory=lambda: _to_float(os.getenv("THRESHOLD_BUY"), 0.55))
     THRESHOLD_SELL: float = field(default_factory=lambda: _to_float(os.getenv("THRESHOLD_SELL"), 0.45))
+    # --- decision thresholds & position/stops/backtest (added) ---
+    DECISION_BUY_THRESHOLD: float = field(default_factory=lambda: _to_float(os.getenv("DECISION_BUY_THRESHOLD"), 0.55))
+    DECISION_SELL_THRESHOLD: float = field(default_factory=lambda: _to_float(os.getenv("DECISION_SELL_THRESHOLD"), 0.45))
+
+    # position sizing (separate from DEFAULT_ORDER_SIZE; 0.00 by default for prod-safe posture)
+    POSITION_SIZE: str = field(default_factory=lambda: os.getenv("POSITION_SIZE", "0.00"))
+
+    # optional stops/takeprofit/trailing — None means disabled
+    STOP_LOSS_PCT: float | None = field(default_factory=lambda: (_to_float(os.getenv("STOP_LOSS_PCT"), 0.0) if os.getenv("STOP_LOSS_PCT") else None))
+    TAKE_PROFIT_PCT: float | None = field(default_factory=lambda: (_to_float(os.getenv("TAKE_PROFIT_PCT"), 0.0) if os.getenv("TAKE_PROFIT_PCT") else None))
+    TRAILING_PCT: float | None = field(default_factory=lambda: (_to_float(os.getenv("TRAILING_PCT"), 0.0) if os.getenv("TRAILING_PCT") else None))
+
+    # backtest settings
+    BACKTEST_CSV_PATH: str = field(default_factory=lambda: os.getenv("BACKTEST_CSV_PATH", "data/backtest.csv"))
+
 
     # --- Event Bus настройки (если используется async_bus) ---
     BUS_STRATEGIES: Dict[str, str] = field(
