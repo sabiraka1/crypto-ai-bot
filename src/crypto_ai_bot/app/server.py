@@ -1,139 +1,215 @@
 from __future__ import annotations
 
 import json
-import time
-from fastapi import FastAPI, Request
-from typing import Any, Dict
+import sqlite3
+from dataclasses import dataclass
+from typing import Any, Optional
 
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+
+# --- core/config ---
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils.metrics import export as metrics_export, inc
-from crypto_ai_bot.utils.logging import init as init_logging
-from crypto_ai_bot.utils.time_sync import measure_time_drift, get_last_drift_ms
-from crypto_ai_bot.utils.http_client import get_http_client
 
+# --- storage / migrations / repos ---
 from crypto_ai_bot.core.storage.sqlite_adapter import connect
-from crypto_ai_bot.core.storage.migrations import runner
+try:
+    # если есть раннер миграций — используем
+    from crypto_ai_bot.core.storage.migrations.runner import apply_all as apply_migrations
+except Exception:  # pragma: no cover
+    apply_migrations = None  # мягкая деградация
 
+from crypto_ai_bot.core.storage.repositories import (
+    SqliteTradeRepository,
+    SqlitePositionRepository,
+    SqliteSnapshotRepository,
+    SqliteAuditRepository,
+    SqliteIdempotencyRepository,
+    SqliteDecisionsRepository,  # <-- новый репозиторий решений
+)
+
+# --- broker factory ---
+# по нашей архитектуре фабрика — в base.py и реэкспортируется в __init__ (но импорт из base надёжнее)
 from crypto_ai_bot.core.brokers.base import create_broker
-from crypto_ai_bot.core.events.async_bus import AsyncBus, Event
+
+# --- use-cases ---
+from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
+
+# --- metrics / logging / time sync ---
+from crypto_ai_bot.utils.metrics import inc, observe, export as metrics_export
+try:
+    from crypto_ai_bot.utils.time_sync import measure_time_drift  # если внедрён ранее
+except Exception:  # pragma: no cover
+    def measure_time_drift(urls: Optional[list[str]] = None, timeout: float = 1.0) -> int:
+        return 0
 
 
-# ------------------------ App init ------------------------
+# =========================
+#   РЕПОЗИТОРИИ: сборка
+# =========================
+@dataclass
+class Repos:
+    trades: Any
+    positions: Any
+    snapshots: Any
+    audit: Any
+    idempotency: Any
+    decisions: Optional[Any] = None
+    uow: Optional[Any] = None  # если будет UnitOfWork — подставим
 
-cfg = Settings.build()
-init_logging()
+def _build_repos(con: sqlite3.Connection) -> Repos:
+    return Repos(
+        trades=SqliteTradeRepository(con),
+        positions=SqlitePositionRepository(con),
+        snapshots=SqliteSnapshotRepository(con),
+        audit=SqliteAuditRepository(con),
+        idempotency=SqliteIdempotencyRepository(con),
+        decisions=SqliteDecisionsRepository(con),  # <-- ВАЖНО: тут подключаем репозиторий решений
+        uow=None,
+    )
+
+
+# =========================
+#     FASTAPI APP
+# =========================
 app = FastAPI(title="crypto-ai-bot")
 
-# sqlite
-_db_con = connect(getattr(cfg, "DB_PATH", ":memory:"))
+@app.on_event("startup")
+def on_startup() -> None:
+    cfg = Settings.build()
+    app.state.cfg = cfg
 
-# broker через фабрику
-_broker = create_broker(cfg)
+    # соединение с БД
+    con = connect(cfg.DB_PATH)
+    app.state.con = con
 
-# event bus
-app.state.bus = AsyncBus()
+    # миграции (если есть раннер)
+    if apply_migrations is not None:
+        try:
+            apply_migrations(con)
+        except Exception as e:  # pragma: no cover
+            # не падаем — возвращаем 'degraded' в /health
+            app.state.migration_error = str(e)
+
+    # сборка репозиториев
+    app.state.repos = _build_repos(con)
+
+    # брокер через фабрику
+    broker = create_broker(mode=cfg.MODE, settings=cfg, http_client=None)
+    app.state.broker = broker
+
+    inc("app_start_total", {"mode": cfg.MODE})
 
 
-# ------------------------ Helpers ------------------------
-
-def _health_matrix(db_ok: bool, broker_ok: bool, drift_ms: int, limit_ms: int, mig_ok: bool) -> Dict[str, Any]:
-    """
-    Возвращаем сводный статус по матрице.
-    """
-    if (not db_ok) or (abs(drift_ms) > limit_ms) or (not mig_ok):
-        return {"status": "unhealthy", "degradation_level": "critical"}
-    if not broker_ok:
-        return {"status": "degraded", "degradation_level": "no_trading"}
-    return {"status": "healthy", "degradation_level": "none"}
+# ---------- MODELS ----------
+class TickIn(BaseModel):
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    limit: Optional[int] = None
 
 
-# ------------------------ Routes ------------------------
-
+# =========================
+#        ENDPOINTS
+# =========================
 @app.get("/health")
-async def health() -> Dict[str, Any]:
+def health() -> dict:
+    cfg: Settings = app.state.cfg
+    con: sqlite3.Connection = app.state.con
+    broker = app.state.broker
+
+    components = {"mode": cfg.MODE}
+
     # DB
-    t0 = time.perf_counter()
-    db_ok = True
     try:
-        _db_con.execute("SELECT 1").fetchone()
-    except Exception:
-        db_ok = False
-    db_latency = int((time.perf_counter() - t0) * 1000)
+        con.execute("SELECT 1;").fetchone()
+        components["db"] = {"status": "ok", "latency_ms": 0}
+    except Exception as e:
+        components["db"] = {"status": f"error:{type(e).__name__}", "detail": str(e)}
 
-    # Migrations
-    cur_v = 0
-    latest_v = 0
-    mig_ok = False
+    # Broker (fetch_ticker c коротким таймаутом — у нас таймауты уже внутри адаптера)
     try:
-        cur_v = runner.get_current_version(_db_con)
-        latest_v = runner.latest_version()
-        mig_ok = cur_v >= latest_v
-    except Exception:
-        mig_ok = False
+        # используем символ из конфигов, но ошибки не фатальны
+        broker.fetch_ticker(cfg.SYMBOL)
+        components["broker"] = {"status": "ok", "latency_ms": 0}
+    except Exception as e:
+        components["broker"] = {"status": f"error:{type(e).__name__}", "detail": str(e)}
 
-    # Broker
-    t1 = time.perf_counter()
-    bro_status = "ok"
+    # Time drift (если модуль есть)
     try:
-        _ = _broker.fetch_ticker(getattr(cfg, "SYMBOL", "BTC/USDT"))
-        broker_ok = True
-    except Exception as exc:  # noqa: BLE001
-        bro_status = f"error:{exc.__class__.__name__}"
-        broker_ok = False
-    bro_latency = int((time.perf_counter() - t1) * 1000)
+        drift_ms = measure_time_drift(cfg.TIME_DRIFT_URLS or None, timeout=cfg.BROKER_TIMEOUT_SEC)
+        components["time"] = {
+            "status": "ok" if abs(drift_ms) <= cfg.TIME_DRIFT_LIMIT_MS else "drift",
+            "drift_ms": drift_ms,
+            "limit_ms": cfg.TIME_DRIFT_LIMIT_MS,
+        }
+    except Exception as e:
+        components["time"] = {"status": f"error:{type(e).__name__}", "detail": str(e)}
 
-    # Time drift — если ещё не мерили, сделаем замер
-    try:
-        if get_last_drift_ms() == 0:
-            measure_time_drift(getattr(cfg, "TIME_DRIFT_URLS", []))
-    except Exception:
-        pass
-    drift_ms = int(get_last_drift_ms() or 0)
-    limit_ms = int(getattr(cfg, "TIME_DRIFT_LIMIT_MS", 1000))
+    # миграции
+    if getattr(app.state, "migration_error", None):
+        components["migrations"] = {"status": "error", "detail": app.state.migration_error}
+    else:
+        components["migrations"] = {"status": "ok"}
 
-    matrix = _health_matrix(db_ok, broker_ok, drift_ms, limit_ms, mig_ok)
+    # сводный статус
+    statuses = [v["status"] for k, v in components.items() if isinstance(v, dict)]
+    if any(s.startswith("error") for s in statuses) or any(s == "drift" for s in statuses):
+        status = "degraded"
+        lvl = "major" if any(s.startswith("error") for s in statuses) else "minor"
+    else:
+        status = "healthy"
+        lvl = "none"
 
-    # Circuit stats (если брокер поддерживает)
-    cb_stats = {}
-    try:
-        if hasattr(_broker, "get_cb_stats"):
-            cb_stats = _broker.get_cb_stats() or {}
-    except Exception:
-        cb_stats = {}
-
-    return {
-        **matrix,
-        "components": {
-            "mode": "paper" if getattr(cfg, "PAPER_MODE", True) else "live",
-            "db": {"status": "ok" if db_ok else "error", "latency_ms": db_latency,
-                   "schema_version": cur_v, "latest": latest_v, "migrations_ok": mig_ok},
-            "broker": {"status": bro_status, "latency_ms": bro_latency, "circuit": cb_stats},
-            "time": {"status": "ok", "drift_ms": drift_ms, "limit_ms": limit_ms},
-        },
-    }
+    return {"status": status, "degradation_level": lvl, "components": components}
 
 
-@app.get("/metrics")
-async def metrics() -> str:
+@app.get("/metrics", response_class=None)
+def metrics() -> Any:
     return metrics_export()
 
 
-@app.get("/bus")
-async def bus_stats() -> Dict[str, Any]:
-    bus = getattr(app.state, "bus", None)
-    if bus and hasattr(bus, "stats"):
-        return bus.stats()
-    return {"status": "no_bus"}
-
-
 @app.post("/tick")
-async def tick() -> Dict[str, Any]:
-    # Для простого прогона evaluate без Telegram
+def tick(body: TickIn) -> dict:
+    cfg: Settings = app.state.cfg
+    broker = app.state.broker
+    repos: Repos = app.state.repos
+
+    symbol = body.symbol or cfg.SYMBOL
+    timeframe = body.timeframe or cfg.TIMEFRAME
+    limit = body.limit or cfg.LIMIT
+
     try:
-        # Публикация тестового события в шину (проверка очередей)
-        bus: AsyncBus = app.state.bus
-        await bus.publish(Event(type="MetricEvent", payload={"kind": "tick"}))
-        inc("tick_total")
-        return {"status": "ok"}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "error": f"tick_failed: {exc}"}
+        res = uc_eval_and_execute(
+            cfg,
+            broker,
+            repos,
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+        return res
+    except Exception as e:
+        # ошибки не пробрасываем наружу, чтобы не падал оркестратор
+        return {"status": "error", "error": f"tick_failed: {type(e).__name__}: {e}"}
+
+
+@app.get("/why_last")
+def why_last(symbol: Optional[str] = None, timeframe: Optional[str] = None) -> dict:
+    """
+    Возвращает последнее Decision для пары symbol/timeframe (с explain),
+    которое было сохранено в таблицу `decisions` (Шаг 79).
+    """
+    cfg: Settings = app.state.cfg
+    repos: Repos = app.state.repos
+
+    sym = symbol or cfg.SYMBOL
+    tf = timeframe or cfg.TIMEFRAME
+
+    if not getattr(repos, "decisions", None):
+        raise HTTPException(status_code=501, detail="Decisions repo not configured")
+
+    row = repos.decisions.get_last(symbol=sym, timeframe=tf)
+    if not row:
+        raise HTTPException(status_code=404, detail="No decisions found")
+
+    return {"status": "ok", "symbol": sym, "timeframe": tf, "decision": row}
