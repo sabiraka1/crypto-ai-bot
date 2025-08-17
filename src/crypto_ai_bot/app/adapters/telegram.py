@@ -1,96 +1,197 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Dict
-
-from crypto_ai_bot.core.signals import policy
-from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Callable, Dict, Optional
 
 
-def _reply(chat_id: int | str, text: str) -> Dict[str, Any]:
-    return {
-        "method": "sendMessage",
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
+# =============== Public surface ===============
+# handle_update — единственная публичная функция.
+# Никакой бизнес-логики/доступа к БД/брокеру тут нет — только маршрутизация команд и форматирование текста.
+#
+# Зависимости передаются "снаружи" как коллбеки:
+#   - tick_call(symbol, timeframe, limit) -> dict  (внутри сервер вызывает use_case eval_and_execute)
+#   - why_last_call(symbol, timeframe) -> dict|None (внутри сервер берёт из repos.decisions)
+#
+# Это сохраняет нам правило: app/* не лезет в core/* напрямую.
 
 
-def _format_explain(explain: Dict[str, Any]) -> str:
-    sig = explain.get("signals", {})
-    blocks = explain.get("blocks", {})
-    weights = explain.get("weights", {})
-    thr = explain.get("thresholds", {})
-    ctx = explain.get("context", {})
-
-    parts = []
-    parts.append("<b>Последнее решение — объяснение</b>")
-    parts.append(f"symbol/timeframe: <code>{ctx.get('symbol')}</code> / <code>{ctx.get('timeframe')}</code>")
-    parts.append(f"mode: <code>{ctx.get('mode')}</code>")
-    parts.append("")
-    parts.append("<b>Signals</b>")
-    for k in ("ema_fast", "ema_slow", "rsi", "macd", "macd_signal", "macd_hist", "atr", "atr_pct", "price"):
-        if k in sig and sig[k] is not None:
-            parts.append(f"• {k}: <code>{sig[k]}</code>")
-    parts.append("")
-    parts.append("<b>Weights</b>")
-    parts.append(f"rule={weights.get('rule', 0):.2f}, ai={weights.get('ai', 0):.2f}")
-    parts.append("")
-    parts.append("<b>Thresholds</b>")
-    parts.append(f"entry_min={thr.get('entry_min', 0):.2f}, exit_max={thr.get('exit_max', 0):.2f}, reduce_below={thr.get('reduce_below', 0):.2f}")
-    parts.append("")
-    parts.append("<b>Blocks</b>")
-    parts.append(f"risk: <code>{blocks.get('risk') or 'ok'}</code>; data: <code>{blocks.get('data') or 'ok'}</code>")
-
-    return "\n".join(parts)
+@dataclass
+class TgDeps:
+    tick_call: Callable[[str, str, int], Dict[str, Any]]
+    why_last_call: Callable[[str, str], Optional[Dict[str, Any]]]
+    default_symbol: str
+    default_timeframe: str
+    default_limit: int = 300
 
 
-async def handle_update(update: Dict[str, Any], cfg: Any, bot: Any, http: Any) -> Dict[str, Any]:
+def handle_update(update: Dict[str, Any], deps: TgDeps) -> Dict[str, Any]:
     """
-    Тонкий адаптер:
-      - /why        → объяснение последнего решения (из policy.get_last_decision)
-      - /why_last   → синоним /why
-      - /symbol SYMBOL TF → нормализует и подтверждает ввод
-      - иначе — краткая подсказка
-    Никакой бизнес-логики, ни доступа к брокеру/БД.
+    Возвращает словарь с полями:
+      {
+        "chat_id": int,
+        "text": str,
+        "parse_mode": "Markdown" | "HTML" | None
+      }
+    Сервер сам отправит это в Telegram API (через utils.http_client).
     """
-    msg = (update.get("message") or update.get("edited_message")) or {}
-    chat_id = msg.get("chat", {}).get("id") or msg.get("from", {}).get("id")
-    text: str = msg.get("text") or ""
+    chat_id = _extract_chat_id(update)
+    if chat_id is None:
+        return {"chat_id": 0, "text": "unsupported update", "parse_mode": None}
 
-    if not chat_id:
-        return {"ok": True}  # некого уведомлять
+    text = _extract_text(update) or ""
+    cmd, args = _parse_command(text)
 
-    tokens = text.strip().split()
-    cmd = tokens[0].lower() if tokens else ""
+    if cmd in ("/start", "/help"):
+        return {"chat_id": chat_id, "text": _help_text(deps), "parse_mode": "Markdown"}
 
-    # /why и /why_last
-    if cmd in ("/why", "/why_last"):
-        last = policy.get_last_decision()
-        if not last:
-            return _reply(chat_id, "Пока нет принятых решений в этом процессе. Запусти торговый цикл или вызови /tick.")
-        # аккуратно отформатируем
-        score = float(last.get("score", 0.0))
-        action = last.get("action", "hold")
-        explain = last.get("explain", {})
-        head = f"<b>Decision</b>: <code>{action}</code>, score=<code>{score:.3f}</code>"
-        body = _format_explain(explain)
-        return _reply(chat_id, f"{head}\n\n{body}")
+    if cmd == "/status":
+        return {
+            "chat_id": chat_id,
+            "text": _status_text(deps),
+            "parse_mode": "Markdown",
+        }
 
-    # /symbol <SYMBOL> [TF] — нормализация ввода пользователя (для удобства)
-    if cmd == "/symbol":
-        if len(tokens) < 2:
-            return _reply(chat_id, "Формат: <code>/symbol BTC/USDT 1h</code>")
-        sym = normalize_symbol(tokens[1])
-        tf = normalize_timeframe(tokens[2]) if len(tokens) > 2 else getattr(cfg, "TIMEFRAME", "1h")
-        return _reply(chat_id, f"Нормализовано:\n • symbol = <code>{sym}</code>\n • timeframe = <code>{tf}</code>")
+    if cmd == "/tick":
+        sym, tf, lim = _parse_symbol_tf_limit(args, deps)
+        res = deps.tick_call(sym, tf, lim)
+        return {"chat_id": chat_id, "text": _format_tick_result(sym, tf, res), "parse_mode": "Markdown"}
 
-    # help по умолчанию
-    help_text = (
-        "<b>Команды</b>\n"
-        "• /why — показать объяснение последнего решения\n"
-        "• /why_last — синоним /why\n"
-        "• /symbol SYMBOL [TF] — нормализовать ввод (например, /symbol btcusdt 1h)\n"
+    if cmd == "/why":
+        sym, tf, _ = _parse_symbol_tf_limit(args, deps)
+        row = deps.why_last_call(sym, tf)
+        if not row:
+            return {"chat_id": chat_id, "text": f"Нет сохранённых решений для *{sym}* [{tf}].", "parse_mode": "Markdown"}
+        return {"chat_id": chat_id, "text": _format_why_last(sym, tf, row), "parse_mode": "Markdown"}
+
+    # неизвестная команда → help
+    return {"chat_id": chat_id, "text": _help_text(deps), "parse_mode": "Markdown"}
+
+
+# =============== helpers ===============
+
+def _extract_chat_id(update: Dict[str, Any]) -> Optional[int]:
+    try:
+        return int(update["message"]["chat"]["id"])
+    except Exception:
+        try:
+            return int(update["callback_query"]["message"]["chat"]["id"])
+        except Exception:
+            return None
+
+
+def _extract_text(update: Dict[str, Any]) -> Optional[str]:
+    try:
+        return str(update["message"]["text"])
+    except Exception:
+        try:
+            return str(update["callback_query"]["data"])
+        except Exception:
+            return None
+
+
+def _parse_command(text: str) -> tuple[str, list[str]]:
+    text = (text or "").strip()
+    if not text.startswith("/"):
+        return "/help", []
+    parts = text.split()
+    cmd = parts[0].split("@", 1)[0].lower()
+    return cmd, parts[1:]
+
+
+def _parse_symbol_tf_limit(args: list[str], deps: TgDeps) -> tuple[str, str, int]:
+    sym = deps.default_symbol
+    tf = deps.default_timeframe
+    lim = deps.default_limit
+    if len(args) >= 1:
+        sym = args[0].upper()
+    if len(args) >= 2:
+        tf = args[1]
+    if len(args) >= 3:
+        try:
+            lim = max(50, min(2000, int(args[2])))
+        except Exception:
+            pass
+    return sym, tf, lim
+
+
+def _help_text(deps: TgDeps) -> str:
+    return (
+        "*Crypto AI Bot*\n\n"
+        "Доступные команды:\n"
+        "• `/status` — текущие настройки (symbol/timeframe)\n"
+        "• `/tick [SYMBOL] [TF] [LIMIT]` — выполнить один цикл оценки/исполнения\n"
+        "• `/why [SYMBOL] [TF]` — показать последнее сохранённое решение и объяснение\n\n"
+        f"_По умолчанию_: `{deps.default_symbol}` [{deps.default_timeframe}], LIMIT={deps.default_limit}\n"
     )
-    return _reply(chat_id, help_text)
+
+
+def _status_text(deps: TgDeps) -> str:
+    return (
+        "*Статус*\n"
+        f"Symbol: `{deps.default_symbol}`\n"
+        f"Timeframe: `{deps.default_timeframe}`\n"
+        f"Limit: `{deps.default_limit}`\n"
+    )
+
+
+def _format_tick_result(sym: str, tf: str, res: Dict[str, Any]) -> str:
+    try:
+        d = res.get("decision") or {}
+        action = str(d.get("action") or "hold")
+        size = _as_str(d.get("size", "0"))
+        score = d.get("score")
+        lines = [f"*Tick* `{sym}` [{tf}] → **{action}** {size}"]
+        if score is not None:
+            lines.append(f"score = `{score:.3f}`")
+        # краткое объяснение, если есть
+        explain = d.get("explain") or {}
+        sigs = explain.get("signals") or {}
+        if sigs:
+            short = ", ".join(f"{k}={_short_num(v)}" for k, v in list(sigs.items())[:5])
+            lines.append(f"_signals_: {short}")
+        return "\n".join(lines)
+    except Exception:
+        return f"*Tick* `{sym}` [{tf}] → результат: `{res}`"
+
+
+def _format_why_last(sym: str, tf: str, row: Dict[str, Any]) -> str:
+    action = str(row.get("action") or "hold")
+    size = row.get("size") or "0"
+    score = row.get("score")
+    lines = [f"*Последнее решение* `{sym}` [{tf}] → **{action}** {size}"]
+    if score is not None:
+        lines.append(f"score = `{score:.3f}`" if isinstance(score, float) else f"score = `{score}`")
+
+    explain = row.get("explain") or {}
+    if isinstance(explain, dict):
+        sigs = explain.get("signals") or {}
+        blocks = explain.get("blocks") or {}
+        if sigs:
+            lines.append("_signals_: " + ", ".join(f"{k}={_short_num(v)}" for k, v in list(sigs.items())[:6]))
+        if blocks:
+            # покажем кратко, что блокировало/влияла
+            shown = []
+            for k, v in blocks.items():
+                if isinstance(v, (int, float, str, bool)):
+                    shown.append(f"{k}={v}")
+                if len(shown) >= 6:
+                    break
+            if shown:
+                lines.append("_blocks_: " + ", ".join(shown))
+
+    return "\n".join(lines)
+
+
+def _as_str(val: Any) -> str:
+    if isinstance(val, Decimal):
+        return format(val, "f")
+    return str(val)
+
+
+def _short_num(v: Any) -> str:
+    try:
+        f = float(v)
+        return f"{f:.3f}"
+    except Exception:
+        return str(v)
