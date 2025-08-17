@@ -1,31 +1,20 @@
 # python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.pkl
-
-# venv
+**/__pycache__/
+**/*.pyc
 .venv/
 venv/
-
-# tools / cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-# os
-.DS_Store
-Thumbs.db
+# build
+dist/
+build/
+*.egg-info/
 
-# project
+# env & local data
 .env
 /data/
 logs/
 charts/
 models/
-
-# builds
-dist/
-build/
-*.egg-info/

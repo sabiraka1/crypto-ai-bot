@@ -1,20 +1,14 @@
-# --- Web / ASGI ---
 fastapi==0.116.1
-uvicorn==0.35.0
-gunicorn==22.0.0
-python-dotenv>=1.0.1
+uvicorn[standard]==0.35.0
+gunicorn==21.2.0
 
-# --- Core ---
-pydantic>=2.11.0,<3
-typing-extensions>=4.9.0
-requests>=2.31.0
+pydantic==2.11.7
+python-dotenv==1.0.1
+requests==2.32.3
 
-# --- Data / indicators ---
-numpy>=2.0.0
-pandas>=2.2.0
+numpy>=1.26
+pandas>=2.2
 
-# --- Brokers ---
-ccxt>=4.3.0,<5
-
-# --- Optional / metrics client (можно не использовать, но не мешает) ---
+ccxt>=4.4.0
 prometheus-client>=0.20.0
+typing-inspection>=0.4.0
