@@ -1,107 +1,172 @@
+# src/crypto_ai_bot/utils/circuit_breaker.py
 from __future__ import annotations
-
 import time
-from collections import deque, defaultdict
-from typing import Any, Callable, Dict, Deque, Optional
-
-# простые метрики (наши)
-from crypto_ai_bot.utils.metrics import inc, set_gauge
+import threading
+from typing import Any, Callable, Dict, Optional, Tuple, List
 
 
 class CircuitBreaker:
     """
-    Пер-ключевой circuit breaker с состояниями: closed -> half-open -> open.
-    - fail_threshold: сколько подряд ошибок переводит в open
-    - open_seconds: сколько держать open до перехода в half-open
+    Простая реализация Circuit Breaker со статусами:
+      - closed     : вызовы проходят, считаем фейлы
+      - open       : вызовы блокируются на open_seconds
+      - half-open  : пробная попытка; успех -> closed, фейл -> open
+
+    Совместима с существующим вызовом:
+      breaker.call(fn, *, key="broker.fetch_ticker", timeout=2.0, fail_threshold=3, open_seconds=30, ...)
     """
 
-    def __init__(self) -> None:
-        # state per key: "closed" | "open" | "half-open"
-        self.state: Dict[str, str] = defaultdict(lambda: "closed")
-        self.fail_count: Dict[str, int] = defaultdict(int)
-        self.open_until: Dict[str, float] = {}
-        self.last_errors: Dict[str, Deque[str]] = defaultdict(lambda: deque(maxlen=10))
-        self.transitions_log: Deque[tuple[str, str, str, float]] = deque(maxlen=100)
+    def __init__(self, default_fail_threshold: int = 3, default_open_seconds: float = 30.0):
+        self._lock = threading.Lock()
+        self._state: Dict[str, Dict[str, Any]] = {}
+        self._default_fail_threshold = default_fail_threshold
+        self._default_open_seconds = default_open_seconds
+        # агрегированные метрики
+        self._counters: Dict[str, Dict[str, int]] = {}  # per key: attempts/successes/failures/opens/half_opens
+        # краткий лог переходов (per key)
+        self._transitions: Dict[str, List[Tuple[float, str, str]]] = {}  # (ts, from, to)
+        # последние ошибки
+        self._last_errors: Dict[str, str] = {}
 
-    # ---- helpers
+    # ---------- внутренние помощники ----------
+    def _now(self) -> float:
+        return time.time()
 
-    @staticmethod
-    def _state_to_value(s: str) -> float:
-        # для gauge: closed=0, half-open=0.5, open=1
-        return 0.0 if s == "closed" else (0.5 if s == "half-open" else 1.0)
+    def _ensure_key(self, key: str) -> None:
+        if key not in self._state:
+            self._state[key] = {
+                "state": "closed",
+                "failures": 0,
+                "opened_at": None,          # float|None
+                "last_transition": self._now(),
+                "fail_threshold": self._default_fail_threshold,
+                "open_seconds": self._default_open_seconds,
+            }
+            self._counters[key] = {"attempts": 0, "successes": 0, "failures": 0, "opens": 0, "half_opens": 0}
+            self._transitions[key] = []
 
-    def _transition(self, key: str, new_state: str) -> None:
-        old = self.state[key]
-        if old != new_state:
-            self.transitions_log.append((key, old, new_state, time.time()))
-            self.state[key] = new_state
-            # одна агрегированная метрика без лейблов (упрощаем экспорт)
-            set_gauge("circuit_state", self._state_to_value(new_state))
-            inc("broker_circuit_transitions_total", {"from": old, "to": new_state})
+    def _transition(self, key: str, to_state: str) -> None:
+        st = self._state[key]
+        frm = st["state"]
+        if frm == to_state:
+            return
+        st["state"] = to_state
+        st["last_transition"] = self._now()
+        if to_state == "open":
+            st["opened_at"] = self._now()
+            self._counters[key]["opens"] += 1
+        elif to_state == "half-open":
+            self._counters[key]["half_opens"] += 1
+        # лог переходов (держим компактно)
+        log = self._transitions[key]
+        log.append((self._now(), frm, to_state))
+        if len(log) > 32:
+            del log[: len(log) - 32]
 
-    # ---- public API
-
-    def get_state(self, key: str) -> str:
-        return self.state[key]
-
-    def get_stats(self, key: str) -> dict:
-        return {
-            "state": self.state[key],
-            "fail_count": self.fail_count.get(key, 0),
-            "open_until": self.open_until.get(key),
-            "last_errors": list(self.last_errors.get(key, [])),
-            "transitions": [t for t in list(self.transitions_log)[-10:] if t[0] == key],
-        }
-
-    def record_error(self, key: str, err: Exception) -> None:
-        self.last_errors[key].append(repr(err))
+    # ---------- публичное API ----------
+    def get_stats(self) -> Dict[str, Any]:
+        """Снимок состояния по всем ключам для health/details и метрик."""
+        with self._lock:
+            out = {}
+            for key, st in self._state.items():
+                out[key] = {
+                    "state": st["state"],
+                    "failures": st["failures"],
+                    "fail_threshold": st["fail_threshold"],
+                    "open_seconds": st["open_seconds"],
+                    "opened_at": st["opened_at"],
+                    "last_transition": st["last_transition"],
+                    "counters": dict(self._counters.get(key, {})),
+                    "last_error": self._last_errors.get(key),
+                    "transitions": list(self._transitions.get(key, [])),
+                }
+            return out
 
     def call(
         self,
-        fn: Callable[[], Any],
+        fn: Callable[..., Any],
         *,
         key: str,
-        timeout: float,
-        fail_threshold: int,
-        open_seconds: float,
+        timeout: Optional[float] = None,
+        fail_threshold: Optional[int] = None,
+        open_seconds: Optional[float] = None,
+        **kwargs: Any,
     ) -> Any:
         """
-        Обёртка вызова: учитывает состояние, обновляет метрики/состояния.
+        Выполняет вызов под контролем предохранителя.
+        - Если breaker открыт и время не истекло — бросит RuntimeError (или вернёт fallback, если передан через kwargs).
+        - Поддерживает кастомные пороги per-call через параметры.
+
+        Пример:
+            breaker.call(client.fetch_ticker, key="broker.fetch_ticker", timeout=2.0)
         """
-        now = time.time()
-        st = self.state[key]
+        fallback = kwargs.pop("fallback", None)
 
-        # если open — проверяем таймер
-        if st == "open":
-            if now < self.open_until.get(key, 0.0):
-                inc("broker_circuit_open_total")
-                raise RuntimeError("circuit_open")
-            # истёк таймер open → half-open
-            self._transition(key, "half-open")
-            st = "half-open"
+        with self._lock:
+            self._ensure_key(key)
+            st = self._state[key]
+            if fail_threshold is not None:
+                st["fail_threshold"] = int(fail_threshold)
+            if open_seconds is not None:
+                st["open_seconds"] = float(open_seconds)
 
+            state = st["state"]
+
+            # Если открыт — проверяем, не истёк ли таймер
+            if state == "open":
+                opened_at = st["opened_at"] or 0.0
+                if self._now() - opened_at < st["open_seconds"]:
+                    # ещё открыт
+                    if fallback is not None:
+                        return fallback()
+                    raise RuntimeError("circuit_open")
+                else:
+                    # пробуем half-open
+                    self._transition(key, "half-open")
+
+            self._counters[key]["attempts"] += 1
+
+        # Вызов без блокировки
+        err: Optional[BaseException] = None
+        result: Any = None
         try:
-            # сам вызов
-            start = time.perf_counter()
-            result = fn()
-            elapsed = time.perf_counter() - start
+            if timeout is not None:
+                # простая обёртка таймаута: для sync-IO делаем мягкий подход
+                # (ожидание таймаута как часть операции — реальный таймаут должен быть в клиенте)
+                result = fn(**kwargs)
+            else:
+                result = fn(**kwargs)
 
-            # успешный — сбрасываем счётчики и закрываем
-            self.fail_count[key] = 0
-            self._transition(key, "closed")
-            inc("broker_requests_total", {"code": "200"})
-            # грубая метрика длительности
-            set_gauge("broker_last_call_seconds", float(elapsed))
-            return result
+        except BaseException as e:
+            err = e
 
-        except Exception as exc:  # noqa: BLE001
-            self.record_error(key, exc)
-            self.fail_count[key] += 1
-            inc("broker_errors_total", {"type": exc.__class__.__name__})
+        with self._lock:
+            self._ensure_key(key)
+            st = self._state[key]
 
-            # half-open → один фэйл = опять open
-            if st in ("half-open", "closed") and self.fail_count[key] >= fail_threshold:
-                self.open_until[key] = now + float(open_seconds)
+            if err is None:
+                # успех
+                st["failures"] = 0
+                if st["state"] in ("half-open", "open"):
+                    self._transition(key, "closed")
+                self._counters[key]["successes"] += 1
+                return result
+
+            # ошибка
+            self._counters[key]["failures"] += 1
+            self._last_errors[key] = f"{type(err).__name__}: {err}"
+
+            st["failures"] += 1
+            if st["state"] == "half-open":
+                # неудачная проба — обратно в open
                 self._transition(key, "open")
+            else:
+                # closed: проверяем порог
+                if st["failures"] >= st["fail_threshold"]:
+                    self._transition(key, "open")
 
-            raise
+        # если есть fallback — используем
+        if fallback is not None:
+            return fallback()
+
+        raise err  # пробрасываем оригинальную ошибку
