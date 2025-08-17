@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/bot.py
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -75,12 +76,22 @@ class Bot:
     ) -> Dict[str, Any]:
         sym = normalize_symbol(symbol or self.cfg.SYMBOL)
         tf = normalize_timeframe(timeframe or self.cfg.TIMEFRAME)
-        lookback = int(limit or getattr(self.cfg, "LOOKBACK_LIMIT", 300))
+        lookback = int(limit or getattr(self.cfg, "LIMIT_BARS", 300))
         return uc_evaluate(self.cfg, self.broker, symbol=sym, timeframe=tf, limit=lookback)
 
     def execute(self, decision: Dict[str, Any]) -> Dict[str, Any]:
-        # Новый контракт: use_cases.place_order(cfg, broker, uow, repos, decision)
-        return uc_place_order(self.cfg, self.broker, self.uow, self.repos, decision)
+        # Совместимо с текущим контрактом UC.place_order(...)
+        return uc_place_order(
+            self.cfg,
+            self.broker,
+            positions_repo=self.positions_repo,
+            trades_repo=self.trades_repo,
+            audit_repo=self.audit_repo,
+            uow=self.uow,
+            decision=decision,
+            symbol=self.cfg.SYMBOL,
+            idem_repo=SqliteIdempotencyRepository(self.con),
+        )
 
     def eval_and_execute(
         self,
@@ -90,18 +101,21 @@ class Bot:
     ) -> Dict[str, Any]:
         sym = normalize_symbol(symbol or self.cfg.SYMBOL)
         tf = normalize_timeframe(timeframe or self.cfg.TIMEFRAME)
-        lookback = int(limit or getattr(self.cfg, "LOOKBACK_LIMIT", 300))
-        repos = {
-            "positions": self.positions_repo,
-            "trades": self.trades_repo,
-            "audit": self.audit_repo,
-        }
-        return uc_eval_and_execute(self.cfg, self.broker, repos, symbol=sym, timeframe=tf, limit=lookback)
+        lookback = int(limit or getattr(self.cfg, "LIMIT_BARS", 300))
+
+        # Объект с нужными атрибутами, как ожидает UC
+        repos_obj = type("Repos", (), {})()
+        repos_obj.positions = self.positions_repo
+        repos_obj.trades = self.trades_repo
+        repos_obj.audit = self.audit_repo
+        repos_obj.uow = self.uow
+        try:
+            repos_obj.idempotency = SqliteIdempotencyRepository(self.con)
+        except Exception:
+            repos_obj.idempotency = None
+
+        return uc_eval_and_execute(self.cfg, self.broker, repos_obj, symbol=sym, timeframe=tf, limit=lookback)
 
     def get_status(self) -> Dict[str, Any]:
-        mode = "paper" if getattr(self.cfg, "PAPER_MODE", True) else "live"
-        return {
-            "mode": mode,
-            "symbol": self.cfg.SYMBOL,
-            "timeframe": self.cfg.TIMEFRAME,
-        }
+        mode = "paper" if getattr(self.cfg, "MODE", "paper") == "paper" else "live"
+        return {"mode": mode, "symbol": self.cfg.SYMBOL, "timeframe": self.cfg.TIMEFRAME}

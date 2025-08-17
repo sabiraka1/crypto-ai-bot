@@ -1,9 +1,9 @@
 # scripts/backtest_cli.py
 from __future__ import annotations
+
 import argparse
 import csv
-from types import SimpleNamespace
-from typing import Dict, Any
+from typing import Any, Dict
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
@@ -15,14 +15,10 @@ from crypto_ai_bot.core.storage.uow import SqliteUnitOfWork
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
 from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
-try:
-    from crypto_ai_bot.core.storage.repositories.decisions import SqliteDecisionsRepository
-except Exception:
-    SqliteDecisionsRepository = None
 from crypto_ai_bot.core.storage.repositories.idempotency import SqliteIdempotencyRepository
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
     ap.add_argument("--symbol", default="BTC/USDT")
@@ -40,26 +36,25 @@ def main():
     setattr(cfg, "SYMBOL", normalize_symbol(args.symbol))
     setattr(cfg, "TIMEFRAME", normalize_timeframe(args.timeframe))
     setattr(cfg, "LIMIT_BARS", int(args.limit))
-    # настройки для симулятора (читаются реализацией backtest/paper, если поддерживает)
+    # Настройки для симулятора (читаются реализацией backtest/paper, если поддерживает)
     setattr(cfg, "FEE_BPS", float(args.fee_bps))
     setattr(cfg, "SLIPPAGE_BPS", float(args.slippage_bps))
 
     broker = create_broker(cfg)
 
-    con = connect(getattr(cfg, "DB_PATH", "crypto.db"))
-    repos = SimpleNamespace(
-        positions=SqlitePositionRepository(con),
-        trades=SqliteTradeRepository(con),
-        audit=SqliteAuditRepository(con),
-        uow=SqliteUnitOfWork(con),
-        idempotency=SqliteIdempotencyRepository(con),
-        decisions=SqliteDecisionsRepository(con) if SqliteDecisionsRepository else None,
-    )
+    con = connect(getattr(cfg, "DB_PATH", "data/bot.sqlite"))
 
-    # простой проход по CSV для прогрева, сам broker/backtest читает из своих источников;
-    # нам важен сам цикл eval_and_execute, чтобы проверить логику end-to-end
+    # Repos с нужными атрибутами
+    repos = type("Repos", (), {})()
+    repos.positions = SqlitePositionRepository(con)
+    repos.trades = SqliteTradeRepository(con)
+    repos.audit = SqliteAuditRepository(con)
+    repos.uow = SqliteUnitOfWork(con)
+    repos.idempotency = SqliteIdempotencyRepository(con)
+
+    # Простой проход по CSV для прогрева; источник OHLCV использует сам broker.backtest
     with open(args.csv, "r", newline="") as f:
-        _ = list(csv.reader(f))  # прогрев
+        _ = list(csv.reader(f))
 
     steps = 0
     for _ in range(int(args.limit)):
