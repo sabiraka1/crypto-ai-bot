@@ -14,13 +14,13 @@ from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.http_client import get_http_client
+from crypto_ai_bot.utils.alerts import AlertState, send_telegram_alert
 
 from crypto_ai_bot.app.adapters import telegram as tg_adapter
 
 from crypto_ai_bot.core.brokers.base import create_broker
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
 
-from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
 
 from crypto_ai_bot.core.storage.sqlite_adapter import connect
@@ -41,8 +41,8 @@ except Exception:
     def measure_time_drift(cfg=None, http=None, *, urls: Optional[List[str]] = None, timeout: float = 1.5) -> Optional[int]:
         return None
 
-# bus wiring
-from crypto_ai_bot.app.bus_wiring import build_bus
+# bus wiring + квантили
+from crypto_ai_bot.app.bus_wiring import build_bus, snapshot_quantiles
 
 # orchestrator (опционально)
 try:
@@ -59,7 +59,6 @@ HTTP = get_http_client()
 
 CONN = connect(getattr(CFG, "DB_PATH", "crypto.db"))
 
-# Контейнер репозиториев, совместимый с контрактом use_cases.eval_and_execute()
 class _Repos:
     def __init__(self, con):
         self.positions = SqlitePositionRepository(con)
@@ -71,19 +70,20 @@ class _Repos:
 
 REPOS = _Repos(CONN)
 
-# Event Bus + брокер
 BUS = build_bus(CFG, REPOS)
 BROKER = create_broker(CFG, bus=BUS)
 
 metrics.inc("app_start_total", {"mode": getattr(CFG, "MODE", "unknown")})
 metrics.inc("broker_created_total", {"mode": getattr(CFG, "MODE", "unknown")})
 
-# --- lifecycle: опциональный автозапуск оркестратора ---
+# --- lifecycle: оркестратор + алерт-монитор ---
 _ORCH_TASK: Optional[asyncio.Task] = None
+_ALERT_TASK: Optional[asyncio.Task] = None
+_ALERTS = AlertState()
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    global _ORCH_TASK
+    global _ORCH_TASK, _ALERT_TASK
     if getattr(CFG, "ORCHESTRATOR_AUTOSTART", False) and Orchestrator is not None:
         orch = Orchestrator(CFG, BROKER, REPOS, bus=BUS)
         set_global_orchestrator(orch)  # type: ignore
@@ -93,12 +93,100 @@ async def _on_startup() -> None:
                 await asyncio.sleep(3600)
         _ORCH_TASK = asyncio.create_task(_runner(), name="orch-runner")
 
+    # Алерт на DLQ и p99-пороги
+    _ALERT_TASK = asyncio.create_task(_alerts_runner(), name="alerts-runner")
+
+
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
-    global _ORCH_TASK
+    global _ORCH_TASK, _ALERT_TASK
     if _ORCH_TASK:
         _ORCH_TASK.cancel()
         _ORCH_TASK = None
+    if _ALERT_TASK:
+        _ALERT_TASK.cancel()
+        _ALERT_TASK = None
+
+
+async def _alerts_runner() -> None:
+    """
+    - DLQ: если DLQ > 0 и включены алерты — отправляем раз в ALERT_DLQ_EVERY_SEC.
+    - LATENCY p99: если включено ALERT_ON_LATENCY и p99 превышает порог — шлём алерт (кулдаун общий 5 мин).
+    """
+    cooldown_dlq = int(getattr(CFG, "ALERT_DLQ_EVERY_SEC", 300))
+    cooldown_p99 = 300  # 5 минут
+    while True:
+        try:
+            # --- DLQ ---
+            if getattr(CFG, "ALERT_ON_DLQ", True):
+                size = 0
+                try:
+                    h = BUS.health()
+                    # поддержим разные ключи
+                    size = int(h.get("dlq_size") or h.get("dlq_len") or h.get("dlq", 0) or 0)
+                except Exception:
+                    size = 0
+
+                if size > 0 and _ALERTS.should_send("dlq", cooldown_sec=cooldown_dlq, value=size):
+                    _try_alert(f"⚠️ <b>DLQ</b>: {size} сообщений в очереди ошибок.")
+
+            # --- LATENCY p99 ---
+            if getattr(CFG, "ALERT_ON_LATENCY", False):
+                snap = snapshot_quantiles()
+                # Глобальные пороги в мс; 0 — отключено
+                thr_dec = int(getattr(CFG, "DECISION_LATENCY_P99_ALERT_MS", 0))
+                thr_ord = int(getattr(CFG, "ORDER_LATENCY_P99_ALERT_MS", 0))
+                thr_flow = int(getattr(CFG, "FLOW_LATENCY_P99_ALERT_MS", 0))
+
+                # decision
+                if thr_dec > 0:
+                    for key, vv in snap.items():
+                        if not key.startswith("decision:"):
+                            continue
+                        p99 = float(vv.get("p99", 0.0))
+                        if p99 and p99 > thr_dec and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
+                            _try_alert(f"⏱️ <b>Decision p99</b> {key} = {int(p99)}ms > {thr_dec}ms")
+
+                # order
+                if thr_ord > 0:
+                    for key, vv in snap.items():
+                        if not key.startswith("order:"):
+                            continue
+                        p99 = float(vv.get("p99", 0.0))
+                        if p99 and p99 > thr_ord and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
+                            _try_alert(f"⏱️ <b>Order p99</b> {key} = {int(p99)}ms > {thr_ord}ms")
+
+                # flow
+                if thr_flow > 0:
+                    for key, vv in snap.items():
+                        if not key.startswith("flow:"):
+                            continue
+                        p99 = float(vv.get("p99", 0.0))
+                        if p99 and p99 > thr_flow and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
+                            _try_alert(f"⏱️ <b>Flow p99</b> {key} = {int(p99)}ms > {thr_flow}ms")
+
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            # не ломаем сервер из-за алерт-петли
+            pass
+        await asyncio.sleep(5)
+
+
+def _try_alert(text: str) -> None:
+    token = getattr(CFG, "TELEGRAM_BOT_TOKEN", None)
+    chat_id = getattr(CFG, "ALERT_TELEGRAM_CHAT_ID", None)
+    ok = False
+    if token and chat_id:
+        ok = send_telegram_alert(HTTP, token, chat_id, text)
+    metrics.inc("alerts_sent_total", {"ok": "1" if ok else "0"})
+    try:
+        # полезно иметь копию в логах
+        from logging import getLogger
+        getLogger("alerts").warning(text)
+    except Exception:
+        pass
+
 
 def _safe_config(cfg: Settings) -> Dict[str, Any]:
     SAFE_PREFIXES = ("API_", "SECRET", "TOKEN", "PASSWORD", "WEBHOOK", "TELEGRAM")
@@ -130,6 +218,7 @@ def _health_matrix(components: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> JSONResponse:
+    # DB
     t0 = time.time()
     db_ok = True
     db_error = None
@@ -141,11 +230,13 @@ def health() -> JSONResponse:
         db_latency_ms = int((time.time() - t0) * 1000)
         db_error = f"{type(e).__name__}: {e}"
 
+    # Broker
     b0 = time.time()
     broker_ok = True
     broker_detail = None
     try:
         BRECKER_CALL = lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT"))
+        # краткий вызов через breaker, без fallback-параметров
         BREAKER.call(BRECKER_CALL, key="broker.fetch_ticker", timeout=2.0)
     except Exception as e:
         broker_ok = False
@@ -174,11 +265,6 @@ def health() -> JSONResponse:
     return JSONResponse({**rollup, "components": comps})
 
 
-@app.get("/health/details")
-def health_details() -> JSONResponse:
-    return JSONResponse({"breakers": BREAKER.get_stats()})
-
-
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
     base = metrics.export()
@@ -201,26 +287,21 @@ def config_public() -> JSONResponse:
     return JSONResponse(_safe_config(CFG))
 
 
-@app.get("/status")
-def status() -> JSONResponse:
-    # Быстрый обзор состояния бота для live/paper
-    open_positions = []
-    try:
-        open_positions = REPOS.positions.get_open() or []
-    except Exception:
-        open_positions = []
-    broker_ok = True
-    try:
-        BREAKER.call(lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT")), key="broker.fetch_ticker", timeout=1.5)
-    except Exception:
-        broker_ok = False
-
+@app.get("/alerts/status")
+def alerts_status() -> JSONResponse:
+    """
+    Показать текущие пороги и факт включения алертов.
+    """
     return JSONResponse({
-        "mode": getattr(CFG, "MODE", "unknown"),
-        "symbol": getattr(CFG, "SYMBOL", "BTC/USDT"),
-        "timeframe": getattr(CFG, "TIMEFRAME", "1h"),
-        "open_positions": len(open_positions),
-        "broker": "ok" if broker_ok else "error",
+        "on_dlq": getattr(CFG, "ALERT_ON_DLQ", True),
+        "dlq_every_sec": getattr(CFG, "ALERT_DLQ_EVERY_SEC", 300),
+        "on_latency": getattr(CFG, "ALERT_ON_LATENCY", False),
+        "p99_thresholds_ms": {
+            "decision": getattr(CFG, "DECISION_LATENCY_P99_ALERT_MS", 0),
+            "order": getattr(CFG, "ORDER_LATENCY_P99_ALERT_MS", 0),
+            "flow": getattr(CFG, "FLOW_LATENCY_P99_ALERT_MS", 0),
+        },
+        "telegram_chat_id_set": bool(getattr(CFG, "ALERT_TELEGRAM_CHAT_ID", None)),
     })
 
 
@@ -236,33 +317,6 @@ def tick(body: Dict[str, Any] = Body(default=None)) -> JSONResponse:
         return JSONResponse({"status": "error", "error": f"tick_failed: {type(e).__name__}: {e}"})
 
 
-@app.get("/last")
-def last(limit: int = Query(1, ge=1, le=200)) -> JSONResponse:
-    if not getattr(REPOS, "decisions", None):
-        return JSONResponse({"status": "error", "error": "decisions_repo_unavailable"})
-    rows = REPOS.decisions.list_recent(limit=limit)
-    return JSONResponse({"status": "ok", "items": rows})
-
-
-@app.get("/positions/open")
-def positions_open() -> JSONResponse:
-    items = REPOS.positions.get_open() or []
-    return JSONResponse({"status": "ok", "items": items})
-
-
-@app.get("/orders/recent")
-def orders_recent(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
-    items = REPOS.trades.list_recent(limit=limit) or []
-    return JSONResponse({"status": "ok", "items": items})
-
-
-@app.post("/alerts/test")
-def alerts_test(message: Optional[str] = Query(None)) -> JSONResponse:
-    metrics.inc("alerts_test_total", {"mode": getattr(CFG, "MODE", "unknown")})
-    return JSONResponse({"status": "ok", "echo": message or "pong"})
-
-
-# --- Bus endpoints ---
 @app.get("/bus/health")
 def bus_health() -> JSONResponse:
     try:

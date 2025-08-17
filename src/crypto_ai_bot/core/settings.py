@@ -16,17 +16,12 @@ class _DecisionProfile:
 
 
 class Settings:
-    """
-    Единственная точка чтения ENV и дефолтов.
-    ВНИМАНИЕ: во всём проекте нельзя читать os.getenv вне этого файла.
-    """
-
     # --- базовые режимы ---
-    MODE: str = os.getenv("MODE", "paper").lower()  # live | paper | backtest
+    MODE: str = os.getenv("MODE", "paper").lower()
     SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
     TIMEFRAME: str = os.getenv("TIMEFRAME", "1h")
     LIMIT_BARS: int = int(os.getenv("LIMIT_BARS", "300"))
-    LOOKBACK_LIMIT: int = LIMIT_BARS  # исторический алиас
+    LOOKBACK_LIMIT: int = LIMIT_BARS
 
     ENABLE_TRADING: bool = os.getenv("ENABLE_TRADING", "false").lower() in {"1", "true", "yes"}
     SAFE_MODE: bool = os.getenv("SAFE_MODE", "true").lower() in {"1", "true", "yes"}
@@ -40,11 +35,11 @@ class Settings:
     MAINTENANCE_SEC: int = int(os.getenv("MAINTENANCE_SEC", "60"))
     ORCHESTRATOR_AUTOSTART: bool = os.getenv("ORCHESTRATOR_AUTOSTART", "false").lower() in {"1", "true", "yes"}
 
-    # --- Rate limits (use-cases) ---
+    # --- Rate limits ---
     RL_EVALUATE_PER_MIN: int = int(os.getenv("RL_EVALUATE_PER_MIN", "60"))
     RL_ORDERS_PER_MIN: int = int(os.getenv("RL_ORDERS_PER_MIN", "10"))
 
-    # --- брокер (ccxt/paper/backtest) ---
+    # --- брокер ---
     EXCHANGE: str = os.getenv("EXCHANGE", "binance")
     API_KEY: Optional[str] = os.getenv("API_KEY") or None
     API_SECRET: Optional[str] = os.getenv("API_SECRET") or None
@@ -53,8 +48,8 @@ class Settings:
     # --- идемпотентность ---
     IDEMPOTENCY_TTL_SEC: int = int(os.getenv("IDEMPOTENCY_TTL_SEC", "300"))
 
-    # --- time sync / drift ---
-    TIME_DRIFT_LIMIT_MS: int = int(os.getenv("TIME_DRIFT_LIMIT_MS", "1000"))  # 1s
+    # --- time sync ---
+    TIME_DRIFT_LIMIT_MS: int = int(os.getenv("TIME_DRIFT_LIMIT_MS", "1000"))
     TIME_DRIFT_URLS: List[str] = [
         u.strip() for u in os.getenv("TIME_DRIFT_URLS", "").split(",") if u.strip()
     ] or [
@@ -67,7 +62,7 @@ class Settings:
     # --- бэктест ---
     BACKTEST_CSV_PATH: str = os.getenv("BACKTEST_CSV_PATH", "data/backtest.csv")
 
-    # --- базовые параметры риск/размер ---
+    # --- риск/размер ---
     POSITION_SIZE: str = os.getenv("POSITION_SIZE", "0.00")
     STOP_LOSS_PCT: float | None = float(os.getenv("STOP_LOSS_PCT")) if os.getenv("STOP_LOSS_PCT") else None
     TAKE_PROFIT_PCT: float | None = float(os.getenv("TAKE_PROFIT_PCT")) if os.getenv("TAKE_PROFIT_PCT") else None
@@ -75,6 +70,8 @@ class Settings:
 
     # --- Telegram / webhooks ---
     TELEGRAM_WEBHOOK_SECRET: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET") or None
+    TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN") or None
+    ALERT_TELEGRAM_CHAT_ID: Optional[str] = os.getenv("ALERT_TELEGRAM_CHAT_ID") or None
 
     # --- профиль решений ---
     DECISION_PROFILE: str = os.getenv("DECISION_PROFILE", "balanced").lower()
@@ -90,20 +87,21 @@ class Settings:
     # --- Event Bus ---
     BUS_DLQ_MAX: int = int(os.getenv("BUS_DLQ_MAX", "1000"))
 
-    # --- helpers ---
+    # --- Алерты ---
+    ALERT_ON_DLQ: bool = os.getenv("ALERT_ON_DLQ", "true").lower() in {"1", "true", "yes"}
+    ALERT_DLQ_EVERY_SEC: int = int(os.getenv("ALERT_DLQ_EVERY_SEC", "300"))
 
-    @dataclass
-    class _DecisionProfileData:
-        name: str
-        rule_weight: float
-        ai_weight: float
-        buy_threshold: float
-        sell_threshold: float
+    ALERT_ON_LATENCY: bool = os.getenv("ALERT_ON_LATENCY", "false").lower() in {"1", "true", "yes"}
+    # Пороги p99 (мс). Можно задавать глобально; при 0 — отключить конкретный тип
+    DECISION_LATENCY_P99_ALERT_MS: int = int(os.getenv("DECISION_LATENCY_P99_ALERT_MS", "0"))
+    ORDER_LATENCY_P99_ALERT_MS: int = int(os.getenv("ORDER_LATENCY_P99_ALERT_MS", "0"))
+    FLOW_LATENCY_P99_ALERT_MS: int = int(os.getenv("FLOW_LATENCY_P99_ALERT_MS", "0"))
 
+    # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {
-        "conservative": _DecisionProfile(name="conservative", rule_weight=0.75, ai_weight=0.25, buy_threshold=0.65, sell_threshold=0.35),
-        "balanced":    _DecisionProfile(name="balanced",    rule_weight=0.50, ai_weight=0.50, buy_threshold=0.55, sell_threshold=0.45),
-        "aggressive":  _DecisionProfile(name="aggressive",  rule_weight=0.35, ai_weight=0.65, buy_threshold=0.52, sell_threshold=0.48),
+        "conservative": _DecisionProfile("conservative", 0.75, 0.25, 0.65, 0.35),
+        "balanced":     _DecisionProfile("balanced",     0.50, 0.50, 0.55, 0.45),
+        "aggressive":   _DecisionProfile("aggressive",   0.35, 0.65, 0.52, 0.48),
     }
 
     def _profile_base(self) -> _DecisionProfile:
