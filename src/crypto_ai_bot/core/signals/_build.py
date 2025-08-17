@@ -1,124 +1,96 @@
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple
 from decimal import Decimal
 from datetime import datetime, timezone
 
-import pandas as pd  # runtime dep ensured in requirements
-import numpy as np
+import pandas as pd
 
 from crypto_ai_bot.core.brokers import normalize_symbol, normalize_timeframe
-from crypto_ai_bot.core.indicators import unified as IND
+from crypto_ai_bot.core.indicators import unified as ind
+from crypto_ai_bot.core.validators.dataframe import require_ohlcv
 
-# ---- helpers -----------------------------------------------------------------
 
-def _safe_last(series: pd.Series, default: float = float("nan")) -> float:
-    try:
-        return float(series.iloc[-1])
-    except Exception:
-        return default
+def _to_utc(ts_ms: int) -> datetime:
+    # безопасная конверсия миллисекунд в UTC-aware datetime
+    return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
 
-def _compute_spread_pct(ticker: Dict[str, Any]) -> Optional[float]:
-    try:
-        bid = float(ticker.get("bid"))
-        ask = float(ticker.get("ask"))
-        if bid > 0 and ask > 0 and ask >= bid:
-            mid = 0.5 * (ask + bid)
-            if mid > 0:
-                return (ask - bid) / mid * 100.0
-    except Exception:
-        pass
-    return None
 
-def _ensure_min_len(df: pd.DataFrame, n: int) -> bool:
-    try:
-        return len(df) >= n
-    except Exception:
-        return False
-
-# ---- public (internal) API ---------------------------------------------------
-
-def build(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
-    """Собирает feature-set: OHLCV → индикаторы → normalize → context.
-    Без обращения к БД. Только broker + векторные индикаторы.
-    Возвращает dict со структурой, пригодной для policy/fusion/risk.
+def _prep_dataframe(ohlcv: list[list[float]]) -> pd.DataFrame:
     """
-    sym = normalize_symbol(symbol or cfg.SYMBOL)
-    tf = normalize_timeframe(timeframe or cfg.TIMEFRAME)
+    Превращаем OHLCV массив в DataFrame стандарта: [ts, open, high, low, close, volume]
+    """
+    df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
+    df = require_ohlcv(df)
+    return df
 
-    # Fetch OHLCV
-    raw = broker.fetch_ohlcv(sym, tf, limit)  # [[ts, o, h, l, c, v], ...]
-    if not raw or len(raw) < 50:
-        raise ValueError("not_enough_ohlcv")
 
-    df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
-    # normalize types
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-    for col in ("open","high","low","close","volume"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+def _calc_indicators(df: pd.DataFrame) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    """
+    Возвращает:
+      - indicators: плоский словарь с основными сигналами
+      - market: текущий срез рынка (price/ts)
+    """
+    closes = df["close"]
+    highs = df["high"]
+    lows = df["low"]
 
-    # Indicators (centralized in IND)
-    # Use common defaults
-    ema_fast_n, ema_slow_n = 20, 50
-    rsi_n = 14
-    macd_fast, macd_slow, macd_signal = 12, 26, 9
-    atr_n = 14
+    # Базовый набор: EMA(20/50), RSI(14), MACD, ATR(14) + ATR в процентах
+    ema20 = ind.ema(closes, 20).iloc[-1]
+    ema50 = ind.ema(closes, 50).iloc[-1]
+    rsi14 = ind.rsi(closes, 14).iloc[-1]
 
-    ema_fast = IND.ema(df["close"], ema_fast_n)
-    ema_slow = IND.ema(df["close"], ema_slow_n)
-    rsi = IND.rsi(df["close"], rsi_n)
-    macd_line, macd_signal_s, macd_hist = IND.macd(df["close"], macd_fast, macd_slow, macd_signal)
-    atr = IND.atr(df["high"], df["low"], df["close"], atr_n)
+    macd_line, macd_signal, macd_hist = ind.macd(closes)  # дефолты (12,26,9)
+    macd_hist_last = macd_hist.iloc[-1]
 
-    # Aggregate last values
-    last_close = _safe_last(df["close"])
-    last_ts = df["ts"].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc)
+    atr14 = ind.atr(highs, lows, closes, 14).iloc[-1]
+    price = float(closes.iloc[-1])
+    atr_pct = float(atr14) / price if price != 0 else 0.0
 
-    atr_pct = float("nan")
-    if last_close and last_close > 0 and _ensure_min_len(atr, atr_n):
-        atr_pct = float(_safe_last(atr) / last_close * 100.0)
-
-    # Ticker/spread
-    ticker = {}
-    try:
-        ticker = broker.fetch_ticker(sym) or {}
-    except Exception:
-        ticker = {}
-
-    spread_pct = _compute_spread_pct(ticker)
-
-    # Context
-    ctx = {
-        "hour": last_ts.hour,                         # UTC hour of last candle
-        "spread_pct": spread_pct,                     # None if bid/ask unknown
-        "price": float(last_close),
-        "ts": int(last_ts.timestamp() * 1000),
-        # optional fields (left None for now; can be filled by higher layers)
-        "day_drawdown_pct": None,
-        "seq_losses": None,
-        "exposure_pct": None,
-        "exposure_usd": None,
+    indicators = {
+        "ema_fast": float(ema20),
+        "ema_slow": float(ema50),
+        "rsi": float(rsi14),
+        "macd_hist": float(macd_hist_last),
+        "atr": float(atr14),
+        "atr_pct": float(atr_pct),
     }
 
-    features = {
-        "symbol": sym,
-        "timeframe": tf,
-        "indicators": {
-            "ema_fast": float(_safe_last(ema_fast)),
-            "ema_slow": float(_safe_last(ema_slow)),
-            "rsi": float(_safe_last(rsi)),
-            "macd_hist": float(_safe_last(macd_hist)),
-            "atr": float(_safe_last(atr)),
-            "atr_pct": float(atr_pct),
-        },
-        "market": {
-            "price": float(last_close),
-            "ts": int(last_ts.timestamp() * 1000),
-        },
-        "context": ctx,
-        # placeholders for scoring layers (policy/_fusion will use them)
+    market = {
+        "price": Decimal(str(price)),
+        "ts": _to_utc(int(df["ts"].iloc[-1])),
+    }
+
+    return indicators, market
+
+
+def build(cfg, broker, *, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
+    """
+    Приватный билдер фич: OHLCV → индикаторы → нормализация.
+    Никаких HTTP/ENV/БД. Только broker.fetch_ohlcv().
+    """
+    sym = normalize_symbol(symbol)
+    tf = normalize_timeframe(timeframe)
+
+    # 1) Загружаем OHLCV
+    ohlcv = broker.fetch_ohlcv(sym, tf, limit)
+    df = _prep_dataframe(ohlcv)
+
+    # 2) Индикаторы + рыночный срез
+    indicators, market = _calc_indicators(df)
+
+    # 3) Контекст для risk-правил (bars — критично для check_min_history)
+    context = {
+        "bars": int(len(df)),
+        # "exposure":  None,   # можно проложить позже из PositionTracker при желании
+        # "time_drift_ms": None,  # жёсткий стоп по drift делаем в policy/health
+    }
+
+    features: Dict[str, Any] = {
+        "indicators": indicators,
+        "market": market,
+        "context": context,
         "rule_score": None,
         "ai_score": None,
     }
-
     return features

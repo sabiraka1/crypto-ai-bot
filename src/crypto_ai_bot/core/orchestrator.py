@@ -1,58 +1,91 @@
-
 from __future__ import annotations
 
 import asyncio
-import time
-from typing import Callable, Awaitable, Optional
-
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.core.bot import Bot
+import random
+from typing import Callable, Awaitable, List, Optional, Any
 
 
 class Orchestrator:
-    """Простой планировщик циклов. По умолчанию сам создаёт Bot,
-    а Bot — брокера через фабрику (см. core/bot.py).
+    """
+    Планировщик фоновых задач бота.
+    - Не знает ничего про HTTP, ccxt и т.д.
+    - Работает с уже сконструированными зависимостями (cfg, bot, repos).
     """
 
-    def __init__(self, cfg: Settings, bot: Optional[Bot] = None) -> None:
+    def __init__(self, cfg, bot, repos, loop: Optional[asyncio.AbstractEventLoop] = None):
         self.cfg = cfg
-        self.bot = bot or Bot(cfg)
-        self._tasks: list[asyncio.Task] = []
-        self._stopping = False
+        self.bot = bot
+        self.repos = repos
+        self.loop = loop or asyncio.get_event_loop()
+
+        self._running: bool = False
+        self._tasks: List[asyncio.Task] = []
+
+    # ------------- публичный API -------------
 
     def schedule_every(
         self,
         seconds: float,
-        fn: Callable[[], Awaitable[None]],
+        fn: Callable[[], Awaitable[Any]] | Callable[[], Any],
         *,
         jitter: float = 0.1,
-    ) -> asyncio.Task:
-        async def runner() -> None:
-            while not self._stopping:
-                t0 = time.perf_counter()
+        name: Optional[str] = None,
+    ) -> None:
+        """
+        Планирует периодический вызов fn.
+        jitter – относительный (0.1 = ±10%).
+        """
+        async def _runner():
+            # небольшой рандом при старте, чтобы не стрелять синхронно
+            await asyncio.sleep(random.uniform(0, seconds * jitter))
+            while self._running:
                 try:
-                    await fn()
-                except Exception:  # pragma: no cover
-                    # логирование оставляем на уровень utils.logging, если подключён
+                    res = fn()
+                    if asyncio.iscoroutine(res):
+                        await res  # type: ignore[func-returns-value]
+                except Exception:
+                    # никаких падений оркестратора — ошибки уже логируются в самом fn
                     pass
-                elapsed = time.perf_counter() - t0
-                delay = max(0.0, seconds - elapsed)
-                # небольшой джиттер, чтобы петли не совпадали
-                if jitter:
-                    delay *= 1.0 + jitter * 0.1
-                await asyncio.sleep(delay)
+                # следующий запуск
+                await asyncio.sleep(seconds * random.uniform(1 - jitter, 1 + jitter))
 
-        task = asyncio.create_task(runner())
+        task = self.loop.create_task(_runner(), name=name or f"periodic-{getattr(fn, '__name__', 'job')}")
         self._tasks.append(task)
-        return task
 
     async def start(self) -> None:
-        self._stopping = False
+        if self._running:
+            return
+        self._running = True
+
+        # ---- обслуживание: периодически обновляем метрики позиций/экспозиции
+        # частота берётся из настроек, по умолчанию 30 секунд
+        refresh_sec = getattr(self.cfg, "METRICS_REFRESH_SEC", 30)
+        if getattr(self.repos, "tracker", None):
+            def _update_metrics_safely():
+                try:
+                    self.repos.tracker.update_metrics()
+                except Exception:
+                    # намеренно молчим – метрики не должны валить оркестратор
+                    pass
+
+            self.schedule_every(refresh_sec, _update_metrics_safely, jitter=0.2, name="positions-metrics")
 
     async def stop(self) -> None:
-        self._stopping = True
+        if not self._running:
+            return
+        self._running = False
+
+        # мягкая остановка
         for t in self._tasks:
             t.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+
+
+# Фабричная функция — удобно вызывать там, где инициализируется бот
+def create_default_orchestrator(cfg, bot, repos) -> Orchestrator:
+    """
+    Конструирует оркестратор и включает обслуживание метрик (если доступен tracker).
+    """
+    return Orchestrator(cfg=cfg, bot=bot, repos=repos)

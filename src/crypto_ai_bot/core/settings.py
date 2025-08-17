@@ -93,6 +93,11 @@ class Settings:
     # --- риски/пороги ---
     IDEMPOTENCY_TTL_SECONDS: int = field(default_factory=lambda: _to_int(os.getenv("IDEMPOTENCY_TTL_SECONDS"), 300))
 
+    # --- Risk / exposure / history ---
+    MIN_HISTORY_BARS: int = field(default_factory=lambda: _to_int(os.getenv("MIN_HISTORY_BARS"), 300))
+    MAX_EXPOSURE_UNITS: str = field(default_factory=lambda: os.getenv("MAX_EXPOSURE_UNITS", "0"))
+
+
     # --- time sync / health ---
     TIME_DRIFT_LIMIT_MS: int = field(default_factory=lambda: _to_int(os.getenv("TIME_DRIFT_LIMIT_MS"), 1000))
     # Через запятую. Можно оставить пустым — дефолты возьмём в utils/time_sync.py
