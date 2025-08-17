@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, List
 
 
 @dataclass
@@ -33,10 +33,13 @@ class Settings:
     TICK_PERIOD_SEC: int = int(os.getenv("TICK_PERIOD_SEC", "60"))
     METRICS_REFRESH_SEC: int = int(os.getenv("METRICS_REFRESH_SEC", "30"))
     MAINTENANCE_SEC: int = int(os.getenv("MAINTENANCE_SEC", "60"))
+
     # --- Rate limits (use-cases) ---
+    # Базовые имена
     RL_EVALUATE_PER_MIN: int = int(os.getenv("RL_EVALUATE_PER_MIN", "60"))
     RL_ORDERS_PER_MIN: int = int(os.getenv("RL_ORDERS_PER_MIN", "10"))
-
+    # Дополнительные лимиты (опционально)
+    RL_MARKET_CONTEXT_PER_HOUR: int = int(os.getenv("RL_MARKET_CONTEXT_PER_HOUR", "100"))
 
     # --- брокер (ccxt/paper/backtest) ---
     EXCHANGE: str = os.getenv("EXCHANGE", "binance")
@@ -44,16 +47,27 @@ class Settings:
     API_SECRET: Optional[str] = os.getenv("API_SECRET") or None
     SUBACCOUNT: Optional[str] = os.getenv("SUBACCOUNT") or None
 
+    # --- база данных ---
+    DB_PATH: str = os.getenv("DB_PATH", "data/bot.sqlite")
+
+    # --- Telegram ---
+    TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN") or None
+    TELEGRAM_SECRET_TOKEN: Optional[str] = os.getenv("TELEGRAM_SECRET_TOKEN") or None
+
     # --- идемпотентность ---
     IDEMPOTENCY_TTL_SEC: int = int(os.getenv("IDEMPOTENCY_TTL_SEC", "300"))
 
     # --- time sync / drift ---
-    TIME_DRIFT_LIMIT_MS: int = int(os.getenv("TIME_DRIFT_LIMIT_MS", "1000"))  # 1s
-    TIME_DRIFT_URLS: list[str] = [
-        u.strip() for u in os.getenv("TIME_DRIFT_URLS", "").split(",") if u.strip()
-    ]
+    TIME_DRIFT_LIMIT_MS: int = int(
+        os.getenv("TIME_DRIFT_LIMIT_MS", os.getenv("MAX_TIME_DRIFT_MS", "1000"))
+    )
+    TIME_DRIFT_URLS: List[str] = [
+        u.strip()
+        for u in (os.getenv("TIME_DRIFT_URLS") or "").split(",")
+        if u.strip()
+    ] or ["https://worldtimeapi.org/api/timezone/Etc/UTC"]
 
-     or ["https://worldtimeapi.org/api/timezone/Etc/UTC"]# --- бэктест ---
+    # --- бэктест ---
     BACKTEST_CSV_PATH: str = os.getenv("BACKTEST_CSV_PATH", "data/backtest.csv")
 
     # --- базовые параметры риск/размер ---
@@ -161,11 +175,25 @@ class Settings:
             "thresholds": {"buy": buy, "sell": sell},
         }
 
-    # Фабрика: можно будет расширять (валидация, кросс-проверки)
+    # Фабрика: доп. валидации/алиасы
     @classmethod
     def build(cls) -> "Settings":
         s = cls()
-        # SAFE_MODE всегда выключает реальную торговлю
+
+        # Алиасы из README/Word для совместимости старых конфигов
+        if os.getenv("RATE_LIMIT_EVALUATE_PER_MINUTE"):
+            s.RL_EVALUATE_PER_MIN = int(os.getenv("RATE_LIMIT_EVALUATE_PER_MINUTE", "60"))
+        if os.getenv("RATE_LIMIT_PLACE_ORDER_PER_MINUTE"):
+            s.RL_ORDERS_PER_MIN = int(os.getenv("RATE_LIMIT_PLACE_ORDER_PER_MINUTE", "10"))
+        if os.getenv("MAX_TIME_DRIFT_MS") and not os.getenv("TIME_DRIFT_LIMIT_MS"):
+            s.TIME_DRIFT_LIMIT_MS = int(os.getenv("MAX_TIME_DRIFT_MS", "1000"))
+
+        # Безопасный режим запрещает реальную торговлю
         if s.SAFE_MODE:
             s.ENABLE_TRADING = False
+
+        # Гарантированный дефолт для источников времени
+        if not s.TIME_DRIFT_URLS:
+            s.TIME_DRIFT_URLS = ["https://worldtimeapi.org/api/timezone/Etc/UTC"]
+
         return s
