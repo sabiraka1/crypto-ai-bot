@@ -39,7 +39,7 @@ def place_order(
         metrics.inc("order_skip_total", {"reason": "hold"})
         return {"status": "skipped", "reason": "hold"}
 
-    # идемпотентность (соответствие спецификации по ключу: symbol:side:size:minute:decision_id[:8])
+    # идемпотентность (spec: symbol:side:size:minute:decision_id[:8])
     if idem_repo is not None:
         minute = int(int(decision.get("ts_ms", 0) or 0) // 60000)
         did = str(decision.get("id", ""))[:8]
@@ -64,7 +64,8 @@ def place_order(
     if side == "buy":
         snap = pm.open_or_add(symbol, size, px)
     elif side == "sell":
-        snap = pm.reduce_or_close(symbol, size, px)
+        # В менеджере позиций нет reduce_or_close, используем reduce
+        snap = pm.reduce(symbol, size, px)
     else:
         return {"status": "error", "error": f"unknown_action:{action}"}
 
@@ -74,8 +75,8 @@ def place_order(
                 "type": "OrderExecuted",
                 "symbol": symbol,
                 "timeframe": getattr(cfg, "TIMEFRAME", ""),
-                "side": side,                      # <-- важное выравнивание
-                "qty": str(size),                  # <-- ожидание в bus_wiring
+                "side": side,                      # выравнивание с bus_wiring
+                "qty": str(size),                  # ожидание в bus_wiring
                 "price": str(px),
                 "latency_ms": decision.get("latency_ms"),
             })

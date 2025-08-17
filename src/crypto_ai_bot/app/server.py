@@ -453,3 +453,21 @@ async def telegram_webhook(
 
     resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
     return JSONResponse(resp)
+
+
+@app.get("/context")
+def context() -> JSONResponse:
+    sym = getattr(CFG, "SYMBOL", "BTC/USDT")
+    tf  = getattr(CFG, "TIMEFRAME", "1h")
+    prof = CFG.get_profile_dict() if hasattr(CFG, "get_profile_dict") else {}
+    try:
+        qs = snapshot_quantiles()
+    except Exception:
+        qs = {}
+    return JSONResponse({
+        "symbol": sym,
+        "timeframe": tf,
+        "profile": prof,            # веса правил/AI и пороги
+        "quantiles_ms": qs,         # полная карта квантилей (как в /metrics)
+        "safe_config": _safe_config(CFG),
+    })
