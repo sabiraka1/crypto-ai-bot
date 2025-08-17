@@ -378,3 +378,68 @@ async def telegram_webhook(
 
     resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
     return JSONResponse(resp)
+
+
+@app.get("/status/extended")
+def status_extended() -> JSONResponse:
+    sym = getattr(CFG, "SYMBOL", "BTC/USDT")
+    tf = getattr(CFG, "TIMEFRAME", "1h")
+
+    snap = snapshot_quantiles()
+
+    # ключи квантилей из bus_wiring.snapshot_quantiles()
+    key_dec = f"decision:{sym}:{tf}"
+    key_flow = f"flow:{sym}:{tf}"
+    # order имеет раздельные ключи по стороне — берём максимум по buy/sell
+    key_ord_buy = f"order:{sym}:{tf}:buy"
+    key_ord_sell = f"order:{sym}:{tf}:sell"
+
+    def _pp(d, k, p):
+        try:
+            v = snap.get(k, {}).get(p)
+            return float(v) if v is not None else None
+        except Exception:
+            return None
+
+    dec_p95, dec_p99 = _pp(snap, key_dec, "p95"), _pp(snap, key_dec, "p99")
+    flow_p95, flow_p99 = _pp(snap, key_flow, "p95"), _pp(snap, key_flow, "p99")
+    ord_p95 = max([x for x in (_pp(snap, key_ord_buy, "p95"), _pp(snap, key_ord_sell, "p95")) if x is not None], default=None)
+    ord_p99 = max([x for x in (_pp(snap, key_ord_buy, "p99"), _pp(snap, key_ord_sell, "p99")) if x is not None], default=None)
+
+    # бюджеты p99 из Settings (в миллисекундах — оставляем так же, как в /metrics)
+    b_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0) or 0)
+    b_ord = int(getattr(CFG, "PERF_BUDGET_ORDER_P99_MS", 0) or 0)
+    b_flow = int(getattr(CFG, "PERF_BUDGET_FLOW_P99_MS", 0) or 0)
+
+    def _exceeded(v, b):
+        if v is None or not b:
+            return None
+        return float(v) > float(b)
+
+    # открытые позиции (мягко)
+    try:
+        open_positions = REPOS.positions.get_open() or []
+        open_count = len(open_positions)
+    except Exception:
+        open_count = None
+
+    return JSONResponse({
+        "mode": getattr(CFG, "MODE", "unknown"),
+        "symbol": sym,
+        "timeframe": tf,
+        "positions": {"open_count": open_count},
+        "quantiles_ms": {
+            "decision": {"p95": dec_p95, "p99": dec_p99},
+            "order": {"p95": ord_p95, "p99": ord_p99},
+            "flow": {"p95": flow_p95, "p99": flow_p99},
+        },
+        "budgets_ms": {
+            "decision_p99": b_dec,
+            "order_p99": b_ord,
+            "flow_p99": b_flow,
+            "decision_p99_exceeded": _exceeded(dec_p99, b_dec),
+            "order_p99_exceeded": _exceeded(ord_p99, b_ord),
+            "flow_p99_exceeded": _exceeded(flow_p99, b_flow),
+        },
+    })
+

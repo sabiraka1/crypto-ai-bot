@@ -1,77 +1,45 @@
-# src/crypto_ai_bot/core/use_cases/evaluate.py
 from __future__ import annotations
 
-import json
-import time
-from typing import Any, Dict, Optional
+from decimal import Decimal
+from typing import Any, Dict
 
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.core.signals import policy
 from crypto_ai_bot.utils import metrics
+from crypto_ai_bot.utils.rate_limit import rate_limit
+from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
+from crypto_ai_bot.core.brokers.base import ExchangeInterface
+from crypto_ai_bot.core.signals.policy import decide
+from crypto_ai_bot.core.signals._build import build  # приватный билд фич
+# Примечание: DTO Decision задан в core/types/signals по спецификации (score, explain и т.д.)
 
-# корректный модуль декоратора
-try:
-    from crypto_ai_bot.utils.rate_limit import rate_limit
-except Exception:
-    def rate_limit(*_, **__):
-        def _wrap(fn):
-            return fn
-        return _wrap
+@rate_limit(max_calls=60, window=60)  # соответствие спецификации
+def evaluate(cfg: Any, broker: ExchangeInterface, *, symbol: str, timeframe: str, limit: int) -> Any:
+    """Собирает фичи, принимает решение policy.decide(), возвращает Decision.
 
-_HIST_BUCKETS_MS = (50, 100, 250, 500, 1000, 2000, 5000)
+    Метрики:
+      - bot_decision_total{action}
+      - latency_decide_seconds (hist)
+      - decision_score_histogram (hist)
+    """
+    symbol_n = normalize_symbol(symbol)
+    timeframe_n = normalize_timeframe(timeframe)
 
-def _observe_hist(name: str, value_ms: int, labels: Optional[Dict[str, str]] = None) -> None:
-    lbls = dict(labels or {})
-    for b in _HIST_BUCKETS_MS:
-        if value_ms <= b:
-            metrics.inc(f"{name}_bucket", {**lbls, "le": str(b)})
-    metrics.inc(f"{name}_bucket", {**lbls, "le": "+Inf"})
-    metrics.observe(f"{name}_sum", value_ms, lbls)
-    metrics.inc(f"{name}_count", lbls)
+    with metrics.timer() as t:
+        features: Dict[str, Any] = build(cfg, broker, symbol=symbol_n, timeframe=timeframe_n, limit=int(limit))
+        decision = decide(cfg, features)
 
-
-@rate_limit(limit=60, per=60)  # ≤ 60 evaluate/мин
-def evaluate(
-    cfg: Settings,
-    broker: Any,
-    *,
-    symbol: Optional[str] = None,
-    timeframe: Optional[str] = None,
-    limit: Optional[int] = None,
-    bus: Optional[Any] = None,
-) -> Dict[str, Any]:
-    sym = symbol or cfg.SYMBOL
-    tf = timeframe or cfg.TIMEFRAME
-    lim = int(limit or getattr(cfg, "LIMIT_BARS", 300))
-
-    t0 = time.perf_counter()
-    decision = policy.decide(cfg, broker, symbol=sym, timeframe=tf, limit=lim)
-    latency_ms = int((time.perf_counter() - t0) * 1000)
-
-    metrics.inc("bot_decision_total", {"action": str(decision.get("action", "unknown"))})
-    metrics.observe("latency_decide_ms", latency_ms, {"symbol": sym, "timeframe": tf})
-    _observe_hist("latency_decide_ms", latency_ms, {"symbol": sym, "timeframe": tf})
-
-    if bus is not None:
-        try:
-            bus.publish(
-                {
-                    "type": "DecisionEvaluated",
-                    "symbol": sym,
-                    "timeframe": tf,
-                    "score": decision.get("score"),
-                    "action": decision.get("action"),
-                    "size": str(decision.get("size", "0")),
-                    "explain": decision.get("explain"),
-                    "latency_ms": latency_ms,
-                }
-            )
-        except Exception:
-            pass
-
+    # Наблюдаем метрики централизованно
+    metrics.observe_histogram("latency_decide_seconds", t.elapsed)
     try:
-        json.dumps(decision, default=str)
+        score = float(getattr(decision, "score", None) or decision.get("score"))  # поддержка DTO/слов.
     except Exception:
-        decision = json.loads(json.dumps(decision, default=str))
+        score = None
+    if score is not None:
+        metrics.observe_histogram("decision_score_histogram", max(0.0, min(1.0, score)))
+
+    action = getattr(decision, "action", None) or (decision.get("action") if isinstance(decision, dict) else "unknown")
+    metrics.inc("bot_decision_total", {"action": str(action)})
+
+    # Performance budget (моментный, быстрый сигнал; для точной оценки используем p95 из extended)
+    metrics.check_performance_budget("decide_p99", t.elapsed, getattr(cfg, "PERF_BUDGET_DECIDE_P99", None))
 
     return decision
