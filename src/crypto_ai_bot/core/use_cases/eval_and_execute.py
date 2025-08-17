@@ -1,129 +1,84 @@
 # src/crypto_ai_bot/core/use_cases/eval_and_execute.py
 from __future__ import annotations
 
-import json
-import time
 from typing import Any, Dict, Optional
+from decimal import Decimal
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.core.events import BusProtocol
-
-# локальная гистограмма без смены utils.metrics API
-_HIST_BUCKETS_MS = (50, 100, 250, 500, 1000, 2000, 5000)
-
-def _observe_hist(name: str, value_ms: int, labels: Optional[Dict[str, str]] = None) -> None:
-    lbls = dict(labels or {})
-    # Prometheus-подобный паттерн: bucket counters + sum
-    placed = False
-    for b in _HIST_BUCKETS_MS:
-        le = str(b)
-        if value_ms <= b:
-            metrics.inc(f"{name}_bucket", {**lbls, "le": le})
-            placed = True
-        else:
-            # для совместимости с простыми счётчиками — ничего
-            pass
-    metrics.inc(f"{name}_bucket", {**lbls, "le": "+Inf"})
-    # sum/count
-    metrics.observe(f"{name}_sum", value_ms, lbls)
-    metrics.inc(f"{name}_count", lbls)
-
-# аккуратные импорты UC
-from .evaluate import evaluate as uc_evaluate
-from .place_order import place_order as uc_place_order
-
-# риск — мягко, если есть
-try:
-    from crypto_ai_bot.core.risk.manager import check as risk_check  # type: ignore
-except Exception:  # pragma: no cover
-    risk_check = None  # type: ignore
+from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
+from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_order
+from crypto_ai_bot.core.risk.manager import assess as risk_assess
 
 
 def eval_and_execute(
     cfg: Settings,
     broker: Any,
-    repos: Any,  # ожидается контейнер с атрибутами: positions, trades, audit, uow, idempotency(опц.)
+    repos: Any,
     *,
-    symbol: Optional[str] = None,
-    timeframe: Optional[str] = None,
-    limit: Optional[int] = None,
-    bus: Optional[BusProtocol] = None,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    bus: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    Полный конвейер: evaluate → (risk?) → execute (через PositionManager).
-    Публикует события (если передан bus) и пишет метрики.
+    Полный цикл: evaluate -> (risk) -> place_order
+    Публикует события в шину (если передана).
     """
-    sym = symbol or cfg.SYMBOL
-    tf = timeframe or cfg.TIMEFRAME
-    lim = int(limit or getattr(cfg, "LIMIT_BARS", 300))
+    decision = uc_evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit, bus=bus)
 
-    t_flow0 = time.perf_counter()
+    action = str(decision.get("action", "hold")).lower()
+    size = Decimal(str(decision.get("size", "0")))
 
-    # 1) EVALUATE
-    decision = uc_evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=lim, bus=bus)
-
-    # 2) RISK (мягко)
-    risk_ok, risk_reason = True, ""
-    if callable(risk_check):
-        try:
-            # Передаём то, что точно есть в любом режиме
-            risk_ok, risk_reason = risk_check({"decision": decision}, cfg)  # type: ignore
-        except Exception as e:  # не роняем поток из-за риска
-            risk_ok, risk_reason = True, f"risk_check_failed:{type(e).__name__}"
-            if bus:
-                try:
-                    bus.publish({"type": "RiskCheckFailed", "symbol": sym, "reason": str(e)})
-                except Exception:
-                    pass
-
+    # Сразу публикуем «DecisionEvaluated», если это не сделал сам evaluate
     if bus:
         try:
-            bus.publish(
-                {
-                    "type": "RiskChecked",
-                    "symbol": sym,
-                    "timeframe": tf,
-                    "ok": risk_ok,
-                    "reason": risk_reason,
-                }
-            )
+            bus.publish({
+                "type": "DecisionEvaluated",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "score": decision.get("score"),
+                "action": action,
+                "size": str(size),
+                "latency_ms": decision.get("latency_ms"),
+                "explain": decision.get("explain") or {},
+            })
         except Exception:
             pass
 
-    # 3) BLOCK on risk
-    if not risk_ok:
-        metrics.inc("order_blocked_total", {"reason": risk_reason or "risk"})
+    # Если HOLD — заканчиваем
+    if action not in ("buy", "sell") or size == 0:
         if bus:
             try:
-                bus.publish(
-                    {
-                        "type": "OrderBlocked",
-                        "symbol": sym,
-                        "timeframe": tf,
-                        "reason": risk_reason,
-                        "decision": decision,
-                    }
-                )
+                bus.publish({"type": "FlowFinished", "symbol": symbol, "timeframe": timeframe, "flow_latency_ms": decision.get("latency_ms")})
             except Exception:
                 pass
-        flow_ms = int((time.perf_counter() - t_flow0) * 1000)
-        _observe_hist("flow_latency_ms", flow_ms, {"stage": "blocked"})
-        return {"status": "blocked", "symbol": sym, "timeframe": tf, "reason": risk_reason, "decision": decision}
+        return {"status": "skipped", "decision": decision}
 
-    # 4) EXECUTE (но уважаем флаг ENABLE_TRADING)
-    if not getattr(cfg, "ENABLE_TRADING", False):
-        metrics.inc("order_skip_total", {"reason": "trading_disabled"})
+    # --- RISK ---
+    ra = risk_assess(cfg, broker, repos, symbol=symbol, side=action, size=size)
+    if not ra.allow:
+        # безопасно: сообщаем, что заблокировано правилами
         if bus:
             try:
-                bus.publish({"type": "OrderSkipped", "symbol": sym, "reason": "trading_disabled"})
+                bus.publish({
+                    "type": "OrderFailed",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "side": action,
+                    "error": "risk_blocked",
+                    "reasons": ra.reasons,
+                })
+                bus.publish({"type": "FlowFinished", "symbol": symbol, "timeframe": timeframe})
             except Exception:
                 pass
-        flow_ms = int((time.perf_counter() - t_flow0) * 1000)
-        _observe_hist("flow_latency_ms", flow_ms, {"stage": "simulated"})
-        return {"status": "simulated", "symbol": sym, "timeframe": tf, "decision": decision}
+        return {"status": "blocked_risk", "reasons": ra.reasons, "decision": decision}
 
-    # 5) PLACE
+    # мягкое ограничение размера, если задано
+    if ra.size_cap is not None and ra.size_cap > 0 and size > ra.size_cap:
+        size = ra.size_cap
+        decision = {**decision, "size": str(size), "explain": {**(decision.get("explain") or {}), "size_capped_by_risk": str(ra.size_cap)}}
+
+    # --- PLACE ORDER ---
     result = uc_place_order(
         cfg,
         broker,
@@ -132,27 +87,15 @@ def eval_and_execute(
         audit_repo=repos.audit,
         uow=repos.uow,
         decision=decision,
-        symbol=sym,
-        bus=bus,
+        symbol=symbol,
         idem_repo=getattr(repos, "idempotency", None),
+        bus=bus,
     )
 
-    flow_ms = int((time.perf_counter() - t_flow0) * 1000)
-    _observe_hist("flow_latency_ms", flow_ms, {"stage": "executed" if result.get("status") == "executed" else "other"})
-
-    # финальный ивент потока
     if bus:
         try:
-            bus.publish(
-                {
-                    "type": "FlowFinished",
-                    "symbol": sym,
-                    "timeframe": tf,
-                    "status": result.get("status"),
-                    "latency_ms": flow_ms,
-                }
-            )
+            bus.publish({"type": "FlowFinished", "symbol": symbol, "timeframe": timeframe})
         except Exception:
             pass
 
-    return {"status": "ok", "symbol": sym, "timeframe": tf, "decision": decision, "result": result}
+    return {"status": "ok", "decision": decision, "order": result}

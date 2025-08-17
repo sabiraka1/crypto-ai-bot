@@ -1,49 +1,75 @@
 # src/crypto_ai_bot/core/risk/manager.py
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+from decimal import Decimal
 
-from crypto_ai_bot.core.risk import rules
-from crypto_ai_bot.utils import metrics
-
-
-RuleFn = Callable[[Dict[str, Any], Any], Tuple[bool, str]]
-
-# порядок проверок: сначала время, затем остальные
-_DEFAULT_RULE_ORDER: List[str] = [
-    "check_time_sync",
-    "check_hours",
-    "check_spread",
-    "check_dd",
-    "check_seq_losses",
-    "check_max_exposure",
-]
+from . import rules as R
 
 
-def _resolve_rule(name: str) -> RuleFn | None:
-    fn = getattr(rules, name, None)
-    if callable(fn):
-        return fn  # type: ignore
-    return None
+class RiskAssessment:
+    def __init__(self, allow: bool, reasons: List[str], size_cap: Optional[Decimal] = None):
+        self.allow = allow
+        self.reasons = reasons
+        self.size_cap = size_cap
+
+    def to_dict(self) -> Dict[str, Any]:
+        out = {"allow": self.allow, "reasons": list(self.reasons)}
+        if self.size_cap is not None:
+            out["size_cap"] = str(self.size_cap)
+        return out
 
 
-def check(features: Dict[str, Any], cfg) -> Tuple[bool, str]:
+def assess(
+    cfg: Any,
+    broker: Any,
+    repos: Any,
+    *,
+    symbol: str,
+    side: str,
+    size: Decimal,
+) -> RiskAssessment:
     """
-    Пробегаемся по правилам. На первом отказе — стоп.
+    Единая точка вызова правил риска. Возвращает «можно/нельзя» и причины.
+    Если одно из правил «неизвестно» (нет данных/метода) — не блокируем.
     """
-    for name in _DEFAULT_RULE_ORDER:
-        fn = _resolve_rule(name)
-        if fn is None:
-            continue
-        ok, reason = (True, "ok")
-        try:
-            ok, reason = fn(features, cfg)
-        except Exception as e:
-            metrics.inc("risk_rule_errors_total", {"rule": name, "type": type(e).__name__})
-            ok, reason = False, f"rule_error:{name}:{type(e).__name__}"
+    reasons: List[str] = []
+    ok_all = True
 
-        if not ok:
-            metrics.inc("risk_block_total", {"rule": name})
-            return False, reason
+    # 1) Спред
+    ok, why = R.check_spread(cfg, broker, symbol)
+    ok_all &= ok
+    reasons.append(f"spread:{why}")
 
-    return True, "ok"
+    # 2) Торговые часы
+    ok2, why2 = R.check_hours(cfg)
+    ok_all &= ok2
+    reasons.append(f"hours:{why2}")
+
+    # 3) Просадка
+    ok3, why3 = R.check_drawdown(cfg, repos.trades if hasattr(repos, "trades") else None)
+    ok_all &= ok3
+    reasons.append(f"drawdown:{why3}")
+
+    # 4) Серия лоссов
+    ok4, why4 = R.check_sequence_losses(cfg, repos.trades if hasattr(repos, "trades") else None)
+    ok_all &= ok4
+    reasons.append(f"seq_losses:{why4}")
+
+    # 5) Экспозиция
+    ok5, why5 = R.check_max_exposure(cfg, repos.positions if hasattr(repos, "positions") else None, broker, side, symbol)
+    ok_all &= ok5
+    reasons.append(f"exposure:{why5}")
+
+    # (Опционально) Мягкое ограничение размера позиции
+    size_cap = None
+    max_pos_size = getattr(cfg, "RISK_MAX_POSITION_SIZE", None)
+    try:
+        if max_pos_size is not None:
+            cap = Decimal(str(max_pos_size))
+            if cap > 0 and size > cap:
+                size_cap = cap
+    except Exception:
+        pass
+
+    return RiskAssessment(bool(ok_all), reasons, size_cap)
