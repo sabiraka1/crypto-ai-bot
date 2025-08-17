@@ -1,18 +1,28 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional
+
+from time import perf_counter
+from typing import Any, Dict
+
 from crypto_ai_bot.core.signals import policy
-from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.ratelimits import guard_rate_limit
+from crypto_ai_bot.utils.metrics import inc, observe
 
-from crypto_ai_bot.utils.ratelimits import guard_rate_limit
-@guard_rate_limit(
-    name="evaluate",
-    per_min=lambda cfg: int(getattr(cfg, "RATE_EVALUATE_PER_MIN", 60) or 60),
-    metric_prefix="uc_evaluate",
-)
 
-def evaluate(cfg, broker, *, symbol: Optional[str]=None, timeframe: Optional[str]=None, limit: Optional[int]=None) -> Dict[str, Any]:
-    dec = policy.decide(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
-    metrics.inc("bot_decision_total", {"action": dec.get("action","hold")})
-    metrics.observe("latency_decide_seconds", 0.0)  # заполняется отдельным middleware при желании
-    return dec
+def evaluate(
+    cfg: Any,
+    broker: Any,
+    *,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+) -> Dict[str, Any]:
+    """
+    Вычисляет решение (Decision) без исполнения.
+    Замеряем латентность, инкрементим счётчики по action.
+    """
+    t0 = perf_counter()
+    try:
+        decision = policy.decide(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
+        inc("bot_decision_total", {"action": decision.get("action", "hold")})
+        return decision
+    finally:
+        observe("uc_evaluate_latency_seconds", perf_counter() - t0)

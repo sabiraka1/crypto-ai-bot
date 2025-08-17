@@ -1,30 +1,61 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional
-from crypto_ai_bot.core.use_cases.evaluate import evaluate
-from crypto_ai_bot.core.use_cases.place_order import place_order
-from crypto_ai_bot.core.risk import manager as risk_manager
-from crypto_ai_bot.utils import metrics
+
+from time import perf_counter
+from typing import Any, Dict
+
+from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
+from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_order
+from crypto_ai_bot.utils.metrics import observe
+
 
 def eval_and_execute(
-    cfg,
-    broker,
+    cfg: Any,
+    broker: Any,
+    repos: Any,
     *,
-    idem_repo,
-    trades_repo=None,
-    audit_repo=None,
-    positions_repo=None,
-    symbol: Optional[str]=None,
-    timeframe: Optional[str]=None,
-    limit: Optional[int]=None,
+    symbol: str,
+    timeframe: str,
+    limit: int,
 ) -> Dict[str, Any]:
-    dec = evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
-    # риск
-    ok, reason = risk_manager.check(dec.get("explain",{}), cfg)  # features здесь могут быть расширены
-    if not ok:
-        return {"status":"blocked","reason":reason,"decision":dec}
-    if dec.get("action") not in ("buy","sell"):
-        return {"status":"skipped","decision":dec}
+    """
+    Конвейер: evaluate → (при необходимости) execute.
+    Замеряем:
+      - общую латентность eval_and_execute
+      - латентность блока исполнения (place_order), если был вызван.
+    """
+    t_all = perf_counter()
+    try:
+        decision = uc_evaluate(cfg, broker, symbol=symbol, timeframe=timeframe, limit=limit)
 
-    res = place_order(cfg, broker, decision=dec, idem_repo=idemp_repo, trades_repo=trades_repo, audit_repo=audit_repo, positions_repo=positions_repo)
-    metrics.inc("eval_execute_total", {"status": res.get("status","unknown")})
-    return {"status":"executed","result":res,"decision":dec}
+        action = (decision.get("action") or "hold").lower()
+        if action in ("buy", "reduce", "close"):
+            t_exec = perf_counter()
+            try:
+                # ожидается, что repos имеет атрибуты: positions, trades, audit, uow
+                result = uc_place_order(
+                    cfg,
+                    broker,
+                    repos.positions,
+                    repos.trades,
+                    repos.audit,
+                    repos.uow,
+                    decision,
+                )
+                return {
+                    "status": "executed",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "decision": decision,
+                    "order": result,
+                }
+            finally:
+                observe("uc_place_order_latency_seconds", perf_counter() - t_exec)
+        else:
+            return {
+                "status": "evaluated",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "decision": decision,
+            }
+    finally:
+        observe("uc_eval_and_execute_latency_seconds", perf_counter() - t_all)
