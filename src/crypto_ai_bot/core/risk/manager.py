@@ -1,35 +1,30 @@
 from __future__ import annotations
-from typing import Dict, Any, Tuple
+
+from typing import Dict, Any, Tuple, List
 
 from . import rules
 
+
 def check(features: Dict[str, Any], cfg) -> Tuple[bool, str]:
     """
-    Агрегатор risk-правил. Никаких IO/брокеров/БД — только pure checks.
-    Ожидаемые поля (опционально, если нет — правило пропускается):
-      features["context"]["bars"]          -> int
-      features["context"]["exposure"]      -> Decimal|float|str (в базовых единицах)
-      features["context"]["time_drift_ms"] -> int
-    Пороговые значения берём из Settings (с дефолтами).
+    Проверяем набор правил. Возвращаем общий вердикт и свёртку причин.
     """
-    ctx = features.get("context") or features.get("market") or {}
+    context = features.get("context", {}) if isinstance(features, dict) else {}
+    bars = context.get("bars")
+    drift_ms = context.get("time_drift_ms")
 
-    # 1) Минимальная история баров
-    min_bars = getattr(cfg, "MIN_HISTORY_BARS", 300)
-    ok, reason = rules.check_min_history(ctx.get("bars"), min_bars)
-    if not ok:
-        return False, reason
+    reasons: List[str] = []
 
-    # 2) Максимальная экспозиция (в базовых единицах)
-    max_units = getattr(cfg, "MAX_EXPOSURE_UNITS", "0")  # "0" == отключено
-    ok, reason = rules.check_max_exposure(ctx.get("exposure"), max_units)
-    if not ok:
-        return False, reason
+    # 1) рассинхронизация времени
+    ok1, r1 = rules.check_time_sync(drift_ms, getattr(cfg, "TIME_DRIFT_LIMIT_MS", 1000))
+    if not ok1:
+        reasons.append(r1)
 
-    # 3) Time drift (доп. слой, основной стоп есть в policy)
-    limit_ms = getattr(cfg, "TIME_DRIFT_LIMIT_MS", 1000)
-    ok, reason = rules.check_time_sync(ctx.get("time_drift_ms"), limit_ms)
-    if not ok:
-        return False, reason
+    # 2) минимальная история
+    ok2, r2 = rules.check_min_history(bars, getattr(cfg, "MIN_HISTORY_BARS", 100))
+    if not ok2:
+        reasons.append(r2)
 
+    if reasons:
+        return False, ";".join(reasons)
     return True, "ok"

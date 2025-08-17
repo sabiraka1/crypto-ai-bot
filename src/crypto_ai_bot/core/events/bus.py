@@ -1,103 +1,115 @@
+# src/crypto_ai_bot/core/events/bus.py
 from __future__ import annotations
 
-import asyncio
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
+from collections import defaultdict, deque
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Deque, Dict, List, Tuple
+import time
+import traceback
+
+from crypto_ai_bot.utils import metrics
 
 
-BackpressureStrategy = str  # "block" | "drop_oldest" | "keep_latest"
+Handler = Callable[[Any], None]
+
+
+def _event_type_of(event: Any) -> str:
+    # Пытаемся аккуратно определить тип события
+    if isinstance(event, dict):
+        et = event.get("type") or event.get("event_type")
+        if not et:
+            raise ValueError("event dict must contain 'type' or 'event_type'")
+        return str(et)
+    # dataclass/объект с атрибутом
+    for attr in ("event_type", "type", "__class__.__name__"):
+        if hasattr(event, attr):
+            val = getattr(event, attr)
+            if isinstance(val, str):
+                return val
+    # fallback — имя класса
+    return event.__class__.__name__
 
 
 @dataclass
-class _Sub:
-    event_type: str
-    handler: Callable[[Dict[str, Any]], Awaitable[None]]
+class BusStats:
+    delivered_total: int = 0
+    handler_errors_total: int = 0
+    dlq_size: int = 0
 
 
-@dataclass
-class _QueueCfg:
-    maxlen: int = 1000
-    strategy: BackpressureStrategy = "block"  # по-умолчанию безопасно
-
-
-class AsyncBus:
+class Bus:
     """
-    Простой async pub/sub с per-event стратегиями backpressure и DLQ.
+    Простой синхронный шина событий (in-proc).
+    - publish() вызывает подписчиков в текущем потоке по очереди.
+    - Ошибки хэндлеров не прерывают доставку: считаются, складываются в DLQ.
+    - Поддержка wildcard-подписки на '*'.
+    Использование: глобальный экземпляр создаётся приложением и передаётся в нужные слои.
     """
 
-    def __init__(self) -> None:
-        self._subs: Dict[str, List[_Sub]] = {}
-        self._queues: Dict[str, Deque[Dict[str, Any]]] = {}
-        self._cfgs: Dict[str, _QueueCfg] = {}
-        self._dlq: Deque[Dict[str, Any]] = deque(maxlen=1000)
-        self._lock = asyncio.Lock()
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
+    def __init__(self, *, dlq_max: int = 1000) -> None:
+        self._subs: Dict[str, List[Handler]] = defaultdict(list)
+        self._subs_all: List[Handler] = []  # подписки на '*'
+        self._dlq: Deque[Tuple[str, Any, str]] = deque(maxlen=max(1, dlq_max))  # (event_type, event, err)
+        self._stats = BusStats()
 
-    def set_strategy(self, event_type: str, *, maxlen: int, strategy: BackpressureStrategy) -> None:
-        self._cfgs[event_type] = _QueueCfg(maxlen=maxlen, strategy=strategy)
+    # ---------- подписки ----------
 
-    def subscribe(self, event_type: str, handler: Callable[[Dict[str, Any]], Awaitable[None]]) -> None:
-        lst = self._subs.setdefault(event_type, [])
-        lst.append(_Sub(event_type=event_type, handler=handler))
-
-    def publish(self, event_type: str, payload: Dict[str, Any]) -> None:
-        q = self._queues.get(event_type)
-        cfg = self._cfgs.get(event_type, _QueueCfg())
-        if q is None:
-            q = deque(maxlen=cfg.maxlen)
-            self._queues[event_type] = q
-
-        if cfg.strategy == "block":
-            if len(q) >= cfg.maxlen:
-                # блокируемся пока consumer не снимет
-                # (не делаем await здесь — publish синхронный; очередь обработается в run())
-                pass
-            q.append(payload)
-        elif cfg.strategy == "drop_oldest":
-            if len(q) >= cfg.maxlen:
-                q.popleft()
-            q.append(payload)
-        elif cfg.strategy == "keep_latest":
-            q.clear()
-            q.append(payload)
+    def subscribe(self, event_type: str, handler: Handler) -> None:
+        if event_type == "*":
+            self._subs_all.append(handler)
         else:
-            q.append(payload)
+            self._subs[event_type].append(handler)
 
-    async def _consume_once(self) -> None:
-        async with self._lock:
-            for etype, q in self._queues.items():
-                if not q:
-                    continue
-                item = q.popleft()
-                subs = self._subs.get(etype, [])
-                for sub in subs:
-                    try:
-                        await sub.handler({"type": etype, "data": item})
-                    except Exception as e:
-                        self._dlq.append({"type": etype, "data": item, "error": f"{type(e).__name__}: {e}"})
-
-    async def run(self, *, interval_sec: float = 0.05) -> None:
-        if self._running:
-            return
-        self._running = True
+    def unsubscribe(self, event_type: str, handler: Handler) -> None:
         try:
-            while self._running:
-                await self._consume_once()
-                await asyncio.sleep(interval_sec)
-        finally:
-            self._running = False
+            if event_type == "*":
+                self._subs_all.remove(handler)
+            else:
+                self._subs[event_type].remove(handler)
+        except ValueError:
+            pass
 
-    def stop(self) -> None:
-        self._running = False
+    # ---------- публикация ----------
 
-    def dlq(self) -> List[Dict[str, Any]]:
-        return list(self._dlq)
+    def publish(self, event: Any) -> None:
+        et = _event_type_of(event)
+        handlers = list(self._subs.get(et, ())) + list(self._subs_all)
+        if not handlers:
+            # нет подписчиков — просто считаем доставленным
+            self._stats.delivered_total += 1
+            metrics.inc("events_published_total", {"type": et, "handlers": "0"})
+            return
+
+        metrics.inc("events_published_total", {"type": et, "handlers": str(len(handlers))})
+        t0 = time.perf_counter()
+        for h in handlers:
+            try:
+                h(event)
+            except Exception as e:
+                self._stats.handler_errors_total += 1
+                tb = traceback.format_exc(limit=3)
+                self._dlq.append((et, event, f"{type(e).__name__}: {e}\n{tb}"))
+                metrics.inc("events_handler_errors_total", {"type": et})
+        self._stats.delivered_total += 1
+        metrics.observe("events_dispatch_seconds", time.perf_counter() - t0, {"type": et})
+
+        metrics.observe("events_dlq_size", float(len(self._dlq)), {"bus": "sync"})
+
+    # ---------- состояние / DLQ ----------
+
+    def dlq_dump(self, limit: int = 50) -> List[Dict[str, Any]]:
+        items = list(self._dlq)[-limit:]
+        out: List[Dict[str, Any]] = []
+        for et, ev, err in items:
+            out.append({"type": et, "event": ev, "error": err})
+        return out
 
     def health(self) -> Dict[str, Any]:
-        return {
-            "queues": {k: len(v) for k, v in self._queues.items()},
-            "dlq": len(self._dlq),
-            "running": self._running,
+        # для /health можно вернуть краткое состояние
+        st = {
+            "delivered_total": self._stats.delivered_total,
+            "handler_errors_total": self._stats.handler_errors_total,
+            "dlq_size": len(self._dlq),
+            "status": "healthy" if len(self._dlq) == 0 else "degraded",
         }
+        return st
