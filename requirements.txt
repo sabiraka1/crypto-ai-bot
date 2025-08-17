@@ -1,8 +1,20 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pandas>=2.2
-numpy>=1.26
-pydantic>=2.6
-requests>=2.31
-ccxt>=4.1
-pytest>=8.1
+# --- Web / ASGI ---
+fastapi==0.116.1
+uvicorn==0.35.0
+gunicorn==22.0.0
+python-dotenv>=1.0.1
+
+# --- Core ---
+pydantic>=2.11.0,<3
+typing-extensions>=4.9.0
+requests>=2.31.0
+
+# --- Data / indicators ---
+numpy>=2.0.0
+pandas>=2.2.0
+
+# --- Brokers ---
+ccxt>=4.3.0,<5
+
+# --- Optional / metrics client (можно не использовать, но не мешает) ---
+prometheus-client>=0.20.0

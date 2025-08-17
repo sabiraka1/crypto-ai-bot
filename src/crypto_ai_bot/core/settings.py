@@ -32,6 +32,10 @@ class Settings:
     # --- оркестратор ---
     TICK_PERIOD_SEC: int = int(os.getenv("TICK_PERIOD_SEC", "60"))
     METRICS_REFRESH_SEC: int = int(os.getenv("METRICS_REFRESH_SEC", "30"))
+    # --- Rate limits (use-cases) ---
+    RL_EVALUATE_PER_MIN: int = int(os.getenv("RL_EVALUATE_PER_MIN", "60"))
+    RL_ORDERS_PER_MIN: int = int(os.getenv("RL_ORDERS_PER_MIN", "10"))
+
 
     # --- брокер (ccxt/paper/backtest) ---
     EXCHANGE: str = os.getenv("EXCHANGE", "binance")

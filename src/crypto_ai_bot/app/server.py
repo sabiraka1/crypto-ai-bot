@@ -16,6 +16,7 @@ from crypto_ai_bot.core.use_cases.place_order import place_order as uc_place_ord
 
 from crypto_ai_bot.core.events.async_bus import AsyncBus, BackpressurePolicy
 from crypto_ai_bot.core.storage.sqlite_adapter import connect
+from crypto_ai_bot.core.storage.maintenance import cleanup_idempotency_once
 from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
 from crypto_ai_bot.utils.http_client import get_http_client
@@ -117,6 +118,17 @@ def _spawn_periodic_tasks() -> None:
 
     asyncio.create_task(_loop())
 
+    # hourly cleanup
+    async def _loop_cleanup():
+        while True:
+            try:
+                await _background_cleanup_idempotency()
+            except Exception:
+                pass
+            await asyncio.sleep(3600)
+
+    asyncio.create_task(_loop_cleanup())
+
 
 async def _background_refresh_metrics() -> None:
     cfg: Settings = app.state.cfg
@@ -124,7 +136,7 @@ async def _background_refresh_metrics() -> None:
     if measure_time_drift:
         sources = cfg.TIME_DRIFT_URLS or DEFAULT_TIME_SOURCES
         try:
-            drift_ms = await measure_time_drift(app.state.http, sources)
+            drift_ms = measure_time_drift(None, app.state.http, urls=app.state.http, sources)
             metrics.set_gauge("time_drift_ms", float(drift_ms))
         except Exception:
             # ничего — дрейф может не помериться
@@ -184,9 +196,7 @@ async def health() -> Response:
     try:
         if measure_time_drift:
             sources = cfg.TIME_DRIFT_URLS or DEFAULT_TIME_SOURCES
-            drift_ms = asyncio.get_event_loop().run_until_complete(
-                measure_time_drift(app.state.http, sources)
-            )
+            drift_ms = measure_time_drift(None, app.state.http, urls=app.state.http, sources)
             time_res["drift_ms"] = int(drift_ms)
             # обязательный gauge
             metrics.set_gauge("time_drift_ms", float(drift_ms))
@@ -255,7 +265,7 @@ async def tick(request: Request) -> Response:
     limit = int(body.get("limit") or 300)
 
     try:
-        decision = uc_evaluate(cfg, app.state.broker, symbol=symbol, timeframe=timeframe, limit=limit)
+        decision = uc_evaluate(cfg, app.state.broker, symbol=symbol, timeframe=timeframe, limit=limit, bus=app.state.bus)
         return JSONResponse({"status": "evaluated", "symbol": symbol, "timeframe": timeframe, "decision": decision})
     except Exception as e:
         return JSONResponse({"status": "error", "error": f"tick_failed: {type(e).__name__}: {str(e)[:200]}"})
@@ -266,3 +276,12 @@ async def bus_metrics() -> Response:
     bus: AsyncBus = app.state.bus
     stats = bus.get_stats()
     return JSONResponse(stats)
+
+
+async def _background_cleanup_idempotency() -> None:
+    cfg: Settings = app.state.cfg
+    try:
+        await cleanup_idempotency_once(cfg, ttl_seconds=3600)
+    except Exception:
+        pass
+

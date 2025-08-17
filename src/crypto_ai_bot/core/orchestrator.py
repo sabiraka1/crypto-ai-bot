@@ -5,6 +5,21 @@ import asyncio
 import time
 from typing import Any, Callable, Optional
 
+# --- Global orchestrator (safe accessors) ---
+_GLOBAL_ORCH = None  # type: Optional[Orchestrator]
+
+def set_global_orchestrator(orch: "Orchestrator") -> None:
+    global _GLOBAL_ORCH
+    _GLOBAL_ORCH = orch
+
+def get_global_orchestrator() -> Optional["Orchestrator"]:
+    """
+    Безопасный доступ к синглтону оркестратора.
+    Возвращает None, если его ещё не проинициализировали извне.
+    """
+    return _GLOBAL_ORCH
+
+
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.utils import metrics
 
