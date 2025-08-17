@@ -89,7 +89,6 @@ async def _on_startup() -> None:
         set_global_orchestrator(orch)  # type: ignore
         async def _runner():
             await orch.start()
-            # живем пока приложение живо
             while True:
                 await asyncio.sleep(3600)
         _ORCH_TASK = asyncio.create_task(_runner(), name="orch-runner")
@@ -146,11 +145,8 @@ def health() -> JSONResponse:
     broker_ok = True
     broker_detail = None
     try:
-        BREAKER.call(
-            lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT")),
-            key="broker.fetch_ticker",
-            timeout=2.0,
-        )
+        BRECKER_CALL = lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT"))
+        BREAKER.call(BRECKER_CALL, key="broker.fetch_ticker", timeout=2.0)
     except Exception as e:
         broker_ok = False
         broker_detail = f"{type(e).__name__}: {e}"
@@ -162,7 +158,6 @@ def health() -> JSONResponse:
     drift_status = "ok" if (drift_ms is not None and drift_ms <= limit) else ("unknown" if drift_ms is None else "error")
 
     # bus
-    bus_state = {"status": "unknown"}
     try:
         bus_state = BUS.health()
     except Exception as e:
@@ -204,6 +199,29 @@ def metrics_export() -> PlainTextResponse:
 @app.get("/config")
 def config_public() -> JSONResponse:
     return JSONResponse(_safe_config(CFG))
+
+
+@app.get("/status")
+def status() -> JSONResponse:
+    # Быстрый обзор состояния бота для live/paper
+    open_positions = []
+    try:
+        open_positions = REPOS.positions.get_open() or []
+    except Exception:
+        open_positions = []
+    broker_ok = True
+    try:
+        BREAKER.call(lambda: BROKER.fetch_ticker(getattr(CFG, "SYMBOL", "BTC/USDT")), key="broker.fetch_ticker", timeout=1.5)
+    except Exception:
+        broker_ok = False
+
+    return JSONResponse({
+        "mode": getattr(CFG, "MODE", "unknown"),
+        "symbol": getattr(CFG, "SYMBOL", "BTC/USDT"),
+        "timeframe": getattr(CFG, "TIMEFRAME", "1h"),
+        "open_positions": len(open_positions),
+        "broker": "ok" if broker_ok else "error",
+    })
 
 
 @app.post("/tick")
@@ -256,7 +274,6 @@ def bus_health() -> JSONResponse:
 @app.get("/bus/dlq")
 def bus_dlq(limit: int = Query(50, ge=1, le=1000)) -> JSONResponse:
     try:
-        # у синхронного Bus это dlq_dump(); у адаптера можно сделать такую же сигнатуру
         items = BUS.dlq_dump(limit=limit)
     except AttributeError:
         items = []
@@ -277,6 +294,5 @@ async def telegram_webhook(
     except Exception:
         update = {}
 
-    # адаптер ожидает broker и http-клиент; прокидываем bus
     resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
     return JSONResponse(resp)
