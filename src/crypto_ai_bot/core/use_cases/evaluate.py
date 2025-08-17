@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/use_cases/evaluate.py
 from __future__ import annotations
 
 import json
@@ -18,8 +19,20 @@ except Exception:  # pragma: no cover
             return fn
         return _wrap
 
+# простая локальная гистограмма
+_HIST_BUCKETS_MS = (50, 100, 250, 500, 1000, 2000, 5000)
 
-@rate_limit(limit=60, per=60)  # по спецификации: evaluate ≤ 60/мин
+def _observe_hist(name: str, value_ms: int, labels: Optional[Dict[str, str]] = None) -> None:
+    lbls = dict(labels or {})
+    for b in _HIST_BUCKETS_MS:
+        if value_ms <= b:
+            metrics.inc(f"{name}_bucket", {**lbls, "le": str(b)})
+    metrics.inc(f"{name}_bucket", {**lbls, "le": "+Inf"})
+    metrics.observe(f"{name}_sum", value_ms, lbls)
+    metrics.inc(f"{name}_count", lbls)
+
+
+@rate_limit(limit=60, per=60)  # evaluate ≤ 60/мин
 def evaluate(
     cfg: Settings,
     broker: Any,
@@ -30,11 +43,7 @@ def evaluate(
     bus: Optional[BusProtocol] = None,
 ) -> Dict[str, Any]:
     """
-    Вычисляет решение без исполнения:
-      - вызывает core.signals.policy.decide(...)
-      - собирает метрики и (опционально) публикует событие DecisionEvaluated
-
-    Возвращает структуру Decision (dict), стабильно сериализуемую в JSON.
+    Вычисляет решение без исполнения.
     """
     sym = symbol or cfg.SYMBOL
     tf = timeframe or cfg.TIMEFRAME
@@ -47,8 +56,9 @@ def evaluate(
     # метрики
     metrics.inc("bot_decision_total", {"action": str(decision.get("action", "unknown"))})
     metrics.observe("latency_decide_ms", latency_ms, {"symbol": sym, "timeframe": tf})
+    _observe_hist("latency_decide_ms", latency_ms, {"symbol": sym, "timeframe": tf})
 
-    # опциональная публикация
+    # публикация (мягко)
     if bus is not None:
         try:
             bus.publish(
@@ -64,14 +74,12 @@ def evaluate(
                 }
             )
         except Exception:
-            # события не должны «ронять» бизнес-поток
             pass
 
-    # гарантируем JSON-сериализацию (Decimal→str и т.п.)
+    # сериализация
     try:
         json.dumps(decision, default=str)
     except Exception:
-        # fallback: агрессивная нормализация
         decision = json.loads(json.dumps(decision, default=str))
 
     return decision
