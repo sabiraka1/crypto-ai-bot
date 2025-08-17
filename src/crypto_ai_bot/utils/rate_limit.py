@@ -95,7 +95,36 @@ def guard_rate_limit(
     return _decorator
 
 
-def rate_limit(*, limit: int, per: int = 60, name: Optional[str] = None, metric_prefix: str = "rl"):
+def rate_limit(*args, limit: int = None, per: int = 60, name: Optional[str] = None, metric_prefix: str = "rl", **kw):
+
+    """
+    Compatible wrapper:
+      - New style: @rate_limit(limit=60, per=60)
+      - Legacy  : @rate_limit(max_calls=60, window=60)
+      - Also accepts a single positional for limit: @rate_limit(60)
+    """
+    # Support a single positional arg as limit
+    if limit is None and args:
+        try:
+            limit = int(args[0])
+        except Exception:
+            pass
+
+    # Map legacy aliases if provided
+    if limit is None and "max_calls" in kw:
+        try:
+            limit = int(kw.pop("max_calls"))
+        except Exception:
+            pass
+    if "window" in kw:
+        try:
+            per = int(kw.pop("window"))
+        except Exception:
+            pass
+
+    # Fallback safety: if limit still None, default to 60/min
+    if limit is None:
+        limit = 60
     """
     Совместимая с UC обёртка:
     @rate_limit(limit=60, per=60) → фикс-окно 60/мин.

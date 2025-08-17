@@ -1,17 +1,33 @@
 # src/crypto_ai_bot/market_context/snapshot.py
 from __future__ import annotations
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-def build_snapshot(broker: Any) -> Dict[str, Optional[float]]:
+from crypto_ai_bot.market_context import providers
+
+def build_snapshot(cfg, http, breaker) -> Dict[str, Optional[float | str]]:
     """
-    Мини-снапшот контекста: индексы/доминации могут быть None, если недоступны.
-    Расширять по мере необходимости.
+    Собирает контекст рынка безопасно:
+      - BTC dominance (проценты)
+      - Fear & Greed (значение и текст)
+      - DXY (если включён через CONTEXT_DXY_URL)
+    Любая ошибка/таймаут → None, чтобы не портить основной флоу.
     """
-    out: Dict[str, Optional[float]] = {
-        "btc_dominance": None,
-        "dxy_index": None,
-        "fear_greed": None,
-        "volatility_1d": None,
+    # если контекст выключен, возвращаем пустые поля
+    if not getattr(cfg, "CONTEXT_ENABLE", True):
+        return {
+            "btc_dominance_percent": None,
+            "fear_greed": None,
+            "fear_greed_class": None,
+            "dxy_index": None,
+        }
+
+    btc = providers.btc_dominance(cfg, http, breaker)
+    fng_val, fng_class = providers.fear_greed(cfg, http, breaker)
+    dxy = providers.dxy_index(cfg, http, breaker)
+
+    return {
+        "btc_dominance_percent": btc,
+        "fear_greed": fng_val,
+        "fear_greed_class": fng_class,
+        "dxy_index": dxy,
     }
-    # Здесь можно добавить реальные источники (внешние API) — в paper-режиме оставляем None.
-    return out
