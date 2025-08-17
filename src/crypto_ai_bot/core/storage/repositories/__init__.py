@@ -1,28 +1,15 @@
-# Aggregated exports for repository implementations.
-# Делайте try/except, чтобы импорт отдельных модулей не валил тесты, которым они не нужны.
+from .trades import SqliteTradeRepository  # noqa: F401
+from .positions import SqlitePositionRepository  # noqa: F401
+from .snapshots import SqliteSnapshotRepository  # noqa: F401
+from .audit import SqliteAuditRepository  # noqa: F401
+from .idempotency import SqliteIdempotencyRepository  # noqa: F401
+from .decisions import SqliteDecisionsRepository  # noqa: F401
 
-__all__ = []
-
-try:
-    from .idempotency import SqliteIdempotencyRepository  # type: ignore
-    __all__.append("SqliteIdempotencyRepository")
-except Exception:
-    pass
-
-try:
-    from .trades import SqliteTradeRepository  # type: ignore
-    __all__.append("SqliteTradeRepository")
-except Exception:
-    pass
-
-try:
-    from .positions import SqlitePositionRepository  # type: ignore
-    __all__.append("SqlitePositionRepository")
-except Exception:
-    pass
-
-try:
-    from .snapshots import SqliteSnapshotRepository  # type: ignore
-    __all__.append("SqliteSnapshotRepository")
-except Exception:
-    pass
+__all__ = [
+    "SqliteTradeRepository",
+    "SqlitePositionRepository",
+    "SqliteSnapshotRepository",
+    "SqliteAuditRepository",
+    "SqliteIdempotencyRepository",
+    "SqliteDecisionsRepository",
+]
