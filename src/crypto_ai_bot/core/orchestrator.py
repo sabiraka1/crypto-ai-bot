@@ -1,91 +1,62 @@
 from __future__ import annotations
 
 import asyncio
-import random
-from typing import Callable, Awaitable, List, Optional, Any
+import time
+from typing import Callable, Awaitable, Optional, Dict, Any
+
+from crypto_ai_bot.core.events import AsyncBus as Bus
+from crypto_ai_bot.utils import metrics
 
 
 class Orchestrator:
     """
-    Планировщик фоновых задач бота.
-    - Не знает ничего про HTTP, ccxt и т.д.
-    - Работает с уже сконструированными зависимостями (cfg, bot, repos).
+    Планировщик периодических задач. Работает в одном event loop, не лезет в брокеров напрямую —
+    только вызывает публичные use-cases/bot.
     """
 
-    def __init__(self, cfg, bot, repos, loop: Optional[asyncio.AbstractEventLoop] = None):
-        self.cfg = cfg
-        self.bot = bot
-        self.repos = repos
-        self.loop = loop or asyncio.get_event_loop()
-
-        self._running: bool = False
-        self._tasks: List[asyncio.Task] = []
-
-    # ------------- публичный API -------------
-
-    def schedule_every(
-        self,
-        seconds: float,
-        fn: Callable[[], Awaitable[Any]] | Callable[[], Any],
-        *,
-        jitter: float = 0.1,
-        name: Optional[str] = None,
-    ) -> None:
-        """
-        Планирует периодический вызов fn.
-        jitter – относительный (0.1 = ±10%).
-        """
-        async def _runner():
-            # небольшой рандом при старте, чтобы не стрелять синхронно
-            await asyncio.sleep(random.uniform(0, seconds * jitter))
-            while self._running:
-                try:
-                    res = fn()
-                    if asyncio.iscoroutine(res):
-                        await res  # type: ignore[func-returns-value]
-                except Exception:
-                    # никаких падений оркестратора — ошибки уже логируются в самом fn
-                    pass
-                # следующий запуск
-                await asyncio.sleep(seconds * random.uniform(1 - jitter, 1 + jitter))
-
-        task = self.loop.create_task(_runner(), name=name or f"periodic-{getattr(fn, '__name__', 'job')}")
-        self._tasks.append(task)
-
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-
-        # ---- обслуживание: периодически обновляем метрики позиций/экспозиции
-        # частота берётся из настроек, по умолчанию 30 секунд
-        refresh_sec = getattr(self.cfg, "METRICS_REFRESH_SEC", 30)
-        if getattr(self.repos, "tracker", None):
-            def _update_metrics_safely():
-                try:
-                    self.repos.tracker.update_metrics()
-                except Exception:
-                    # намеренно молчим – метрики не должны валить оркестратор
-                    pass
-
-            self.schedule_every(refresh_sec, _update_metrics_safely, jitter=0.2, name="positions-metrics")
-
-    async def stop(self) -> None:
-        if not self._running:
-            return
+    def __init__(self, *, bus: Bus, shutdown_timeout: float = 5.0) -> None:
+        self._bus = bus
+        self._shutdown_timeout = shutdown_timeout
+        self._tasks: set[asyncio.Task] = set()
         self._running = False
 
-        # мягкая остановка
-        for t in self._tasks:
+    def schedule_every(self, seconds: int, fn: Callable[[], Awaitable[Any]], *, jitter: float = 0.1) -> None:
+        """
+        Планирование корутин-функции с фиксированным периодом и небольшим джиттером.
+        """
+        async def _runner():
+            try:
+                # маленькая рассинхронизация старта
+                await asyncio.sleep(seconds * jitter)
+                while self._running:
+                    t0 = time.perf_counter()
+                    try:
+                        await fn()
+                        metrics.observe("scheduled_task_duration_seconds", time.perf_counter() - t0, {"fn": getattr(fn, "__name__", "anon")})
+                    except Exception as e:
+                        metrics.inc("scheduled_task_error_total", {"fn": getattr(fn, "__name__", "anon"), "type": type(e).__name__})
+                    # выдерживаем период
+                    await asyncio.sleep(max(0.0, seconds - (time.perf_counter() - t0)))
+            except asyncio.CancelledError:
+                pass
+
+        self._tasks.add(asyncio.create_task(_runner()))
+
+    async def start(self) -> None:
+        self._running = True
+
+    async def stop(self) -> None:
+        self._running = False
+        # отмена и ожидание завершения всех задач
+        for t in list(self._tasks):
             t.cancel()
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.wait(self._tasks, timeout=self._shutdown_timeout)
         self._tasks.clear()
 
-
-# Фабричная функция — удобно вызывать там, где инициализируется бот
-def create_default_orchestrator(cfg, bot, repos) -> Orchestrator:
-    """
-    Конструирует оркестратор и включает обслуживание метрик (если доступен tracker).
-    """
-    return Orchestrator(cfg=cfg, bot=bot, repos=repos)
+    # На будущее — хук публикации событий
+    def publish(self, event: Dict[str, Any]) -> None:
+        try:
+            self._bus.publish(event)
+        except Exception:
+            pass
