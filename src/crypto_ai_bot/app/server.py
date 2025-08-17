@@ -201,6 +201,12 @@ def tick(body: Dict[str, Any] = Body(default=None)) -> JSONResponse:
     limit = int((body or {}).get("limit") or getattr(CFG, "LIMIT", 300))
     try:
         decision = uc_eval_and_execute(CFG, BROKER, REPOS, symbol=sym, timeframe=tf, limit=limit)
+        # обновим метрики трекера, если подключён
+        if getattr(REPOS, "tracker", None):
+            try:
+                REPOS.tracker.update_metrics()
+            except Exception:
+                pass
         return JSONResponse({"status": "ok", "decision": decision, "symbol": sym, "timeframe": tf})
     except Exception as e:
         return JSONResponse({"status": "error", "error": f"tick_failed: {type(e).__name__}: {e}"})
