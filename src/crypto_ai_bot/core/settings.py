@@ -32,6 +32,7 @@ class Settings:
     # --- оркестратор ---
     TICK_PERIOD_SEC: int = int(os.getenv("TICK_PERIOD_SEC", "60"))
     METRICS_REFRESH_SEC: int = int(os.getenv("METRICS_REFRESH_SEC", "30"))
+    MAINTENANCE_SEC: int = int(os.getenv("MAINTENANCE_SEC", "60"))
     # --- Rate limits (use-cases) ---
     RL_EVALUATE_PER_MIN: int = int(os.getenv("RL_EVALUATE_PER_MIN", "60"))
     RL_ORDERS_PER_MIN: int = int(os.getenv("RL_ORDERS_PER_MIN", "10"))
@@ -52,7 +53,7 @@ class Settings:
         u.strip() for u in os.getenv("TIME_DRIFT_URLS", "").split(",") if u.strip()
     ]
 
-    # --- бэктест ---
+     or ["https://worldtimeapi.org/api/timezone/Etc/UTC"]# --- бэктест ---
     BACKTEST_CSV_PATH: str = os.getenv("BACKTEST_CSV_PATH", "data/backtest.csv")
 
     # --- базовые параметры риск/размер ---
