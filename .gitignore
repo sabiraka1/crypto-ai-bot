@@ -88,3 +88,12 @@ pnpm-debug.log*
 
 # FastAPI / Uvicorn reload artifacts
 *.reload
+
+# SQLite artifacts
+*.sqlite
+*.sqlite3
+*.db
+**/smoke_*.sqlite
+/data/*
+!/data/.gitkeep
+
