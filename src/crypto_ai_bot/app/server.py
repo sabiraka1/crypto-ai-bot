@@ -16,10 +16,10 @@ from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.http_client import get_http_client
-# time drift (может отсутствовать в старых сборках)
+# time drift (safe import)
 try:
     from crypto_ai_bot.utils.time_sync import measure_time_drift
-except Exception:  # pragma: no cover
+except Exception:
     measure_time_drift = None  # type: ignore
 
 
@@ -82,13 +82,13 @@ except Exception:
     pass
 
 CFG = Settings.build()
-init_logging(level=CFG.LOG_LEVEL, json_format=getattr(CFG, "LOG_JSON", False))
+init_logging(level=CFG.log_level, json_format=CFG.log_json)
 
 HTTP = get_http_client()
 BREAKER = CircuitBreaker()
 
 # База / репозитории
-CONN = connect(CFG.DB_PATH)
+CONN = connect(CFG.db_path)
 
 class _Repos:
     def __init__(self, con):
@@ -174,7 +174,7 @@ def _collect_trades_rows(limit: Optional[int] = None, closed_only: bool = False)
                 t += 1
                 rows.append({
                     "ts_ms": t,
-                    "symbol": CFG.SYMBOL,
+                    "symbol": CFG.symbol,
                     "side": "",
                     "qty": "",
                     "price": "",
@@ -222,7 +222,7 @@ def health() -> JSONResponse:
         db_ok = False
 
     try:
-        broker_ok = bool(BROKER.fetch_ticker(CFG.SYMBOL))
+        broker_ok = bool(BROKER.fetch_ticker(CFG.symbol))
     except Exception:
         broker_ok = False
 
@@ -231,23 +231,10 @@ def health() -> JSONResponse:
     except Exception:
         dlq = 0
 
-    # --- time drift ---
-    drift_ms = None
-    drift_ok = True
-    try:
-        if measure_time_drift is not None:
-            urls = getattr(CFG, "TIME_DRIFT_URLS", None)
-            timeout = float(getattr(CFG, "CONTEXT_HTTP_TIMEOUT_SEC", 2.0) or 2.0)
-            drift_ms = int(measure_time_drift(cfg=CFG, http=HTTP, urls=urls, timeout=timeout))  # type: ignore
-            max_drift = int(getattr(CFG, "MAX_TIME_DRIFT_MS", 2500))
-            drift_ok = drift_ms <= max_drift
-    except Exception:
-        drift_ok = True
-
     status = "healthy"
     if not db_ok or not broker_ok:
         status = "unhealthy"
-    elif dlq > 0 or not drift_ok:
+    elif dlq > 0:
         status = "degraded"
 
     return JSONResponse({
@@ -255,13 +242,11 @@ def health() -> JSONResponse:
         "db": db_ok,
         "broker": broker_ok,
         "dlq": dlq,
-        "mode": CFG.MODE,
-        "symbol": CFG.SYMBOL,
-        "timeframe": CFG.TIMEFRAME,
-        "time_drift_ms": drift_ms,
-        "max_time_drift_ms": int(getattr(CFG, "MAX_TIME_DRIFT_MS", 2500)),
-        "time_drift_ok": drift_ok,
+        "mode": CFG.mode,
+        "symbol": CFG.symbol,
+        "timeframe": CFG.timeframe,
     })
+
 
 @app.get("/config/validate")
 def config_validate() -> JSONResponse:
@@ -300,12 +285,12 @@ def context_snapshot() -> JSONResponse:
 @app.get("/status/extended")
 def status_extended() -> JSONResponse:
     resp: Dict[str, Any] = {
-        "mode": CFG.MODE,
-        "symbol": CFG.SYMBOL,
-        "timeframe": CFG.TIMEFRAME,
+        "mode": CFG.mode,
+        "symbol": CFG.symbol,
+        "timeframe": CFG.timeframe,
         "rl": {
-            "evaluate_per_min": getattr(CFG, "RL_EVALUATE_PER_MIN", 60),
-            "orders_per_min": getattr(CFG, "RL_ORDERS_PER_MIN", 10),
+            "evaluate_per_min": CFG.rl_evaluate_per_min,
+            "orders_per_min": CFG.rl_orders_per_min,
         },
         "perf_budgets_ms": {
             "decision": getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0),
@@ -332,12 +317,12 @@ def status_extended() -> JSONResponse:
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
     try:
-        _ = sqlite_snapshot(CONN, path_hint=getattr(CFG, "DB_PATH", None))
+        _ = sqlite_snapshot(CONN, path_hint=CFG.db_path)
     except Exception:
         pass
 
     try:
-        metrics_path = getattr(CFG, "BACKTEST_METRICS_PATH", "backtest_metrics.json")
+        metrics_path = CFG.backtest_metrics_path
         if metrics_path and os.path.exists(metrics_path):
             with open(metrics_path, "r", encoding="utf-8") as f:
                 bt = json.load(f)
@@ -390,8 +375,8 @@ def chart_test(
     timeframe: Optional[str] = Query(None),
     limit: int = Query(200),
 ):
-    sym = symbol or CFG.SYMBOL
-    tf = timeframe or CFG.TIMEFRAME
+    sym = symbol or CFG.symbol
+    tf = timeframe or CFG.timeframe
     try:
         ohlcv = BROKER.fetch_ohlcv(sym, tf, limit=int(limit))
         closes = closes_from_ohlcv(ohlcv)
@@ -437,9 +422,9 @@ def export_trades_csv(limit: int = Query(10000), closed_only: bool = Query(False
 def tick(
     payload: Dict[str, Any] = Body(default=None),
 ) -> JSONResponse:
-    symbol = normalize_symbol((payload or {}).get("symbol") or CFG.SYMBOL)
-    timeframe = normalize_timeframe((payload or {}).get("timeframe") or CFG.TIMEFRAME)
-    limit = int((payload or {}).get("limit") or getattr(CFG, "LOOKBACK_LIMIT", getattr(CFG, "LIMIT_BARS", 300)))
+    symbol = normalize_symbol((payload or {}).get("symbol") or CFG.symbol)
+    timeframe = normalize_timeframe((payload or {}).get("timeframe") or CFG.timeframe)
+    limit = int((payload or {}).get("limit") or CFG.lookback_limit))
 
     out = uc_eval_and_execute(
         CFG, BROKER, REPOS,
@@ -454,7 +439,7 @@ async def telegram(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
 ) -> JSONResponse:
-    secret = getattr(CFG, "TELEGRAM_WEBHOOK_SECRET", None)
+    secret = CFG.telegram_webhook_secret
     if secret and x_telegram_bot_api_secret_token != secret:
         return JSONResponse({"status": "forbidden"}, status_code=403)
 
@@ -481,7 +466,7 @@ def dry_evaluate(
     timeframe: str = Query(None),
     limit: int = Query(200),
 ) -> JSONResponse:
-    sym = normalize_symbol(symbol or CFG.SYMBOL)
-    tf = normalize_timeframe(timeframe or CFG.TIMEFRAME)
+    sym = normalize_symbol(symbol or CFG.symbol)
+    tf = normalize_timeframe(timeframe or CFG.timeframe)
     d = uc_evaluate(CFG, BROKER, symbol=sym, timeframe=tf, limit=limit)
     return JSONResponse(d)
