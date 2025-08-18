@@ -1,43 +1,22 @@
 # src/crypto_ai_bot/core/events/factory.py
 from __future__ import annotations
-from typing import Dict
+from typing import Any, Dict, Optional
 
-from .async_bus import AsyncBus
-
-# Рекомендованные дефолты backpressure для типов событий
-# (можно переопределить через Settings.EVENT_BACKPRESSURE_MAP)
-_DEFAULTS: Dict[str, Dict[str, str | int]] = {
-    "DecisionEvaluated": {"strategy": "keep_latest", "maxsize": 100},  # высокочастотные, держим только свежие
-    "FlowFinished":      {"strategy": "drop_oldest", "maxsize": 1000}, # телеметрия
-    "OrderExecuted":     {"strategy": "block",       "maxsize": 100},  # важные события — не теряем
-    "OrderFailed":       {"strategy": "block",       "maxsize": 100},
+# Карта backpressure по типам событий: стратегия и лимит очереди.
+# Можно переопределить через CFG.EVENTS_BACKPRESSURE_JSON (если захочешь).
+DEFAULT_BACKPRESSURE_MAP: Dict[str, Dict[str, Any]] = {
+    "DecisionEvaluated": {"strategy": "keep_latest", "queue_size": 1024},
+    "OrderExecuted":     {"strategy": "drop_oldest", "queue_size": 2048},
+    "OrderFailed":       {"strategy": "drop_oldest", "queue_size": 2048},
+    "FlowFinished":      {"strategy": "keep_latest", "queue_size": 1024},
 }
 
-def build_bus(cfg) -> AsyncBus:
-    """
-    Фабрика асинхронной шины с конфигурируемым backpressure:
-      - дефолты из _DEFAULTS
-      - затем пользовательские overrides из Settings.EVENT_BACKPRESSURE_MAP
-    """
-    bus = AsyncBus()
+def build_sync_bus(cfg: Any, repos: Any) -> Any:
+    from .bus import EventBus
+    dlq_max = int(getattr(cfg, "BUS_DLQ_MAX", 1000))
+    return EventBus(dlq_max=dlq_max)
 
-    # собрать карту настроек
-    overrides: Dict[str, Dict[str, str | int]] = {}
-    overrides.update(_DEFAULTS)
-    try:
-        user_map = getattr(cfg, "EVENT_BACKPRESSURE_MAP", None) or {}
-        # ожидаем формат: {event_type: {"strategy": "...", "maxsize": N}}
-        for et, conf in dict(user_map).items():
-            if isinstance(conf, dict):
-                overrides[et] = {**overrides.get(et, {}), **conf}
-    except Exception:
-        pass
-
-    # применить конфигурацию
-    for et, conf in overrides.items():
-        bus.configure_backpressure(et,
-            strategy=str(conf.get("strategy", "block")),
-            maxsize=int(conf.get("maxsize", 1000))
-        )
-
-    return bus
+def build_async_bus(cfg: Any, repos: Any) -> Any:
+    from .async_bus import AsyncEventBus
+    dlq_max = int(getattr(cfg, "BUS_DLQ_MAX", 1000))
+    return AsyncEventBus(strategy_map=DEFAULT_BACKPRESSURE_MAP, dlq_max=dlq_max)

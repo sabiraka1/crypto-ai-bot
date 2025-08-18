@@ -2,68 +2,59 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
 from collections import deque
+from typing import Any, Callable, Dict, List, Optional
 
 from crypto_ai_bot.utils import metrics
 
+_Strategy = str  # "block" | "drop_oldest" | "keep_latest"
 
-EventHandler = Callable[[Any], Awaitable[None]] | Callable[[Any], None]
-
-
-@dataclass
-class _EventCfg:
-    strategy: str = "block"   # block | drop_oldest | keep_latest
-    maxsize: int = 1000
-
-
-@dataclass
-class _EventPipe:
-    queue: asyncio.Queue
-    handlers: List[EventHandler]
-
-
-class AsyncBus:
+class AsyncEventBus:
     """
-    Асинхронная шина событий с backpressure per-event и DLQ.
-    API:
-      - configure_backpressure(event_type, strategy, maxsize)
-      - subscribe(event_type, handler)
-      - publish(event_type, payload)
-      - start()/stop()
+    Асинхронная шина событий с backpressure:
+      - block:     ждать пока освободится место
+      - drop_oldest: удалить старое и положить новое
+      - keep_latest:  сохранить только последнее (новое), старые дропнуть
+    DLQ (dead letter queue) для ошибок обработчиков.
     """
 
-    def __init__(self) -> None:
-        self._cfg: Dict[str, _EventCfg] = {}
-        self._pipes: Dict[str, _EventPipe] = {}
+    def __init__(self, *, strategy_map: Dict[str, Dict[str, Any]], dlq_max: int = 1000, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
+        self.loop = loop or asyncio.get_event_loop()
+        self.strategy_map = strategy_map or {}
+        self.dlq = deque(maxlen=int(dlq_max))
+        self.handlers: Dict[str, List[Callable[[Dict[str, Any]], Any]]] = {}
+        self._queues: Dict[str, asyncio.Queue] = {}
         self._tasks: List[asyncio.Task] = []
         self._running = False
-        self._dlq = deque(maxlen=1000)  # dead letter queue
 
-    # ---------- config ----------
-    def configure_backpressure(self, event_type: str, *, strategy: str = "block", maxsize: int = 1000) -> None:
-        self._cfg[event_type] = _EventCfg(strategy=strategy, maxsize=maxsize)
+    # ---------- public API ----------
 
-    def _pipe_for(self, event_type: str) -> _EventPipe:
-        pipe = self._pipes.get(event_type)
-        if pipe is None:
-            cfg = self._cfg.get(event_type, _EventCfg())
-            q: asyncio.Queue = asyncio.Queue(maxsize=cfg.maxsize)
-            pipe = _EventPipe(queue=q, handlers=[])
-            self._pipes[event_type] = pipe
-            if self._running:
-                self._start_consumer(event_type, pipe)
-        return pipe
+    def subscribe(self, event_type: str, handler: Callable[[Dict[str, Any]], Any]) -> None:
+        self.handlers.setdefault(event_type, []).append(handler)
+        # ленивая инициализация очереди под тип
+        self._ensure_queue(event_type)
 
-    # ---------- lifecycle ----------
+    def publish(self, event: Dict[str, Any]) -> None:
+        et = str(event.get("type") or "")
+        if not et:
+            return
+        q = self._ensure_queue(et)
+        strat, qsize = self._strategy_for(et)
+        put_coro = self._put_with_strategy(q, event, strat, qsize)
+
+        try:
+            # потокобезопасный вызов из sync-кода
+            asyncio.run_coroutine_threadsafe(put_coro, self.loop)
+        except RuntimeError:
+            # если луп не запущен — просто дропнем (не роняем основной поток)
+            metrics.inc("bus_publish_drop_total", {"reason": "loop_not_running", "type": et})
+
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
-        for etype, pipe in self._pipes.items():
-            self._start_consumer(etype, pipe)
+        for etype in list(self._queues.keys()):
+            self._tasks.append(self.loop.create_task(self._worker(etype), name=f"bus-worker:{etype}"))
 
     async def stop(self) -> None:
         self._running = False
@@ -71,76 +62,106 @@ class AsyncBus:
             t.cancel()
         self._tasks.clear()
 
-    def _start_consumer(self, event_type: str, pipe: _EventPipe) -> None:
-        async def _runner():
-            while self._running:
-                try:
-                    payload = await pipe.queue.get()
-                except asyncio.CancelledError:
-                    return
-                except Exception as e:
-                    self._to_dlq(event_type, {"error": repr(e), "phase": "dequeue"})
-                    continue
+    def health(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "status": "ok",
+            "types": {},
+            "dlq_size": len(self.dlq),
+        }
+        for et, q in self._queues.items():
+            out["types"][et] = {"qsize": q.qsize(), **self._strategy_map_view(et)}
+        return out
 
-                for h in list(pipe.handlers):
-                    try:
-                        if inspect.iscoroutinefunction(h):  # type: ignore
-                            await h(payload)               # type: ignore
-                        else:
-                            # sync → отдельно чтобы не блокировать event loop
-                            await asyncio.to_thread(h, payload)  # type: ignore
-                        metrics.inc("event_bus_consumed_total", {"event": event_type, "handler": h.__name__})
-                    except Exception as e:
-                        metrics.inc("event_bus_errors_total", {"event": event_type, "handler": getattr(h, "__name__", "unknown")})
-                        self._to_dlq(event_type, {"payload": payload, "error": repr(e), "handler": getattr(h, "__name__", "unknown")})
-                pipe.queue.task_done()
+    def dlq_dump(self, limit: int = 50) -> List[Dict[str, Any]]:
+        n = max(1, min(int(limit), len(self.dlq)))
+        return list(self.dlq)[-n:]
 
-        task = asyncio.create_task(_runner(), name=f"bus:{event_type}")
-        self._tasks.append(task)
+    # ---------- internals ----------
 
-    def _to_dlq(self, event_type: str, item: Any) -> None:
-        self._dlq.append({"event": event_type, "item": item})
+    def _ensure_queue(self, event_type: str) -> asyncio.Queue:
+        if event_type not in self._queues:
+            strat, qsize = self._strategy_for(event_type)
+            self._queues[event_type] = asyncio.Queue(maxsize=int(qsize))
+        return self._queues[event_type]
 
-    # ---------- API ----------
-    def subscribe(self, event_type: str, handler: EventHandler) -> None:
-        pipe = self._pipe_for(event_type)
-        pipe.handlers.append(handler)
+    def _strategy_for(self, event_type: str) -> tuple[_Strategy, int]:
+        cfg = self.strategy_map.get(event_type) or {}
+        strat = str(cfg.get("strategy") or "block")
+        qsize = int(cfg.get("queue_size") or 1024)
+        return strat, qsize
 
-    async def publish(self, event_type: str, payload: Any) -> None:
-        cfg = self._cfg.get(event_type, _EventCfg())
-        pipe = self._pipe_for(event_type)
-        q = pipe.queue
+    def _strategy_map_view(self, event_type: str) -> Dict[str, Any]:
+        strat, qsize = self._strategy_for(event_type)
+        return {"strategy": strat, "queue_size": qsize}
 
-        if cfg.strategy == "block":
-            await q.put(payload)
+    async def _put_with_strategy(self, q: asyncio.Queue, item: Dict[str, Any], strat: _Strategy, qsize: int) -> None:
+        et = str(item.get("type") or "")
+        if strat == "block":
+            # дождаться места
+            await q.put(item)
+            metrics.inc("bus_enqueued_total", {"type": et, "strategy": "block"})
+            return
 
-        elif cfg.strategy == "drop_oldest":
+        if strat == "drop_oldest":
             if q.full():
                 try:
-                    _ = q.get_nowait()  # выкидываем старый
+                    _ = q.get_nowait()
                     q.task_done()
+                    metrics.inc("bus_dropped_total", {"type": et, "strategy": "drop_oldest"})
                 except asyncio.QueueEmpty:
                     pass
-            await q.put(payload)
+            await q.put(item)
+            metrics.inc("bus_enqueued_total", {"type": et, "strategy": "drop_oldest"})
+            return
 
-        elif cfg.strategy == "keep_latest":
-            # очищаем очередь и кладём только последнюю версию
+        if strat == "keep_latest":
+            # выбрасываем всё старое, кладём только новое
             while not q.empty():
                 try:
                     _ = q.get_nowait()
                     q.task_done()
                 except asyncio.QueueEmpty:
                     break
-            await q.put(payload)
+            await q.put(item)
+            metrics.inc("bus_enqueued_total", {"type": et, "strategy": "keep_latest"})
+            return
 
-        else:
-            # на всякий случай — как block
-            await q.put(payload)
+        # неизвестная стратегия → fallback block
+        await q.put(item)
+        metrics.inc("bus_enqueued_total", {"type": et, "strategy": "block"})
 
-        metrics.inc("event_bus_published_total", {"event": event_type})
+    async def _worker(self, event_type: str) -> None:
+        q = self._queues[event_type]
+        while self._running:
+            try:
+                item = await q.get()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                continue
 
-    def dlq_snapshot(self, limit: int = 100) -> List[Any]:
-        """
-        Возвращает последние элементы DLQ, чтобы можно было отдать через /bus/debug.
-        """
-        return list(self._dlq)[-limit:]
+            try:
+                handlers = list(self.handlers.get(event_type, []))
+                if not handlers:
+                    # нет обработчиков — считаем доставленным
+                    metrics.inc("bus_delivered_total", {"type": event_type, "handlers": "0"})
+                    q.task_done()
+                    continue
+
+                delivered = 0
+                for h in handlers:
+                    try:
+                        if asyncio.iscoroutinefunction(h):
+                            await h(item)
+                        else:
+                            # исполняем sync-обработчик в default executor
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(None, h, item)
+                        delivered += 1
+                    except Exception as e:
+                        # отправляем в DLQ
+                        self.dlq.append({"type": event_type, "error": f"{type(e).__name__}: {e}", "event": item})
+                        metrics.inc("bus_dlq_total", {"type": event_type})
+                metrics.inc("bus_delivered_total", {"type": event_type, "handlers": str(delivered)})
+            finally:
+                q.task_done()

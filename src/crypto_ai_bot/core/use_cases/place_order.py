@@ -6,19 +6,10 @@ from typing import Any, Dict, Optional
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.utils import metrics
-
-try:
-    from crypto_ai_bot.utils.rate_limit import rate_limit
-except Exception:
-    def rate_limit(*_, **__):
-        def _wrap(fn):
-            return fn
-        return _wrap
-
+from crypto_ai_bot.utils.rate_limit import rate_limit, RateLimitExceeded
 from crypto_ai_bot.core.positions.manager import PositionManager
 
-
-@rate_limit(limit=10, per=60)  # ≤ 10 исполнений/мин
+@rate_limit(max_calls=10, window=60)  # спецификация
 def place_order(
     cfg: Settings,
     broker: Any,
@@ -32,14 +23,14 @@ def place_order(
     bus: Optional[Any] = None,
     idem_repo: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    action = str(decision.get("action", "hold")).lower()  # buy|sell|hold
+    action = str(decision.get("action", "hold")).lower()
     side = action if action in ("buy", "sell") else "hold"
     size = Decimal(str(decision.get("size", "0")))
     if side == "hold" or size == Decimal("0"):
         metrics.inc("order_skip_total", {"reason": "hold"})
         return {"status": "skipped", "reason": "hold"}
 
-    # идемпотентность (spec: symbol:side:size:minute:decision_id[:8])
+    # идемпотентность (spec)
     if idem_repo is not None:
         minute = int(int(decision.get("ts_ms", 0) or 0) // 60000)
         did = str(decision.get("id", ""))[:8]
@@ -49,14 +40,8 @@ def place_order(
             metrics.inc("order_duplicate_total")
             return {"status": "duplicate", "prev": prev}
 
-    pm = PositionManager(
-        positions_repo=positions_repo,
-        trades_repo=trades_repo,
-        audit_repo=audit_repo,
-        uow=uow,
-    )
+    pm = PositionManager(positions_repo=positions_repo, trades_repo=trades_repo, audit_repo=audit_repo, uow=uow)
 
-    # цену берём у брокера
     px = Decimal(str(broker.fetch_ticker(symbol).get("last", "0")))
     if px <= 0:
         return {"status": "error", "error": "invalid_price"}
@@ -64,8 +49,7 @@ def place_order(
     if side == "buy":
         snap = pm.open_or_add(symbol, size, px)
     elif side == "sell":
-        # В менеджере позиций нет reduce_or_close, используем reduce
-        snap = pm.reduce(symbol, size, px)
+        snap = pm.reduce(symbol, size, px)  # фикc: reduce_or_close -> reduce
     else:
         return {"status": "error", "error": f"unknown_action:{action}"}
 
@@ -75,8 +59,8 @@ def place_order(
                 "type": "OrderExecuted",
                 "symbol": symbol,
                 "timeframe": getattr(cfg, "TIMEFRAME", ""),
-                "side": side,                      # выравнивание с bus_wiring
-                "qty": str(size),                  # ожидание в bus_wiring
+                "side": side,
+                "qty": str(size),
                 "price": str(px),
                 "latency_ms": decision.get("latency_ms"),
             })

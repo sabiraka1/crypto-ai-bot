@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-echo "== Architecture sanity check =="
 cd "$ROOT"
 
-# 1) Пустые или почти пустые файлы (< 10 байт или только перенос)
-echo "-- Empty / near-empty files:"
-EMPTY=$(find src -type f -name "*.py" -exec awk 'BEGIN{empty=1} { if (length($0) > 1 && $0 !~ /^[[:space:]]*#/) empty=0 } END{ if (empty) print FILENAME }' {} + || true)
+echo "== Architecture sanity check =="
+
+# 1) Пустые (кроме __init__.py)
+echo "-- Empty / near-empty python files:"
+EMPTY=$(find src -type f -name "*.py" ! -name "__init__.py" -exec awk 'BEGIN{empty=1} { if (length($0) > 1 && $0 !~ /^[[:space:]]*#/) empty=0 } END{ if (empty) print FILENAME }' {} + || true)
 if [[ -n "${EMPTY:-}" ]]; then
   echo "$EMPTY"
   echo "✗ Found empty stubs ↑"
@@ -16,18 +16,20 @@ else
   echo "✓ none"
 fi
 
-# 2) Критичные пути и файлы
+# 2) Критичные файлы присутствуют
 echo "-- Critical files presence:"
 CRIT=0
 for p in \
-  "src/crypto_ai_bot/utils/logging.py" \
-  "src/crypto_ai_bot/utils/metrics.py" \
   "src/crypto_ai_bot/app/server.py" \
-  "src/crypto_ai_bot/core/storage/sqlite_adapter.py" \
+  "src/crypto_ai_bot/utils/rate_limit.py" \
+  "src/crypto_ai_bot/utils/metrics.py" \
+  "src/crypto_ai_bot/utils/logging.py" \
   "src/crypto_ai_bot/core/events/bus.py" \
+  "src/crypto_ai_bot/core/events/async_bus.py" \
+  "src/crypto_ai_bot/core/events/factory.py" \
   "src/crypto_ai_bot/core/use_cases/evaluate.py" \
   "src/crypto_ai_bot/core/use_cases/place_order.py" \
-  "src/crypto_ai_bot/core/use_cases/eval_and_execute.py"
+  "src/crypto_ai_bot/core/storage/sqlite_adapter.py"
 do
   if [[ -f "$p" ]]; then
     echo "✓ $p"
@@ -36,10 +38,7 @@ do
   fi
 done
 
-# 3) Быстрые подсказки
 echo "-- Hints:"
-echo "• Ensure TELEGRAM_BOT_TOKEN and ALERT_TELEGRAM_CHAT_ID for alerts (optional)."
-echo "• Run 'uvicorn crypto_ai_bot.app.server:app --reload' and check /health, /metrics."
-echo "• Set PERF_BUDGET_*_P99_MS to enable budget flags."
-
+echo "• Run 'uvicorn crypto_ai_bot.app.server:app --reload' and check /health, /status/extended, /metrics, /context."
+echo "• PERF_BUDGET_*_P99_MS envs enable budget flags."
 exit $CRIT

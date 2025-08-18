@@ -1,142 +1,82 @@
 # src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
 
-import threading
 import time
-from typing import Callable, Optional, Any, Dict
+import threading
+import functools
+import inspect
+from collections import deque
+from typing import Callable, Deque, Dict, Optional, Any
 
-from crypto_ai_bot.utils.metrics import inc
+__all__ = ["rate_limit", "RateLimitExceeded"]
 
 
-class RateLimitExceeded(Exception):
-    """Поднятие исключения при превышении лимита."""
+class RateLimitExceeded(RuntimeError):
+    pass
 
 
-class _FixedWindow:
+class _Limiter:
+    def __init__(self, max_calls: int, window: float) -> None:
+        self.max_calls = int(max_calls)
+        self.window = float(window)
+        self.lock = threading.RLock()
+        self.calls: Deque[float] = deque()
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        cutoff = now - self.window
+        with self.lock:
+            while self.calls and self.calls[0] < cutoff:
+                self.calls.popleft()
+            if len(self.calls) >= self.max_calls:
+                return False
+            self.calls.append(now)
+            return True
+
+
+def rate_limit(*dargs: Any, **dkwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """
-    Потокобезопасный лимитер по фиксированному окну (N вызовов / window_sec).
-    Для продакшена достаточно; легко заменить на токен-бакет при необходимости.
+    Унифицированный декоратор:
+      @rate_limit(max_calls=60, window=60)      # спецификация
+      @rate_limit(limit=60, per=60)             # старый вариант (синонимы)
+    Работает и для sync, и для async функций.
     """
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        # key -> {"start": epoch_sec, "count": int}
-        self._state: Dict[str, Dict[str, float]] = {}
+    max_calls = dkwargs.get("max_calls", dkwargs.get("limit"))
+    window = dkwargs.get("window", dkwargs.get("per"))
+    if max_calls is None or window is None:
+        raise TypeError("rate_limit requires (max_calls, window) or (limit, per)")
 
-    def allow(self, key: str, limit: int, window_sec: int = 60) -> bool:
-        now = int(time.time())
-        with self._lock:
-            st = self._state.get(key)
-            if not st or now - int(st["start"]) >= window_sec:
-                # новое окно
-                self._state[key] = {"start": float(now), "count": 1.0}
-                return True
-            # то же окно
-            if st["count"] < float(limit):
-                st["count"] += 1.0
-                return True
-            return False
+    limiter = _Limiter(int(max_calls), float(window))
 
+    def _decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        is_coro = inspect.iscoroutinefunction(fn)
 
-# Глобальный реестр лимитов (в процессе)
-_LIMITER = _FixedWindow()
+        @functools.wraps(fn)
+        async def _async_wrapped(*args: Any, **kwargs: Any) -> Any:
+            if not limiter.allow():
+                try:
+                    from . import metrics  # ленивая загрузка, чтобы не плодить зависимостей
+                    metrics.inc("rate_limit_exceeded_total", {"fn": fn.__name__})
+                except Exception:
+                    pass
+                raise RateLimitExceeded(f"rate limit exceeded: {max_calls} calls / {window}s")
+            return await fn(*args, **kwargs)
 
-
-def _detect_mode(cfg: Any) -> str:
-    try:
-        # В проекте есть Settings.MODE, но на всякий случай мягко определим
-        mode = getattr(cfg, "MODE", None)
-        if mode:
-            return str(mode)
-    except Exception:
-        pass
-    return "paper"
-
-
-def guard_rate_limit(
-    *,
-    name: str,
-    per_min: int | Callable[[Any], int],
-    metric_prefix: str = "rl",
-    key_fn: Optional[Callable[..., str]] = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """
-    Декоратор: ограничивает частоту вызовов функции.
-    Метрики:
-      {metric_prefix}_calls_total
-      {metric_prefix}_rate_limited_total
-    """
-    def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        def _wrapped(*args: Any, **kwargs: Any) -> Any:
-            # Метрика "вызовов до лимита"
-            inc(f"{metric_prefix}_calls_total")
-
-            # cfg может приходить либо первым позиционным (UC), либо именованным
-            cfg = kwargs.get("cfg", None)
-            if cfg is None and args:
-                cfg = args[0]  # UC обычно первым аргументом передают cfg
-
-            # лимит в минуту
-            limit_val = per_min(cfg) if callable(per_min) else int(per_min)
-
-            # ключ лимита
-            mode = _detect_mode(cfg)
-            key = key_fn(*args, **kwargs) if key_fn else f"{name}:{mode}:global"
-
-            if limit_val <= 0:
-                inc(f"{metric_prefix}_rate_limited_total", {"key": key})
-                raise RateLimitExceeded(f"rate_limit_{name}: limit=0")
-
-            if not _LIMITER.allow(key, limit=limit_val, window_sec=60):
-                inc(f"{metric_prefix}_rate_limited_total", {"key": key})
-                raise RateLimitExceeded(f"rate_limit_{name}: {limit_val}/min exceeded")
-
+        @functools.wraps(fn)
+        def _sync_wrapped(*args: Any, **kwargs: Any) -> Any:
+            if not limiter.allow():
+                try:
+                    from . import metrics
+                    metrics.inc("rate_limit_exceeded_total", {"fn": fn.__name__})
+                except Exception:
+                    pass
+            # поднимаем исключение для вызывающей стороны (UC ловят и возвращают статус)
+                raise RateLimitExceeded(f"rate limit exceeded: {max_calls} calls / {window}s")
             return fn(*args, **kwargs)
-        return _wrapped
-    return _decorator
 
+        return _async_wrapped if is_coro else _sync_wrapped
 
-def rate_limit(*args, limit: int = None, per: int = 60, name: Optional[str] = None, metric_prefix: str = "rl", **kw):
-
-    """
-    Compatible wrapper:
-      - New style: @rate_limit(limit=60, per=60)
-      - Legacy  : @rate_limit(max_calls=60, window=60)
-      - Also accepts a single positional for limit: @rate_limit(60)
-    """
-    # Support a single positional arg as limit
-    if limit is None and args:
-        try:
-            limit = int(args[0])
-        except Exception:
-            pass
-
-    # Map legacy aliases if provided
-    if limit is None and "max_calls" in kw:
-        try:
-            limit = int(kw.pop("max_calls"))
-        except Exception:
-            pass
-    if "window" in kw:
-        try:
-            per = int(kw.pop("window"))
-        except Exception:
-            pass
-
-    # Fallback safety: if limit still None, default to 60/min
-    if limit is None:
-        limit = 60
-    """
-    Совместимая с UC обёртка:
-    @rate_limit(limit=60, per=60) → фикс-окно 60/мин.
-    """
-    # name берём из функции, если не задан
-    def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        nm = name or getattr(fn, "__name__", "fn")
-        # per всегда 60 для "per minute"; limit — фактический лимит
-        return guard_rate_limit(name=nm, per_min=limit, metric_prefix=metric_prefix)(_wrap_name(fn, nm))
-    return _decorator
-
-
-def _wrap_name(fn: Callable[..., Any], name: str) -> Callable[..., Any]:
-    fn.__name__ = name  # полезно для метрик/логов
-    return fn
+    # Поддержка как с параметрами, так и без (но у нас всегда с параметрами)
+    if dargs and callable(dargs[0]):
+        return _decorate(dargs[0])
+    return _decorate
