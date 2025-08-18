@@ -1,1 +1,1 @@
-web: PYTHONPATH=src gunicorn -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT crypto_ai_bot.app.server:app
+web: gunicorn -k uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:$PORT --chdir src crypto_ai_bot.app.server:app
