@@ -1,18 +1,31 @@
-# src/crypto_ai_bot/utils/time_sync.py
 from __future__ import annotations
+from typing import Optional, Dict, Any
 import time
 
-def measure_time_drift_ms(container) -> int:
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+def measure_time_drift_ms(broker: Any) -> Dict[str, Any]:
     """
-    Разница локального времени и времени биржи (если ccxt поддерживает).
-    Если недоступно — возвращаем 0 (не считаем фэйлом).
+    Пробуем получить серверное время биржи и вернуть дрейф в мс.
+    Порядок: broker.ccxt.fetch_time() -> broker.ccxt.milliseconds() -> 0.
     """
+    ex = getattr(broker, "ccxt", None)
+    server_ms: Optional[int] = None
     try:
-        ccxt = getattr(container.broker, "ccxt", None)
-        if ccxt and hasattr(ccxt, "milliseconds"):
-            bt = int(ccxt.milliseconds())
-            lt = int(time.time() * 1000)
-            return abs(bt - lt)
+        if ex and hasattr(ex, "fetch_time"):
+            t = ex.fetch_time()
+            if isinstance(t, (int, float)):
+                server_ms = int(t)
     except Exception:
         pass
-    return 0
+    if server_ms is None:
+        try:
+            if ex and hasattr(ex, "milliseconds"):
+                server_ms = int(ex.milliseconds())
+        except Exception:
+            server_ms = None
+    local_ms = _now_ms()
+    if server_ms is None:
+        return {"ok": False, "drift_ms": 0, "source": "none"}
+    return {"ok": True, "drift_ms": int(abs(local_ms - server_ms)), "source": "exchange"}

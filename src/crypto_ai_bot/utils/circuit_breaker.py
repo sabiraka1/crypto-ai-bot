@@ -1,93 +1,81 @@
-# src/crypto_ai_bot/utils/circuit_breaker.py
 from __future__ import annotations
 import time
-from typing import Callable, Any, Optional, List, Tuple
+from typing import Optional, Dict, Any, List
+
+__all__ = ["CircuitBreaker", "HALF_OPEN", "OPEN", "CLOSED"]
+
+CLOSED, OPEN, HALF_OPEN = "closed", "open", "half-open"
 
 class CircuitBreaker:
     """
-    Простой Circuit Breaker со статистикой и журналом переходов.
+    Простой CB с журналом переходов и stats.
+    Поля:
+      - state: closed|open|half-open
+      - opened_at_ms: когда открыли (для таймаута)
+      - fail_count / success_count
+      - transitions: список {"ts":..,"from":..,"to":..,"reason":..}
     """
-    def __init__(self,
-                 failure_threshold: int = 5,
-                 reset_timeout_sec: float = 10.0,
-                 success_threshold: int = 2):
-        self.failure_threshold = max(1, int(failure_threshold))
-        self.reset_timeout_sec = float(reset_timeout_sec)
-        self.success_threshold = max(1, int(success_threshold))
+    def __init__(self, *, open_timeout_ms: int = 10_000, max_failures: int = 3):
+        self.open_timeout_ms = int(open_timeout_ms)
+        self.max_failures = int(max_failures)
+        self.state = CLOSED
+        self.opened_at_ms: Optional[int] = None
+        self.fail_count = 0
+        self.success_count = 0
+        self.transitions: List[Dict[str, Any]] = []
 
-        self._state = "CLOSED"  # CLOSED | OPEN | HALF_OPEN
-        self._failures = 0
-        self._successes = 0
-        self._opened_at = 0.0
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000)
 
-        self._calls = 0
-        self._errors = 0
-        self._transitions: List[Tuple[float, str]] = [(time.time(), "CLOSED")]
+    # ----- transitions / logging -----
+    def _transition(self, to_state: str, reason: str) -> None:
+        prev = self.state
+        self.state = to_state
+        if to_state == OPEN:
+            self.opened_at_ms = self._now_ms()
+        elif to_state == CLOSED:
+            self.opened_at_ms = None
+            self.fail_count = 0
+        self.transitions.append({
+            "ts": self._now_ms(),
+            "from": prev, "to": to_state, "reason": str(reason),
+        })
 
-    @property
-    def state(self) -> str:
-        if self._state == "OPEN" and (time.time() - self._opened_at) >= self.reset_timeout_sec:
-            self._state = "HALF_OPEN"
-            self._successes = 0
-            self._failures = 0
-            self._transitions.append((time.time(), "HALF_OPEN"))
-        return self._state
+    # ----- API -----
+    def allow(self) -> bool:
+        if self.state == CLOSED:
+            return True
+        if self.state == OPEN:
+            if self.opened_at_ms is None:
+                return False
+            if self._now_ms() - self.opened_at_ms >= self.open_timeout_ms:
+                self._transition(HALF_OPEN, "timeout_expired")
+                return True
+            return False
+        if self.state == HALF_OPEN:
+            return True
+        return False
 
-    def call(self, fn: Callable[[], Any], *, on_error: Optional[Callable[[Exception], None]] = None) -> Any:
-        st = self.state
-        if st == "OPEN":
-            raise RuntimeError("circuit_open")
+    def on_success(self) -> None:
+        self.success_count += 1
+        if self.state in (HALF_OPEN, OPEN):
+            self._transition(CLOSED, "success")
+        # в closed остаёмся closed
 
-        try:
-            result = fn()
-            self._on_success()
-            return result
-        except Exception as e:
-            if on_error:
-                try:
-                    on_error(e)
-                except Exception:
-                    pass
-            self._on_failure()
-            raise
+    def on_failure(self, *, reason: str = "error") -> None:
+        self.fail_count += 1
+        if self.state == CLOSED and self.fail_count >= self.max_failures:
+            self._transition(OPEN, reason)
+        elif self.state == HALF_OPEN:
+            self._transition(OPEN, reason)
+        # если уже OPEN — остаёмся OPEN
 
-    def _on_success(self) -> None:
-        self._calls += 1
-        if self._state == "CLOSED":
-            self._failures = 0
-            return
-        # HALF_OPEN
-        self._successes += 1
-        if self._successes >= self.success_threshold:
-            self._state = "CLOSED"
-            self._failures = 0
-            self._successes = 0
-            self._transitions.append((time.time(), "CLOSED"))
-
-    def _on_failure(self) -> None:
-        self._errors += 1
-        if self._state in ("HALF_OPEN", "CLOSED"):
-            self._failures += 1
-            if self._failures >= self.failure_threshold:
-                self._state = "OPEN"
-                self._opened_at = time.time()
-                self._successes = 0
-                self._transitions.append((self._opened_at, "OPEN"))
-
-    def get_stats(self) -> dict:
+    # статистика для health/метрик
+    def get_stats(self) -> Dict[str, Any]:
         return {
-            "state": self._state,
-            "calls": self._calls,
-            "errors": self._errors,
-            "failures_in_window": self._failures,
-            "success_probes": self._successes,
-            "transitions": self._transitions[-10:],
+            "state": self.state,
+            "fail_count": self.fail_count,
+            "success_count": self.success_count,
+            "opened_for_ms": 0 if self.opened_at_ms is None else max(0, self._now_ms() - self.opened_at_ms),
+            "transitions": list(self.transitions[-50:]),  # хвост журнала
         }
-
-
-def _transition(self, new_state: str) -> None:
-    self._state = new_state
-    try:
-        self._transitions.append((time.time(), new_state))
-    except Exception:
-        self._transitions = [(time.time(), new_state)]
