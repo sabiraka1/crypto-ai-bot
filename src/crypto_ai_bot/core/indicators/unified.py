@@ -197,3 +197,87 @@ def calculate_all_indicators(
     out["atr_pct"] = atr_pct(h, l, c, atr_len).astype(float)
 
     return out
+
+# --- adapter for signals/_build.py API (no math changes) ----------------------
+from typing import Any, Optional, Dict, List
+
+def _ohlcv_to_df(ohlcv: List[List[float]]):
+    import pandas as pd
+    norm = []
+    for row in ohlcv:
+        r = list(row)
+        if len(r) < 6:
+            r = (r + [0.0])[:6]
+        norm.append(r[:6])
+    return pd.DataFrame(norm, columns=["ts", "open", "high", "low", "close", "volume"])
+
+def build_indicators(
+    broker: Any = None,
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    *,
+    limit: int = 300,
+    ohlcv: Optional[List[List[float]]] = None,
+    ema_fast: int = 20,
+    ema_slow: int = 50,
+    rsi_period: int = 14,
+    atr_period: int = 14,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
+) -> Dict[str, Any]:
+    """
+    Thin wrapper around calculate_all_indicators() that keeps your math intact.
+    Returns { "df": DataFrame, "features": {ema_fast, ema_slow, rsi, macd_hist, atr_pct} }.
+    """
+    # 1) get OHLCV
+    if ohlcv is None and broker is not None and symbol and timeframe:
+        try:
+            ohlcv = broker.fetch_ohlcv(symbol, timeframe, limit=limit)
+        except Exception:
+            ohlcv = None
+    if not ohlcv:
+        return {"df": None, "features": {}}
+
+    # 2) compute via existing vectorized logic (no math changes)
+    df = _ohlcv_to_df(ohlcv)
+
+    # Build kwargs for calculate_all_indicators using best-effort mapping
+    kwargs = {}
+    kwargs.update({
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "macd_fast": macd_fast,
+        "macd_slow": macd_slow,
+        "macd_signal": macd_signal,
+    })
+    param_set = {}
+    if "rsi_len" in param_set:
+        kwargs["rsi_len"] = rsi_period
+    else:
+        kwargs["rsi_len"] = rsi_period
+    if "atr_len" in param_set:
+        kwargs["atr_len"] = atr_period
+    else:
+        kwargs["atr_len"] = atr_period
+
+    df2 = calculate_all_indicators(df, **kwargs)
+
+    last = df2.iloc[-1]
+    features = {
+        "ema_fast": float(last.get("ema_fast", 0.0)),
+        "ema_slow": float(last.get("ema_slow", 0.0)),
+        "rsi": float(last.get("rsi", 0.0)),
+        "macd_hist": float(last.get("macd_hist", 0.0)),
+        "atr_pct": float(last.get("atr_pct", 0.0)),
+    }
+    return {"df": df2, "features": features}
+
+# export symbol
+try:
+    __all__.append("build_indicators")   # type: ignore
+except Exception:
+    try:
+        __all__ = list(set(globals().get("__all__", [])) | {"build_indicators"})
+    except Exception:
+        __all__ = ["build_indicators"]
