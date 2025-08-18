@@ -1,215 +1,128 @@
 # src/crypto_ai_bot/app/bus_wiring.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, DefaultDict
-from collections import defaultdict
+import time
+from typing import Any, Callable, Dict, Optional, Tuple, List
 
-from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.percentiles import RollingQuantiles
+try:
+    from crypto_ai_bot.core.events.async_bus import AsyncEventBus
+except Exception as e:  # pragma: no cover
+    AsyncEventBus = None  # type: ignore
 
-
-# Квантили по событиям (глобально для процесса)
-# decision[(symbol, tf)] -> RQ
-# order[(symbol, tf, side)] -> RQ
-# flow[(symbol, tf)] -> RQ
-_decision_q: DefaultDict[Tuple[str, str], RollingQuantiles] = defaultdict(lambda: RollingQuantiles(512))
-_order_q: DefaultDict[Tuple[str, str, str], RollingQuantiles] = defaultdict(lambda: RollingQuantiles(512))
-_flow_q: DefaultDict[Tuple[str, str], RollingQuantiles] = defaultdict(lambda: RollingQuantiles(512))
+try:
+    from crypto_ai_bot.events.factory import build_strategy_map
+except Exception:
+    def build_strategy_map(cfg): return {}
 
 
-def _get(d: dict, key: str, default=None):
-    try:
-        return d.get(key, default)
-    except Exception:
-        return default
+# --- простейшая статистика по p95/p99 (in-memory, небольшой буфер) ---
+_LAT: Dict[str, List[float]] = {}
+_LAT_MAX = 2000
 
+def _record_latency(key: str, ms: float) -> None:
+    arr = _LAT.setdefault(key, [])
+    arr.append(float(ms))
+    if len(arr) > _LAT_MAX:
+        del arr[: len(arr) - _LAT_MAX]
 
-def _gauge_quantiles(prefix: str, labels: Dict[str, str], rq: RollingQuantiles) -> None:
-    p95 = rq.p95()
-    p99 = rq.p99()
-    if p95 is not None:
-        try:
-            metrics.gauge(f"{prefix}_p95_ms", float(p95), labels)
-        except Exception:
-            pass
-    if p99 is not None:
-        try:
-            metrics.gauge(f"{prefix}_p99_ms", float(p99), labels)
-        except Exception:
-            pass
-
-
-def build_bus(cfg, repos) -> Any:
-    from crypto_ai_bot.core.events.bus import Bus  # реализация уже есть
-
-    bus = Bus(dlq_max=int(getattr(cfg, "BUS_DLQ_MAX", 1000)))
-
-    # -------- DecisionEvaluated --------
-    def _on_decision(ev: Dict[str, Any]) -> None:
-        if not isinstance(ev, dict) or ev.get("type") != "DecisionEvaluated":
-            return
-        symbol = str(_get(ev, "symbol", ""))
-        timeframe = str(_get(ev, "timeframe", ""))
-        score = _get(ev, "score")
-        action = _get(ev, "action")
-        size = _get(ev, "size")
-        latency_ms = _get(ev, "latency_ms")
-
-        metrics.inc("decision_evaluated_total", {"symbol": symbol, "tf": timeframe, "action": str(action)})
-        if latency_ms is not None:
-            try:
-                metrics.gauge("decision_latency_ms", float(latency_ms), {"symbol": symbol, "tf": timeframe})
-            except Exception:
-                pass
-            # квантили по (symbol, tf)
-            rq = _decision_q[(symbol, timeframe)]
-            rq.add(float(latency_ms))
-            _gauge_quantiles("decision_latency", {"symbol": symbol, "tf": timeframe}, rq)
-
-        dec_repo = getattr(repos, "decisions", None)
-        if dec_repo:
-            try:
-                dec_repo.insert(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    decision={
-                        "score": score,
-                        "action": action,
-                        "size": size,
-                        "latency_ms": latency_ms,
-                    },
-                    explain=_get(ev, "explain") or {},
-                )
-            except Exception:
-                # пусть Bus положит в DLQ для диагностики
-                raise
-
-    bus.subscribe("DecisionEvaluated", _on_decision)
-
-    # -------- OrderExecuted --------
-    def _on_order_executed(ev: Dict[str, Any]) -> None:
-        if not isinstance(ev, dict) or ev.get("type") != "OrderExecuted":
-            return
-        symbol = str(_get(ev, "symbol", ""))
-        timeframe = str(_get(ev, "timeframe", ""))
-        side = str(_get(ev, "side", "")).lower()  # buy/sell
-        qty = _get(ev, "qty")
-        price = _get(ev, "price")
-        order_id = _get(ev, "order_id")
-        latency_ms = _get(ev, "latency_ms")
-
-        metrics.inc("orders_executed_total", {"symbol": symbol, "tf": timeframe, "side": side})
-        if latency_ms is not None:
-            try:
-                metrics.gauge("order_latency_ms", float(latency_ms), {"symbol": symbol, "tf": timeframe, "side": side})
-            except Exception:
-                pass
-            rq = _order_q[(symbol, timeframe, side)]
-            rq.add(float(latency_ms))
-            _gauge_quantiles("order_latency", {"symbol": symbol, "tf": timeframe, "side": side}, rq)
-
-        # аудиты — как было
-        audit = getattr(repos, "audit", None)
-        if audit:
-            try:
-                audit.insert(
-                    kind="order_executed",
-                    payload={
-                        "symbol": symbol,
-                        "timeframe": timeframe,
-                        "side": side,
-                        "qty": qty,
-                        "price": price,
-                        "order_id": order_id,
-                        "latency_ms": latency_ms,
-                    },
-                )
-            except Exception:
-                raise
-
-    bus.subscribe("OrderExecuted", _on_order_executed)
-
-    # -------- OrderFailed --------
-    def _on_order_failed(ev: Dict[str, Any]) -> None:
-        if not isinstance(ev, dict) or ev.get("type") != "OrderFailed":
-            return
-        symbol = str(_get(ev, "symbol", ""))
-        timeframe = str(_get(ev, "timeframe", ""))
-        side = str(_get(ev, "side", "")).lower()
-        error = str(_get(ev, "error", "unknown"))
-
-        metrics.inc("orders_failed_total", {"symbol": symbol, "tf": timeframe, "side": side})
-
-        audit = getattr(repos, "audit", None)
-        if audit:
-            try:
-                audit.insert(
-                    kind="order_failed",
-                    payload={"symbol": symbol, "timeframe": timeframe, "side": side, "error": error},
-                )
-            except Exception:
-                raise
-
-    bus.subscribe("OrderFailed", _on_order_failed)
-
-    # -------- FlowFinished --------
-    def _on_flow_finished(ev: Dict[str, Any]) -> None:
-        if not isinstance(ev, dict) or ev.get("type") != "FlowFinished":
-            return
-        symbol = str(_get(ev, "symbol", ""))
-        timeframe = str(_get(ev, "timeframe", ""))
-        flow_latency_ms = _get(ev, "flow_latency_ms")
-
-        metrics.inc("flow_finished_total", {"symbol": symbol, "tf": timeframe})
-        if flow_latency_ms is not None:
-            try:
-                metrics.gauge("flow_latency_ms", float(flow_latency_ms), {"symbol": symbol, "tf": timeframe})
-            except Exception:
-                pass
-            rq = _flow_q[(symbol, timeframe)]
-            rq.add(float(flow_latency_ms))
-            _gauge_quantiles("flow_latency", {"symbol": symbol, "tf": timeframe}, rq)
-
-    bus.subscribe("FlowFinished", _on_flow_finished)
-
-    return bus
-
+def _percentile(xs: List[float], q: float) -> Optional[float]:
+    if not xs:
+        return None
+    xs = sorted(xs)
+    k = (len(xs) - 1) * q
+    f = int(k)
+    c = min(f + 1, len(xs) - 1)
+    if f == c:
+        return xs[int(k)]
+    d0 = xs[f] * (c - k)
+    d1 = xs[c] * (k - f)
+    return d0 + d1
 
 def snapshot_quantiles() -> Dict[str, Dict[str, float]]:
-    """
-    Отдаёт текущие p95/p99 с «плоскими» ключами — удобно для алертов.
-    Ключи:
-      decision:<symbol>:<tf>
-      order:<symbol>:<tf>:<side>
-      flow:<symbol>:<tf>
-    """
     out: Dict[str, Dict[str, float]] = {}
-
-    for (symbol, tf), rq in _decision_q.items():
-        p95, p99 = rq.p95(), rq.p99()
-        if p95 is not None or p99 is not None:
-            out[f"decision:{symbol}:{tf}"] = {}
-            if p95 is not None:
-                out[f"decision:{symbol}:{tf}"]["p95"] = float(p95)
-            if p99 is not None:
-                out[f"decision:{symbol}:{tf}"]["p99"] = float(p99)
-
-    for (symbol, tf, side), rq in _order_q.items():
-        p95, p99 = rq.p95(), rq.p99()
-        if p95 is not None or p99 is not None:
-            out[f"order:{symbol}:{tf}:{side}"] = {}
-            if p95 is not None:
-                out[f"order:{symbol}:{tf}:{side}"]["p95"] = float(p95)
-            if p99 is not None:
-                out[f"order:{symbol}:{tf}:{side}"]["p99"] = float(p99)
-
-    for (symbol, tf), rq in _flow_q.items():
-        p95, p99 = rq.p95(), rq.p99()
-        if p95 is not None or p99 is not None:
-            out[f"flow:{symbol}:{tf}"] = {}
-            if p95 is not None:
-                out[f"flow:{symbol}:{tf}"]["p95"] = float(p95)
-            if p99 is not None:
-                out[f"flow:{symbol}:{tf}"]["p99"] = float(p99)
-
+    for k, arr in _LAT.items():
+        p95 = _percentile(arr, 0.95)
+        p99 = _percentile(arr, 0.99)
+        d: Dict[str, float] = {}
+        if p95 is not None:
+            d["p95"] = float(p95)
+        if p99 is not None:
+            d["p99"] = float(p99)
+        if d:
+            out[k] = d
     return out
+
+
+# --- журнал-прокси поверх AsyncEventBus ---
+class _JournalProxy:
+    def __init__(self, bus: Any, journal_repo: Optional[Any] = None) -> None:
+        self._bus = bus
+        self._jr = journal_repo
+
+    # делегаты
+    async def start(self) -> None:
+        if hasattr(self._bus, "start"):
+            await self._bus.start()
+
+    async def stop(self) -> None:
+        if hasattr(self._bus, "stop"):
+            await self._bus.stop()
+
+    def health(self) -> Dict[str, Any]:
+        if hasattr(self._bus, "health"):
+            return self._bus.health()
+        return {}
+
+    def dlq_dump(self, *, limit: int = 50) -> Any:
+        if hasattr(self._bus, "dlq_dump"):
+            return self._bus.dlq_dump(limit=limit)
+        return []
+
+    # публикация
+    def publish(self, event: Dict[str, Any]) -> None:
+        evt = dict(event or {})
+        evt.setdefault("ts_ms", int(time.time() * 1000))
+        if self._jr:
+            try:
+                self._jr.log_enqueued(evt)
+            except Exception:
+                pass
+        self._bus.publish(evt)
+
+    # подписка
+    def subscribe(self, type_: str, handler: Callable[[Dict[str, Any]], Any]) -> None:
+        def _wrap(e: Dict[str, Any]) -> Any:
+            t0 = time.time()
+            try:
+                out = handler(e)
+                if self._jr:
+                    try:
+                        self._jr.log_delivered(e)
+                    except Exception:
+                        pass
+                return out
+            except Exception as err:
+                if self._jr:
+                    try:
+                        self._jr.log_error(e, err)
+                    except Exception:
+                        pass
+                raise
+            finally:
+                try:
+                    ts = int(e.get("ts_ms") or int(t0 * 1000))
+                    dt_ms = max(0.0, (time.time() - (ts / 1000.0)) * 1000.0)
+                    _record_latency(f"bus:{e.get('type','Unknown')}", dt_ms)
+                except Exception:
+                    pass
+
+        self._bus.subscribe(type_, _wrap)
+
+
+def build_bus(cfg: Any, repos: Any) -> Any:
+    if AsyncEventBus is None:
+        raise RuntimeError("AsyncEventBus is not available")
+    smap = build_strategy_map(cfg)
+    bus = AsyncEventBus(strategy_map=smap, dlq_max=int(getattr(cfg, "BUS_DLQ_MAX", 1000)))
+    jr = getattr(repos, "journal", None)
+    return _JournalProxy(bus, journal_repo=jr)

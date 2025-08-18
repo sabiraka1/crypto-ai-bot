@@ -34,7 +34,10 @@ try:
 except Exception:
     SqliteDecisionsRepository = None
 
-# ✅ НОВЫЙ импорт (через пакет validators)
+# ✅ журнал событий
+from crypto_ai_bot.core.storage.repositories.events_journal import EventJournalRepository
+
+# валидатор конфига
 from crypto_ai_bot.core.validators import validate_config
 
 # time drift
@@ -61,7 +64,7 @@ except Exception:
 
 app = FastAPI(title="crypto-ai-bot")
 init_logging()
-register_middlewares(app)  # ← добавили middleware (request-id, http-метрики)
+register_middlewares(app)
 
 CFG: Settings = Settings.build()
 BREAKER = CircuitBreaker()
@@ -77,6 +80,8 @@ class _Repos:
         self.uow = SqliteUnitOfWork(con)
         self.idempotency = SqliteIdempotencyRepository(con)
         self.decisions = SqliteDecisionsRepository(con) if SqliteDecisionsRepository else None
+        # ✅ журнал (ring-buffer)
+        self.journal = EventJournalRepository(con, max_rows=int(getattr(CFG, "JOURNAL_MAX_ROWS", 10_000)))
 
 REPOS = _Repos(CONN)
 
@@ -103,7 +108,6 @@ async def _on_startup() -> None:
                 await asyncio.sleep(3600)
         _ORCH_TASK = asyncio.create_task(_runner(), name="orch-runner")
 
-    # Алерт на DLQ и p99-пороги
     _ALERT_TASK = asyncio.create_task(_alerts_runner(), name="alerts-runner")
 
 
@@ -120,10 +124,9 @@ async def _on_shutdown() -> None:
 
 async def _alerts_runner() -> None:
     cooldown_dlq = int(getattr(CFG, "ALERT_DLQ_EVERY_SEC", 300))
-    cooldown_p99 = 300  # 5 минут
+    cooldown_p99 = 300
     while True:
         try:
-            # DLQ
             if getattr(CFG, "ALERT_ON_DLQ", True):
                 size = 0
                 try:
@@ -134,36 +137,27 @@ async def _alerts_runner() -> None:
                 if size > 0 and _ALERTS.should_send("dlq", cooldown_sec=cooldown_dlq, value=size):
                     _try_alert(f"⚠️ <b>DLQ</b>: {size} сообщений в очереди ошибок.")
 
-            # LATENCY p99
             if getattr(CFG, "ALERT_ON_LATENCY", False):
                 snap = snapshot_quantiles()
+                # (оставим как есть — ключи формата "decision:*", "order:*" если кто-то пишет)
                 thr_dec = int(getattr(CFG, "DECISION_LATENCY_P99_ALERT_MS", 0))
                 thr_ord = int(getattr(CFG, "ORDER_LATENCY_P99_ALERT_MS", 0))
                 thr_flow = int(getattr(CFG, "FLOW_LATENCY_P99_ALERT_MS", 0))
 
-                if thr_dec > 0:
+                def _maybe_alert(prefix: str, thr: int):
+                    if thr <= 0:
+                        return
                     for key, vv in snap.items():
-                        if not key.startswith("decision:"):
+                        if not key.startswith(prefix):
                             continue
                         p99 = float(vv.get("p99", 0.0))
-                        if p99 and p99 > thr_dec and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
-                            _try_alert(f"⏱️ <b>Decision p99</b> {key} = {int(p99)}ms > {thr_dec}ms")
+                        if p99 and p99 > thr and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
+                            _try_alert(f"⏱️ <b>{prefix} p99</b> {key} = {int(p99)}ms > {thr}ms")
 
-                if thr_ord > 0:
-                    for key, vv in snap.items():
-                        if not key.startswith("order:"):
-                            continue
-                        p99 = float(vv.get("p99", 0.0))
-                        if p99 and p99 > thr_ord and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
-                            _try_alert(f"⏱️ <b>Order p99</b> {key} = {int(p99)}ms > {thr_ord}ms")
+                _maybe_alert("decision:", thr_dec)
+                _maybe_alert("order:", thr_ord)
+                _maybe_alert("flow:", thr_flow)
 
-                if thr_flow > 0:
-                    for key, vv in snap.items():
-                        if not key.startswith("flow:"):
-                            continue
-                        p99 = float(vv.get("p99", 0.0))
-                        if p99 and p99 > thr_flow and _ALERTS.should_send(f"p99:{key}", cooldown_sec=cooldown_p99, value=int(p99)):
-                            _try_alert(f"⏱️ <b>Flow p99</b> {key} = {int(p99)}ms > {thr_flow}ms")
         except asyncio.CancelledError:
             break
         except Exception:
@@ -210,7 +204,6 @@ def _health_matrix(components: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
 
 @app.get("/health")
 def health() -> JSONResponse:
-    # DB
     t0 = time.time()
     db_ok = True
     db_error = None
@@ -222,7 +215,6 @@ def health() -> JSONResponse:
         db_latency_ms = int((time.time() - t0) * 1000)
         db_error = f"{type(e).__name__}: {e}"
 
-    # Broker
     b0 = time.time()
     broker_ok = True
     broker_detail = None
@@ -233,7 +225,6 @@ def health() -> JSONResponse:
         broker_detail = f"{type(e).__name__}: {e}"
     broker_latency_ms = int((time.time() - b0) * 1000)
 
-    # Breaker critical keys: если OPEN — деградируем
     breaker_state = "ok"
     try:
         stats = BREAKER.get_stats()
@@ -244,12 +235,10 @@ def health() -> JSONResponse:
     except Exception:
         breaker_state = "unknown"
 
-    # drift
     drift_ms = measure_time_drift(CFG, HTTP, urls=getattr(CFG, "TIME_DRIFT_URLS", None) or None, timeout=1.5)
     limit = int(getattr(CFG, "TIME_DRIFT_LIMIT_MS", 1000))
     drift_status = "ok" if (drift_ms is not None and drift_ms <= limit) else ("unknown" if drift_ms is None else "error")
 
-    # bus
     try:
         bus_state = BUS.health()
     except Exception as e:
@@ -269,19 +258,11 @@ def health() -> JSONResponse:
 
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
-    """
-    Перед экспортом:
-      - Снимаем SQLite-метрики
-      - Выставляем events_dead_letter_total
-      - Считаем performance budgets по p99 из шины
-    """
-    # SQLite snapshot → gauges
     try:
         _ = sqlite_snapshot(CONN)
     except Exception:
         pass
 
-    # events DLQ → gauge
     try:
         h = BUS.health()
         dlq = int(h.get("dlq_size") or h.get("dlq_len") or h.get("dlq", 0) or 0)
@@ -289,50 +270,26 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         metrics.gauge("events_dead_letter_total", 0.0)
 
-    # performance budgets (p99): см. bus_wiring.snapshot_quantiles()
     try:
         snap = snapshot_quantiles()
         thr_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0))
         thr_ord = int(getattr(CFG, "PERF_BUDGET_ORDER_P99_MS", 0))
         thr_flow = int(getattr(CFG, "PERF_BUDGET_FLOW_P99_MS", 0))
-
         exceeded_any = False
-
-        if thr_dec > 0:
-            for key, vv in snap.items():
-                if key.startswith("decision:"):
-                    p99 = float(vv.get("p99", 0.0))
-                    if p99 and p99 > thr_dec:
-                        metrics.gauge("performance_budget_exceeded", 1.0, {"type": "decision", "key": key})
-                        exceeded_any = True
-                    else:
-                        metrics.gauge("performance_budget_exceeded", 0.0, {"type": "decision", "key": key})
-
-        if thr_ord > 0:
-            for key, vv in snap.items():
-                if key.startswith("order:"):
-                    p99 = float(vv.get("p99", 0.0))
-                    if p99 and p99 > thr_ord:
-                        metrics.gauge("performance_budget_exceeded", 1.0, {"type": "order", "key": key})
-                        exceeded_any = True
-                    else:
-                        metrics.gauge("performance_budget_exceeded", 0.0, {"type": "order", "key": key})
-
-        if thr_flow > 0:
-            for key, vv in snap.items():
-                if key.startswith("flow:"):
-                    p99 = float(vv.get("p99", 0.0))
-                    if p99 and p99 > thr_flow:
-                        metrics.gauge("performance_budget_exceeded", 1.0, {"type": "flow", "key": key})
-                        exceeded_any = True
-                    else:
-                        metrics.gauge("performance_budget_exceeded", 0.0, {"type": "flow", "key": key})
-
+        for key, vv in snap.items():
+            p99 = float(vv.get("p99", 0.0))
+            kind = "unknown"
+            if key.startswith("decision:"): kind = "decision"
+            elif key.startswith("order:"): kind = "order"
+            elif key.startswith("flow:"): kind = "flow"
+            thr = {"decision": thr_dec, "order": thr_ord, "flow": thr_flow}.get(kind, 0)
+            if thr > 0 and p99 and p99 > thr:
+                metrics.gauge("performance_budget_exceeded", 1.0, {"type": kind, "key": key})
+                exceeded_any = True
         metrics.gauge("performance_budget_exceeded_any", 1.0 if exceeded_any else 0.0)
     except Exception:
         pass
 
-    # breaker state series
     state_map = {"closed": 0, "half-open": 1, "open": 2}
     extra: List[str] = []
     stats = BREAKER.get_stats()
@@ -352,6 +309,16 @@ def metrics_export() -> PlainTextResponse:
 @app.get("/config")
 def config_public() -> JSONResponse:
     return JSONResponse(_safe_config(CFG))
+
+
+@app.get("/config/validate")
+def config_validate() -> JSONResponse:
+    try:
+        report = validate_config(CFG, http=HTTP, conn=CONN, bus=BUS, breaker=BREAKER)
+        code = 200 if report.get("ok") else 422
+        return JSONResponse(report, status_code=code)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=500)
 
 
 @app.post("/tick")
@@ -381,6 +348,16 @@ def bus_dlq(limit: int = Query(50, ge=1, le=1000)) -> JSONResponse:
     except AttributeError:
         items = []
     return JSONResponse({"status": "ok", "items": items})
+
+# ✅ НОВОЕ: агрегаты по журналу
+@app.get("/bus/stats")
+def bus_stats(since_ms: Optional[int] = Query(None, description="Фильтр по времени (UTC ms)")) -> JSONResponse:
+    try:
+        rep = REPOS.journal.stats(since_ms=since_ms)
+        h = BUS.health()
+        return JSONResponse({"status": "ok", "journal": rep, "bus": h})
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": f"{type(e).__name__}: {e}"}, status_code=500)
 
 
 @app.get("/context")
@@ -425,7 +402,6 @@ def status_extended() -> JSONResponse:
             return None
         return float(v) > float(b)
 
-    # открытые позиции
     try:
         open_count = len(REPOS.positions.get_open() or [])
     except Exception:
