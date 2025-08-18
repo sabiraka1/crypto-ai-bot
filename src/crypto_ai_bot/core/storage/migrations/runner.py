@@ -9,7 +9,6 @@ def _table_exists(con: sqlite3.Connection, table: str) -> bool:
 
 
 def _ensure_table(con: sqlite3.Connection, table: str, create_sql: str) -> None:
-    # Создаёт таблицу, если её нет. Идемпотентно.
     if not _table_exists(con, table):
         con.executescript(create_sql)
 
@@ -19,7 +18,6 @@ def _get_columns(con: sqlite3.Connection, table: str) -> set[str]:
     try:
         cur = con.execute(f"PRAGMA table_info({table});")
         for row in cur.fetchall():
-            # row = (cid, name, type, notnull, dflt_value, pk)
             cols.add(row[1])
     except sqlite3.OperationalError:
         pass
@@ -31,20 +29,13 @@ def _ensure_columns(
     table: str,
     cols_to_add: Iterable[Tuple[str, str, str | None]]
 ) -> None:
-    """
-    Для каждой колонки выполняет:
-      - если отсутствует — ALTER TABLE ... ADD COLUMN <name> <type> [DEFAULT <default>]
-    Параметры:
-      cols_to_add: [(name, sql_type, default_or_None)]
-    """
     existing = _get_columns(con, table)
     for name, sql_type, default in cols_to_add:
         if name in existing:
             continue
         ddl = f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"
         if default is not None:
-            # В SQLite DEFAULT константное выражение; строки — в кавычках
-            if isinstance(default, (int, float)) or str(default).isdigit():
+            if isinstance(default, (int, float)) or str(default).lstrip("-").replace(".", "", 1).isdigit():
                 ddl += f" DEFAULT {default}"
             else:
                 ddl += f" DEFAULT '{default}'"
@@ -53,14 +44,13 @@ def _ensure_columns(
 
 def apply_all(con: sqlite3.Connection) -> None:
     """
-    Единая, безопасная "миграция v2":
-    - Ничего не удаляет и не ломает.
-    - Создаёт нужные таблицы, если их нет.
-    - Добавляет недостающие колонки к существующим таблицам.
-    - Оставляет старые миграции нетронутыми.
+    Единый, безопасный мигратор (идемпотентно):
+    - создаёт недостающие таблицы
+    - добавляет недостающие колонки
+    - расставляет индексы
     """
     with con:
-        # 1) trades (см. PR-3: FSM + комиссии)
+        # trades
         _ensure_table(
             con,
             "trades",
@@ -70,8 +60,8 @@ def apply_all(con: sqlite3.Connection) -> None:
                 ts INTEGER NOT NULL,
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,      -- 'buy' | 'sell'
-                price REAL NOT NULL,
-                qty REAL NOT NULL,
+                price REAL NOT NULL,     -- фактическая или ожидаемая цена
+                qty REAL NOT NULL,       -- фактическое ИЛИ текущее исполненное количество
                 pnl REAL DEFAULT 0.0
             );
             """
@@ -81,13 +71,16 @@ def apply_all(con: sqlite3.Connection) -> None:
             "trades",
             [
                 ("order_id", "TEXT", None),
-                ("state", "TEXT", "filled"),
+                ("state", "TEXT", "filled"),                 # pending|partial|filled|canceled|rejected
                 ("fee_amt", "REAL", 0.0),
                 ("fee_ccy", "TEXT", "USDT"),
+                ("exp_qty", "REAL", None),                   # ожидаемое количество (для частичных)
+                ("last_exchange_status", "TEXT", None),      # сырой статус от биржи
+                ("last_update_ts", "INTEGER", None),         # последний апдейт из reconcile
             ],
         )
 
-        # 2) idempotency (атомарный claim)
+        # idempotency
         _ensure_table(
             con,
             "idempotency",
@@ -101,7 +94,7 @@ def apply_all(con: sqlite3.Connection) -> None:
             """
         )
 
-        # 3) protective_exits (soft SL/TP)
+        # protective_exits
         _ensure_table(
             con,
             "protective_exits",
@@ -119,7 +112,7 @@ def apply_all(con: sqlite3.Connection) -> None:
             """
         )
 
-        # 4) audit (если ещё не завели)
+        # audit_log
         _ensure_table(
             con,
             "audit_log",
@@ -133,8 +126,8 @@ def apply_all(con: sqlite3.Connection) -> None:
             """
         )
 
-        # (опционально) Индексы — добавляем только если таблица уже есть
-        # Индексы в SQLite безопаснее создавать так: IF NOT EXISTS
+        # индексы
         con.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts);")
         con.execute("CREATE INDEX IF NOT EXISTS idx_trades_state ON trades(state);")
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);")
         con.execute("CREATE INDEX IF NOT EXISTS idx_protective_exits_symbol ON protective_exits(symbol);")

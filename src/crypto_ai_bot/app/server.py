@@ -6,7 +6,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container, Container
-from crypto_ai_bot.utils.metrics import export_prometheus
+from crypto_ai_bot.utils.metrics import export as export_metrics   # <-- фикс
 from crypto_ai_bot.app.tasks.reconciler import start_reconciler
 
 container: Optional[Container] = None
@@ -54,7 +54,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/metrics")
 def metrics():
-    return PlainTextResponse(export_prometheus(), media_type="text/plain; version=0.0.4")
+    return PlainTextResponse(export_metrics(), media_type="text/plain; version=0.0.4")  # <-- фикс
 
 @app.get("/health")
 async def health():
@@ -82,7 +82,6 @@ def status_extended():
         pending = container.trades_repo.count_pending()
     except Exception:
         pending = None
-    # user_version (если используешь PRAGMA для версионирования)
     try:
         uv = container.con.execute("PRAGMA user_version;").fetchone()
         user_version = int(uv[0]) if uv and len(uv) > 0 else 0

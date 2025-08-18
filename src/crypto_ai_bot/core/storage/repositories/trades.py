@@ -1,11 +1,20 @@
 # src/crypto_ai_bot/core/storage/repositories/trades.py
 import sqlite3
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+
+# Допустимые состояния:
+# 'pending' -> 'partial' -> 'filled'
+# 'pending' ---------> 'canceled' | 'rejected'
+# 'partial' ---------> 'filled'   | 'canceled' | 'rejected'
+
+_TERMINAL = {"filled", "canceled", "rejected"}
+
 
 class SqliteTradeRepository:
     def __init__(self, con: sqlite3.Connection):
         self.con = con
+        # Базовая схема — создаётся мигратором. Здесь — страховка для первого старта.
         self.con.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,8 +26,14 @@ class SqliteTradeRepository:
             pnl REAL DEFAULT 0.0
         );
         """)
+        # Идентичные поля добавляются мигратором
+        try:
+            self.con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);")
+        except Exception:
+            pass
 
-    # ---- совместимость ----
+    # ---------- Совместимость со старым кодом ----------
+
     def insert_trade(self, symbol: str, side: str, price: float, qty: float, pnl: float = 0.0) -> int:
         with self.con:
             cur = self.con.execute(
@@ -27,46 +42,36 @@ class SqliteTradeRepository:
             )
             return int(cur.lastrowid)
 
-    def list_by_symbol(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
-        limit = max(1, int(limit))
-        cur = self.con.execute(
-            "SELECT id, ts, symbol, side, price, qty, pnl, order_id, state, fee_amt, fee_ccy "
-            "FROM trades WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
-            (symbol, limit)
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    # ---------- Создание/поиск ----------
 
-    # ---- FSM ----
     def create_pending_order(self, *, symbol: str, side: str, exp_price: float, qty: float, order_id: str) -> int:
+        """
+        Создаём запись о предполагаемом ордере. Храним exp_qty — ожидаемое, qty=0 (фактически исполненное).
+        """
+        now = int(time.time())
         with self.con:
             cur = self.con.execute(
-                "INSERT INTO trades(ts, symbol, side, price, qty, pnl, order_id, state) VALUES(?,?,?,?,?,?,?, 'pending')",
-                (int(time.time()), symbol, side, float(exp_price), float(qty), 0.0, order_id)
+                "INSERT OR REPLACE INTO trades(ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, last_exchange_status, last_update_ts) "
+                "VALUES(?,?,?,?,?,?,?, 'pending', ?, NULL, ?)",
+                (now, symbol, side, float(exp_price), 0.0, 0.0, order_id, float(qty), now)
             )
             return int(cur.lastrowid)
 
-    def update_order_state(self, *, order_id: str, state: str) -> None:
-        with self.con:
-            self.con.execute("UPDATE trades SET state=? WHERE order_id=?", (state, order_id,))
-
-    def fill_order(self, *, order_id: str, executed_price: float, executed_qty: float, fee_amt: float = 0.0, fee_ccy: str = "USDT") -> None:
-        with self.con:
-            self.con.execute(
-                "UPDATE trades SET state='filled', price=?, qty=?, fee_amt=?, fee_ccy=? WHERE order_id=?",
-                (float(executed_price), float(executed_qty), float(fee_amt), fee_ccy, order_id)
-            )
-
-    def cancel_order(self, *, order_id: str) -> None:
-        with self.con:
-            self.con.execute("UPDATE trades SET state='canceled' WHERE order_id=?", (order_id,))
-
-    def reject_order(self, *, order_id: str) -> None:
-        with self.con:
-            self.con.execute("UPDATE trades SET state='rejected' WHERE order_id=?", (order_id,))
+    def get_by_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
+        cur = self.con.execute(
+            "SELECT id, ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, fee_amt, fee_ccy, last_exchange_status, last_update_ts "
+            "FROM trades WHERE order_id=?",
+            (order_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
 
     def find_pending_orders(self, symbol: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        q = "SELECT id, ts, symbol, side, price, qty, order_id FROM trades WHERE state='pending'"
+        q = ("SELECT id, ts, symbol, side, price, qty, order_id, state, exp_qty "
+             "FROM trades WHERE state IN ('pending','partial')")
         p: List[Any] = []
         if symbol:
             q += " AND symbol=?"
@@ -77,7 +82,111 @@ class SqliteTradeRepository:
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    def list_by_symbol(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, int(limit))
+        cur = self.con.execute(
+            "SELECT id, ts, symbol, side, price, qty, pnl, order_id, state, fee_amt, fee_ccy, exp_qty "
+            "FROM trades WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
+            (symbol, limit)
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
     def count_pending(self) -> int:
-        cur = self.con.execute("SELECT COUNT(1) FROM trades WHERE state='pending'")
+        cur = self.con.execute("SELECT COUNT(1) FROM trades WHERE state IN ('pending','partial')")
         (n,) = cur.fetchone() or (0,)
         return int(n)
+
+    # ---------- FSM-транзишены (новое) ----------
+
+    def record_exchange_update(
+        self,
+        *,
+        order_id: str,
+        exchange_status: Optional[str],
+        filled: Optional[float],
+        average_price: Optional[float],
+        fee_amt: float = 0.0,
+        fee_ccy: str = "USDT"
+    ) -> str:
+        """
+        Применяет апдейт с биржи и переводит состояние согласно правилам.
+        Возвращает новое состояние: 'pending'|'partial'|'filled'|'canceled'|'rejected'
+        """
+        now = int(time.time())
+        row = self.get_by_order_id(order_id)
+        if not row:
+            # защита от гонок: создадим запись best-effort
+            with self.con:
+                self.con.execute(
+                    "INSERT OR IGNORE INTO trades(ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, last_exchange_status, last_update_ts) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (now, "UNKNOWN/UNKNOWN", "buy", float(average_price or 0.0), float(filled or 0.0), 0.0,
+                     order_id, "pending", float(filled or 0.0), str(exchange_status or ""), now)
+                )
+            row = self.get_by_order_id(order_id)
+
+        cur_state = (row.get("state") or "pending").lower()
+        if cur_state in _TERMINAL:
+            return cur_state
+
+        exp_qty = float(row.get("exp_qty") or 0.0)
+        have_filled = max(0.0, float(filled or 0.0))
+        avg_px = float(average_price or row.get("price") or 0.0)
+
+        # нормализуем биржевой статус
+        st = (exchange_status or "").strip().lower()
+        is_canceled = st in {"canceled", "cancelled"}
+        is_rejected = st in {"rejected"}
+        is_filled   = st in {"closed", "filled", "done", "ok"} or (exp_qty > 0 and have_filled >= exp_qty)
+        is_partial  = not is_filled and not is_canceled and not is_rejected and have_filled > 0.0
+
+        new_state = cur_state
+        if is_rejected:
+            new_state = "rejected"
+        elif is_canceled:
+            new_state = "canceled"
+        elif is_filled:
+            new_state = "filled"
+        elif is_partial:
+            new_state = "partial"
+        else:
+            new_state = "pending"
+
+        with self.con:
+            # qty — это «исполнено на текущий момент»
+            self.con.execute(
+                "UPDATE trades SET state=?, qty=?, price=?, fee_amt=?, fee_ccy=?, last_exchange_status=?, last_update_ts=? "
+                "WHERE order_id=?",
+                (new_state, have_filled, avg_px, float(fee_amt or 0.0), fee_ccy, st or None, now, order_id)
+            )
+        return new_state
+
+    # ---------- Прежние точечные операции (оставлены для совместимости) ----------
+
+    def update_order_state(self, *, order_id: str, state: str) -> None:
+        if state not in {"pending","partial","filled","canceled","rejected"}:
+            state = "pending"
+        with self.con:
+            self.con.execute("UPDATE trades SET state=? WHERE order_id=?", (state, order_id,))
+
+    def fill_order(self, *, order_id: str, executed_price: float, executed_qty: float, fee_amt: float = 0.0, fee_ccy: str = "USDT") -> None:
+        with self.con:
+            self.con.execute(
+                "UPDATE trades SET state='filled', price=?, qty=?, fee_amt=?, fee_ccy=?, last_exchange_status='filled', last_update_ts=? WHERE order_id=?",
+                (float(executed_price), float(executed_qty), float(fee_amt), fee_ccy, int(time.time()), order_id)
+            )
+
+    def cancel_order(self, *, order_id: str) -> None:
+        with self.con:
+            self.con.execute(
+                "UPDATE trades SET state='canceled', last_exchange_status='canceled', last_update_ts=? WHERE order_id=?",
+                (int(time.time()), order_id)
+            )
+
+    def reject_order(self, *, order_id: str) -> None:
+        with self.con:
+            self.con.execute(
+                "UPDATE trades SET state='rejected', last_exchange_status='rejected', last_update_ts=? WHERE order_id=?",
+                (int(time.time()), order_id)
+            )

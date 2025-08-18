@@ -1,31 +1,13 @@
 from __future__ import annotations
-from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-class ExchangeInterface(ABC):
-    @abstractmethod
-    def fetch_ticker(self, symbol: str) -> Dict[str, Any]: ...
-    @abstractmethod
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200): ...
-    @abstractmethod
-    def create_order(
-        self, symbol: str, side: str, type_: str, amount: float,
-        price: Optional[float] = None, params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]: ...
-    @abstractmethod
-    def cancel_order(self, id_: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
-    @abstractmethod
-    def fetch_balance(self) -> Dict[str, Any]: ...
+# Единообразно используем CCXTExchange из ccxt_impl
+from .ccxt_impl import CCXTExchange
 
-def create_broker(settings, bus=None) -> ExchangeInterface:
-    mode = getattr(settings, "MODE", "paper").lower()
-    if mode == "live":
-        from .ccxt_exchange import CCXTExchange
-        return CCXTExchange(settings=settings, bus=bus)
-    elif mode == "paper":
-        from .paper_exchange import PaperExchange
-        return PaperExchange(settings=settings, bus=bus)  # type: ignore
-    elif mode == "backtest":
-        from .backtest_exchange import BacktestExchange
-        return BacktestExchange(settings=settings, bus=bus)  # type: ignore
-    raise ValueError(f"Unsupported MODE={mode!r}")
+def create_broker(settings: Any, bus: Optional[Any] = None) -> CCXTExchange:
+    """
+    Единая фабрика брокера.
+    settings.EXCHANGE: 'gateio'|'binance'|... (поддерживает CCXT)
+    """
+    ex_name = getattr(settings, "EXCHANGE", "gateio")
+    return CCXTExchange(settings=settings, bus=bus, exchange_name=ex_name)

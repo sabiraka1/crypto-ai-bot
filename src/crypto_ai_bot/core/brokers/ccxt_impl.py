@@ -1,11 +1,16 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional, Callable
-
 import time
 
-from crypto_ai_bot.utils.rate_limiter import MultiLimiter
+# Лимитер: поддерживаем и новое, и старое имя файла
+try:
+    from crypto_ai_bot.utils.rate_limiter import MultiLimiter  # новое имя
+except Exception:  # pragma: no cover
+    from crypto_ai_bot.utils.rate_limit import MultiLimiter    # старое имя
+
 from crypto_ai_bot.utils.metrics import inc, gauge
 
+# CCXT и его исключения (без падения, если пакета нет)
 try:
     import ccxt
     from ccxt.base.errors import (
@@ -13,7 +18,7 @@ try:
         RequestTimeout, AuthenticationError, PermissionDenied,
         InvalidOrder, InsufficientFunds, OrderNotFound
     )
-except Exception as e:  # pragma: no cover
+except Exception:  # pragma: no cover
     ccxt = None
 
 
