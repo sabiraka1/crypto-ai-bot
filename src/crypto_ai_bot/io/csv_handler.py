@@ -1,26 +1,25 @@
 # src/crypto_ai_bot/io/csv_handler.py
 from __future__ import annotations
-import csv
-from typing import List, Dict, Any
 
-def read_ohlcv_csv(path: str) -> List[Dict[str, Any]]:
+from typing import Any, Dict, List
+import csv
+
+try:
+    # используем наш надёжный парсер
+    from crypto_ai_bot.backtest.csv_loader import load_ohlcv_csv as load_ohlcv_csv  # re-export
+except Exception:
+    def load_ohlcv_csv(path: str):
+        raise RuntimeError("backtest.csv_loader not available")
+
+
+def export_trades_csv(path: str, rows: List[Dict[str, Any]]) -> None:
     """
-    Ожидаем заголовки: ts,open,high,low,close,volume
-    Возвращаем список словарей с числовыми значениями.
+    Унифицированная выгрузка сделок:
+      поля: ts_ms, symbol, side, qty, price, pnl (опционально), note (опционально).
     """
-    out: List[Dict[str, Any]] = []
-    with open(path, "r", newline="") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            try:
-                out.append({
-                    "ts_ms": int(row.get("ts") or row.get("timestamp") or row.get("time")),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row.get("volume", 0) or 0),
-                })
-            except Exception:
-                continue
-    return out
+    fields = ["ts_ms", "symbol", "side", "qty", "price", "pnl", "note"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k) for k in fields})
