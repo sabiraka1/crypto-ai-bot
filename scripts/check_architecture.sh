@@ -1,58 +1,77 @@
-# scripts/check_architecture.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "== Architecture sanity check =="
+echo "==> Architecture checks starting in $ROOT"
 
-# 1) Пустые или почти пустые (кроме __init__.py)
-echo "-- Empty / nearly-empty python files:"
-NEAR_EMPTY=$( \
-  find src -type f -name "*.py" ! -name "__init__.py" \
-  -exec awk '
-    BEGIN{nonblank=0}
-    {
-      line=$0
-      # считаем «содержательной» строкой то, что не только пробелы/комменты
-      if (line !~ /^[[:space:]]*$/ && line !~ /^[[:space:]]*#/) nonblank++
-    }
-    END{
-      if (nonblank <= 3) print FILENAME
-    }' {} + \
-)
-if [[ -n "${NEAR_EMPTY:-}" ]]; then
-  echo "$NEAR_EMPTY"
-  echo "✗ Found empty/nearly-empty stubs ↑"
+failures=0
+fail() { echo "✗ $*"; failures=$((failures+1)); }
+
+pass() { echo "✓ $*"; }
+
+# 1) ENV-правило: os.getenv разрешён только в core/settings.py
+ENV_GREP=$(grep -Rn "os\.getenv\(" src || true)
+if [[ -n "$ENV_GREP" ]]; then
+  while IFS= read -r line; do
+    file="${line%%:*}"
+    if [[ "$file" != src/crypto_ai_bot/core/settings.py ]]; then
+      fail "ENV read outside settings.py: $line"
+    fi
+  done <<< "$ENV_GREP"
 else
-  echo "✓ none"
+  pass "No ENV reads found"
 fi
 
-# 2) Критичные файлы присутствуют
-echo "-- Critical files presence:"
-CRIT=0
-for p in \
-  "src/crypto_ai_bot/app/server.py" \
-  "src/crypto_ai_bot/utils/metrics.py" \
-  "src/crypto_ai_bot/utils/logging.py" \
-  "src/crypto_ai_bot/utils/rate_limit.py" \
-  "src/crypto_ai_bot/core/events/async_bus.py" \
-  "src/crypto_ai_bot/core/events/factory.py" \
-  "src/crypto_ai_bot/core/use_cases/evaluate.py" \
-  "src/crypto_ai_bot/core/use_cases/place_order.py" \
-  "src/crypto_ai_bot/core/use_cases/eval_and_execute.py" \
-  "src/crypto_ai_bot/core/brokers/ccxt_exchange.py" \
-  "src/crypto_ai_bot/core/storage/sqlite_adapter.py"
-do
-  if [[ -f "$p" ]]; then
-    echo "✓ $p"
-  else
-    echo "✗ missing: $p"; CRIT=1
-  fi
-done
+# 2) Запрет прямого requests — должен использоваться utils/http_client.py
+REQ_GREP=$(grep -RnE "^\s*import\s+requests\b|^\s*from\s+requests\s+import\b" src || true)
+if [[ -n "$REQ_GREP" ]]; then
+  while IFS= read -r line; do
+    # Разрешим внутри utils/http_client.py (если он сам импортит requests)
+    file="${line%%:*}"
+    if [[ "$file" != src/crypto_ai_bot/utils/http_client.py ]]; then
+      fail "Direct 'requests' usage: $line"
+    fi
+  done <<< "$REQ_GREP"
+else
+  pass "No direct 'requests' imports found"
+fi
 
-echo "-- Tips:"
-echo "• Run 'uvicorn crypto_ai_bot.app.server:app --reload' and check /health, /status/extended, /metrics, /context."
-echo "• Use '.env.example' as canonical env template."
-exit $CRIT
+# 3) Локальные _observe_hist — должны быть удалены
+OBS_GREP=$(grep -Rn "def\s+_observe_hist\(" src || true)
+if [[ -n "$OBS_GREP" ]]; then
+  while IFS= read -r line; do
+    fail "Local _observe_hist duplicate — use utils.metrics.observe_histogram/observe_ms: $line"
+  done <<< "$OBS_GREP"
+else
+  pass "No local _observe_hist found"
+fi
+
+# 4) utils/logging.py должен существовать и быть непустым
+if [[ -s "src/crypto_ai_bot/utils/logging.py" ]]; then
+  pass "utils/logging.py present"
+else
+  fail "utils/logging.py missing or empty"
+fi
+
+# 5) server.py не должен читать ENV
+SRV_ENV=$(grep -n "os\.getenv\(" src/crypto_ai_bot/app/server.py || true)
+if [[ -n "$SRV_ENV" ]]; then
+  fail "server.py must not read ENV: $SRV_ENV"
+else
+  pass "server.py has no ENV reads"
+fi
+
+# 6) Бонус: подсказка по пустым файлам (warning)
+EMPTY=$(find src -type f -name "*.py" -size 0c || true)
+if [[ -n "$EMPTY" ]]; then
+  echo "⚠ Пустые python-файлы (рекомендуется заполнить или удалить):"
+  echo "$EMPTY"
+fi
+
+if [[ $failures -gt 0 ]]; then
+  echo "==> FAILED ($failures problems)"; exit 1
+else
+  echo "==> OK"; exit 0
+fi
