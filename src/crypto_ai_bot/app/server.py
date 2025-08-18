@@ -6,6 +6,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container, Container
+from crypto_ai_bot.utils.logging import setup_json_logging
 from crypto_ai_bot.utils.metrics import export as export_metrics
 from crypto_ai_bot.app.tasks.reconciler import start_reconciler
 from crypto_ai_bot.app.middleware import register_middlewares
@@ -20,16 +21,18 @@ async def lifespan(app: FastAPI):
     global container, _reconciler
     container = build_container()
 
-    # мидлвары после сборки контейнера (есть Settings)
+    # JSON-логи
+    setup_json_logging(container.settings)
+    # Мидлвары (rate/body/logging/request-id)
     register_middlewares(app, container.settings)
 
     # старт фонового реконсилятора
-    _reconciler = start_reconciler(container)  # <-- без await
+    _reconciler = start_reconciler(container)
 
     try:
         yield
     finally:
-        # аккуратное завершение: останавливаем шину, реконсилятор и закрываем БД
+        # аккуратное завершение
         try:
             if _reconciler:
                 _reconciler.cancel()
@@ -64,7 +67,7 @@ async def health():
                 t = container.broker.fetch_ticker(container.settings.SYMBOL)
                 return bool(t)
             except Exception as e:
-                return _cb_health.call(lambda: (_ for _ in ()).throw(e))  # зарегистрировать фэйл
+                return _cb_health.call(lambda: (_ for _ in ()).throw(e))
         try:
             ok = _cb_health.call(lambda: _call())
             return bool(ok)
@@ -75,7 +78,6 @@ async def health():
         ok = await anyio.to_thread.run_sync(_probe_sync)
     if not scope.cancel_called and ok:
         return {"status": "ok", "circuit": _cb_health.state}
-    # degraded, но процесс жив; включаем состояние автомата
     return JSONResponse({"status": "degraded", "circuit": _cb_health.state}, status_code=503)
 
 @app.get("/status/extended")
@@ -106,7 +108,7 @@ async def telegram(request: Request, x_telegram_bot_api_secret_token: Optional[s
     """
     Безопасный webhook:
       - секрет в заголовке (если настроен)
-      - body-limit и rate-limit обеспечиваются мидлварами
+      - lim/body-лимиты и логирование обеспечиваются мидлварами
     """
     secret = getattr(container.settings, "TELEGRAM_WEBHOOK_SECRET", None)
     if secret and x_telegram_bot_api_secret_token != secret:

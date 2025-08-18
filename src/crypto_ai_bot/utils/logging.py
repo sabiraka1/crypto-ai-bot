@@ -1,84 +1,82 @@
-# src/crypto_ai_bot/utils/logging.py
 from __future__ import annotations
-
 import json
 import logging
 import sys
 import time
+import uuid
 from typing import Any, Dict, Optional
+import contextvars
 
-_configured = False
+# Текущий request-id (проставляет мидлварь)
+REQUEST_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("REQUEST_ID", default=None)
 
+_SENSITIVE_KEYS = ("token", "secret", "password", "api_key", "apikey", "authorization", "auth")
 
-class _JsonFormatter(logging.Formatter):
+def _mask_value(v: Any) -> Any:
+    if v is None:
+        return None
+    s = str(v)
+    if len(s) <= 6:
+        return "***"
+    return s[:3] + "***" + s[-2:]
+
+def mask_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, v in (d or {}).items():
+        if any(sk in k.lower() for sk in _SENSITIVE_KEYS):
+            out[k] = _mask_value(v)
+        else:
+            out[k] = v
+    return out
+
+class JsonFormatter(logging.Formatter):
+    def __init__(self, *, app: str = "crypto-ai-bot", env: str = "dev"):
+        super().__init__()
+        self.app = app
+        self.env = env
+
     def format(self, record: logging.LogRecord) -> str:
-        payload: Dict[str, Any] = {
+        rid = REQUEST_ID.get()
+        base = {
             "ts": int(time.time() * 1000),
             "level": record.levelname,
-            "name": record.name,
+            "logger": record.name,
             "msg": record.getMessage(),
+            "app": self.app,
+            "env": self.env,
         }
+        if rid:
+            base["request_id"] = rid
+        # приклеим extra-данные (если передавали через logger.bind / extra=...)
+        if hasattr(record, "extra") and isinstance(record.extra, dict):
+            base.update(mask_dict(record.extra))
+        # Исключение — компактно
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
-        # прокидываем extra, если они были
-        for k, v in record.__dict__.items():
-            if k in ("args", "created", "exc_info", "exc_text", "filename", "funcName",
-                     "levelname", "levelno", "lineno", "module", "msecs", "msg",
-                     "name", "pathname", "process", "processName", "relativeCreated",
-                     "stack_info", "thread", "threadName"):
-                continue
-            try:
-                json.dumps(v)
-                payload[k] = v
-            except Exception:
-                payload[k] = str(v)
-        return json.dumps(payload, ensure_ascii=False)
+            base["exc"] = self.formatException(record.exc_info)
+        return json.dumps(base, ensure_ascii=False)
 
+def setup_json_logging(settings: Any) -> None:
+    """Включаем JSON-логирование для всего приложения (root + uvicorn)."""
+    app = getattr(settings, "APP_NAME", "crypto-ai-bot")
+    env = getattr(settings, "ENV", getattr(settings, "MODE", "dev"))
+    level = getattr(settings, "LOG_LEVEL", "INFO")
 
-class _TextFormatter(logging.Formatter):
-    def __init__(self) -> None:
-        super().__init__("[%(asctime)s] %(levelname)s %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
+    fmt = JsonFormatter(app=app, env=env)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
 
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level)
 
-def init(*, level: str = "INFO", json_format: bool = False, logger_name: Optional[str] = None) -> None:
-    """
-    Инициализация логгера. ВАЖНО: не читает ENV — параметры передаются извне (server.py -> Settings).
-    """
-    global _configured
-    if _configured:
-        # уже настроено — просто обновим уровень
-        set_level(level, logger_name=logger_name)
-        return
-
-    logger = logging.getLogger(logger_name) if logger_name else logging.getLogger()
-    logger.setLevel(level.upper())
-
-    # убираем существующие хендлеры у корневого, чтобы не дублировать вывод
-    if not logger_name:
-        for h in list(logger.handlers):
-            logger.removeHandler(h)
-
-    handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setLevel(level.upper())
-    handler.setFormatter(_JsonFormatter() if json_format else _TextFormatter())
-    logger.addHandler(handler)
-
-    # чтобы дочерние логгеры не плодили дубли, отключаем propagate у корневого
-    if not logger_name:
-        logger.propagate = False
-
-    _configured = True
-
-
-def set_level(level: str, *, logger_name: Optional[str] = None) -> None:
-    logger = logging.getLogger(logger_name) if logger_name else logging.getLogger()
-    logger.setLevel(level.upper())
-    for h in logger.handlers:
-        try:
-            h.setLevel(level.upper())
-        except Exception:
-            pass
-
+    # Шум uvicorn access — оставляем (но в JSON)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "gunicorn.error", "gunicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers[:] = [handler]
+        lg.setLevel(level)
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
+
+def new_request_id() -> str:
+    return uuid.uuid4().hex[:16]
