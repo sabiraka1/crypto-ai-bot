@@ -16,6 +16,12 @@ from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.logging import init as init_logging
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.http_client import get_http_client
+# time drift (может отсутствовать в старых сборках)
+try:
+    from crypto_ai_bot.utils.time_sync import measure_time_drift
+except Exception:  # pragma: no cover
+    measure_time_drift = None  # type: ignore
+
 
 from crypto_ai_bot.app.adapters import telegram as tg_adapter
 
@@ -225,10 +231,23 @@ def health() -> JSONResponse:
     except Exception:
         dlq = 0
 
+    # --- time drift ---
+    drift_ms = None
+    drift_ok = True
+    try:
+        if measure_time_drift is not None:
+            urls = getattr(CFG, "TIME_DRIFT_URLS", None)
+            timeout = float(getattr(CFG, "CONTEXT_HTTP_TIMEOUT_SEC", 2.0) or 2.0)
+            drift_ms = int(measure_time_drift(cfg=CFG, http=HTTP, urls=urls, timeout=timeout))  # type: ignore
+            max_drift = int(getattr(CFG, "MAX_TIME_DRIFT_MS", 2500))
+            drift_ok = drift_ms <= max_drift
+    except Exception:
+        drift_ok = True  # не роняем health из-за этой проверки
+
     status = "healthy"
     if not db_ok or not broker_ok:
         status = "unhealthy"
-    elif dlq > 0:
+    elif dlq > 0 or not drift_ok:
         status = "degraded"
 
     return JSONResponse({
@@ -239,8 +258,10 @@ def health() -> JSONResponse:
         "mode": CFG.MODE,
         "symbol": CFG.SYMBOL,
         "timeframe": CFG.TIMEFRAME,
+        "time_drift_ms": drift_ms,
+        "max_time_drift_ms": int(getattr(CFG, "MAX_TIME_DRIFT_MS", 2500)),
+        "time_drift_ok": drift_ok,
     })
-
 
 @app.get("/config/validate")
 def config_validate() -> JSONResponse:
