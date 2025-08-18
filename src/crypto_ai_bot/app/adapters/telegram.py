@@ -1,8 +1,12 @@
 # src/crypto_ai_bot/app/adapters/telegram.py
 from __future__ import annotations
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 from fastapi.responses import JSONResponse
+
+# единый расчёт PnL и единая нормализация символа
+from crypto_ai_bot.core.analytics.pnl import realized_pnl_summary
+from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 
 
 # ---------- helpers: formatting ----------
@@ -10,12 +14,12 @@ from fastapi.responses import JSONResponse
 def _help_text() -> str:
     return (
         "Команды:\n"
-        "/start  — приветствие\n"
-        "/help   — краткая справка и список команд\n"
-        "/status — текущее состояние (режим, символ, таймфрейм, профиль, health)\n"
-        "/test   — тестовый ответ (smoke)\n"
-        "/profit — PnL%% и кумулятив по закрытым сделкам\n"
-        "/positions — открытые позиции\n"
+        "/start      — приветствие\n"
+        "/help       — краткая справка и список команд\n"
+        "/status     — текущее состояние (режим, символ, таймфрейм, профиль, health)\n"
+        "/test       — тестовый ответ (smoke)\n"
+        "/profit     — PnL% и кумулятив по закрытым сделкам\n"
+        "/positions  — открытые позиции (опц.: /positions BTCUSDT)\n"
     )
 
 def _make_reply(chat_id: int | None, text: str) -> JSONResponse:
@@ -31,86 +35,13 @@ def _fmt_positions(rows: List[Dict[str, Any]]) -> str:
     lines = []
     for r in rows:
         sym = r.get("symbol", "?")
-        qty = r.get("qty", 0.0)
+        qty = float(r.get("qty", 0.0))
         avg = r.get("avg_price", None)
         if avg is None:
             lines.append(f"• {sym}: qty={qty}")
         else:
-            lines.append(f"• {sym}: qty={qty}, avg={round(float(avg), 6)}")
+            lines.append(f"• {sym}: qty={qty}, avg={float(avg):.6f}")
     return "\n".join(lines)
-
-
-# ---------- helpers: PnL over filled trades ----------
-
-def _load_filled_trades(con, symbol: str | None = None) -> List[Tuple[int, str, str, float, float, float]]:
-    """
-    Возвращает список сделок (ts, symbol, side, price, qty, fee_amt) только state='filled'.
-    Порядок — по времени возрастанию.
-    """
-    if symbol:
-        cur = con.execute(
-            "SELECT ts, symbol, side, price, qty, COALESCE(fee_amt,0.0) "
-            "FROM trades WHERE state='filled' AND symbol=? ORDER BY ts ASC",
-            (symbol,)
-        )
-    else:
-        cur = con.execute(
-            "SELECT ts, symbol, side, price, qty, COALESCE(fee_amt,0.0) "
-            "FROM trades WHERE state='filled' ORDER BY ts ASC"
-        )
-    return [(int(ts), str(sym), str(side), float(price), float(qty), float(fee))
-            for (ts, sym, side, price, qty, fee) in cur.fetchall()]
-
-def _realized_pnl_summary(con, symbol: str | None = None) -> Dict[str, Any]:
-    """
-    Простой учёт по average-cost:
-      - Покупки увеличивают объём и усредняют цену.
-      - Продажи уменьшают объём и формируют realized PnL: (sell_px - avg_cost) * sell_qty - fee_sell.
-    Возвращает: {'closed_trades', 'wins', 'losses', 'pnl_abs', 'pnl_pct'}.
-    pnl_pct считается от суммарной стоимости проданных лотов (cost basis), чтобы не зависеть от незакрытых позиций.
-    """
-    rows = _load_filled_trades(con, symbol)
-    if not rows:
-        return {"closed_trades": 0, "wins": 0, "losses": 0, "pnl_abs": 0.0, "pnl_pct": 0.0}
-
-    # состояние по символам
-    inv: Dict[str, Dict[str, float]] = {}  # {symbol: {'qty': q, 'avg': avg}}
-    realized = 0.0
-    realized_cost = 0.0
-    wins = losses = closed = 0
-
-    for _, sym, side, px, qty, fee in rows:
-        s = inv.setdefault(sym, {"qty": 0.0, "avg": 0.0})
-        if side == "buy":
-            new_qty = s["qty"] + qty
-            if new_qty <= 0:
-                s["qty"] = 0.0
-                s["avg"] = 0.0
-            else:
-                s["avg"] = (s["avg"] * s["qty"] + px * qty) / new_qty if s["qty"] > 0 else px
-                s["qty"] = new_qty
-        else:  # sell
-            sell_qty = min(qty, s["qty"]) if s["qty"] > 0 else qty
-            pnl = (px - s["avg"]) * sell_qty - fee
-            realized += pnl
-            realized_cost += s["avg"] * sell_qty
-            closed += 1
-            if pnl >= 0:
-                wins += 1
-            else:
-                losses += 1
-            s["qty"] = max(0.0, s["qty"] - sell_qty)
-            if s["qty"] == 0.0:
-                s["avg"] = 0.0
-
-    pnl_pct = (realized / realized_cost * 100.0) if realized_cost > 0 else 0.0
-    return {
-        "closed_trades": closed,
-        "wins": wins,
-        "losses": losses,
-        "pnl_abs": realized,
-        "pnl_pct": pnl_pct,
-    }
 
 
 # ---------- main handler ----------
@@ -144,9 +75,20 @@ async def handle_update(app, body: bytes, container: Any):
         return _make_reply(chat_id, "✅ OK (smoke). Бот отвечает и подключён к приложению.")
 
     if text.startswith("/positions"):
+        # синтаксис: /positions [SYMBOL]
         try:
+            parts = text.split(None, 1)
+            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
+            sym = parts[1].strip() if len(parts) > 1 else default_sym
+            sym = normalize_symbol(sym)
+
             rows = container.positions_repo.get_open()
-            return _make_reply(chat_id, _fmt_positions(rows))
+            # если пользователь передал символ — показываем только его
+            if sym:
+                rows = [r for r in rows if str(r.get("symbol")) == sym]
+
+            msg_text = _fmt_positions(rows) if rows else f"{sym}: нет открытых позиций"
+            return _make_reply(chat_id, msg_text)
         except Exception as e:
             return _make_reply(chat_id, f"Ошибка: {e!r}")
 
@@ -171,19 +113,21 @@ async def handle_update(app, body: bytes, container: Any):
             return _make_reply(chat_id, f"Ошибка: {e!r}")
 
     if text.startswith("/profit"):
+        # синтаксис: /profit [SYMBOL]
         try:
-            # по умолчанию — по всем символам; если нужно по конкретному:
-            # можно поддержать "/profit BTC/USDT"
             parts = text.split(None, 1)
-            sym = parts[1].strip() if len(parts) > 1 else None
-            summary = _realized_pnl_summary(container.con, sym)
-            pct = round(summary["pnl_pct"], 4)
-            abs_usd = round(summary["pnl_abs"], 6)
-            wl = f"{summary['wins']}/{summary['losses']}"
+            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
+            sym = parts[1].strip() if len(parts) > 1 else default_sym
+            sym = normalize_symbol(sym)
+
+            # единый расчёт PnL по БД
+            summary = realized_pnl_summary(container.con, sym)
+            wl = f"{int(summary['wins'])}/{int(summary['losses'])}"
             resp = (
-                f"Closed trades: {summary['closed_trades']} (W/L {wl})\n"
-                f"PnL: {abs_usd} USDT\n"
-                f"PnL%: {pct}%"
+                f"{sym}\n"
+                f"Closed trades: {int(summary['closed_trades'])} (W/L {wl})\n"
+                f"PnL: {float(summary['pnl_abs']):.6f} USDT\n"
+                f"PnL%: {float(summary['pnl_pct']):.4f}%"
             )
             return _make_reply(chat_id, resp)
         except Exception as e:
