@@ -1,50 +1,53 @@
+# src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
-from typing import Any, Dict
+import threading
+import time
+from typing import Dict
 
-from crypto_ai_bot.core.use_cases.place_order import place_order
-from crypto_ai_bot.core.use_cases.decide import evaluate_only
-from crypto_ai_bot.utils.rate_limit import MultiLimiter
 
-# Глобальный лимитер торговых действий (per (symbol, side))
-_GLOBAL_RL = MultiLimiter({
-    "place_order": {"rps": float(1.0), "burst": float(2.0)}
-})
+class TokenBucket:
+    """Простой thread-safe токен-бакет."""
+    def __init__(self, rate_per_sec: float, capacity: float | None = None):
+        self.rate = float(max(0.000001, rate_per_sec))
+        self.capacity = float(capacity if capacity is not None else rate_per_sec)
+        self.tokens = self.capacity
+        self.updated = time.monotonic()
+        self._lock = threading.Lock()
 
-def eval_and_execute(*, cfg, broker, repos, symbol: str) -> Dict[str, Any]:
+    def try_acquire(self, tokens: float = 1.0) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            elapsed = max(0.0, now - self.updated)
+            self.updated = now
+            # пополнение
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            return False
+
+
+class MultiLimiter:
     """
-    Back-compat точка: оцени, затем при необходимости исполни.
+    Набор бакетов по именам. Пример:
+      lim = MultiLimiter(global_rps=10, write_rps=5)
+      lim.try_acquire("global")
     """
-    eval_res = evaluate_only(cfg=cfg, broker=broker, symbol=symbol)
-    action = eval_res.get("action")
-    if action not in ("buy", "sell"):
-        return {"accepted": False, "decision": eval_res}
+    def __init__(self, **rates: float):
+        self._buckets: Dict[str, TokenBucket] = {}
+        for name, r in rates.items():
+            if not name.endswith("_rps"):
+                # допустим и без _rps; нормализуем
+                key = name
+            else:
+                key = name[:-4]
+            self._buckets[key] = TokenBucket(rate_per_sec=float(r))
 
-    # rate limiting поверх бизнес-операции
-    key = f"place_order:{symbol}:{action}"
-    if not _GLOBAL_RL.allow("place_order"):  # общий ключ; внутр. бакет учитывает rps/burst
-        return {"accepted": False, "error": "rate_limited", "decision": eval_res}
-
-    trades_repo     = getattr(repos, "trades_repo", getattr(repos, "trades", None))
-    positions_repo  = getattr(repos, "positions_repo", getattr(repos, "positions", None))
-    exits_repo      = getattr(repos, "exits_repo", getattr(repos, "exits", None))
-    idemp_repo      = getattr(repos, "idempotency_repo", getattr(repos, "idempotency", None))
-
-    if trades_repo is None or positions_repo is None:
-        return {"accepted": False, "error": "repos_missing", "decision": eval_res}
-
-    res = place_order(
-        cfg=cfg,
-        broker=broker,
-        trades_repo=trades_repo,
-        positions_repo=positions_repo,
-        exits_repo=exits_repo,
-        symbol=symbol,
-        side=action,
-        idempotency_repo=idemp_repo,
-    )
-    res["decision"] = eval_res
-    return res
-
-# Старый псевдоним 'evaluate' (некоторые места могли вызывать)
-def evaluate(*args, **kwargs):
-    return eval_and_execute(*args, **kwargs)
+    def try_acquire(self, name: str = "global", tokens: float = 1.0) -> bool:
+        b = self._buckets.get(name)
+        if b is None:
+            # если не настроен конкретный бакет — используем «global», если есть
+            b = self._buckets.get("global")
+            if b is None:
+                return True
+        return b.try_acquire(tokens)

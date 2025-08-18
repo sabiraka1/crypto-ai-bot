@@ -1,156 +1,144 @@
 # src/crypto_ai_bot/core/settings.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Optional, Mapping
-from .config.env_reader import EnvReader
 
-@dataclass(slots=True)
+import os
+from typing import Any, Dict, Mapping, Optional
+
+
 class Settings:
-    # Core
-    mode: str
-    enable_trading: bool
+    """
+    Единый конфиг с поддержкой UPPER_CASE и snake_case алиасов.
+    Имеет build() (из os.environ) и from_reader(dict-like).
+    """
 
-    # Exchange / broker
-    exchange: str
-    api_key: Optional[str]
-    api_secret: Optional[str]
-    client_order_id_prefix: str
+    # ---- значения по умолчанию (минимально необходимые проекту) ----
+    MODE: str = "paper"                  # paper | live | backtest
+    EXCHANGE: str = "binance"
+    SYMBOL: str = "BTC/USDT"
+    TIMEFRAME: str = "1h"
 
-    # Instrument / timeframe
-    symbol: str
-    timeframe: str
-    position_size: float
+    # исполнение
+    POSITION_SIZE_USD: float = 0.0
+    FEE_TAKER_BPS: float = 20.0
+    SLIPPAGE_BPS: float = 5.0
 
-    # History / lookback
-    limit_bars: int
-    lookback_limit: int
+    # идемпотентность
+    IDEMPOTENCY_TTL_SEC: int = 300
+    IDEMPOTENCY_BUCKET_MS: int = 5_000
 
-    # Fees / slippage (bps)
-    fee_bps: float
-    slippage_bps: float
-
-    # Storage
-    db_path: str
-
-    # CCXT local rate-limit
-    ccxt_local_rl_calls: int
-    ccxt_local_rl_window: float
-
-    # Observability / HTTP
-    public_base_url: Optional[str]
-    log_level: str
-    log_json: bool
-    context_http_timeout_sec: float
-
-    # Time sync in /health
-    max_time_drift_ms: int
-    time_drift_urls: List[str]
+    # здоровье/время
+    MAX_TIME_DRIFT_MS: int = 5_000
 
     # Telegram
-    telegram_bot_token: Optional[str]
-    telegram_webhook_secret: Optional[str]
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_BOT_SECRET: Optional[str] = None
 
-    # Orchestrator
-    tick_period_sec: float
-    perf_budget_flow_p99_ms: int
-    perf_budget_decision_p99_ms: int
-    perf_budget_order_p99_ms: int
+    # backtest источники
+    BACKTEST_CSV_PATH: Optional[str] = None
+    BACKTEST_PRICES: Optional[list] = None
+    BACKTEST_LAST_PRICE: float = 100.0
 
-    # Misc
-    tz: str
+    # профиль/окружение (для /status)
+    PROFILE: Optional[str] = None
+    ENV: Optional[str] = None
 
-    # ---------- Builders ----------
-    @classmethod
-    def build(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
-        reader = EnvReader(env)
-        return cls.from_reader(reader)
-
-    @classmethod
-    def from_reader(cls, env: EnvReader) -> "Settings":
-        return cls(
-            # Core
-            mode=(env.get("MODE","paper") or "paper").lower(),
-            enable_trading=env.get_bool("ENABLE_TRADING", False),
-            # Exchange
-            exchange=(env.get("EXCHANGE","gateio") or "gateio").lower(),
-            api_key=env.get("API_KEY"),
-            api_secret=env.get("API_SECRET"),
-            client_order_id_prefix=env.get("CLIENT_ORDER_ID_PREFIX","cai") or "cai",
-            # Instrument
-            symbol=env.get("SYMBOL","BTC/USDT") or "BTC/USDT",
-            timeframe=env.get("TIMEFRAME","15m") or "15m",
-            position_size=float(env.get_float("POSITION_SIZE", 10)),
-            # History
-            limit_bars=env.get_int("LIMIT_BARS", 300),
-            lookback_limit=env.get_int("LOOKBACK_LIMIT", 300),
-            # Fees / slippage
-            fee_bps=float(env.get_float("FEE_BPS", 10.0)),
-            slippage_bps=float(env.get_float("SLIPPAGE_BPS", 5.0)),
-            # Storage
-            db_path=env.get("DB_PATH","./crypto.db") or "./crypto.db",
-            # CCXT RL
-            ccxt_local_rl_calls=env.get_int("CCXT_LOCAL_RL_CALLS", 8),
-            ccxt_local_rl_window=float(env.get_float("CCXT_LOCAL_RL_WINDOW", 1.0)),
-            # Observability / HTTP
-            public_base_url=env.get("PUBLIC_BASE_URL"),
-            log_level=(env.get("LOG_LEVEL","INFO") or "INFO").upper(),
-            log_json=env.get_bool("LOG_JSON", False),
-            context_http_timeout_sec=float(env.get_float("CONTEXT_HTTP_TIMEOUT_SEC", 2.0)),
-            # Time sync
-            max_time_drift_ms=env.get_int("MAX_TIME_DRIFT_MS", 2500),
-            time_drift_urls=env.get_list("TIME_DRIFT_URLS", ["https://worldtimeapi.org/api/timezone/Etc/UTC","https://worldtimeapi.org/api/ip"]),
-            # Telegram
-            telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN"),
-            telegram_webhook_secret=env.get("TELEGRAM_WEBHOOK_SECRET"),
-            # Orchestrator
-            tick_period_sec=float(env.get_float("TICK_PERIOD_SEC", 60.0)),
-            perf_budget_flow_p99_ms=env.get_int("PERF_BUDGET_FLOW_P99_MS", 0),
-            perf_budget_decision_p99_ms=env.get_int("PERF_BUDGET_DECISION_P99_MS", 0),
-            perf_budget_order_p99_ms=env.get_int("PERF_BUDGET_ORDER_P99_MS", 0),
-            # Misc
-            tz=env.get("TZ","Europe/Istanbul") or "Europe/Istanbul",
-
-    # --- Back-compat UPPER_CASE aliases ---
-    _ALIAS = {
-        "MODE": "mode",
-        "EXCHANGE": "exchange",
-        "SYMBOL": "symbol",
-        "TIMEFRAME": "timeframe",
-        "DB_PATH": "db_path",
-        "ENABLE_TRADING": "enable_trading",
-        # брокер/лимиты/тайминги
-        "HTTP_TIMEOUT_MS": "http_timeout_ms",
-        "GATEIO_HTTP_TIMEOUT_MS": "http_timeout_ms",
-        "RATE_PUBLIC_RPM": "rate_public_rpm",
-        "RATE_PUBLIC_BURST": "rate_public_burst",
-        "RATE_PRIVATE_READ_RPM": "rate_private_read_rpm",
-        "RATE_PRIVATE_READ_BURST": "rate_private_read_burst",
-        "RATE_PRIVATE_WRITE_RPM": "rate_private_write_rpm",
-        "RATE_PRIVATE_WRITE_BURST": "rate_private_write_burst",
-        "RATE_WAIT_TIMEOUT_SEC": "rate_wait_timeout_sec",
-        # торговля/риски/производительность
-        "FEE_TAKER_BPS": "fee_taker_bps",
-        "SLIPPAGE_BPS": "slippage_bps",
-        "POSITION_SIZE_USD": "position_size_usd",
-        "IDEMPOTENCY_TTL_SEC": "idempotency_ttl_sec",
-        "IDEMPOTENCY_BUCKET_MS": "idempotency_bucket_ms",
-        "RECONCILE_PERIOD_SEC": "reconcile_period_sec",
-        # телеграм/прочее
-        "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
-        "TELEGRAM_WEBHOOK_SECRET": "telegram_webhook_secret",
-        "LOG_LEVEL": "log_level",
-        "LOG_JSON": "log_json",
-        "TZ": "tz",
-        "API_KEY": "api_key",
-        "API_SECRET": "api_secret",
-        "API_PASSWORD": "api_password",
+    # ---- алиасы ключей (snake -> UPPER) ----
+    _ALIASES: Dict[str, str] = {
+        "mode": "MODE",
+        "exchange": "EXCHANGE",
+        "symbol": "SYMBOL",
+        "timeframe": "TIMEFRAME",
+        "position_size_usd": "POSITION_SIZE_USD",
+        "fee_taker_bps": "FEE_TAKER_BPS",
+        "slippage_bps": "SLIPPAGE_BPS",
+        "idempotency_ttl_sec": "IDEMPOTENCY_TTL_SEC",
+        "idempotency_bucket_ms": "IDEMPOTENCY_BUCKET_MS",
+        "max_time_drift_ms": "MAX_TIME_DRIFT_MS",
+        "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+        "telegram_bot_secret": "TELEGRAM_BOT_SECRET",
+        "backtest_csv_path": "BACKTEST_CSV_PATH",
+        "backtest_prices": "BACKTEST_PRICES",
+        "backtest_last_price": "BACKTEST_LAST_PRICE",
+        "profile": "PROFILE",
+        "env": "ENV",
     }
 
-    def __getattr__(self, name: str):
-        # поддержка обращений вида CFG.EXCHANGE, CFG.DB_PATH и т.п.
-        lower = self._ALIAS.get(name)
-        if lower:
-            return getattr(self, lower)
+    def __init__(self, **kwargs: Any) -> None:
+        # инициализируем известные поля, остальное — как есть
+        for k, v in kwargs.items():
+            setattr(self, self._normalize_key(k), v)
+
+    # ---------------- constructors ----------------
+
+    @classmethod
+    def from_reader(cls, env: Mapping[str, Any]) -> "Settings":
+        """
+        Строим Settings из dict-like. Поддерживает UPPER/snake и алиасы.
+        """
+        def _g(*names: str, default: Any = None, cast: Optional[type] = None):
+            for n in names:
+                # пробуем как есть
+                if n in env and env[n] is not None:
+                    val = env[n]
+                    return cast(val) if cast else val
+                # пробуем алиас
+                upper = cls._ALIASES.get(n.lower())
+                if upper and upper in env and env[upper] is not None:
+                    val = env[upper]
+                    return cast(val) if cast else val
+                # пробуем UPPER
+                if n.upper() in env and env[n.upper()] is not None:
+                    val = env[n.upper()]
+                    return cast(val) if cast else val
+            return default
+
+        return cls(
+            MODE=_g("MODE", "mode", default="paper", cast=str),
+            EXCHANGE=_g("EXCHANGE", "exchange", default="binance", cast=str),
+            SYMBOL=_g("SYMBOL", "symbol", default="BTC/USDT", cast=str),
+            TIMEFRAME=_g("TIMEFRAME", "timeframe", default="1h", cast=str),
+            POSITION_SIZE_USD=_g("POSITION_SIZE_USD", "position_size_usd", default=0.0, cast=float),
+            FEE_TAKER_BPS=_g("FEE_TAKER_BPS", "fee_taker_bps", default=20.0, cast=float),
+            SLIPPAGE_BPS=_g("SLIPPAGE_BPS", "slippage_bps", default=5.0, cast=float),
+            IDEMPOTENCY_TTL_SEC=_g("IDEMPOTENCY_TTL_SEC", "idempotency_ttl_sec", default=300, cast=int),
+            IDEMPOTENCY_BUCKET_MS=_g("IDEMPOTENCY_BUCKET_MS", "idempotency_bucket_ms", default=5000, cast=int),
+            MAX_TIME_DRIFT_MS=_g("MAX_TIME_DRIFT_MS", "max_time_drift_ms", default=5000, cast=int),
+            TELEGRAM_BOT_TOKEN=_g("TELEGRAM_BOT_TOKEN", "telegram_bot_token", default=None, cast=str),
+            TELEGRAM_BOT_SECRET=_g("TELEGRAM_BOT_SECRET", "telegram_bot_secret", default=None, cast=str),
+            BACKTEST_CSV_PATH=_g("BACKTEST_CSV_PATH", "backtest_csv_path", default=None, cast=str),
+            BACKTEST_PRICES=_g("BACKTEST_PRICES", "backtest_prices", default=None),
+            BACKTEST_LAST_PRICE=_g("BACKTEST_LAST_PRICE", "backtest_last_price", default=100.0, cast=float),
+            PROFILE=_g("PROFILE", "profile", default=None, cast=str),
+            ENV=_g("ENV", "env", default=None, cast=str),
+        )
+
+    @classmethod
+    def build(cls) -> "Settings":
+        """Извлекаем из os.environ."""
+        return cls.from_reader(os.environ)
+
+    # ---------------- helpers ----------------
+
+    @classmethod
+    def _normalize_key(cls, k: str) -> str:
+        if not k:
+            return k
+        if k in cls._ALIASES:
+            return cls._ALIASES[k]
+        if k.upper() in cls._ALIASES.values():
+            return k.upper()
+        return k
+
+    def __getattr__(self, name: str) -> Any:
+        # поддержка snake_case доступа
+        if name in self._ALIASES:
+            return getattr(self, self._ALIASES[name], None)
         raise AttributeError(name)
 
-        )
+    def to_dict(self) -> Dict[str, Any]:
+        out = {}
+        for k, v in self.__dict__.items():
+            if k.startswith("_"):
+                continue
+            out[k] = v
+        return out

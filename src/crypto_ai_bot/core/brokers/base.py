@@ -1,42 +1,27 @@
 # src/crypto_ai_bot/core/brokers/base.py
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+
+from typing import Any, Protocol, List, Optional, Dict
 
 
-@runtime_checkable
 class ExchangeInterface(Protocol):
-    """
-    Минимальный протокол, на который опирается приложение/юзкейсы.
-    Реализации: CCXTExchange (live), PaperExchange (paper), BacktestExchange (backtest).
-    """
     # --- market data ---
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]: ...
+    def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
 
-    # --- trading ---
+    # --- orders ---
     def create_order(
         self,
         symbol: str,
-        type: str,            # 'market' | 'limit'
-        side: str,            # 'buy' | 'sell'
+        type: str,
+        side: str,
         amount: float,
         price: Optional[float] = None,
         params: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]: ...
-
-    def cancel_order(
-        self,
-        id: str,
-        symbol: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]: ...
-
-    def fetch_order(
-        self,
-        id: str,
-        symbol: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]: ...
-
+    def cancel_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
+    def fetch_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
     def fetch_open_orders(
         self,
         symbol: Optional[str] = None,
@@ -45,69 +30,25 @@ class ExchangeInterface(Protocol):
         params: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]: ...
 
-    # опционально, но полезно для health
-    def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
-
-
-def _mode(settings: Any) -> str:
-    m = str(getattr(settings, "MODE", "paper") or "paper").strip().lower()
-    # допускаем синонимы
-    return {
-        "live": "live",
-        "prod": "live",
-        "production": "live",
-        "paper": "paper",
-        "papertrading": "paper",
-        "sim": "paper",
-        "sandbox": "paper",
-        "backtest": "backtest",
-        "bt": "backtest",
-    }.get(m, "paper")
-
-
-def _exchange_name(settings: Any) -> str:
-    # по умолчанию идём в Gate.io (как ты и планируешь)
-    return str(getattr(settings, "EXCHANGE", "gateio") or "gateio").strip().lower()
-
 
 def create_broker(settings: Any, bus: Any = None) -> ExchangeInterface:
     """
-    Единая фабрика брокера с явной поддержкой Gate.io через CCXT.
-    MODE:   live | paper | backtest
-    EXCHANGE: gateio | binance | okx | bybit | ...
+    Фабрика брокеров:
+      - MODE=backtest  -> BacktestExchange
+      - MODE=paper/live -> CCXTExchange (ccxt_impl если есть, иначе ccxt_exchange)
     """
-    mode = _mode(settings)
-    exchange_name = _exchange_name(settings)
-
-    if mode == "live":
-        # Основная реализация: CCXT-адаптер.
-        # Важно: передаём exchange_name (Gate.io, Binance и т.д.)
-        from .ccxt_impl import CCXTExchange
-        # избегаем именованных параметров, чтобы не наткнуться на старые сигнатуры
-        return CCXTExchange(settings, bus=bus, exchange_name=exchange_name)  # type: ignore[call-arg]
-
-    if mode == "paper":
-        # Бумажная торговля (если есть). Иначе — безопасный фоллбек на CCXT в "read-only" режимах.
-        try:
-            from .paper_exchange import PaperExchange  # твоя реализация, если присутствует
-            return PaperExchange(settings, bus=bus, exchange_name=exchange_name)  # type: ignore[call-arg]
-        except Exception:
-            # Фоллбек: создадим CCXT-адаптер (методы ордеров можно «заглушить» в настройках)
-            from .ccxt_impl import CCXTExchange
-            return CCXTExchange(settings, bus=bus, exchange_name=exchange_name)  # type: ignore[call-arg]
+    mode = str(getattr(settings, "MODE", "paper")).lower()
+    exchange_name = getattr(settings, "EXCHANGE", "binance")
 
     if mode == "backtest":
-        # Бэктест-адаптер (если есть)
-        try:
-            from .backtest_exchange import BacktestExchange
-            return BacktestExchange(settings, bus=bus, exchange_name=exchange_name)  # type: ignore[call-arg]
-        except Exception as e:
-            raise RuntimeError("Backtest mode requested but BacktestExchange not available") from e
+        from .backtest_exchange import BacktestExchange
+        return BacktestExchange(settings=settings, bus=bus, exchange_name="backtest")
 
-    # если пришёл неизвестный режим — безопасно отвалимся в paper
+    # paper/live через CCXT
     try:
-        from .paper_exchange import PaperExchange
-        return PaperExchange(settings, bus=bus, exchange_name=exchange_name)  # type: ignore[call-arg]
+        # предпочтительно использовать новую реализацию, если она в проекте
+        from .ccxt_impl import CCXTExchange as _CCXT
     except Exception:
-        from .ccxt_impl import CCXTExchange
-        return CCXTExchange(settings, bus=bus, exchange_name=exchange_name)  # type: ignore[call-arg]
+        from .ccxt_exchange import CCXTExchange as _CCXT
+
+    return _CCXT(settings=settings, bus=bus, exchange_name=exchange_name)

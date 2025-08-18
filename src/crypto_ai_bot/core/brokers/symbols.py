@@ -1,81 +1,70 @@
 # src/crypto_ai_bot/core/brokers/symbols.py
 from __future__ import annotations
-from typing import Optional, List, Tuple
 
-# --- timeframes ---
-_TF_ALIASES = {
-    "1s": "1s", "5s": "5s", "15s": "15s",
-    "1m": "1m", "1min": "1m", "60s": "1m",
-    "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
-    "1h": "1h", "60m": "1h", "1hour": "1h",
-    "2h": "2h", "4h": "4h", "6h": "6h", "12h": "12h",
-    "1d": "1d", "24h": "1d", "1day": "1d",
-    "1w": "1w", "1week": "1w",
-    "1mth": "1M", "1mon": "1M", "1M": "1M",
-}
+import re
+from typing import Tuple
 
-COMMON_QUOTES = (
-    "USDT","USD","USDC","BUSD","FDUSD","BTC","ETH",
-    "EUR","GBP","JPY","TRY","AUD","RUB","BNB","TUSD",
-)
+_PAIR_RE = re.compile(r"^([A-Za-z0-9]+)[/_-]?([A-Za-z0-9]+)$")
+_GATE_ALIASES = {"gate", "gateio", "gate.io", "gate_io"}
 
-def _split_base_quote(raw: str) -> Tuple[str, str]:
-    s = str(raw).strip().upper()
+def split_symbol(s: str) -> Tuple[str, str]:
     if not s:
-        return "BTC", "USDT"
-
-    # remove derivatives settle suffix (e.g. BTC/USDT:USDT)
-    if ":" in s:
-        s = s.split(":", 1)[0]
-
-    for sep in ("/", "_", "-", " "):
-        if sep in s:
-            base, quote = s.split(sep, 1)
-            return base or "BTC", quote or "USDT"
-
-    # joined like BTCUSDT -> split by longest matching quote suffix
-    for q in sorted(COMMON_QUOTES, key=len, reverse=True):
-        if s.endswith(q) and len(s) > len(q):
-            return s[: -len(q)], q
-
-    # fallback
-    return s, "USDT"
-
-def to_canonical_symbol(raw: str) -> str:
-    base, quote = _split_base_quote(raw)
-    return f"{base}/{quote}"
-
-def ensure_spot_ccxt_symbol(raw: str) -> str:
-    # CCXT canonical BASE/QUOTE for spot
-    return to_canonical_symbol(raw)
-
-def to_ccxt_symbol(raw: str, exchange: Optional[str] = None) -> str:
-    # spot-only: always canonical
-    return ensure_spot_ccxt_symbol(raw)
+        raise ValueError("empty symbol")
+    s = str(s).strip()
+    m = _PAIR_RE.match(s.replace(":", "").replace(".", "").replace(" ", ""))
+    if not m:
+        raise ValueError(f"invalid symbol: {s}")
+    base, quote = m.group(1).upper(), m.group(2).upper()
+    return base, quote
 
 def normalize_symbol(s: str) -> str:
-    return ensure_spot_ccxt_symbol(s)
+    base, quote = split_symbol(s)
+    return f"{base}/{quote}"
 
-def normalize_timeframe(tf: str, default: str = "1h") -> str:
-    key = (tf or "").strip().lower()
-    return _TF_ALIASES.get(key, default)
+def to_exchange_symbol(s: str, exchange: str | None = None, *, native: bool = False) -> str:
+    base, quote = split_symbol(s)
+    ex = (exchange or "").strip().lower()
+    if native and ex in _GATE_ALIASES:
+        return f"{base}_{quote}"   # нативный Gate
+    return f"{base}/{quote}"       # ccxt/unified
 
-def symbol_variants(raw: str) -> List[str]:
-    """Варианты записи символа, чтобы смотреть в БД/репозиториях."""
-    base, quote = _split_base_quote(raw)
-    canon = f"{base}/{quote}"
-    return [canon, f"{base}{quote}", f"{base}_{quote}", f"{base}-{quote}"]
+def from_exchange_symbol(s: str, exchange: str | None = None) -> str:
+    return normalize_symbol(s)
 
-def normalize_symbol(raw: str, exchange: str | None = None) -> str:
-    """Алиас для дашборда/старого кода — возвращает 'BASE/QUOTE'."""
-    return to_ccxt_symbol(raw, exchange)
-
-_TIMEFRAME_MAP = {
-    "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
-    "1h":"1h","2h":"2h","4h":"4h","6h":"6h","12h":"12h",
-    "1d":"1d","3d":"3d","1w":"1w",
-}
-def normalize_timeframe(tf: str) -> str:
-    if not tf: return "1h"
-    return _TIMEFRAME_MAP.get(str(tf).strip().lower(), "1h")
-
+def normalize_timeframe(tf: str | int | float) -> str:
+    # ccxt-стиль: '1m','5m','1h','1d','1w'
+    import re as _re
+    if isinstance(tf, (int, float)):
+        n = int(tf)
+        if n < 60:
+            return f"{n}m"
+        if n % 60 == 0 and n < 24 * 60:
+            return f"{n // 60}h"
+        if n % (24 * 60) == 0:
+            return f"{n // (24 * 60)}d"
+        return f"{n}m"
+    s = str(tf).strip().lower()
+    aliases = {
+        "1": "1m", "3": "3m", "5": "5m", "15": "15m", "30": "30m",
+        "60": "1h", "1h": "1h", "h1": "1h", "1hr": "1h",
+        "4h": "4h", "h4": "4h",
+        "1d": "1d", "d1": "1d", "24h": "1d",
+        "1w": "1w", "w1": "1w",
+        "1mth": "1M", "1mo": "1M",
+    }
+    if s in aliases:
+        return aliases[s]
+    if _re.match(r"^\d+[mhdwM]$", s):
+        return s.upper() if s.endswith("M") else s
+    if s.endswith("min"):
+        n = int(s[:-3]); return f"{n}m"
+    if s.endswith("hour") or s.endswith("h"):
+        n = int(_re.sub(r"[^0-9]", "", s)); return f"{n}h"
+    if s.endswith("day") or s.endswith("d"):
+        n = int(_re.sub(r"[^0-9]", "", s)); return f"{n}d"
+    if s.endswith("week") or s.endswith("w"):
+        n = int(_re.sub(r"[^0-9]", "", s)); return f"{n}w"
+    try:
+        n = int(s); return normalize_timeframe(n)
+    except Exception:
+        return "1h"

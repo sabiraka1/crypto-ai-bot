@@ -1,62 +1,53 @@
+# src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
+import threading
 import time
-from threading import RLock
-from typing import Optional
+from typing import Dict
 
 
 class TokenBucket:
-    """
-    Простой thread-safe токен-бакет: refill по фиксированной скорости.
-    Единицы: токены в минуту (rpm). burst — максимальная ёмкость.
-    """
-    def __init__(self, rpm: float, burst: float | None = None):
-        self.rpm = float(rpm)
-        self.burst = float(burst if burst is not None else rpm)
-        self.tokens = self.burst
-        self.last = time.time()
-        self._lock = RLock()
+    """Простой thread-safe токен-бакет."""
+    def __init__(self, rate_per_sec: float, capacity: float | None = None):
+        self.rate = float(max(0.000001, rate_per_sec))
+        self.capacity = float(capacity if capacity is not None else rate_per_sec)
+        self.tokens = self.capacity
+        self.updated = time.monotonic()
+        self._lock = threading.Lock()
 
-    def acquire(self, tokens: float = 1.0, timeout: float = 5.0) -> bool:
-        """
-        Пытаемся получить 'tokens'. При необходимости ждём до timeout.
-        Возвращает True/False (успех/таймаут).
-        """
-        end = time.time() + float(timeout)
+    def try_acquire(self, tokens: float = 1.0) -> bool:
         with self._lock:
-            while True:
-                now = time.time()
-                # пополнение
-                elapsed = max(0.0, now - self.last)
-                self.last = now
-                self.tokens = min(self.burst, self.tokens + (self.rpm / 60.0) * elapsed)
-                if self.tokens >= tokens:
-                    self.tokens -= tokens
-                    return True
-                # ждём до следующего пополнения
-                if now >= end:
-                    return False
-                time.sleep(min(0.05, end - now))
+            now = time.monotonic()
+            elapsed = max(0.0, now - self.updated)
+            self.updated = now
+            # пополнение
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            return False
 
 
 class MultiLimiter:
     """
-    Набор бакетов по ключам/методам. Например:
-    - public_read
-    - private_read
-    - private_write
+    Набор бакетов по именам. Пример:
+      lim = MultiLimiter(global_rps=10, write_rps=5)
+      lim.try_acquire("global")
     """
-    def __init__(self):
-        self._buckets: dict[str, TokenBucket] = {}
-        self._lock = RLock()
+    def __init__(self, **rates: float):
+        self._buckets: Dict[str, TokenBucket] = {}
+        for name, r in rates.items():
+            if not name.endswith("_rps"):
+                # допустим и без _rps; нормализуем
+                key = name
+            else:
+                key = name[:-4]
+            self._buckets[key] = TokenBucket(rate_per_sec=float(r))
 
-    def set_bucket(self, key: str, rpm: float, burst: Optional[float] = None) -> None:
-        with self._lock:
-            self._buckets[key] = TokenBucket(rpm=rpm, burst=burst)
-
-    def acquire(self, key: str, tokens: float = 1.0, timeout: float = 5.0) -> bool:
-        with self._lock:
-            bucket = self._buckets.get(key)
-        if bucket is None:
-            # нет ограничителя — разрешаем (по умолчанию)
-            return True
-        return bucket.acquire(tokens=tokens, timeout=timeout)
+    def try_acquire(self, name: str = "global", tokens: float = 1.0) -> bool:
+        b = self._buckets.get(name)
+        if b is None:
+            # если не настроен конкретный бакет — используем «global», если есть
+            b = self._buckets.get("global")
+            if b is None:
+                return True
+        return b.try_acquire(tokens)

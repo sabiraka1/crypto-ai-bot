@@ -35,7 +35,9 @@ async def _housekeeping_loop(cont: Any) -> None:
         try:
             if idem is not None:
                 ttl = int(getattr(cont.settings, "IDEMPOTENCY_TTL_SEC", 300))
-                idem.cleanup_expired(ttl_seconds=ttl)
+                deleted = idem.cleanup_expired(ttl_seconds=ttl)
+                if deleted:
+                    logger.info("housekeeping: idempotency deleted=%s", deleted)
             if con is not None and random.random() < 0.1:
                 con.execute("PRAGMA optimize")
         except Exception as e:
@@ -91,11 +93,7 @@ def metrics():
 @app.get("/health")
 def health():
     """
-    Расширенный health: broker/db/bus/time_sync.
-    Статус:
-      - healthy: все основные подсистемы ок (time_sync 'ok' или 'unknown')
-      - degraded: часть подсистем ок, но есть предупреждения (например, time_sync 'degraded')
-      - unhealthy: одна из критичных подсистем (broker|db|bus) не ок
+    Расширенный health: broker/db/bus/time_sync(+ broker.circuit_breaker если есть).
     """
     cfg = container.settings
 
@@ -106,6 +104,14 @@ def health():
     except Exception as e:
         logger.warning("health: broker check failed: %s", e)
         broker_ok = False
+
+    # 1.a) circuit breaker (если брокер его экспонирует)
+    try:
+        cb = getattr(container.broker, "cb", None) or getattr(container.broker, "circuit_breaker", None)
+        cb_stats = cb.get_stats() if cb and hasattr(cb, "get_stats") else None
+    except Exception as e:
+        logger.warning("health: broker circuit-breaker stats failed: %s", e)
+        cb_stats = None
 
     # 2) db
     try:
@@ -139,7 +145,7 @@ def health():
 
     return {
         "status": status,
-        "broker": {"ok": broker_ok},
+        "broker": {"ok": broker_ok, "circuit_breaker": cb_stats},
         "db": {"ok": db_ok},
         "bus": {"ok": bus_ok, **bus_h},
         "time_sync": {"status": ts_status, **ts},
