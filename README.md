@@ -402,3 +402,91 @@ yaml
 
 Скажи, если что-то из файлов выше конфликтует — пришлю дифф для твоей версии.
 ::contentReference[oaicite:0]{index=0}
+
+---
+
+## Telegram — команды
+
+Бот поддерживает базовые команды (ручных трейдов нет):
+
+- `/start` — приветствие и краткая помощь.
+- `/help` — список команд.
+- `/status` — режим, символ, таймфрейм, кол-во открытых позиций, win-rate и DLQ шины.
+- `/test [SYMBOL] [TF] [LIMIT]` — быстрый расчёт сигнала + мини-график цены (ссылка).
+  - Примеры: `/test`, `/test BTC/USDT 1h 300`
+- `/profit` — кривая доходности (ссылка) + текущая суммарная equity.
+- `/eval [SYMBOL] [TF] [LIMIT]` — расчёт решения (action/score/score_blended).
+- `/why [SYMBOL] [TF] [LIMIT]` — объяснение решения: signals, weights, thresholds, context.
+
+> Примечание: ссылки на графики в ответах бота появляются, если задан `PUBLIC_BASE_URL`.
+
+### Настройка вебхука
+1. Установить переменные окружения в `.env`:
+TELEGRAM_BOT_TOKEN=<ваш_токен>
+TELEGRAM_WEBHOOK_SECRET=<необязательный_секрет>
+PUBLIC_BASE_URL=https://<домен_бота>
+
+markdown
+Копировать
+Редактировать
+2. Настроить вебхук Telegram на `POST <PUBLIC_BASE_URL>/telegram`.  
+   Если задан `TELEGRAM_WEBHOOK_SECRET`, Telegram должен слать заголовок  
+   `X-Telegram-Bot-Api-Secret-Token: <ваш_секрет>`.
+
+---
+
+## Графики (SVG)
+
+Сервер отдает простые SVG-графики без внешних библиотек:
+
+- Цена:  
+  `GET /chart/test?symbol=BTC/USDT&timeframe=1h&limit=200`
+- Доходность (equity):  
+  `GET /chart/profit`
+
+Если задать `PUBLIC_BASE_URL`, Telegram-бот будет слать кликабельные ссылки на эти эндпоинты.
+
+---
+
+## Метрики и бэктест
+
+- Общие метрики: `GET /metrics` (Prometheus text format).
+- Метрики SQLite: `sqlite_file_size_bytes`, `sqlite_fragmentation_percent`, и др.
+- Бюджеты p99 (ms): `PERF_BUDGET_DECISION_P99_MS`, `PERF_BUDGET_ORDER_P99_MS`, `PERF_BUDGET_FLOW_P99_MS`.
+
+### Экспорт метрик бэктеста в /metrics
+В `.env` укажите путь:
+BACKTEST_METRICS_PATH=backtest_metrics.json
+
+yaml
+Копировать
+Редактировать
+Скрипт бэктеста пишет JSON с полями:
+- `backtest_trades_total`
+- `backtest_equity_last`
+- `backtest_max_drawdown_pct`
+
+Сервер подхватит файл и опубликует гейджи в `/metrics`.
+
+---
+
+## Быстрый старт (Makefile)
+
+```bash
+# запуск в dev-режиме (reload)
+make dev
+
+# тесты и архитектурные проверки
+make test
+make check-arch
+
+# SVG-графики рядом
+make chart
+yaml
+Копировать
+Редактировать
+
+---
+
+Если хочешь — в самом конце могу добавить мини-раздел в README про **/config/validate** (что именно проверяет) и всё — проект будет упакован полностью.
+::contentReference[oaicite:0]{index=0}
