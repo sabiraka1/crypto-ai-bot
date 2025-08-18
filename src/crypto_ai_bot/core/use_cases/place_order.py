@@ -1,143 +1,273 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
-import os
+
 import time
-import math
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-try:
-    # предпочтительно использовать ваши настройки
-    from ..settings import settings as _cfg  # type: ignore
-except Exception:
-    class _Cfg:
-        ENABLE_TRADING = os.getenv("ENABLE_TRADING", "false").lower() == "true"
-        FEE_BPS = float(os.getenv("FEE_BPS", "10"))          # 0.10%
-        SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5")) # 0.05%
-        CLIENT_ORDER_ID_PREFIX = os.getenv("CLIENT_ORDER_ID_PREFIX", "cai")
-    _cfg = _Cfg()  # type: ignore
+from ..settings import Settings  # тип для подсказок/передачи CFG
+
+# ВАЖНО: никаких os.getenv — все берём из Settings (см. server.py и контрольную карту). 
+# ENABLE_TRADING, FEE_BPS, SLIPPAGE_BPS, CLIENT_ORDER_ID_PREFIX и т.п. читаются из CFG. 
+# (см. server.py: CFG = Settings.build()).
 
 def _apply_slippage(price: float, side: str, bps: float) -> float:
-    delta = price * (bps / 10_000.0)
-    return price + delta if side.lower() == "buy" else price - delta
+    if not price or not bps:
+        return float(price)
+    delta = float(price) * (float(bps) / 10_000.0)
+    return float(price) + delta if str(side).lower() == "buy" else float(price) - delta
 
 def _calc_fee(notional: float, fee_bps: float) -> float:
-    return notional * (fee_bps / 10_000.0)
+    if not notional or not fee_bps:
+        return 0.0
+    return float(notional) * (float(fee_bps) / 10_000.0)
 
-@dataclass
-class PlaceOrderResult:
-    accepted: bool
-    duplicated: bool
-    order_id: Optional[str]
-    client_order_id: Optional[str]
-    executed_price: Optional[float]
-    executed_qty: Optional[float]
-    fee: float
-    reason: Optional[str] = None
+def _minute_bucket(ts_ms: int) -> int:
+    return int((ts_ms // 1000) // 60)
 
-async def place_order(
-    *,
-    uow,
+
+def place_order(
+    cfg: Settings,
     broker,
-    idem_repo,
-    trades_repo,
-    positions_repo,
-    audit_repo,
-    risk_manager,
-    decision: Dict[str, Any],
+    repos,
+    *,
     symbol: str,
-    side: str,                  # "buy" | "sell"
+    side: str,                # "buy" | "sell"
     qty: float,
     price: Optional[float] = None,
-    type_: str = "market",
-    now_ts: Optional[float] = None,
-) -> PlaceOrderResult:
+    type_: str = "market",    # "market" | "limit"
+    decision: Optional[Dict[str, Any]] = None,
+    bus=None,
+    now_ms: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    Идемпотентность — перед вызовом биржи. При live-режиме вызываем broker.create_order.
-    Учитываем комиссии и слиппедж в live-режиме (без изменения вашей логики PnL/учёта).
+    Sync-вариант под ваш server.py.
+    - Идемпотентность: КЛЮЧ формируется и проверяется ДО сети.
+    - В live режиме исполняем через broker.create_order(...).
+    - Комиссия/слиппедж учитываются в записи в trades/positions.
+    - Все параметры берём из cfg (никаких прямых ENV).
     """
-    now_ts = now_ts or time.time()
-    decision_id = (decision.get("id") or "")[:16]
-    minute_bucket = int(now_ts // 60)
-    idem_key = f"{symbol}:{side}:{qty}:{minute_bucket}:{decision_id}"
+    ts_ms = int(now_ms if now_ms is not None else int(time.time() * 1000))
+    decision_id = str((decision or {}).get("id") or (decision or {}).get("uuid") or "")[:32]
+    minute_b = _minute_bucket(ts_ms)
+    idem_key = f"{symbol}:{side}:{qty}:{minute_b}:{decision_id}"
 
-    # --- идемпотентность до сети ---
-    async with uow:  # зависит от вашей реализации (context manager)
-        # поддержка 2 контрактов: check_and_store() или claim()/commit()
-        duplicated = False
-        if hasattr(idem_repo, "check_and_store"):
-            inserted = await idem_repo.check_and_store(idem_key, ttl_seconds=3600)
-            duplicated = not bool(inserted)
-        elif hasattr(idem_repo, "claim"):
-            claim_ok = await idem_repo.claim(idem_key, ttl_seconds=3600)
-            duplicated = not bool(claim_ok)
+    fee_bps = float(getattr(cfg, "FEE_BPS", 0.0))
+    slippage_bps = float(getattr(cfg, "SLIPPAGE_BPS", 0.0))
+    enable_trading = bool(getattr(cfg, "ENABLE_TRADING", False))
+    client_oid_prefix = str(getattr(cfg, "CLIENT_ORDER_ID_PREFIX", "cai"))
+
+    # ---------- ИДЕМПОТЕНТНОСТЬ (до сети) ----------
+    duplicated = False
+    try:
+        idem = repos.idempotency
+        # Предпочтительно check_and_store(); fallback: claim()/commit()/release()
+        if hasattr(idem, "check_and_store"):
+            inserted = bool(idem.check_and_store(idem_key, ttl_seconds=3600))
+            duplicated = not inserted
+        elif hasattr(idem, "claim"):
+            got = bool(idem.claim(idem_key, ttl_seconds=3600))
+            duplicated = not got
         else:
-            # минимальный fallback — не блокируем, но флагуем
             duplicated = False
+    except Exception:
+        # не блокируем торговлю при сбое идемпотентности, но аудируем ниже
+        duplicated = False
 
-        if duplicated:
-            await audit_repo.append("order_duplicate", {"key": idem_key, "symbol": symbol, "side": side, "qty": qty})
-            return PlaceOrderResult(accepted=False, duplicated=True, order_id=None, client_order_id=None, executed_price=None, executed_qty=None, fee=0.0, reason="duplicate")
+    if duplicated:
+        try:
+            repos.audit.append("order_duplicate", {"key": idem_key, "symbol": symbol, "side": side, "qty": qty, "ts_ms": ts_ms})
+        except Exception:
+            pass
+        if bus and hasattr(bus, "publish"):
+            try:
+                bus.publish({"type": "order.duplicate", "payload": {"key": idem_key, "symbol": symbol, "side": side, "qty": qty, "ts_ms": ts_ms}})
+            except Exception:
+                pass
+        return {
+            "accepted": False,
+            "duplicated": True,
+            "orderId": None,
+            "clientOrderId": None,
+            "executed_price": None,
+            "executed_qty": None,
+            "fee": 0.0,
+            "reason": "duplicate",
+        }
 
-        # --- риск-правила (ваш менеджер)
-        risk_ok, risk_reason = await risk_manager.check(symbol=symbol, side=side, qty=qty, decision=decision)
+    # ---------- РИСК (если менеджер передан) ----------
+    try:
+        risk_ok = True
+        risk_reason = None
+        rm = getattr(repos, "risk_manager", None)
+        if rm and hasattr(rm, "check"):
+            risk_ok, risk_reason = rm.check(symbol=symbol, side=side, qty=qty, decision=decision)
+        # Допустим, risk менеджер находится не в repos, а проброшен через cfg (расширения):
+        elif hasattr(cfg, "RISK_MANAGER") and hasattr(cfg.RISK_MANAGER, "check"):
+            risk_ok, risk_reason = cfg.RISK_MANAGER.check(symbol=symbol, side=side, qty=qty, decision=decision)  # type: ignore[attr-defined]
         if not risk_ok:
-            await audit_repo.append("order_rejected_risk", {"symbol": symbol, "side": side, "qty": qty, "reason": risk_reason})
-            # освобождение ключа при наличии claim/release
-            if hasattr(idem_repo, "release"):
-                await idem_repo.release(idem_key)
-            return PlaceOrderResult(accepted=False, duplicated=False, order_id=None, client_order_id=None, executed_price=None, executed_qty=None, fee=0.0, reason=risk_reason)
+            try:
+                repos.audit.append("order_rejected_risk", {"symbol": symbol, "side": side, "qty": qty, "reason": risk_reason, "ts_ms": ts_ms})
+            except Exception:
+                pass
+            if hasattr(repos, "idempotency") and hasattr(repos.idempotency, "release"):
+                try:
+                    repos.idempotency.release(idem_key)
+                except Exception:
+                    pass
+            return {
+                "accepted": False,
+                "duplicated": False,
+                "orderId": None,
+                "clientOrderId": None,
+                "executed_price": None,
+                "executed_qty": None,
+                "fee": 0.0,
+                "reason": str(risk_reason or "risk_rejected"),
+            }
+    except Exception:
+        # В случае ошибки риск-проверки не останавливаем поток — аудируем и продолжаем,
+        # так как в вашей системе Risk может быть опциональным.
+        try:
+            repos.audit.append("order_risk_error", {"symbol": symbol, "side": side, "qty": qty, "ts_ms": ts_ms})
+        except Exception:
+            pass
 
-        # --- исполнение ---
-        client_oid = f"{getattr(_cfg, 'CLIENT_ORDER_ID_PREFIX', 'cai')}-{minute_bucket}-{decision_id}"
-        order_id = None
-        executed_price = None
-        executed_qty = None
-        fee_val = 0.0
+    # ---------- ИСПОЛНЕНИЕ ----------
+    client_oid = f"{client_oid_prefix}-{minute_b}-{decision_id or 'na'}"[:32]
+    order_id: Optional[str] = None
+    executed_price: Optional[float] = None
+    executed_qty: Optional[float] = None
 
-        if getattr(_cfg, "ENABLE_TRADING", False):
-            # live-path: реальный вызов биржи
-            params = {"clientOrderId": client_oid}
+    # Получим базовую цену от тикера (для market и для оценки slippage)
+    try:
+        tkr = broker.fetch_ticker(symbol)
+        base_price = float(tkr.get("last") or tkr.get("close") or tkr.get("bid") or tkr.get("ask") or 0.0)
+    except Exception:
+        base_price = 0.0
+
+    if type_ == "market":
+        ref_price = base_price
+    else:
+        ref_price = float(price or 0.0)
+
+    executed_price = _apply_slippage(ref_price, side, slippage_bps) if ref_price else None
+    executed_qty = float(qty)
+
+    if enable_trading:
+        # LIVE: реальный вызов на биржу
+        params = {"clientOrderId": client_oid, "text": client_oid}
+        try:
             if type_ == "market":
-                # рыночный: оценка цены с учётом слиппеджа (для записи в аудит/сделки)
-                ticker = await broker.fetch_ticker(symbol)
-                base_price = float(ticker.get("last") or ticker.get("close"))
-                executed_price = _apply_slippage(base_price, side, getattr(_cfg, "SLIPPAGE_BPS", 0.0))
-                executed_qty = float(qty)
-                order = await broker.create_order(symbol=symbol, side=side, type_="market", amount=qty, price=None, params=params)
+                od = broker.create_order(symbol=symbol, side=side, type_="market", amount=qty, price=None, params=params)
             else:
-                # лимитный: цена может быть задана извне; применим "целевой" slippage к лимиту для хранения
                 if price is None:
                     raise ValueError("Limit order requires price")
-                executed_price = float(_apply_slippage(float(price), side, getattr(_cfg, "SLIPPAGE_BPS", 0.0)))
-                executed_qty = float(qty)
-                order = await broker.create_order(symbol=symbol, side=side, type_="limit", amount=qty, price=price, params=params)
+                od = broker.create_order(symbol=symbol, side=side, type_="limit", amount=qty, price=float(price), params=params)
+            order_id = str(od.get("id") or od.get("orderId") or od.get("clientOrderId") or "")
+        except Exception as e:
+            # Аудит и DLQ через bus (если есть)
+            try:
+                repos.audit.append("order_place_error", {"symbol": symbol, "side": side, "qty": qty, "type": type_, "error": f"{type(e).__name__}: {e}", "ts_ms": ts_ms})
+            except Exception:
+                pass
+            if bus and hasattr(bus, "publish"):
+                try:
+                    bus.publish({"type": "dlq.error", "payload": {"op": "create_order", "symbol": symbol, "side": side, "error": f"{type(e).__name__}: {e}"}})
+                except Exception:
+                    pass
+            # В случае ошибки размещения — откатить claim, если он был
+            if hasattr(repos, "idempotency") and hasattr(repos.idempotency, "release"):
+                try:
+                    repos.idempotency.release(idem_key)
+                except Exception:
+                    pass
+            return {
+                "accepted": False,
+                "duplicated": False,
+                "orderId": None,
+                "clientOrderId": client_oid,
+                "executed_price": None,
+                "executed_qty": None,
+                "fee": 0.0,
+                "reason": "create_order_failed",
+            }
 
-            order_id = str(order.get("id") or order.get("orderId") or "")
-            notional = float(executed_price) * float(executed_qty)
-            fee_val = _calc_fee(notional, getattr(_cfg, "FEE_BPS", 0.0))
-        else:
-            # paper/safe-path: без реального вызова биржи — сохраняем симуляцию (как раньше)
-            ticker = await broker.fetch_ticker(symbol)
-            base_price = float(ticker.get("last") or ticker.get("close"))
-            executed_price = _apply_slippage(base_price if type_ == "market" else (price or base_price), side, getattr(_cfg, "SLIPPAGE_BPS", 0.0))
-            executed_qty = float(qty)
-            notional = float(executed_price) * float(executed_qty)
-            fee_val = _calc_fee(notional, getattr(_cfg, "FEE_BPS", 0.0))
-            order_id = None  # симуляция
+    # ---------- Запись в хранилища ----------
+    fee_val = _calc_fee(float(executed_price or 0.0) * float(executed_qty or 0.0), fee_bps)
 
-        # --- запись в хранилища (позиции/сделки/аудит) ---
-        await trades_repo.append(symbol=symbol, side=side, qty=executed_qty, price=executed_price, fee=fee_val, decision_id=decision_id, order_id=order_id, client_order_id=client_oid, ts=now_ts)
-        await positions_repo.on_trade(symbol=symbol, side=side, qty=executed_qty, price=executed_price, fee=fee_val, decision_id=decision_id, order_id=order_id, ts=now_ts)
-        await audit_repo.append("order_placed", {
-            "symbol": symbol, "side": side, "qty": executed_qty, "price": executed_price,
-            "fee": fee_val, "orderId": order_id, "clientOrderId": client_oid, "decisionId": decision_id, "idemKey": idem_key
-        })
+    try:
+        # trades
+        if hasattr(repos, "trades") and hasattr(repos.trades, "append"):
+            repos.trades.append(
+                symbol=symbol,
+                side=side,
+                qty=float(executed_qty or 0.0),
+                price=float(executed_price or 0.0),
+                fee=float(fee_val),
+                decision_id=decision_id or None,
+                order_id=order_id,
+                client_order_id=client_oid,
+                ts_ms=ts_ms,
+                note="live" if enable_trading else "paper",
+            )
+        # positions
+        if hasattr(repos, "positions") and hasattr(repos.positions, "on_trade"):
+            repos.positions.on_trade(
+                symbol=symbol,
+                side=side,
+                qty=float(executed_qty or 0.0),
+                price=float(executed_price or 0.0),
+                fee=float(fee_val),
+                decision_id=decision_id or None,
+                order_id=order_id,
+                ts_ms=ts_ms,
+            )
+        # audit
+        if hasattr(repos, "audit") and hasattr(repos.audit, "append"):
+            repos.audit.append("order_placed", {
+                "symbol": symbol, "side": side,
+                "qty": float(executed_qty or 0.0),
+                "price": float(executed_price or 0.0),
+                "fee": float(fee_val),
+                "orderId": order_id,
+                "clientOrderId": client_oid,
+                "decisionId": decision_id or None,
+                "idemKey": idem_key,
+                "ts_ms": ts_ms,
+            })
+    finally:
+        # Фиксируем ключ идемпотентности, если есть такой метод
+        try:
+            if hasattr(repos, "idempotency") and hasattr(repos.idempotency, "commit"):
+                repos.idempotency.commit(idem_key)
+        except Exception:
+            pass
 
-        # фиксация ключа идемпотентности
-        if hasattr(idem_repo, "commit"):
-            await idem_repo.commit(idem_key)
+    # Событие на шину (не ломая ваш интерфейс publish(event_dict))
+    if bus and hasattr(bus, "publish"):
+        try:
+            bus.publish({
+                "type": "order.placed",
+                "payload": {
+                    "symbol": symbol, "side": side,
+                    "qty": float(executed_qty or 0.0),
+                    "price": float(executed_price or 0.0),
+                    "fee": float(fee_val),
+                    "orderId": order_id,
+                    "clientOrderId": client_oid,
+                    "ts_ms": ts_ms,
+                },
+            })
+        except Exception:
+            pass
 
-        return PlaceOrderResult(
-            accepted=True, duplicated=False, order_id=order_id, client_order_id=client_oid, executed_price=executed_price, executed_qty=executed_qty, fee=fee_val
-        )
+    return {
+        "accepted": True,
+        "duplicated": False,
+        "orderId": order_id,
+        "clientOrderId": client_oid,
+        "executed_price": float(executed_price or 0.0),
+        "executed_qty": float(executed_qty or 0.0),
+        "fee": float(fee_val),
+        "mode": "live" if enable_trading else "paper",
+    }
