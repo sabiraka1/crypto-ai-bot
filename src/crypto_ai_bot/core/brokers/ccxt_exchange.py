@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
 
 import time
@@ -6,28 +5,26 @@ from collections import deque
 from threading import Lock
 from typing import Any, Dict, Optional
 
-import ccxt  # синхронная версия под ваш server.py
+import ccxt  # синхронная версия под server.py
 
 from .base import ExchangeInterface
-from ..events.bus import get_event_bus  # если у вас make_bus в app — bus сюда придёт через __init__
+from ..events.bus import get_event_bus
 from ...utils.metrics import metrics
 
 try:
     from ...utils.circuit_breaker import CircuitBreaker
 except Exception:
-    class CircuitBreaker:  # безопасный заглушечный fallback
+    class CircuitBreaker:
         def __init__(self, *a, **kw): pass
         def __enter__(self): return self
         def __exit__(self, exc_type, exc, tb): return False
 
-# Простой локальный rate-limit (token bucket) поверх ccxt.enableRateLimit
 class _TokenBucket:
     def __init__(self, calls: int, per_seconds: float):
         self.calls = max(1, int(calls))
         self.per = float(per_seconds)
         self._ts = deque()
         self._lock = Lock()
-
     def acquire(self):
         with self._lock:
             now = time.monotonic()
@@ -43,13 +40,6 @@ class _TokenBucket:
             self._ts.append(time.monotonic())
 
 class CCXTExchange(ExchangeInterface):
-    """
-    Синхронный CCXT-адаптер под FastAPI-сервер (sync handlers).
-    - Локальный RL поверх ccxt.enableRateLimit
-    - CircuitBreaker на HTTP-вызовы
-    - Gate.io clientOrderId → 'text'
-    - Метрики: histogram/errs + DLQ на bus
-    """
     def __init__(self, settings, bus=None, exchange_name: str = None):
         self.settings = settings
         self.exchange_name = (exchange_name or getattr(settings, "EXCHANGE", "gateio")).lower()
@@ -65,12 +55,10 @@ class CCXTExchange(ExchangeInterface):
             "timeout": timeout_ms,
         })
 
-        # локальный бюджет вызовов; по умолчанию 8 rps
         calls = int(getattr(settings, "CCXT_LOCAL_RL_CALLS", 8))
         window = float(getattr(settings, "CCXT_LOCAL_RL_WINDOW", 1.0))
         self._bucket = _TokenBucket(calls=calls, per_seconds=window)
 
-        # метрики
         self.m_lat = {
             "fetch_ticker": metrics.histogram("ccxt_fetch_ticker_seconds", "Latency of fetch_ticker", ["ex"]),
             "fetch_ohlcv":  metrics.histogram("ccxt_fetch_ohlcv_seconds", "Latency of fetch_ohlcv", ["ex"]),
@@ -79,24 +67,19 @@ class CCXTExchange(ExchangeInterface):
         }
         self.m_err = metrics.counter("ccxt_errors_total", "Total CCXT errors", ["ex", "op"])
 
-    # ---- helpers ----
     def _with_rl(self):
         self._bucket.acquire()
-
     def _obs(self, op: str, t0: float):
         self.m_lat[op].labels(self.exchange_name).observe(time.perf_counter() - t0)
-
     def _dlq(self, op: str, err: Exception, extra: Optional[Dict[str, Any]] = None):
         try:
             payload = {"op": op, "exchange": self.exchange_name, "error": f"{type(err).__name__}: {err}"}
-            if extra:
-                payload.update(extra)
+            if extra: payload.update(extra)
             if self.bus and hasattr(self.bus, "publish"):
                 self.bus.publish({"type": "dlq.error", "payload": payload})
         except Exception:
             pass
 
-    # ---- API ----
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         self._with_rl()
         t0 = time.perf_counter()
@@ -128,14 +111,10 @@ class CCXTExchange(ExchangeInterface):
         self._with_rl()
         t0 = time.perf_counter()
         p = dict(params or {})
-
-        # Gate.io: ccxt использует поле text как client ID, но clientOrderId тоже поддерживает многие биржи
         client_oid = p.pop("clientOrderId", None) or p.pop("client_oid", None) or p.pop("text", None)
         if client_oid:
             p.setdefault("clientOrderId", client_oid)
-            # Gate.io ограничивает длину text (как правило ≤ 32)
             p.setdefault("text", str(client_oid)[:32])
-
         try:
             with self.breaker:
                 if type_ == "market":

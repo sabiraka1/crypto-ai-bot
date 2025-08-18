@@ -1,28 +1,23 @@
-# src/crypto_ai_bot/core/brokers/base.py
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-# Единый интерфейс брокера (синхронный, под ваш server.py)
 class ExchangeInterface(ABC):
     @abstractmethod
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]: ...
     @abstractmethod
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200): ...
     @abstractmethod
-    def create_order(self, symbol: str, side: str, type_: str, amount: float,
-                     price: Optional[float] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
+    def create_order(
+        self, symbol: str, side: str, type_: str, amount: float,
+        price: Optional[float] = None, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]: ...
     @abstractmethod
     def cancel_order(self, id_: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
     @abstractmethod
     def fetch_balance(self) -> Dict[str, Any]: ...
 
 def create_broker(settings, bus=None) -> ExchangeInterface:
-    """
-    Фабрика брокера, совместимая с server.py:
-      BROKER = create_broker(CFG, bus=BUS)
-    Поддерживает режимы: live / paper / backtest.
-    """
     mode = getattr(settings, "MODE", "paper").lower()
     if mode == "live":
         from .ccxt_exchange import CCXTExchange
