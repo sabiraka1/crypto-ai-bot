@@ -33,7 +33,8 @@ def _kind_from_exc(e: Exception) -> str:
 
 class CCXTExchange:
     """
-    Обёртка над ccxt с простым CB-учётом.
+    Обёртка над ccxt с простым CircuitBreaker-учётом.
+    Совместимая сигнатура create_order(..., type=..., ...), поддержка старого type_.
     """
 
     def __init__(self, settings: Any, bus: Any = None, exchange_name: str | None = None):
