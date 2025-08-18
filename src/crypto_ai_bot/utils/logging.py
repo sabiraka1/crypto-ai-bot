@@ -5,53 +5,122 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict
+import time
+from typing import Any, Dict, Optional
+import contextvars
+from datetime import datetime, timezone
 
-_LEVELS = {
-    "CRITICAL": logging.CRITICAL,
-    "ERROR": logging.ERROR,
-    "WARNING": logging.WARNING,
-    "INFO": logging.INFO,
-    "DEBUG": logging.DEBUG,
-    "NOTSET": logging.NOTSET,
-}
+# Контекст корреляции (можно выставлять вручную в UC/обработчиках)
+_correlation_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("correlation_id", default=None)
+_request_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("request_id", default=None)
+
+
+def set_correlation_id(value: Optional[str]) -> None:
+    _correlation_id.set(value)
+
+
+def get_correlation_id() -> Optional[str]:
+    return _correlation_id.get()
+
+
+def set_request_id(value: Optional[str]) -> None:
+    _request_id.set(value)
+
+
+def get_request_id() -> Optional[str]:
+    return _request_id.get()
+
 
 class _JsonFormatter(logging.Formatter):
+    def __init__(self, app_name: str = "crypto-ai-bot") -> None:
+        super().__init__()
+        self.app_name = app_name
+
     def format(self, record: logging.LogRecord) -> str:
-        data: Dict[str, Any] = {
-            "level": record.levelname,
+        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
+        base: Dict[str, Any] = {
+            "ts": ts,
+            "lvl": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
-            "ts": record.created,
+            "app": self.app_name,
         }
+        # где доступно — добавляем стандартные поля
         if record.exc_info:
-            data["exc_info"] = self.formatException(record.exc_info)
-        if record.__dict__.get("extra"):
-            data["extra"] = record.__dict__["extra"]
-        return json.dumps(data, ensure_ascii=False)
+            base["exc"] = self.formatException(record.exc_info)
+        corr = get_correlation_id()
+        if corr:
+            base["correlation_id"] = corr
+        rid = get_request_id()
+        if rid:
+            base["request_id"] = rid
 
-def init(level: str | None = None, json_logs: bool | None = None) -> None:
-    """
-    Инициализация логирования для приложения/uvicorn.
-    Источники конфигурации:
-      - env LOG_LEVEL (INFO|DEBUG|...)
-      - env LOG_JSON ("1"/"true") — включить JSON-формат
-    """
-    lvl_name = (level or os.getenv("LOG_LEVEL") or "INFO").upper()
-    lvl = _LEVELS.get(lvl_name, logging.INFO)
-    use_json = (str(json_logs if json_logs is not None else os.getenv("LOG_JSON", "0"))).lower() in ("1", "true", "yes")
+        # Учитываем extra=... (record.__dict__ может содержать сервисные ключи)
+        for k, v in record.__dict__.items():
+            if k in ("args", "asctime", "created", "exc_info", "exc_text", "filename", "funcName",
+                     "levelname", "levelno", "lineno", "module", "msecs", "message", "msg",
+                     "name", "pathname", "process", "processName", "relativeCreated", "stack_info",
+                     "thread", "threadName"):
+                continue
+            # пропускаем встроенные на низком уровне
+            if k.startswith("_"):
+                continue
+            # не перетираем базовые ключи
+            if k in base:
+                continue
+            try:
+                json.dumps({k: v})  # проверка сериализуемости
+                base[k] = v
+            except TypeError:
+                base[k] = str(v)
 
+        return json.dumps(base, ensure_ascii=False)
+
+
+def init(level: Optional[str] = None, app_name: str = "crypto-ai-bot") -> None:
+    """
+    Инициализирует глобальный JSON-логгер.
+    Совместимо с вызовом из app/server.py: init_logging()
+
+    ENV:
+      LOG_LEVEL=INFO|DEBUG|WARNING|ERROR (по умолчанию INFO)
+    """
+    log_level = (level or os.getenv("LOG_LEVEL", "INFO")).upper()
+    # корневой логгер
     root = logging.getLogger()
-    root.handlers.clear()
-    root.setLevel(lvl)
+    root.setLevel(getattr(logging, log_level, logging.INFO))
 
-    handler = logging.StreamHandler(sys.stdout)
-    if use_json:
-        handler.setFormatter(_JsonFormatter())
-    else:
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s"))
+    # очищаем старые хендлеры (uvicorn/gunicorn может добавить свои)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(_JsonFormatter(app_name=app_name))
     root.addHandler(handler)
 
-    # популярные логгеры
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
-        logging.getLogger(name).setLevel(lvl)
+    # Уменьшаем болтливость некоторых либ, если они подтянуты
+    for noisy in ("uvicorn.access", "uvicorn.error", "asyncio", "httpx", "urllib3"):
+        lg = logging.getLogger(noisy)
+        if lg.level == logging.NOTSET:
+            lg.setLevel(logging.WARNING)
+
+
+def get_logger(name: str) -> logging.Logger:
+    return logging.getLogger(name)
+
+
+# Удобные шорткаты (если хочется точечно логировать без явного get_logger)
+def info(msg: str, **extra: Any) -> None:
+    logging.getLogger("app").info(msg, extra=extra)
+
+
+def warning(msg: str, **extra: Any) -> None:
+    logging.getLogger("app").warning(msg, extra=extra)
+
+
+def error(msg: str, **extra: Any) -> None:
+    logging.getLogger("app").error(msg, extra=extra)
+
+
+def debug(msg: str, **extra: Any) -> None:
+    logging.getLogger("app").debug(msg, extra=extra)
