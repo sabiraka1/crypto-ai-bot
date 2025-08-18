@@ -37,7 +37,12 @@ class _ReconcilerRunner:
                 except Exception:
                     pass
             try:
-                _check_protective_exits(self.container)
+                \1            try:
+                if hasattr(self.container, "idempotency_repo"):
+                    self.container.idempotency_repo.cleanup_expired()
+            except Exception:
+                pass
+
             except Exception as e:
                 try:
                     self.container.audit_repo.log("reconcile_error", {"stage": "exits", "err": repr(e)})

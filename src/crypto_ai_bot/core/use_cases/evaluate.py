@@ -1,52 +1,50 @@
-# src/crypto_ai_bot/core/use_cases/evaluate.py
 from __future__ import annotations
 from typing import Any, Dict
 
 from crypto_ai_bot.core.use_cases.place_order import place_order
-from crypto_ai_bot.utils.rate_ops import GLOBAL_RATE_LIMITER as _R
+from crypto_ai_bot.core.use_cases.decide import evaluate_only
+from crypto_ai_bot.utils.rate_limit import MultiLimiter
 
-def _get(repo_container: Any, *names: str):
-    for n in names:
-        if hasattr(repo_container, n):
-            return getattr(repo_container, n)
-    return None
+# Глобальный лимитер торговых действий (per (symbol, side))
+_GLOBAL_RL = MultiLimiter({
+    "place_order": {"rps": float(1.0), "burst": float(2.0)}
+})
 
-def eval_and_execute(*, cfg, broker, repos, symbol: str, decision: Dict[str, Any]) -> Dict[str, Any]:
+def eval_and_execute(*, cfg, broker, repos, symbol: str) -> Dict[str, Any]:
     """
-    Совместимость со старым кодом: repos может иметь trades/positions
-    или trades_repo/positions_repo и т.п.
-    decision: {'side': 'buy'|'sell'}
+    Back-compat точка: оцени, затем при необходимости исполни.
     """
-    trades_repo     = _get(repos, "trades_repo", "trades")
-    positions_repo  = _get(repos, "positions_repo", "positions")
-    exits_repo      = _get(repos, "exits_repo", "exits")
-    idemp_repo      = _get(repos, "idempotency_repo", "idempotency")
+    eval_res = evaluate_only(cfg=cfg, broker=broker, symbol=symbol)
+    action = eval_res.get("action")
+    if action not in ("buy", "sell"):
+        return {"accepted": False, "decision": eval_res}
+
+    # rate limiting поверх бизнес-операции
+    key = f"place_order:{symbol}:{action}"
+    if not _GLOBAL_RL.allow("place_order"):  # общий ключ; внутр. бакет учитывает rps/burst
+        return {"accepted": False, "error": "rate_limited", "decision": eval_res}
+
+    trades_repo     = getattr(repos, "trades_repo", getattr(repos, "trades", None))
+    positions_repo  = getattr(repos, "positions_repo", getattr(repos, "positions", None))
+    exits_repo      = getattr(repos, "exits_repo", getattr(repos, "exits", None))
+    idemp_repo      = getattr(repos, "idempotency_repo", getattr(repos, "idempotency", None))
 
     if trades_repo is None or positions_repo is None:
-        return {"accepted": False, "error": "repos-missing"}
+        return {"accepted": False, "error": "repos_missing", "decision": eval_res}
 
-    side = (decision or {}).get("side")
-    if side not in ("buy", "sell"):
-        return {"accepted": False, "error": "invalid-decision"}
-
-    # === rate-limit на торговые действия по (symbol, side) ===
-    lim_key = f"place_order:{symbol}:{side}"
-    rps = float(getattr(cfg, "PLACE_ORDER_RPS", 1.0))
-    burst = float(getattr(cfg, "PLACE_ORDER_BURST", 2.0))
-    if not _R.allow(lim_key, rps=rps, burst=burst):
-        return {"accepted": False, "error": "rate_limited"}
-
-    return place_order(
+    res = place_order(
         cfg=cfg,
         broker=broker,
         trades_repo=trades_repo,
         positions_repo=positions_repo,
         exits_repo=exits_repo,
         symbol=symbol,
-        side=side,
+        side=action,
         idempotency_repo=idemp_repo,
     )
+    res["decision"] = eval_res
+    return res
 
-# старый псевдоним
+# Старый псевдоним 'evaluate' (некоторые места могли вызывать)
 def evaluate(*args, **kwargs):
     return eval_and_execute(*args, **kwargs)

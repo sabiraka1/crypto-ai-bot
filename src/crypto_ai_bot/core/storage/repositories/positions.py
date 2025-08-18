@@ -1,71 +1,73 @@
+from __future__ import annotations
 import sqlite3
-from typing import Dict, List, Any, Optional
+from typing import List, Dict, Any, Optional
+
+DDL = """
+CREATE TABLE IF NOT EXISTS positions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL UNIQUE,
+  qty REAL NOT NULL DEFAULT 0,
+  avg_price REAL NOT NULL DEFAULT 0
+);
+"""
 
 class SqlitePositionRepository:
-    """
-    Позиции считаются по заполненным сделкам (state='filled') из таблицы trades.
-    Интерфейс совместим: has_long(), long_qty(), get_open().
-    """
-
+    """Храним свернутые позиции; поддерживаем ресинк из trades."""
     def __init__(self, con: sqlite3.Connection):
         self.con = con
-        # Страхующие индексы (если их нет)
-        try:
-            self.con.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts);")
-            self.con.execute("CREATE INDEX IF NOT EXISTS idx_trades_state ON trades(state);")
-        except Exception:
-            pass
-
-    def has_long(self, symbol: str) -> bool:
-        return self.long_qty(symbol) > 0.0
-
-    def long_qty(self, symbol: str) -> float:
-        pos = self._compute_positions(symbol_only=symbol)
-        p = pos.get(symbol)
-        return float(p["qty"]) if p else 0.0
+        self.con.execute(DDL)
 
     def get_open(self) -> List[Dict[str, Any]]:
-        pos = self._compute_positions(symbol_only=None)
-        out: List[Dict[str, Any]] = []
-        for sym, p in pos.items():
-            if p["qty"] > 0:
-                out.append({
-                    "symbol": sym,
-                    "qty": float(p["qty"]),
-                    "avg_price": float(p["avg_price"]) if p["avg_price"] is not None else None,
-                    "entry_ts": int(p["entry_ts"]) if p["entry_ts"] is not None else None,
-                })
-        return out
+        cur = self.con.execute("SELECT symbol, qty, avg_price FROM positions WHERE qty > 0")
+        return [{"symbol": s, "qty": float(q), "avg_price": float(ap)} for (s, q, ap) in cur.fetchall()]
 
-    # ---- internal ----
-    def _compute_positions(self, symbol_only: Optional[str]) -> Dict[str, Dict[str, Any]]:
-        params: List[Any] = []
-        q = "SELECT ts, symbol, side, price, qty FROM trades WHERE state='filled' "
-        if symbol_only:
-            q += "AND symbol=? "
-            params.append(symbol_only)
-        q += "ORDER BY symbol ASC, ts ASC"
+    def has_long(self, symbol: str) -> bool:
+        cur = self.con.execute("SELECT 1 FROM positions WHERE symbol=? AND qty>0", (symbol,))
+        return cur.fetchone() is not None
 
-        cur = self.con.execute(q, tuple(params))
-        pos: Dict[str, Dict[str, Any]] = {}
-        for ts, symbol, side, price, qty in cur.fetchall():
-            p = pos.get(symbol)
-            if p is None:
-                p = {"qty": 0.0, "avg_price": 0.0, "entry_ts": None}
-                pos[symbol] = p
-            if side == "buy":
-                new_qty = p["qty"] + float(qty)
-                if new_qty <= 0:
-                    p["qty"] = 0.0; p["avg_price"] = 0.0; p["entry_ts"] = None
+    def long_qty(self, symbol: str) -> float:
+        cur = self.con.execute("SELECT qty FROM positions WHERE symbol=?", (symbol,))
+        row = cur.fetchone()
+        return float(row[0]) if row else 0.0
+
+    # --- поддержка консистентности с фактами из trades ---
+
+    def recompute_from_trades(self, symbol: Optional[str] = None) -> None:
+        """
+        Сворачиваем filled/partial_filled трейды в агрегированную позицию.
+        Важно вызывать периодически из reconciler либо после серии ордеров.
+        """
+        if symbol:
+            syms = [symbol]
+        else:
+            cur = self.con.execute("SELECT DISTINCT symbol FROM trades WHERE state IN ('filled','partial_filled')")
+            syms = [r[0] for r in cur.fetchall()]
+
+        for sym in syms:
+            cur = self.con.execute(
+                "SELECT side, price, qty, COALESCE(fee_amt,0.0) "
+                "FROM trades WHERE symbol=? AND state IN ('filled','partial_filled') ORDER BY ts ASC",
+                (sym,)
+            )
+            qty = 0.0
+            avg = 0.0
+            for (side, price, q, fee) in cur.fetchall():
+                price = float(price); q = float(q)
+                if side == "buy":
+                    new_qty = qty + q
+                    avg = (avg * qty + price * q) / new_qty if new_qty > 0 else 0.0
+                    qty = new_qty
                 else:
-                    p["avg_price"] = (p["avg_price"] * p["qty"] + float(price) * float(qty)) / new_qty if p["qty"] > 0 else float(price)
-                    p["qty"] = new_qty
-                    if p["entry_ts"] is None:
-                        p["entry_ts"] = int(ts)
-            else:
-                new_qty = p["qty"] - float(qty)
-                if new_qty <= 0:
-                    p["qty"] = 0.0; p["avg_price"] = 0.0; p["entry_ts"] = None
+                    sell_qty = min(q, qty)
+                    qty = max(0.0, qty - sell_qty)
+                    if qty == 0.0:
+                        avg = 0.0
+            with self.con:
+                if qty <= 0:
+                    self.con.execute("DELETE FROM positions WHERE symbol=?", (sym,))
                 else:
-                    p["qty"] = new_qty
-        return pos
+                    self.con.execute(
+                        "INSERT INTO positions(symbol, qty, avg_price) VALUES(?,?,?) "
+                        "ON CONFLICT(symbol) DO UPDATE SET qty=excluded.qty, avg_price=excluded.avg_price",
+                        (sym, qty, avg)
+                    )

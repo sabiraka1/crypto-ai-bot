@@ -109,4 +109,48 @@ class Settings:
             perf_budget_order_p99_ms=env.get_int("PERF_BUDGET_ORDER_P99_MS", 0),
             # Misc
             tz=env.get("TZ","Europe/Istanbul") or "Europe/Istanbul",
+
+    # --- Back-compat UPPER_CASE aliases ---
+    _ALIAS = {
+        "MODE": "mode",
+        "EXCHANGE": "exchange",
+        "SYMBOL": "symbol",
+        "TIMEFRAME": "timeframe",
+        "DB_PATH": "db_path",
+        "ENABLE_TRADING": "enable_trading",
+        # брокер/лимиты/тайминги
+        "HTTP_TIMEOUT_MS": "http_timeout_ms",
+        "GATEIO_HTTP_TIMEOUT_MS": "http_timeout_ms",
+        "RATE_PUBLIC_RPM": "rate_public_rpm",
+        "RATE_PUBLIC_BURST": "rate_public_burst",
+        "RATE_PRIVATE_READ_RPM": "rate_private_read_rpm",
+        "RATE_PRIVATE_READ_BURST": "rate_private_read_burst",
+        "RATE_PRIVATE_WRITE_RPM": "rate_private_write_rpm",
+        "RATE_PRIVATE_WRITE_BURST": "rate_private_write_burst",
+        "RATE_WAIT_TIMEOUT_SEC": "rate_wait_timeout_sec",
+        # торговля/риски/производительность
+        "FEE_TAKER_BPS": "fee_taker_bps",
+        "SLIPPAGE_BPS": "slippage_bps",
+        "POSITION_SIZE_USD": "position_size_usd",
+        "IDEMPOTENCY_TTL_SEC": "idempotency_ttl_sec",
+        "IDEMPOTENCY_BUCKET_MS": "idempotency_bucket_ms",
+        "RECONCILE_PERIOD_SEC": "reconcile_period_sec",
+        # телеграм/прочее
+        "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
+        "TELEGRAM_WEBHOOK_SECRET": "telegram_webhook_secret",
+        "LOG_LEVEL": "log_level",
+        "LOG_JSON": "log_json",
+        "TZ": "tz",
+        "API_KEY": "api_key",
+        "API_SECRET": "api_secret",
+        "API_PASSWORD": "api_password",
+    }
+
+    def __getattr__(self, name: str):
+        # поддержка обращений вида CFG.EXCHANGE, CFG.DB_PATH и т.п.
+        lower = self._ALIAS.get(name)
+        if lower:
+            return getattr(self, lower)
+        raise AttributeError(name)
+
         )

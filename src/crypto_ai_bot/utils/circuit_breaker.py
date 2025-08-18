@@ -83,3 +83,11 @@ class CircuitBreaker:
             "success_probes": self._successes,
             "transitions": self._transitions[-10:],
         }
+
+
+def _transition(self, new_state: str) -> None:
+    self._state = new_state
+    try:
+        self._transitions.append((time.time(), new_state))
+    except Exception:
+        self._transitions = [(time.time(), new_state)]
