@@ -1,48 +1,28 @@
-# src/crypto_ai_bot/app/middleware.py
 from __future__ import annotations
-
-import time
 import uuid
-from typing import Callable, Awaitable
-from fastapi import Request, Response
-from starlette.types import ASGIApp
+import contextvars
+from typing import Callable
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.logging import set_request_id, set_correlation_id
+# контекстный correlation-id, доступен из любого места
+_correlation_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("correlation_id", default="")
 
+def get_correlation_id() -> str:
+    return _correlation_id_ctx.get()
 
-async def http_metrics_and_ids(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-    """
-    HTTP middleware:
-    - ставит request_id (X-Request-Id или генерит UUID4)
-    - correlation_id = X-Correlation-Id, иначе совпадает с request_id
-    - снимает http_* метрики
-    """
-    rid = request.headers.get("x-request-id") or str(uuid.uuid4())
-    cid = request.headers.get("x-correlation-id") or rid  # ← важное изменение
+class CorrelationIdMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable):
+        # берём из входящих заголовков или генерим
+        incoming = request.headers.get("X-Request-ID") or request.headers.get("X-Correlation-ID")
+        cid = incoming or str(uuid.uuid4())
+        token = _correlation_id_ctx.set(cid)
+        try:
+            response = await call_next(request)
+        finally:
+            _correlation_id_ctx.reset(token)
+        response.headers["X-Request-ID"] = cid
+        return response
 
-    set_request_id(rid)
-    set_correlation_id(cid)
-
-    t0 = time.time()
-    code = "500"
-    response: Response
-    try:
-        response = await call_next(request)
-        code = str(response.status_code)
-    finally:
-        dt = max(0.0, time.time() - t0)
-        metrics.inc("http_requests_total", {"method": request.method.upper(), "path": request.url.path, "code": code})
-        metrics.observe_histogram("http_request_duration_seconds", dt, {"method": request.method.upper(), "path": request.url.path})
-    try:
-        response.headers["X-Request-Id"] = rid  # type: ignore
-        response.headers["X-Correlation-Id"] = cid  # type: ignore
-    except Exception:
-        pass
-    return response
-
-
-def register_middlewares(app: ASGIApp) -> None:
-    from fastapi import FastAPI
-    fast: FastAPI = app  # type: ignore
-    fast.middleware("http")(http_metrics_and_ids)
+def register_middlewares(app):
+    app.add_middleware(CorrelationIdMiddleware)

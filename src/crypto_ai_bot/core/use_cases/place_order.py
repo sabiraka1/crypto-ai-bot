@@ -1,9 +1,12 @@
+# src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
 
 import time
 from typing import Any, Dict, Optional
 
 from ..settings import Settings  # cfg тип
+from crypto_ai_bot.utils.rate_limit import rate_limit  # ← применяем RL к ордерам
+
 
 def _apply_slippage(price: float, side: str, bps: float) -> float:
     if not price or not bps:
@@ -19,6 +22,9 @@ def _calc_fee(notional: float, fee_bps: float) -> float:
 def _minute_bucket(ts_ms: int) -> int:
     return int((ts_ms // 1000) // 60)
 
+
+# По умолчанию 10 заявок в минуту (можно переопределить в конфиге)
+@rate_limit(max_calls=10, window=60)
 def place_order(
     cfg: Settings,
     broker,

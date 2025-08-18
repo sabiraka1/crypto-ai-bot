@@ -1,159 +1,117 @@
-# src/crypto_ai_bot/app/bus_wiring.py
 from __future__ import annotations
-
-import time
+import heapq
 import threading
-from collections import defaultdict, deque
-from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Tuple
 
 from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.core.events.factory import get_backpressure_conf
 
-
-# -------- Quantiles (rolling) --------
-@dataclass
-class _Q:
-    last: float = 0.0
-    p95: float = 0.0
-    p99: float = 0.0
-    count: int = 0
-
-
-class _Quantiles:
-    """Очень лёгкая RQ-метрика по ключу: поддерживает p95/p99."""
-    def __init__(self, maxlen: int = 2048) -> None:
-        self._buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=maxlen))
-        self._lock = threading.RLock()
-
-    def observe(self, key: str, v: float) -> None:
-        with self._lock:
-            self._buckets[key].append(float(v))
-
-    def snapshot(self) -> Dict[str, Dict[str, float]]:
-        out: Dict[str, Dict[str, float]] = {}
-        with self._lock:
-            for k, q in self._buckets.items():
-                if not q:
-                    out[k] = {"count": 0, "p95": 0.0, "p99": 0.0}
-                    continue
-                xs = sorted(q)
-                n = len(xs)
-                p95 = xs[min(n - 1, int(0.95 * (n - 1)))]
-                p99 = xs[min(n - 1, int(0.99 * (n - 1)))]
-                out[k] = {"count": float(n), "p95": float(p95 * 1000.0), "p99": float(p99 * 1000.0)}  # в мс
-        return out
-
-
-_RQ = _Quantiles()
-
-
-def observe_decision_latency(sec: float, *, symbol: str, timeframe: str) -> None:
-    _RQ.observe(f"decision:{symbol}:{timeframe}", float(sec))
-
-
-def observe_order_latency(sec: float, *, symbol: str, timeframe: str, side: str) -> None:
-    _RQ.observe(f"order:{symbol}:{timeframe}:{side}", float(sec))
-
-
-def observe_flow_latency(sec: float, *, symbol: str, timeframe: str) -> None:
-    _RQ.observe(f"flow:{symbol}:{timeframe}", float(sec))
-
-
-def snapshot_quantiles() -> Dict[str, Dict[str, float]]:
-    return _RQ.snapshot()
-
-
-# --------- Simple Async-ish Bus with backpressure ---------
 Handler = Callable[[Dict[str, Any]], None]
 
+class _PriorityBus:
+    """
+    Однопроцессная шина с приоритетами и стратегиями backpressure.
+    publish(event) — кладёт в приоритетную очередь (меньше число = выше приоритет)
+    worker-поток обрабатывает события по одному.
+    """
+    def __init__(self, max_queue: int = 1000) -> None:
+        self._handlers: Dict[str, List[Handler]] = {}
+        self._queue: List[Tuple[int, int, Dict[str, Any]]] = []
+        self._counter = 0
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._stop = False
+        self._dlq: List[Dict[str, Any]] = []
+        self._max_queue = int(max_queue)
 
-class _Bus:
-    def __init__(self) -> None:
-        self._subs: Dict[str, List[Handler]] = defaultdict(list)
-        self._dlq: Deque[Dict[str, Any]] = deque(maxlen=10_000)
-        self._lock = threading.RLock()
-        self._queued: Deque[Tuple[int, Dict[str, Any]]] = deque(maxlen=50_000)  # (priority, event)
+        # стратегии: type -> (priority, strategy)
+        # strategy: "drop_oldest" | "to_dlq" | "block"
+        self._policies: Dict[str, Tuple[int, str]] = {
+            "dlq.error": (0, "block"),
+            "order.placed": (10, "to_dlq"),
+            "order.duplicate": (15, "to_dlq"),
+            "metrics.ingest": (50, "drop_oldest"),
+            "telegram.incoming": (20, "to_dlq"),
+            "*": (30, "drop_oldest"),
+        }
+
+        self._worker = threading.Thread(target=self._loop, name="bus-worker", daemon=True)
+        self._worker.start()
+
+    def set_policy(self, event_type: str, *, priority: int, strategy: str) -> None:
+        self._policies[event_type] = (int(priority), str(strategy))
+
+    def _policy_of(self, event_type: str) -> Tuple[int, str]:
+        return self._policies.get(event_type, self._policies["*"])
+
+    def publish(self, event: Dict[str, Any]) -> None:
+        et = str(event.get("type") or "")
+        prio, strat = self._policy_of(et)
+        with self._lock:
+            if len(self._queue) >= self._max_queue:
+                if strat == "drop_oldest" and self._queue:
+                    heapq.heappop(self._queue)  # вытесним самый низкий по очереди
+                    metrics.inc("bus_drop_oldest_total", {"type": et})
+                elif strat == "to_dlq":
+                    self._dlq.append({"at": int(time.time()*1000), "event": event, "reason": "backpressure"})
+                    metrics.inc("bus_to_dlq_total", {"type": et})
+                    return
+                elif strat == "block":
+                    # ждём пока освободится место
+                    while len(self._queue) >= self._max_queue and not self._stop:
+                        self._cv.wait(timeout=0.05)
+                else:
+                    # по умолчанию — в DLQ
+                    self._dlq.append({"at": int(time.time()*1000), "event": event, "reason": "overflow"})
+                    return
+            self._counter += 1
+            heapq.heappush(self._queue, (prio, self._counter, event))
+            self._cv.notify()
 
     def subscribe(self, type_: str, handler: Handler) -> None:
-        with self._lock:
-            self._subs[type_].append(handler)
+        self._handlers.setdefault(type_, []).append(handler)
 
-    def _apply_backpressure(self, ev: Dict[str, Any]) -> Optional[str]:
-        """Возвращает причину дропа, если событие не принято."""
-        t = ev.get("type", "Unknown")
-        conf = get_backpressure_conf(str(t))
-        policy = conf.get("policy", "drop_oldest")
-        max_q = int(conf.get("max_queue", 2000))
-        prio = int(conf.get("priority", 5))
-        ev["priority"] = prio  # сохраняем приоритет в самом событии
-
-        # Учтём только события этого типа при лимите
-        same_type = sum(1 for _, e in self._queued if e.get("type") == t)
-        if same_type < max_q:
-            return None
-
-        if policy == "drop_new":
-            return "drop_new"
-        if policy == "drop_oldest":
-            # выкинем самый старый такого же типа
-            for i, (_p, e) in enumerate(self._queued):
-                if e.get("type") == t:
-                    try:
-                        del self._queued[i]
-                        break
-                    except Exception:
-                        break
-            return None
-        if policy == "block":
-            # упрощённо: принимаем (не блокируем event loop)
-            return None
-        if policy == "coalesce":
-            # если уже есть такое событие без уникального ключа — просто заменим хвостовое
-            for i in range(len(self._queued) - 1, -1, -1):
-                _p, e = self._queued[i]
-                if e.get("type") == t:
-                    self._queued[i] = (prio, ev)
-                    return "coalesced"
-            return None
-        return None
-
-    def publish(self, ev: Dict[str, Any]) -> None:
-        with self._lock:
-            reason = self._apply_backpressure(ev)
-            if reason == "drop_new":
-                self._dlq.append(ev)
-                metrics.inc("events_dlq_total", {"reason": "drop_new", "type": str(ev.get("type"))})
-                return
-            # приоритет: вставляем по возрастанию priority
-            prio = int(ev.get("priority", 5))
-            inserted = False
-            for i, (p, _e) in enumerate(self._queued):
-                if prio < p:
-                    self._queued.insert(i, (prio, ev))
-                    inserted = True
-                    break
-            if not inserted:
-                self._queued.append((prio, ev))
-
-        # синхронная «доставка»: пробуем доставить сразу
-        handlers = list(self._subs.get(ev.get("type", ""), []))
-        for h in handlers:
+    def _dispatch(self, ev: Dict[str, Any]) -> None:
+        et = str(ev.get("type") or "")
+        for h in self._handlers.get(et, []):
             try:
                 h(ev)
-            except Exception:
-                self._dlq.append(ev)
-                metrics.inc("events_dlq_total", {"reason": "handler_error", "type": str(ev.get("type"))})
+            except Exception as e:
+                self._dlq.append({"at": int(time.time()*1000), "event": ev, "reason": f"handler_error:{type(e).__name__}"})
+                metrics.inc("bus_handler_error_total", {"type": et})
+
+    def _loop(self):
+        while not self._stop:
+            with self._lock:
+                while not self._queue and not self._stop:
+                    self._cv.wait(timeout=0.05)
+                if self._stop:
+                    break
+                _, _, ev = heapq.heappop(self._queue)
+                self._cv.notify()
+            self._dispatch(ev)
 
     def health(self) -> Dict[str, Any]:
         with self._lock:
-            return {"status": "ok", "dlq_size": len(self._dlq), "queued": len(self._queued)}
+            return {
+                "queue": len(self._queue),
+                "dlq_size": len(self._dlq),
+                "status": "ok" if not self._stop else "stopped",
+            }
 
-    # совместимость
-    def __len__(self) -> int:
+    def dlq_dump(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
-            return len(self._queued)
+            return list(self._dlq[-int(limit):])
 
+    def stop(self) -> None:
+        with self._lock:
+            self._stop = True
+            self._cv.notify_all()
+        self._worker.join(timeout=1.0)
 
-def make_bus():
-    return _Bus()
+def make_bus() -> _PriorityBus:
+    return _PriorityBus(max_queue=1000)
+
+def snapshot_quantiles() -> Dict[str, Any]:
+    # заглушка под ваш экспорт квантилей — если есть отдельный модуль метрик, оставим так
+    return {}

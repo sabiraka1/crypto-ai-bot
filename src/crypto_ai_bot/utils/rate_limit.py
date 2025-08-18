@@ -1,66 +1,43 @@
-# src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
-
-import asyncio
-import functools
-import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Optional
+from threading import Lock
+from typing import Callable, Deque, Dict, Tuple
 
-from . import metrics
+class RateLimiter:
+    """Потокобезопасный токен-бакет."""
+    def __init__(self, max_calls: int, window: float) -> None:
+        self.max_calls = max(1, int(max_calls))
+        self.window = float(window)
+        self._ts: Deque[float] = deque()
+        self._lock = Lock()
 
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            while self._ts and (now - self._ts[0]) >= self.window:
+                self._ts.popleft()
+            if len(self._ts) >= self.max_calls:
+                sleep_for = self.window - (now - self._ts[0])
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                    # очистим окно ещё раз
+                    now = time.monotonic()
+                    while self._ts and (now - self._ts[0]) >= self.window:
+                        self._ts.popleft()
+            self._ts.append(time.monotonic())
 
-class RateLimitExceeded(Exception):
-    pass
+# общий реестр лимитеров на процесс
+_LIMITERS: Dict[Tuple[str, int], RateLimiter] = {}
 
-
-def rate_limit(*, max_calls: Optional[int] = None, window: Optional[int] = None, limit: Optional[int] = None, per: Optional[int] = None):
-    """
-    Универсальный декоратор:
-      @rate_limit(max_calls=60, window=60)        # рекомендованный синтаксис (Word)
-    Поддержка старого алиаса:
-      @rate_limit(limit=60, per=60)
-    Окно — в секундах. Счётчик — по количеству вызовов.
-    """
-    calls = int(max_calls if max_calls is not None else (limit if limit is not None else 0))
-    win = int(window if window is not None else (per if per is not None else 0))
-    if calls <= 0 or win <= 0:
-        # no-op
-        def passthrough(fn):
-            return fn
-        return passthrough
-
-    lock = threading.RLock()
-    q: Deque[float] = deque()
-
-    def _touch(now: float):
-        while q and (now - q[0]) > win:
-            q.popleft()
-
-    def decorator(fn: Callable):
-        if asyncio.iscoroutinefunction(fn):
-            @functools.wraps(fn)
-            async def aw(*args, **kwargs):
-                now = time.monotonic()
-                with lock:
-                    _touch(now)
-                    if len(q) >= calls:
-                        metrics.inc("rate_limit_exceeded_total", {"func": fn.__name__})
-                        raise RateLimitExceeded(f"Rate limit exceeded: {calls}/{win}s")
-                    q.append(now)
-                return await fn(*args, **kwargs)
-            return aw
-        else:
-            @functools.wraps(fn)
-            def w(*args, **kwargs):
-                now = time.monotonic()
-                with lock:
-                    _touch(now)
-                    if len(q) >= calls:
-                        metrics.inc("rate_limit_exceeded_total", {"func": fn.__name__})
-                        raise RateLimitExceeded(f"Rate limit exceeded: {calls}/{win}s")
-                    q.append(now)
-                return fn(*args, **kwargs)
-            return w
-    return decorator
+def rate_limit(max_calls: int, window: float):
+    """Декоратор, использующий процессный реестр лимитеров по имени функции."""
+    def deco(fn: Callable):
+        key = (fn.__name__, max_calls)
+        _LIMITERS.setdefault(key, RateLimiter(max_calls, window))
+        limiter = _LIMITERS[key]
+        def wrapper(*args, **kwargs):
+            limiter.acquire()
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco

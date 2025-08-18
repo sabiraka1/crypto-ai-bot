@@ -1,11 +1,13 @@
 # src/crypto_ai_bot/app/adapters/telegram.py
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
 from typing import Any, Dict, Optional, List, Tuple
 
+from crypto_ai_bot.utils import metrics
 # нормализация символов/таймфреймов — единый реестр
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
 
@@ -47,8 +49,15 @@ async def _send_text(http: Any, token: str, chat_id: str, text: str) -> None:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": _trim(text)}
         http.post_json(url, payload, timeout=3.5)
-    except Exception:
-        pass
+    except Exception as e:
+        # раньше "глотали" исключение — теперь фиксируем метрикой
+        metrics.inc("telegram_send_error_total", {"error": type(e).__name__})
+        # и даём шанс увидеть в логах
+        try:
+            from crypto_ai_bot.utils.logging import logger  # lazy импорт
+            logger.warning("telegram_send_error: %s", f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 def _public_base(cfg: Any) -> Optional[str]:
@@ -133,7 +142,7 @@ def _format_explain(explain: Dict[str, Any]) -> str:
     signals = explain.get("signals") or {}
     weights = explain.get("weights") or {}
     thresholds = explain.get("thresholds") or {}
-    ctx = explain.get("context") or {}
+    ctx = (explain.get("context") or {}).get("ctx") or (explain.get("context") or {})
 
     if signals:
         sig_line = ", ".join(f"{k}:{float(v):.3f}" for k, v in list(signals.items())[:10])
@@ -144,12 +153,15 @@ def _format_explain(explain: Dict[str, Any]) -> str:
     if thresholds:
         th_line = ", ".join(f"{k}:{float(v):.2f}" for k, v in thresholds.items())
         parts.append(f"thresholds: {th_line}")
-    if ctx:
+    if isinstance(ctx, dict):
         keys = []
-        for k in ("btc_dominance", "fear_greed", "dxy"):
-            v = ctx.get(k) if isinstance(ctx, dict) else None
+        for k in ("btc_dominance", "fear_greed", "dxy", "exposure_open_positions", "exposure_notional_quote", "time_drift_ms"):
+            v = ctx.get(k)
             if v is not None:
-                keys.append(f"{k}:{float(v):.2f}")
+                try:
+                    keys.append(f"{k}:{float(v):.2f}")
+                except Exception:
+                    keys.append(f"{k}:{v}")
         if keys:
             parts.append("context: " + ", ".join(keys))
 
@@ -211,7 +223,8 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
         sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
         try:
             from crypto_ai_bot.core.use_cases.evaluate import evaluate
-            d = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit)
+            # важное изменение: выносим блокирующий расчёт из event loop
+            d = await asyncio.to_thread(evaluate, cfg, broker, symbol=sym, timeframe=tf, limit=limit, repos=repos, http=http)
         except Exception as e:
             d = {"action": "hold", "error": f"{type(e).__name__}: {e}"}
         try:
@@ -251,7 +264,7 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
         sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
         try:
             from crypto_ai_bot.core.use_cases.evaluate import evaluate
-            d = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit)
+            d = await asyncio.to_thread(evaluate, cfg, broker, symbol=sym, timeframe=tf, limit=limit, repos=repos, http=http)
         except Exception as e:
             d = {"action": "hold", "error": f"{type(e).__name__}: {e}"}
         action = d.get("action", "hold")
@@ -266,7 +279,7 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
         sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
         try:
             from crypto_ai_bot.core.use_cases.evaluate import evaluate
-            d = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit)
+            d = await asyncio.to_thread(evaluate, cfg, broker, symbol=sym, timeframe=tf, limit=limit, repos=repos, http=http)
             explain = d.get("explain") or {}
         except Exception as e:
             explain = {"error": f"{type(e).__name__}: {e}"}
