@@ -57,23 +57,31 @@ class Orchestrator:
         limit = int(getattr(self.cfg, "LIMIT_BARS", 300) or 300)
 
         base_period = int(getattr(self.cfg, "TICK_PERIOD_SEC", 60) or 60)
-        jitter_pct = 0.15  # ±15%
+        jitter_pct = 0.15  # ±15% (фикс из рекомендаций)
 
         while not self._stopped.is_set():
+            t0 = time.time()
             try:
-                # Offload sync flow out of event loop (broker is sync)
-                import functools
-                loop = asyncio.get_running_loop()
+                # основной flow
                 with metrics.timer() as t_flow:
+                    import functools, asyncio
+                    loop = asyncio.get_running_loop()
                     fn = functools.partial(
                         uc_eval_and_execute, self.cfg, self.broker, self.repos,
                         symbol=sym, timeframe=tf, limit=limit, bus=self.bus, http=self.http
                     )
                     await loop.run_in_executor(None, fn)
                 metrics.observe_histogram("latency_flow_seconds", t_flow.elapsed)
-                thr = int(getattr(self.cfg, "PERF_BUDGET_FLOW_P99_MS", 0) or 0)
-                if thr > 0 and (t_flow.elapsed * 1000.0) > float(thr):
-                    metrics.inc("flow_latency_exceed_total")
+                # пусть RQ-снапшоты берутся из app.bus_wiring; здесь просто p99-бюджеты:
+                try:
+                    thr = int(getattr(self.cfg, "PERF_BUDGET_FLOW_P99_MS", 0) or 0)
+                    if thr > 0:
+                        # легкий «runtime» чек: отдельного p99 тут нет, но можем подсвечивать единичные проскоки
+                        if (t_flow.elapsed * 1000.0) > float(thr):
+                            metrics.inc("flow_latency_exceed_total")
+                except Exception:
+                    pass
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -90,6 +98,7 @@ class Orchestrator:
             except Exception as e:
                 log.warning("orchestrator_sleep_issue: %s", e)
                 await asyncio.sleep(base_period)
+
     async def _maintenance_loop(self) -> None:
         period = int(getattr(self.cfg, "MAINTENANCE_SEC", 60) or 60)
         while not self._stopped.is_set():

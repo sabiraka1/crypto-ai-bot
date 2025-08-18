@@ -242,7 +242,7 @@ def health() -> JSONResponse:
             max_drift = int(getattr(CFG, "MAX_TIME_DRIFT_MS", 2500))
             drift_ok = drift_ms <= max_drift
     except Exception:
-        drift_ok = True  # не роняем health из-за этой проверки
+        drift_ok = True
 
     status = "healthy"
     if not db_ok or not broker_ok:

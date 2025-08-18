@@ -1,20 +1,90 @@
-# python
-**/__pycache__/
-**/*.pyc
+# ============================
+# crypto-ai-bot — .gitignore
+# ============================
+
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Build / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+wheels/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+coverage.xml
+pytestdebug.log
+
+# Type checking / static analysis
+.mypy_cache/
+.pyre/
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Virtual environments
 .venv/
 venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+env/
+ENV/
 
-# build
-dist/
-build/
-*.egg-info/
-
-# env & local data
-.env
-/data/
+# Local runtime / scratch
+*.pid
+*.seed
+*.out
+*.log
 logs/
-charts/
-models/
+tmp/
+data/
+uploads/
+
+# SQLite databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+crypto.db
+
+# dotenv (keep the template)
+.env
+.env.local
+.env.dev
+.env.prod
+.env.*
+!.env.example
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# Node (if present)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# FastAPI / Uvicorn reload artifacts
+*.reload
