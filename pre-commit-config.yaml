@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: forbid-os-import
+        name: Forbid 'import os' outside EnvReader
+        entry: bash -c 'grep -R --line-number -E "^\s*import\s+os\b" src | grep -v "core/config/env_reader.py" && { echo "\nERROR: forbidden \"import os\" outside env_reader.py"; exit 1; } || true'
+        language: system
+        pass_filenames: false
+      - id: forbid-getenv
+        name: Forbid os.getenv / os.environ outside EnvReader
+        entry: bash -c 'grep -R --line-number -E "os\.getenv|os\.environ" src | grep -v "core/config/env_reader.py" && { echo "\nERROR: forbidden os.getenv/os.environ outside env_reader.py"; exit 1; } || true'
+        language: system
+        pass_filenames: false

@@ -1,10 +1,10 @@
 # src/crypto_ai_bot/core/settings.py
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Optional, Mapping, Any, Dict
+from typing import List, Optional, Mapping
 from .config.env_reader import EnvReader
 
-@dataclass
+@dataclass(slots=True)
 class Settings:
     # Core
     mode: str
@@ -110,29 +110,3 @@ class Settings:
             # Misc
             tz=env.get("TZ","Europe/Istanbul") or "Europe/Istanbul",
         )
-
-    # Compatibility: allow CFG.DB_PATH, CFG.SYMBOL, etc.
-    def __getattr__(self, name: str) -> Any:
-        if name.isupper():
-            mapped = name.lower()
-            if hasattr(self, mapped):
-                return getattr(self, mapped)
-        raise AttributeError(name)
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "mode": self.mode,
-            "enable_trading": self.enable_trading,
-            "exchange": self.exchange,
-            "symbol": self.symbol,
-            "timeframe": self.timeframe,
-            "position_size": self.position_size,
-            "db_path": self.db_path,
-            "fee_bps": self.fee_bps,
-            "slippage_bps": self.slippage_bps,
-            "public_base_url": self.public_base_url,
-            "max_time_drift_ms": self.max_time_drift_ms,
-            "log_level": self.log_level,
-            "log_json": self.log_json,
-            "tz": self.tz,
-        }
