@@ -1,43 +1,62 @@
 from __future__ import annotations
 import time
-from collections import deque
-from threading import Lock
-from typing import Callable, Deque, Dict, Tuple
+from threading import RLock
+from typing import Optional
 
-class RateLimiter:
-    """Потокобезопасный токен-бакет."""
-    def __init__(self, max_calls: int, window: float) -> None:
-        self.max_calls = max(1, int(max_calls))
-        self.window = float(window)
-        self._ts: Deque[float] = deque()
-        self._lock = Lock()
 
-    def acquire(self) -> None:
+class TokenBucket:
+    """
+    Простой thread-safe токен-бакет: refill по фиксированной скорости.
+    Единицы: токены в минуту (rpm). burst — максимальная ёмкость.
+    """
+    def __init__(self, rpm: float, burst: float | None = None):
+        self.rpm = float(rpm)
+        self.burst = float(burst if burst is not None else rpm)
+        self.tokens = self.burst
+        self.last = time.time()
+        self._lock = RLock()
+
+    def acquire(self, tokens: float = 1.0, timeout: float = 5.0) -> bool:
+        """
+        Пытаемся получить 'tokens'. При необходимости ждём до timeout.
+        Возвращает True/False (успех/таймаут).
+        """
+        end = time.time() + float(timeout)
         with self._lock:
-            now = time.monotonic()
-            while self._ts and (now - self._ts[0]) >= self.window:
-                self._ts.popleft()
-            if len(self._ts) >= self.max_calls:
-                sleep_for = self.window - (now - self._ts[0])
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-                    # очистим окно ещё раз
-                    now = time.monotonic()
-                    while self._ts and (now - self._ts[0]) >= self.window:
-                        self._ts.popleft()
-            self._ts.append(time.monotonic())
+            while True:
+                now = time.time()
+                # пополнение
+                elapsed = max(0.0, now - self.last)
+                self.last = now
+                self.tokens = min(self.burst, self.tokens + (self.rpm / 60.0) * elapsed)
+                if self.tokens >= tokens:
+                    self.tokens -= tokens
+                    return True
+                # ждём до следующего пополнения
+                if now >= end:
+                    return False
+                time.sleep(min(0.05, end - now))
 
-# общий реестр лимитеров на процесс
-_LIMITERS: Dict[Tuple[str, int], RateLimiter] = {}
 
-def rate_limit(max_calls: int, window: float):
-    """Декоратор, использующий процессный реестр лимитеров по имени функции."""
-    def deco(fn: Callable):
-        key = (fn.__name__, max_calls)
-        _LIMITERS.setdefault(key, RateLimiter(max_calls, window))
-        limiter = _LIMITERS[key]
-        def wrapper(*args, **kwargs):
-            limiter.acquire()
-            return fn(*args, **kwargs)
-        return wrapper
-    return deco
+class MultiLimiter:
+    """
+    Набор бакетов по ключам/методам. Например:
+    - public_read
+    - private_read
+    - private_write
+    """
+    def __init__(self):
+        self._buckets: dict[str, TokenBucket] = {}
+        self._lock = RLock()
+
+    def set_bucket(self, key: str, rpm: float, burst: Optional[float] = None) -> None:
+        with self._lock:
+            self._buckets[key] = TokenBucket(rpm=rpm, burst=burst)
+
+    def acquire(self, key: str, tokens: float = 1.0, timeout: float = 5.0) -> bool:
+        with self._lock:
+            bucket = self._buckets.get(key)
+        if bucket is None:
+            # нет ограничителя — разрешаем (по умолчанию)
+            return True
+        return bucket.acquire(tokens=tokens, timeout=timeout)
