@@ -1,86 +1,129 @@
 # src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
+
 from decimal import Decimal
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from crypto_ai_bot.core.brokers.base import ExchangeInterface, TransientExchangeError, PermanentExchangeError
-from crypto_ai_bot.utils.metrics import inc, observe, set_gauge
+import time
+
+from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
+from crypto_ai_bot.core.brokers.base import ExchangeInterface
+from crypto_ai_bot.core.brokers.symbols import to_exchange_symbol
 
-def _import_ccxt():
-    try:
-        import ccxt  # type: ignore
-        return ccxt
-    except Exception as e:
-        raise PermanentExchangeError(f"ccxt not installed: {e}")
+try:
+    import ccxt  # type: ignore
+except Exception:  # pragma: no cover
+    ccxt = None  # type: ignore
 
-class CcxtExchange(ExchangeInterface):
-    def __init__(self, instance, circuit: CircuitBreaker, exchange_name: str = "binance"):
-        self._ccxt = instance
-        self._cb = circuit
-        self._name = exchange_name
 
+class CCXTExchange(ExchangeInterface):
+    """
+    CCXT-адаптер с защитой:
+      • все сетевые вызовы через CircuitBreaker
+      • мягкие тайм-ауты, метрики, нормализация символа
+    """
+
+    def __init__(self, client: Any, *, cfg: Any, breaker: Optional[CircuitBreaker] = None) -> None:
+        self._client = client
+        self.cfg = cfg
+        self._breaker = breaker or CircuitBreaker()
+        self._bus = None
+
+    # ------ фабрика, которую вызывает create_broker() ------
     @classmethod
-    def from_settings(cls, cfg) -> "CcxtExchange":
-        ccxt = _import_ccxt()
-        exchange_name = getattr(cfg, "EXCHANGE", "binance")
-        kwargs = {
-            "apiKey": getattr(cfg, "API_KEY", None),
-            "secret": getattr(cfg, "API_SECRET", None),
-            "enableRateLimit": True,
-            "options": {"adjustForTimeDifference": True},
-        }
-        instance = getattr(ccxt, exchange_name) (kwargs)
-        circuit = CircuitBreaker()
-        return cls(instance, circuit, exchange_name)
+    def from_settings(cls, cfg) -> "CCXTExchange":
+        if ccxt is None:
+            raise RuntimeError("ccxt is not installed")
 
-    # ---- helpers ----
-    def _cb_call(self, method_name: str, fn, *args, **kwargs):
-        """
-        Обёртка через circuit-breaker + метрики.
-        """
-        inc("broker_requests_total", {"exchange": self._name, "method": method_name})
+        ex_name = str(getattr(cfg, "EXCHANGE", "binance")).lower()
+        if not hasattr(ccxt, ex_name):
+            raise RuntimeError(f"unsupported exchange: {ex_name}")
+
+        klass = getattr(ccxt, ex_name)
+        opts: Dict[str, Any] = {"enableRateLimit": True, "timeout": 10_000}
+
+        api_key = getattr(cfg, "API_KEY", None)
+        api_secret = getattr(cfg, "API_SECRET", None)
+        subaccount = getattr(cfg, "SUBACCOUNT", None)
+
+        if api_key and api_secret:
+            opts["apiKey"] = api_key
+            opts["secret"] = api_secret
+            if subaccount:
+                # у некоторых бирж это 'headers'/'uid' — оставим мягко:
+                opts["headers"] = {"FTX-SUBACCOUNT": subaccount}
+
+        client = klass(opts)
+        return cls(client, cfg=cfg, breaker=CircuitBreaker())
+
+    # необязательная шина событий
+    def set_bus(self, bus) -> None:
+        self._bus = bus
+
+    # ------ helpers ------
+    def _call(self, fn, *, key: str, timeout: float = 2.5):
+        t0 = time.time()
         try:
-            def _inner():
-                return fn(*args, **kwargs)
-
-            res = self._cb.call(
-                _inner,
-                key=f"{self._name}:{method_name}",
-                timeout=10.0,
-                fail_threshold=5,
-                open_seconds=30.0,
-            )
+            res = self._breaker.call(fn, key=key, timeout=timeout)
+            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": key, "code": "200"})
             return res
         except Exception as e:
-            # классифицируем
-            inc("broker_errors_total", {"exchange": self._name, "method": method_name, "type": type(e).__name__})
-            if isinstance(e, PermanentExchangeError):
-                raise
-            # простая эвристика: сетевые/429/5xx считаем transient
-            raise TransientExchangeError(str(e))
+            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": key, "code": "error"})
+            # для некоторых мест полезно пробросить в DLQ
+            if self._bus:
+                try:
+                    self._bus.publish({"type": "BrokerError", "key": key, "error": f"{type(e).__name__}: {e}"})
+                except Exception:
+                    pass
+            raise
+        finally:
+            metrics.observe_histogram("latency_broker_seconds", max(0.0, time.time() - t0))
 
-    # ---- interface ----
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int):
-        ccxt = _import_ccxt()
-        m = "fetch_ohlcv"
-        return self._cb_call(m, self._ccxt.fetch_ohlcv, symbol, timeframe, limit)
-
+    # ------ интерфейс ------
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        m = "fetch_ticker"
-        return self._cb_call(m, self._ccxt.fetch_ticker, symbol)
+        sym = to_exchange_symbol(symbol)
+        def _fn():
+            return self._client.fetch_ticker(sym)
+        return self._call(_fn, key="fetch_ticker", timeout=3.0)
 
-    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Decimal | None = None) -> Dict[str, Any]:
-        m = "create_order"
-        # ccxt принимает float; аккуратно приводим
-        _amount = float(amount)
-        _price = float(price) if price is not None else None
-        return self._cb_call(m, self._ccxt.create_order, symbol, type_, side, _amount, _price)
+    def fetch_order_book(self, symbol: str, limit: int = 10) -> Dict[str, Any]:
+        sym = to_exchange_symbol(symbol)
+        def _fn():
+            return self._client.fetch_order_book(sym, limit=limit)
+        return self._call(_fn, key="fetch_order_book", timeout=3.0)
 
-    def fetch_balance(self) -> Dict[str, Any]:
-        m = "fetch_balance"
-        return self._cb_call(m, self._ccxt.fetch_balance)
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
+        sym = to_exchange_symbol(symbol)
+        tf = timeframe
+        lim = int(limit)
+        def _fn():
+            return self._client.fetch_ohlcv(sym, timeframe=tf, limit=lim)
+        return self._call(_fn, key="fetch_ohlcv", timeout=5.0)
+
+    def create_order(
+        self,
+        symbol: str,
+        type_: str,
+        side: str,
+        amount: Decimal,
+        price: Optional[Decimal] = None,
+    ) -> Dict[str, Any]:
+        sym = to_exchange_symbol(symbol)
+        amt = float(amount)
+        px = float(price) if price is not None else None
+        def _fn():
+            if type_ == "market":
+                return self._client.create_order(sym, "market", side, amt)
+            return self._client.create_order(sym, "limit", side, amt, px)
+        return self._call(_fn, key="create_order", timeout=5.0)
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        m = "cancel_order"
-        return self._cb_call(m, self._ccxt.cancel_order, order_id)
+        def _fn():
+            return self._client.cancel_order(order_id)
+        return self._call(_fn, key="cancel_order", timeout=3.0)
+
+    def fetch_balance(self) -> Dict[str, Any]:
+        def _fn():
+            return self._client.fetch_balance()
+        return self._call(_fn, key="fetch_balance", timeout=4.0)

@@ -1,75 +1,86 @@
 # src/crypto_ai_bot/core/risk/manager.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
-from decimal import Decimal
+from typing import Any, Dict, List
 
+from crypto_ai_bot.utils import metrics
 from . import rules as R
 
 
-class RiskAssessment:
-    def __init__(self, allow: bool, reasons: List[str], size_cap: Optional[Decimal] = None):
-        self.allow = allow
-        self.reasons = reasons
-        self.size_cap = size_cap
-
-    def to_dict(self) -> Dict[str, Any]:
-        out = {"allow": self.allow, "reasons": list(self.reasons)}
-        if self.size_cap is not None:
-            out["size_cap"] = str(self.size_cap)
-        return out
-
-
-def assess(
-    cfg: Any,
-    broker: Any,
-    repos: Any,
-    *,
-    symbol: str,
-    side: str,
-    size: Decimal,
-) -> RiskAssessment:
+class RiskManager:
     """
-    Единая точка вызова правил риска. Возвращает «можно/нельзя» и причины.
-    Если одно из правил «неизвестно» (нет данных/метода) — не блокируем.
+    Агрегирует результат правил. Возвращает словарь:
+    {
+      "ok": bool,
+      "blocked_by": [codes...],
+      "details": {"rule_code": {...}}
+    }
     """
-    reasons: List[str] = []
-    ok_all = True
 
-    # 1) Спред
-    ok, why = R.check_spread(cfg, broker, symbol)
-    ok_all &= ok
-    reasons.append(f"spread:{why}")
+    def __init__(self, cfg: Any, *, broker: Any, positions_repo: Any, trades_repo: Any, http: Any = None) -> None:
+        self.cfg = cfg
+        self.broker = broker
+        self.pos = positions_repo
+        self.trades = trades_repo
+        self.http = http
 
-    # 2) Торговые часы
-    ok2, why2 = R.check_hours(cfg)
-    ok_all &= ok2
-    reasons.append(f"hours:{why2}")
+    def evaluate(self, *, symbol: str, action: str) -> Dict[str, Any]:
+        """
+        Оценивает набор правил. Для action='sell' часть правил считается «пропускными» (не блокируем выход).
+        """
+        res: Dict[str, Any] = {"ok": True, "blocked_by": [], "details": {}}
+        blocked: List[str] = []
 
-    # 3) Просадка
-    ok3, why3 = R.check_drawdown(cfg, repos.trades if hasattr(repos, "trades") else None)
-    ok_all &= ok3
-    reasons.append(f"drawdown:{why3}")
+        # --- time sync ---
+        ok, code, details = R.check_time_sync(self.cfg, self.http)
+        res["details"][code] = details
+        if not ok:
+            blocked.append(code)
 
-    # 4) Серия лоссов
-    ok4, why4 = R.check_sequence_losses(cfg, repos.trades if hasattr(repos, "trades") else None)
-    ok_all &= ok4
-    reasons.append(f"seq_losses:{why4}")
+        # --- hours window ---
+        ok, code, details = R.check_hours(self.cfg)
+        res["details"][code] = details
+        if not ok:
+            blocked.append(code)
 
-    # 5) Экспозиция
-    ok5, why5 = R.check_max_exposure(cfg, repos.positions if hasattr(repos, "positions") else None, broker, side, symbol)
-    ok_all &= ok5
-    reasons.append(f"exposure:{why5}")
+        # --- spread ---
+        max_spread = getattr(self.cfg, "MAX_SPREAD_BPS", None)
+        ok, code, details = R.check_spread(self.broker, symbol, max_spread_bps=max_spread)
+        res["details"][code] = details
+        if not ok:
+            blocked.append(code)
 
-    # (Опционально) Мягкое ограничение размера позиции
-    size_cap = None
-    max_pos_size = getattr(cfg, "RISK_MAX_POSITION_SIZE", None)
-    try:
-        if max_pos_size is not None:
-            cap = Decimal(str(max_pos_size))
-            if cap > 0 and size > cap:
-                size_cap = cap
-    except Exception:
-        pass
+        # --- drawdown ---
+        dd_days = getattr(self.cfg, "RISK_LOOKBACK_DAYS", None)
+        dd_limit = getattr(self.cfg, "RISK_MAX_DRAWDOWN_PCT", None)
+        ok, code, details = R.check_drawdown(self.trades, lookback_days=dd_days, max_drawdown_pct=dd_limit)
+        res["details"][code] = details
+        if not ok:
+            blocked.append(code)
 
-    return RiskAssessment(bool(ok_all), reasons, size_cap)
+        # --- sequence losses ---
+        win = getattr(self.cfg, "RISK_SEQUENCE_WINDOW", None)
+        cap = getattr(self.cfg, "RISK_MAX_LOSSES", None)
+        ok, code, details = R.check_sequence_losses(self.trades, window=win, max_losses=cap)
+        res["details"][code] = details
+        if not ok:
+            blocked.append(code)
+
+        # --- exposure ---
+        max_pos = getattr(self.cfg, "MAX_POSITIONS", None)
+        ok, code, details = R.check_max_exposure(self.pos, max_positions=max_pos)
+        res["details"][code] = details
+        if not ok and str(action).lower() == "buy":
+            # ПОКУПКИ ограничиваем; продажу не блокируем экспозицией
+            blocked.append(code)
+
+        res["blocked_by"] = blocked
+        res["ok"] = len(blocked) == 0
+
+        if not res["ok"]:
+            for reason in blocked:
+                metrics.inc("risk_block_total", {"reason": reason})
+        else:
+            metrics.inc("risk_pass_total")
+
+        return res

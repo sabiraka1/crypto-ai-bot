@@ -68,6 +68,15 @@ class Settings:
     TAKE_PROFIT_PCT: float | None = float(os.getenv("TAKE_PROFIT_PCT")) if os.getenv("TAKE_PROFIT_PCT") else None
     TRAILING_PCT: float | None = float(os.getenv("TRAILING_PCT")) if os.getenv("TRAILING_PCT") else None
 
+    # ► ДОБАВЛЕНО: рычаги правил риска
+    MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "1"))
+    MAX_SPREAD_BPS: int = int(os.getenv("MAX_SPREAD_BPS", "25"))  # разрешённый спред, б.п.
+    RISK_HOURS_UTC: str = os.getenv("RISK_HOURS_UTC", "0-24")
+    RISK_LOOKBACK_DAYS: int = int(os.getenv("RISK_LOOKBACK_DAYS", "7"))
+    RISK_MAX_DRAWDOWN_PCT: float = float(os.getenv("RISK_MAX_DRAWDOWN_PCT", "10"))  # 10% за окно
+    RISK_SEQUENCE_WINDOW: int = int(os.getenv("RISK_SEQUENCE_WINDOW", "3"))
+    RISK_MAX_LOSSES: int = int(os.getenv("RISK_MAX_LOSSES", "3"))
+
     # --- Telegram / webhooks ---
     TELEGRAM_WEBHOOK_SECRET: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET") or None
     TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN") or None
@@ -96,7 +105,7 @@ class Settings:
     ORDER_LATENCY_P99_ALERT_MS: int = int(os.getenv("ORDER_LATENCY_P99_ALERT_MS", "0"))
     FLOW_LATENCY_P99_ALERT_MS: int = int(os.getenv("FLOW_LATENCY_P99_ALERT_MS", "0"))
 
-    # --- Performance budgets (p99), только метрики/health-бейджи ---
+    # --- Performance budgets (p99), ms ---
     PERF_BUDGET_DECISION_P99_MS: int = int(os.getenv("PERF_BUDGET_DECISION_P99_MS", "0"))
     PERF_BUDGET_ORDER_P99_MS: int = int(os.getenv("PERF_BUDGET_ORDER_P99_MS", "0"))
     PERF_BUDGET_FLOW_P99_MS: int = int(os.getenv("PERF_BUDGET_FLOW_P99_MS", "0"))
