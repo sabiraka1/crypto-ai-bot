@@ -1,294 +1,193 @@
 # src/crypto_ai_bot/app/adapters/telegram.py
 from __future__ import annotations
-
-import asyncio
 import json
-import math
-import time
-from typing import Any, Dict, Optional, List, Tuple
-
-from crypto_ai_bot.utils import metrics
-# нормализация символов/таймфреймов — единый реестр
-from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
+from typing import Any, Dict, List, Tuple
+from fastapi.responses import JSONResponse
 
 
-def _get_token(cfg: Any) -> Optional[str]:
-    return getattr(cfg, "TELEGRAM_BOT_TOKEN", None) or None
+# ---------- helpers: formatting ----------
 
+def _help_text() -> str:
+    return (
+        "Команды:\n"
+        "/start  — приветствие\n"
+        "/help   — краткая справка и список команд\n"
+        "/status — текущее состояние (режим, символ, таймфрейм, профиль, health)\n"
+        "/test   — тестовый ответ (smoke)\n"
+        "/profit — PnL%% и кумулятив по закрытым сделкам\n"
+        "/positions — открытые позиции\n"
+    )
 
-def _chat_id_from_update(update: Dict[str, Any]) -> Optional[str]:
-    msg = update.get("message") or update.get("edited_message") or {}
-    chat = msg.get("chat") or {}
-    return str(chat.get("id")) if chat.get("id") is not None else None
+def _make_reply(chat_id: int | None, text: str) -> JSONResponse:
+    # Telegram webhook reply: можно сразу вернуть JSON c методом
+    if chat_id is None:
+        return JSONResponse({"ok": True})
+    payload = {"method": "sendMessage", "chat_id": chat_id, "text": text}
+    return JSONResponse(payload)
 
-
-def _text_from_update(update: Dict[str, Any]) -> str:
-    msg = update.get("message") or update.get("edited_message") or {}
-    return str(msg.get("text") or "").strip()
-
-
-def _trim(s: str, limit: int = 3900) -> str:
-    s = s.strip()
-    if len(s) > limit:
-        return s[: limit - 20] + "\n…(truncated)…"
-    return s
-
-
-def _extract_cmd_args(text: str) -> Tuple[str, str]:
-    t = (text or "").strip()
-    if not t.startswith("/"):
-        return ("", "")
-    parts = t.split(maxsplit=1)
-    cmd = parts[0].split("@", 1)[0].lower()
-    rest = parts[1].strip() if len(parts) > 1 else ""
-    return (cmd, rest)
-
-
-async def _send_text(http: Any, token: str, chat_id: str, text: str) -> None:
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": _trim(text)}
-        http.post_json(url, payload, timeout=3.5)
-    except Exception as e:
-        # раньше "глотали" исключение — теперь фиксируем метрикой
-        metrics.inc("telegram_send_error_total", {"error": type(e).__name__})
-        # и даём шанс увидеть в логах
-        try:
-            from crypto_ai_bot.utils.logging import logger  # lazy импорт
-            logger.warning("telegram_send_error: %s", f"{type(e).__name__}: {e}")
-        except Exception:
-            pass
-
-
-def _public_base(cfg: Any) -> Optional[str]:
-    return getattr(cfg, "PUBLIC_BASE_URL", None) or None
-
-
-def _build_chart_links(cfg: Any, *, symbol: Optional[str] = None, timeframe: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, str]:
-    base = _public_base(cfg)
-    if not base:
-        return {}
-    q = []
-    if symbol:
-        q.append(f"symbol={symbol}")
-    if timeframe:
-        q.append(f"timeframe={timeframe}")
-    if limit is not None:
-        q.append(f"limit={int(limit)}")
-    qs = ("?" + "&".join(q)) if q else ""
-    return {
-        "test": f"{base}/chart/test{qs}",
-        "profit": f"{base}/chart/profit",
-    }
-
-
-def _format_status(cfg: Any, repos: Any, bus: Any) -> str:
-    mode = getattr(cfg, "MODE", "paper")
-    sym = getattr(cfg, "SYMBOL", "")
-    tf = getattr(cfg, "TIMEFRAME", "")
-    try:
-        opens = repos.positions.get_open() or []
-        open_cnt = len(opens)
-    except Exception:
-        open_cnt = -1
-    pnls: List[float] = []
-    try:
-        if hasattr(repos.trades, "last_closed_pnls"):
-            pnls = [float(x) for x in (repos.trades.last_closed_pnls(50) or []) if x is not None]  # type: ignore
-    except Exception:
-        pnls = []
-    eq = sum(pnls) if pnls else 0.0
-    wins = sum(1 for x in pnls if x > 0)
-    wr = (100.0 * wins / len(pnls)) if pnls else 0.0
-    try:
-        h = bus.health()
-        dlq = int(h.get("dlq_size") or h.get("dlq_len") or 0)
-        bus_status = h.get("status", "ok")
-    except Exception:
-        dlq = -1
-        bus_status = "unknown"
-    lines = [
-        f"Mode: {mode}",
-        f"Symbol: {sym}",
-        f"Timeframe: {tf}",
-        f"Open positions: {open_cnt if open_cnt >= 0 else 'n/a'}",
-        f"Closed trades (last N): {len(pnls)} | Win-rate: {wr:.1f}% | Equity: {eq:.4f}",
-        f"Bus: {bus_status} | DLQ: {dlq if dlq >= 0 else 'n/a'}",
-    ]
+def _fmt_positions(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return "Нет открытых позиций."
+    lines = []
+    for r in rows:
+        sym = r.get("symbol", "?")
+        qty = r.get("qty", 0.0)
+        avg = r.get("avg_price", None)
+        if avg is None:
+            lines.append(f"• {sym}: qty={qty}")
+        else:
+            lines.append(f"• {sym}: qty={qty}, avg={round(float(avg), 6)}")
     return "\n".join(lines)
 
 
-def _cmd_help() -> str:
-    return _trim(
-        "\n".join(
-            [
-                "Доступные команды:",
-                "/start — приветствие и помощь",
-                "/help — справка по командам",
-                "/status — текущий статус и краткая статистика",
-                "/test — мини-график цены и пробный сигнал",
-                "/profit — кривая доходности",
-                "/eval — расчёт решения (action/score)",
-                "/why — объяснение решения (signals/weights/thresholds/context)",
-            ]
+# ---------- helpers: PnL over filled trades ----------
+
+def _load_filled_trades(con, symbol: str | None = None) -> List[Tuple[int, str, str, float, float, float]]:
+    """
+    Возвращает список сделок (ts, symbol, side, price, qty, fee_amt) только state='filled'.
+    Порядок — по времени возрастанию.
+    """
+    if symbol:
+        cur = con.execute(
+            "SELECT ts, symbol, side, price, qty, COALESCE(fee_amt,0.0) "
+            "FROM trades WHERE state='filled' AND symbol=? ORDER BY ts ASC",
+            (symbol,)
         )
-    )
+    else:
+        cur = con.execute(
+            "SELECT ts, symbol, side, price, qty, COALESCE(fee_amt,0.0) "
+            "FROM trades WHERE state='filled' ORDER BY ts ASC"
+        )
+    return [(int(ts), str(sym), str(side), float(price), float(qty), float(fee))
+            for (ts, sym, side, price, qty, fee) in cur.fetchall()]
 
+def _realized_pnl_summary(con, symbol: str | None = None) -> Dict[str, Any]:
+    """
+    Простой учёт по average-cost:
+      - Покупки увеличивают объём и усредняют цену.
+      - Продажи уменьшают объём и формируют realized PnL: (sell_px - avg_cost) * sell_qty - fee_sell.
+    Возвращает: {'closed_trades', 'wins', 'losses', 'pnl_abs', 'pnl_pct'}.
+    pnl_pct считается от суммарной стоимости проданных лотов (cost basis), чтобы не зависеть от незакрытых позиций.
+    """
+    rows = _load_filled_trades(con, symbol)
+    if not rows:
+        return {"closed_trades": 0, "wins": 0, "losses": 0, "pnl_abs": 0.0, "pnl_pct": 0.0}
 
-def _format_explain(explain: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    if not isinstance(explain, dict):
-        return "нет объяснения"
-    signals = explain.get("signals") or {}
-    weights = explain.get("weights") or {}
-    thresholds = explain.get("thresholds") or {}
-    ctx = (explain.get("context") or {}).get("ctx") or (explain.get("context") or {})
+    # состояние по символам
+    inv: Dict[str, Dict[str, float]] = {}  # {symbol: {'qty': q, 'avg': avg}}
+    realized = 0.0
+    realized_cost = 0.0
+    wins = losses = closed = 0
 
-    if signals:
-        sig_line = ", ".join(f"{k}:{float(v):.3f}" for k, v in list(signals.items())[:10])
-        parts.append(f"signals: {sig_line}")
-    if weights:
-        w_line = ", ".join(f"{k}:{float(v):.2f}" for k, v in weights.items())
-        parts.append(f"weights: {w_line}")
-    if thresholds:
-        th_line = ", ".join(f"{k}:{float(v):.2f}" for k, v in thresholds.items())
-        parts.append(f"thresholds: {th_line}")
-    if isinstance(ctx, dict):
-        keys = []
-        for k in ("btc_dominance", "fear_greed", "dxy", "exposure_open_positions", "exposure_notional_quote", "time_drift_ms"):
-            v = ctx.get(k)
-            if v is not None:
-                try:
-                    keys.append(f"{k}:{float(v):.2f}")
-                except Exception:
-                    keys.append(f"{k}:{v}")
-        if keys:
-            parts.append("context: " + ", ".join(keys))
-
-    return "\n".join(parts) or "нет данных"
-
-
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
-async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, bus: Any, http: Any) -> Dict[str, Any]:
-    token = _get_token(cfg)
-    chat_id = _chat_id_from_update(update)
-    text = _text_from_update(update)
-    cmd, args = _extract_cmd_args(text)
-
-    # Нормализуем ввод пользователя единым реестром символов/таймфреймов
-    def parse_args(default_symbol: str, default_tf: str, default_limit: int) -> Tuple[str, str, int]:
-        sym = default_symbol
-        tf = default_tf
-        limit = default_limit
-        if args:
-            parts = args.split()
-            if len(parts) >= 1:
-                sym = parts[0]
-            if len(parts) >= 2:
-                tf = parts[1]
-            if len(parts) >= 3:
-                try:
-                    limit = int(parts[2])
-                except Exception:
-                    pass
-        # ЕДИНАЯ нормализация — критичное требование
-        sym = normalize_symbol(sym)
-        tf = normalize_timeframe(tf)
-        return (sym, tf, limit)
-
-    def chart_links(sym: str, tf: str, limit: int) -> Dict[str, str]:
-        return _build_chart_links(cfg, symbol=sym, timeframe=tf, limit=limit)
-
-    reply = {"status": "ok"}
-
-    if cmd in ("", "/start", "/help"):
-        out = "Привет! Это бот наблюдения за стратегией.\n\n" + _cmd_help()
-        if token and chat_id:
-            await _send_text(http, token, chat_id, out)
-        return reply
-
-    if cmd == "/status":
-        out = _format_status(cfg, repos, bus)
-        if token and chat_id:
-            await _send_text(http, token, chat_id, out)
-        return reply
-
-    if cmd == "/test":
-        sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
-        try:
-            from crypto_ai_bot.core.use_cases.evaluate import evaluate
-            # важное изменение: выносим блокирующий расчёт из event loop
-            d = await asyncio.to_thread(evaluate, cfg, broker, symbol=sym, timeframe=tf, limit=limit, repos=repos, http=http)
-        except Exception as e:
-            d = {"action": "hold", "error": f"{type(e).__name__}: {e}"}
-        try:
-            t = broker.fetch_ticker(sym)
-            price = _safe_float(t.get("last"))
-        except Exception:
-            price = 0.0
-        link = chart_links(sym, tf, limit).get("test")
-        lines = [
-            f"{sym} {tf}",
-            f"price: {price:.4f}" if price else "price: n/a",
-            f"action: {d.get('action','hold')} | score: {d.get('score')}",
-        ]
-        if link:
-            lines.append(f"chart: {link}")
-        out = "\n".join(lines)
-        if token and chat_id:
-            await _send_text(http, token, chat_id, out)
-        return reply
-
-    if cmd == "/profit":
-        link = chart_links(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300)))).get("profit")
-        try:
-            if hasattr(repos.trades, "last_closed_pnls"):
-                pnls = [float(x) for x in (repos.trades.last_closed_pnls(10000) or []) if x is not None]  # type: ignore
+    for _, sym, side, px, qty, fee in rows:
+        s = inv.setdefault(sym, {"qty": 0.0, "avg": 0.0})
+        if side == "buy":
+            new_qty = s["qty"] + qty
+            if new_qty <= 0:
+                s["qty"] = 0.0
+                s["avg"] = 0.0
             else:
-                pnls = []
-        except Exception:
-            pnls = []
-        eq = sum(pnls) if pnls else 0.0
-        out = f"Equity: {eq:.4f}" + (f"\nchart: {link}" if link else "")
-        if token and chat_id:
-            await _send_text(http, token, chat_id, out)
-        return reply
+                s["avg"] = (s["avg"] * s["qty"] + px * qty) / new_qty if s["qty"] > 0 else px
+                s["qty"] = new_qty
+        else:  # sell
+            sell_qty = min(qty, s["qty"]) if s["qty"] > 0 else qty
+            pnl = (px - s["avg"]) * sell_qty - fee
+            realized += pnl
+            realized_cost += s["avg"] * sell_qty
+            closed += 1
+            if pnl >= 0:
+                wins += 1
+            else:
+                losses += 1
+            s["qty"] = max(0.0, s["qty"] - sell_qty)
+            if s["qty"] == 0.0:
+                s["avg"] = 0.0
 
-    if cmd == "/eval":
-        sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
+    pnl_pct = (realized / realized_cost * 100.0) if realized_cost > 0 else 0.0
+    return {
+        "closed_trades": closed,
+        "wins": wins,
+        "losses": losses,
+        "pnl_abs": realized,
+        "pnl_pct": pnl_pct,
+    }
+
+
+# ---------- main handler ----------
+
+async def handle_update(app, body: bytes, container: Any):
+    """
+    Сигнатура, которую вызывает server.py.
+    """
+    # 1) Парсим апдейт
+    try:
+        update = json.loads(body.decode("utf-8"))
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad-json"}, status_code=400)
+
+    msg = (update.get("message") or {}) if isinstance(update, dict) else {}
+    text = (msg.get("text") or "").strip()
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
+
+    if not text:
+        return _make_reply(chat_id, "Пришлите команду. /help")
+
+    # 2) Роутинг команд
+    if text.startswith("/start"):
+        return _make_reply(chat_id, "Привет! Я бот торговой системы. Наберите /help.")
+
+    if text.startswith("/help"):
+        return _make_reply(chat_id, _help_text())
+
+    if text.startswith("/test"):
+        return _make_reply(chat_id, "✅ OK (smoke). Бот отвечает и подключён к приложению.")
+
+    if text.startswith("/positions"):
         try:
-            from crypto_ai_bot.core.use_cases.evaluate import evaluate
-            d = await asyncio.to_thread(evaluate, cfg, broker, symbol=sym, timeframe=tf, limit=limit, repos=repos, http=http)
+            rows = container.positions_repo.get_open()
+            return _make_reply(chat_id, _fmt_positions(rows))
         except Exception as e:
-            d = {"action": "hold", "error": f"{type(e).__name__}: {e}"}
-        action = d.get("action", "hold")
-        score = d.get("score")
-        score_blended = d.get("score_blended", score)
-        out = f"{sym} {tf}\naction: {action}\nscore: {score}\nscore_blended: {score_blended}"
-        if token and chat_id:
-            await _send_text(http, token, chat_id, out)
-        return reply
+            return _make_reply(chat_id, f"Ошибка: {e!r}")
 
-    if cmd == "/why":
-        sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
+    if text.startswith("/status"):
         try:
-            from crypto_ai_bot.core.use_cases.evaluate import evaluate
-            d = await asyncio.to_thread(evaluate, cfg, broker, symbol=sym, timeframe=tf, limit=limit, repos=repos, http=http)
-            explain = d.get("explain") or {}
+            mode = getattr(container.settings, "MODE", "paper")
+            symbol = getattr(container.settings, "SYMBOL", "BTC/USDT")
+            timeframe = getattr(container.settings, "TIMEFRAME", "1h")
+            profile = getattr(container.settings, "PROFILE", getattr(container.settings, "ENV", "default"))
+            bus_h = container.bus.health() if hasattr(container.bus, "health") else {"running": True, "dlq_size": None}
+            pending = container.trades_repo.count_pending()
+            lines = [
+                f"mode: {mode}",
+                f"symbol: {symbol}",
+                f"timeframe: {timeframe}",
+                f"profile: {profile}",
+                f"bus: running={bus_h.get('running')}, dlq={bus_h.get('dlq_size')}",
+                f"pending orders: {pending}",
+            ]
+            return _make_reply(chat_id, "\n".join(lines))
         except Exception as e:
-            explain = {"error": f"{type(e).__name__}: {e}"}
-        out = f"{sym} {tf}\n" + _format_explain(explain)
-        if token and chat_id:
-            await _send_text(http, token, chat_id, out)
-        return reply
+            return _make_reply(chat_id, f"Ошибка: {e!r}")
 
-    out = "Неизвестная команда.\n\n" + _cmd_help()
-    if token and chat_id:
-        await _send_text(http, token, chat_id, out)
-    return reply
+    if text.startswith("/profit"):
+        try:
+            # по умолчанию — по всем символам; если нужно по конкретному:
+            # можно поддержать "/profit BTC/USDT"
+            parts = text.split(None, 1)
+            sym = parts[1].strip() if len(parts) > 1 else None
+            summary = _realized_pnl_summary(container.con, sym)
+            pct = round(summary["pnl_pct"], 4)
+            abs_usd = round(summary["pnl_abs"], 6)
+            wl = f"{summary['wins']}/{summary['losses']}"
+            resp = (
+                f"Closed trades: {summary['closed_trades']} (W/L {wl})\n"
+                f"PnL: {abs_usd} USDT\n"
+                f"PnL%: {pct}%"
+            )
+            return _make_reply(chat_id, resp)
+        except Exception as e:
+            return _make_reply(chat_id, f"Ошибка: {e!r}")
+
+    # 3) Дефолт
+    return _make_reply(chat_id, "Неизвестная команда. /help")
