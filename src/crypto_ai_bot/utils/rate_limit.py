@@ -1,82 +1,66 @@
 # src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
 
-import time
-import threading
+import asyncio
 import functools
-import inspect
+import threading
+import time
 from collections import deque
-from typing import Callable, Deque, Dict, Optional, Any
+from typing import Callable, Deque, Optional
 
-__all__ = ["rate_limit", "RateLimitExceeded"]
+from . import metrics
 
 
-class RateLimitExceeded(RuntimeError):
+class RateLimitExceeded(Exception):
     pass
 
 
-class _Limiter:
-    def __init__(self, max_calls: int, window: float) -> None:
-        self.max_calls = int(max_calls)
-        self.window = float(window)
-        self.lock = threading.RLock()
-        self.calls: Deque[float] = deque()
-
-    def allow(self) -> bool:
-        now = time.monotonic()
-        cutoff = now - self.window
-        with self.lock:
-            while self.calls and self.calls[0] < cutoff:
-                self.calls.popleft()
-            if len(self.calls) >= self.max_calls:
-                return False
-            self.calls.append(now)
-            return True
-
-
-def rate_limit(*dargs: Any, **dkwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def rate_limit(*, max_calls: Optional[int] = None, window: Optional[int] = None, limit: Optional[int] = None, per: Optional[int] = None):
     """
-    Унифицированный декоратор:
-      @rate_limit(max_calls=60, window=60)      # спецификация
-      @rate_limit(limit=60, per=60)             # старый вариант (синонимы)
-    Работает и для sync, и для async функций.
+    Универсальный декоратор:
+      @rate_limit(max_calls=60, window=60)        # рекомендованный синтаксис (Word)
+    Поддержка старого алиаса:
+      @rate_limit(limit=60, per=60)
+    Окно — в секундах. Счётчик — по количеству вызовов.
     """
-    max_calls = dkwargs.get("max_calls", dkwargs.get("limit"))
-    window = dkwargs.get("window", dkwargs.get("per"))
-    if max_calls is None or window is None:
-        raise TypeError("rate_limit requires (max_calls, window) or (limit, per)")
+    calls = int(max_calls if max_calls is not None else (limit if limit is not None else 0))
+    win = int(window if window is not None else (per if per is not None else 0))
+    if calls <= 0 or win <= 0:
+        # no-op
+        def passthrough(fn):
+            return fn
+        return passthrough
 
-    limiter = _Limiter(int(max_calls), float(window))
+    lock = threading.RLock()
+    q: Deque[float] = deque()
 
-    def _decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
-        is_coro = inspect.iscoroutinefunction(fn)
+    def _touch(now: float):
+        while q and (now - q[0]) > win:
+            q.popleft()
 
-        @functools.wraps(fn)
-        async def _async_wrapped(*args: Any, **kwargs: Any) -> Any:
-            if not limiter.allow():
-                try:
-                    from . import metrics  # ленивая загрузка, чтобы не плодить зависимостей
-                    metrics.inc("rate_limit_exceeded_total", {"fn": fn.__name__})
-                except Exception:
-                    pass
-                raise RateLimitExceeded(f"rate limit exceeded: {max_calls} calls / {window}s")
-            return await fn(*args, **kwargs)
-
-        @functools.wraps(fn)
-        def _sync_wrapped(*args: Any, **kwargs: Any) -> Any:
-            if not limiter.allow():
-                try:
-                    from . import metrics
-                    metrics.inc("rate_limit_exceeded_total", {"fn": fn.__name__})
-                except Exception:
-                    pass
-            # поднимаем исключение для вызывающей стороны (UC ловят и возвращают статус)
-                raise RateLimitExceeded(f"rate limit exceeded: {max_calls} calls / {window}s")
-            return fn(*args, **kwargs)
-
-        return _async_wrapped if is_coro else _sync_wrapped
-
-    # Поддержка как с параметрами, так и без (но у нас всегда с параметрами)
-    if dargs and callable(dargs[0]):
-        return _decorate(dargs[0])
-    return _decorate
+    def decorator(fn: Callable):
+        if asyncio.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def aw(*args, **kwargs):
+                now = time.monotonic()
+                with lock:
+                    _touch(now)
+                    if len(q) >= calls:
+                        metrics.inc("rate_limit_exceeded_total", {"func": fn.__name__})
+                        raise RateLimitExceeded(f"Rate limit exceeded: {calls}/{win}s")
+                    q.append(now)
+                return await fn(*args, **kwargs)
+            return aw
+        else:
+            @functools.wraps(fn)
+            def w(*args, **kwargs):
+                now = time.monotonic()
+                with lock:
+                    _touch(now)
+                    if len(q) >= calls:
+                        metrics.inc("rate_limit_exceeded_total", {"func": fn.__name__})
+                        raise RateLimitExceeded(f"Rate limit exceeded: {calls}/{win}s")
+                    q.append(now)
+                return fn(*args, **kwargs)
+            return w
+    return decorator

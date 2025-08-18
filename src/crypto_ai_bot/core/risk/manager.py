@@ -1,93 +1,68 @@
 # src/crypto_ai_bot/core/risk/manager.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from crypto_ai_bot.core.risk import rules as R
+from . import rules as R
 
 
 class RiskManager:
     """
-    Агрегирует проверки риска. Возвращает структуру:
-    {
-      "ok": bool,
-      "blocked_by": ["code1", ...],   # только error-коды
-      "checks": {
-         "time_sync": {...},
-         "hours": {...},
-         "spread": {...},
-         "exposure": {...},
-         "drawdown": {...},
-         "sequence_losses": {...},
-      }
-    }
+    Композитный риск-менеджер.
+    Вызывает набор правил и возвращает {"ok": bool, "blocks": [...], "checks": {...}}.
     """
 
-    def __init__(self, cfg: Any, *, broker: Any, positions_repo: Any, trades_repo: Any, http: Any = None) -> None:
+    def __init__(self, cfg: Any, *, broker: Any, positions_repo: Any, trades_repo: Any, http: Any) -> None:
         self.cfg = cfg
         self.broker = broker
-        self.positions = positions_repo
-        self.trades = trades_repo
+        self.positions_repo = positions_repo
+        self.trades_repo = trades_repo
         self.http = http
 
     def evaluate(self, *, symbol: str, action: str) -> Dict[str, Any]:
         """
-        Блокирующие правила:
-         - time_sync (error)
-         - hours (error)
-         - spread (error) — только для действий buy/sell
-         - exposure (error) — ограничение на число открытых позиций, блокирует только buy
-         - drawdown (error)
-         - sequence_losses (error)
-        warn-статусы не блокируют, но возвращаются в checks.
+        Если action == hold — считаем ok без проверок.
+        Иначе прогоняем правила.
         """
-        checks: Dict[str, Dict[str, Any]] = {}
-        blocked: List[str] = []
+        action = (action or "").lower().strip()
+        if action not in ("buy", "sell"):
+            return {"ok": True, "blocks": [], "checks": {"skipped": True}}
 
-        # 1) time sync
-        chk = R.check_time_sync(self.cfg, self.http)
-        checks["time_sync"] = chk
-        if chk["status"] == "error":
-            blocked.append(chk["code"])
+        cfg = self.cfg
+        checks: Dict[str, Any] = {}
 
-        # 2) hours
-        chk = R.check_hours(self.cfg)
-        checks["hours"] = chk
-        if chk["status"] == "error":
-            blocked.append(chk["code"])
+        # 1) время (NTP-drift)
+        checks["time_sync"] = R.check_time_sync(cfg, self.http)
 
-        # 3) spread (только если action реальное)
-        a = (action or "").lower()
-        if a in ("buy", "sell"):
-            max_bps = int(getattr(self.cfg, "MAX_SPREAD_BPS", 25) or 25)
-            chk = R.check_spread(self.broker, symbol=symbol, max_spread_bps=max_bps)
-            checks["spread"] = chk
-            if chk["status"] == "error":
-                blocked.append(chk["code"])
+        # 2) торговые часы
+        checks["hours"] = R.check_hours(cfg)
 
-        # 4) exposure (имеет смысл блокировать только buy)
-        if a == "buy":
-            max_pos = int(getattr(self.cfg, "MAX_POSITIONS", 1) or 1)
-            chk = R.check_max_exposure(self.positions, max_positions=max_pos)
-            checks["exposure"] = chk
-            if chk["status"] == "error":
-                blocked.append(chk["code"])
+        # 3) спред
+        checks["spread"] = R.check_spread(
+            self.broker,
+            symbol=symbol,
+            max_spread_bps=int(getattr(cfg, "MAX_SPREAD_BPS", 25)),
+        )
 
-        # 5) drawdown (по последним сделкам)
-        lookback_days = int(getattr(self.cfg, "RISK_LOOKBACK_DAYS", 7) or 7)
-        dd_limit = float(getattr(self.cfg, "RISK_MAX_DRAWDOWN_PCT", 10.0) or 10.0)
-        chk = R.check_drawdown(self.trades, lookback_days=lookback_days, max_drawdown_pct=dd_limit)
-        checks["drawdown"] = chk
-        if chk["status"] == "error":
-            blocked.append(chk["code"])
+        # 4) экспозиция
+        checks["exposure"] = R.check_max_exposure(
+            self.positions_repo,
+            max_positions=int(getattr(cfg, "MAX_POSITIONS", 1)),
+        )
 
-        # 6) sequence losses
-        seq_win = int(getattr(self.cfg, "RISK_SEQUENCE_WINDOW", 3) or 3)
-        seq_max = int(getattr(self.cfg, "RISK_MAX_LOSSES", 3) or 3)
-        chk = R.check_sequence_losses(self.trades, window=seq_win, max_losses=seq_max)
-        checks["sequence_losses"] = chk
-        if chk["status"] == "error":
-            blocked.append(chk["code"])
+        # 5) просадка
+        checks["drawdown"] = R.check_drawdown(
+            self.trades_repo,
+            lookback_days=int(getattr(cfg, "RISK_LOOKBACK_DAYS", 7)),
+            max_drawdown_pct=float(getattr(cfg, "RISK_MAX_DRAWDOWN_PCT", 10)),
+        )
 
-        ok = len(blocked) == 0
-        return {"ok": ok, "blocked_by": blocked, "checks": checks}
+        # 6) последовательность убыточных
+        checks["seq_losses"] = R.check_sequence_losses(
+            self.trades_repo,
+            window=int(getattr(cfg, "RISK_SEQUENCE_WINDOW", 3)),
+            max_losses=int(getattr(cfg, "RISK_MAX_LOSSES", 3)),
+        )
+
+        blocks = [k for k, v in checks.items() if isinstance(v, dict) and v.get("status") == "error"]
+        return {"ok": len(blocks) == 0, "blocks": blocks, "checks": checks}
