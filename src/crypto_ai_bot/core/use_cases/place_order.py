@@ -1,6 +1,7 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
@@ -15,6 +16,8 @@ try:
 except Exception:
     def get_correlation_id(): return None  # type: ignore
     def get_request_id(): return None      # type: ignore
+
+log = logging.getLogger(__name__)
 
 
 @rate_limit(max_calls=10, window=60)
@@ -61,19 +64,21 @@ def place_order(
         return {"status": "error", "error": f"unknown_action:{action}"}
 
     if bus:
+        evt = {
+            "type": "OrderExecuted",
+            "symbol": symbol,
+            "timeframe": getattr(cfg, "TIMEFRAME", ""),
+            "side": side,
+            "qty": str(size),
+            "price": str(px),
+            "latency_ms": decision.get("latency_ms"),
+            "request_id": get_request_id(),
+            "correlation_id": get_correlation_id(),
+        }
         try:
-            bus.publish({
-                "type": "OrderExecuted",
-                "symbol": symbol,
-                "timeframe": getattr(cfg, "TIMEFRAME", ""),
-                "side": side,
-                "qty": str(size),
-                "price": str(px),
-                "latency_ms": decision.get("latency_ms"),
-                "request_id": get_request_id(),
-                "correlation_id": get_correlation_id(),
-            })
-        except Exception:
-            pass
+            bus.publish(evt)
+        except Exception as e:
+            log.warning("bus_publish_failed (OrderExecuted): %s", e)
+            metrics.inc("bus_publish_errors_total")
 
     return {"status": "executed", "snapshot": snap}

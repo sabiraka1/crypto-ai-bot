@@ -96,6 +96,9 @@ class Settings:
     # --- Event Bus ---
     BUS_DLQ_MAX: int = int(os.getenv("BUS_DLQ_MAX", "1000"))
 
+    # --- Journal (events ring-buffer) ---
+    JOURNAL_MAX_ROWS: int = int(os.getenv("JOURNAL_MAX_ROWS", "10000"))
+
     # --- Алерты ---
     ALERT_ON_DLQ: bool = os.getenv("ALERT_ON_DLQ", "true").lower() in {"1", "true", "yes"}
     ALERT_DLQ_EVERY_SEC: int = int(os.getenv("ALERT_DLQ_EVERY_SEC", "300"))
@@ -104,10 +107,10 @@ class Settings:
     ORDER_LATENCY_P99_ALERT_MS: int = int(os.getenv("ORDER_LATENCY_P99_ALERT_MS", "0"))
     FLOW_LATENCY_P99_ALERT_MS: int = int(os.getenv("FLOW_LATENCY_P99_ALERT_MS", "0"))
 
-    # --- Performance budgets (p99), ms ---
-    PERF_BUDGET_DECISION_P99_MS: int = int(os.getenv("PERF_BUDGET_DECISION_P99_MS", "0"))
-    PERF_BUDGET_ORDER_P99_MS: int = int(os.getenv("PERF_BUDGET_ORDER_P99_MS", "0"))
-    PERF_BUDGET_FLOW_P99_MS: int = int(os.getenv("PERF_BUDGET_FLOW_P99_MS", "0"))
+    # --- Performance budgets (p99), ms (дефолты по Word) ---
+    PERF_BUDGET_DECISION_P99_MS: int = int(os.getenv("PERF_BUDGET_DECISION_P99_MS", "400"))
+    PERF_BUDGET_ORDER_P99_MS: int = int(os.getenv("PERF_BUDGET_ORDER_P99_MS", "750"))
+    PERF_BUDGET_FLOW_P99_MS: int = int(os.getenv("PERF_BUDGET_FLOW_P99_MS", "1500"))
 
     # --- Market Context источники ---
     CONTEXT_ENABLE: bool = os.getenv("CONTEXT_ENABLE", "true").lower() in {"1", "true", "yes"}
@@ -126,6 +129,10 @@ class Settings:
     # --- Market Context пресет (простой режим) ---
     # off | simple | balanced | custom
     CONTEXT_PRESET: str = os.getenv("CONTEXT_PRESET", "off").lower()
+
+    # --- Logging ---
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_JSON: bool = os.getenv("LOG_JSON", "false").lower() in {"1", "true", "yes"}
 
     # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {
@@ -176,20 +183,17 @@ class Settings:
 
         if no_manual:
             if s.CONTEXT_PRESET == "off":
-                # явно выключаем влияние
                 s.CONTEXT_DECISION_WEIGHT = 0.0
             elif s.CONTEXT_PRESET == "simple":
-                # самый понятный вариант: только Fear&Greed
                 s.CONTEXT_DECISION_WEIGHT = 0.20
                 s.CTX_FNG_WEIGHT = 1.0
                 s.CTX_DXY_WEIGHT = 0.0
                 s.CTX_BTC_DOM_WEIGHT = 0.0
             elif s.CONTEXT_PRESET == "balanced":
-                # умеренный микс: F&G + DXY + немного BTC.dominance
                 s.CONTEXT_DECISION_WEIGHT = 0.20
                 s.CTX_FNG_WEIGHT = 1.0
                 s.CTX_DXY_WEIGHT = 1.0
                 s.CTX_BTC_DOM_WEIGHT = 0.5
-            # 'custom' или неизвестное — ничего не трогаем (веса останутся нулевыми)
+            # 'custom' или неизвестное — ничего не трогаем
 
         return s

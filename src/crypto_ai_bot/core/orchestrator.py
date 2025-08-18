@@ -2,104 +2,139 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
-from typing import Any, Callable, Optional
+import logging
+from typing import Any, Optional, Dict
 
-# --- Global orchestrator (safe accessors) ---
-_GLOBAL_ORCH = None  # type: Optional[Orchestrator]
-
-def set_global_orchestrator(orch: "Orchestrator") -> None:
-    global _GLOBAL_ORCH
-    _GLOBAL_ORCH = orch
-
-def get_global_orchestrator() -> Optional["Orchestrator"]:
-    """
-    Безопасный доступ к синглтону оркестратора.
-    Возвращает None, если его ещё не проинициализировали извне.
-    """
-    return _GLOBAL_ORCH
-
-
-from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.utils import metrics
-
-from crypto_ai_bot.core.use_cases.evaluate import evaluate as uc_evaluate
 from crypto_ai_bot.core.use_cases.eval_and_execute import eval_and_execute as uc_eval_and_execute
 
-_HIST_BUCKETS_MS = (50, 100, 250, 500, 1000, 2000, 5000)
+log = logging.getLogger(__name__)
 
-
-def _observe_hist(name: str, value_ms: int, labels: Optional[dict] = None) -> None:
-    labels = dict(labels or {})
-    for b in _HIST_BUCKETS_MS:
-        if value_ms <= b:
-            metrics.inc(f"{name}_bucket", {**labels, "le": str(b)})
-    metrics.inc(f"{name}_bucket", {**labels, "le": "+Inf"})
-    metrics.observe(f"{name}_sum", value_ms, labels)
-    metrics.inc(f"{name}_count", labels)
+_GLOBAL_ORCH: Optional["Orchestrator"] = None
+def set_global_orchestrator(o: Optional["Orchestrator"]) -> None:  # используется в server.py
+    global _GLOBAL_ORCH
+    _GLOBAL_ORCH = o
 
 
 class Orchestrator:
-    def __init__(self, cfg: Settings, broker: Any, repos: Any, bus: Any | None = None) -> None:
+    """
+    Периодически триггерит тик (evaluate+optional order) и делает maintenance.
+    Добавлен рандомный джиттер и явные логи ошибок вместо «проглатывания».
+    """
+
+    def __init__(self, cfg: Any, broker: Any, repos: Any, *, bus: Optional[Any] = None, http: Optional[Any] = None) -> None:
         self.cfg = cfg
         self.broker = broker
         self.repos = repos
         self.bus = bus
-        self._tasks: list[asyncio.Task] = []
-        self._running = False
+        self.http = http
 
-    def schedule_every(self, seconds: int, fn: Callable, *, jitter: float = 0.1) -> None:
-        async def runner():
-            while self._running:
-                t0 = time.perf_counter()
-                try:
-                    await asyncio.to_thread(fn)
-                except Exception:
-                    pass
-                dt = int((time.perf_counter() - t0) * 1000)
-                _observe_hist("orchestrator_tick_ms", dt, {"mode": self.cfg.MODE})
-                await asyncio.sleep(max(0.0, seconds + (jitter * seconds)))
-
-        self._tasks.append(asyncio.create_task(runner()))
+        self._task_tick: Optional[asyncio.Task] = None
+        self._task_maint: Optional[asyncio.Task] = None
+        self._stopped = asyncio.Event()
 
     async def start(self) -> None:
-        self._running = True
-
-        symbol = self.cfg.SYMBOL
-        timeframe = self.cfg.TIMEFRAME
-        limit = int(getattr(self.cfg, "LIMIT_BARS", 300))
-
-        def _tick():
-            if getattr(self.cfg, "ENABLE_TRADING", False):
-                uc_eval_and_execute(self.cfg, self.broker, self.repos, symbol=symbol, timeframe=timeframe, limit=limit, bus=self.bus)
-            else:
-                uc_evaluate(self.cfg, self.broker, symbol=symbol, timeframe=timeframe, limit=limit, bus=self.bus)
-
-        period = int(getattr(self.cfg, "TICK_PERIOD_SEC", 60))
-        self.schedule_every(period, _tick)
-
-        # --- обслуживание: чистим идемпотентность и оптимизируем SQLite
-        maintenance_sec = int(getattr(self.cfg, "METRICS_REFRESH_SEC", 30))
-        def _maintenance():
-            idem = getattr(self.repos, "idempotency", None)
-            if idem is not None and hasattr(idem, "cleanup_expired"):
-                try:
-                    removed = idem.cleanup_expired(ttl_seconds=int(getattr(self.cfg, "IDEMPOTENCY_TTL_SEC", 300)))
-                    metrics.inc("idempotency_cleanup_total", {"removed": str(removed)})
-                except Exception:
-                    pass
-            # по возможности — оптимизация SQLite
-            try:
-                con = getattr(self.repos, "trades", None)
-                if con and hasattr(con, "optimize"):
-                    con.optimize()  # если реализовано
-            except Exception:
-                pass
-
-        self.schedule_every(maintenance_sec, _maintenance, jitter=0.2)
+        if self._task_tick is None:
+            self._task_tick = asyncio.create_task(self._tick_loop(), name="orch.tick")
+        if self._task_maint is None:
+            self._task_maint = asyncio.create_task(self._maintenance_loop(), name="orch.maintenance")
 
     async def stop(self) -> None:
-        self._running = False
-        for t in self._tasks:
-            t.cancel()
-        self._tasks.clear()
+        self._stopped.set()
+        for t in (self._task_tick, self._task_maint):
+            if t:
+                t.cancel()
+        self._task_tick = None
+        self._task_maint = None
+
+    # ---------- loops ----------
+
+    async def _tick_loop(self) -> None:
+        sym = getattr(self.cfg, "SYMBOL", "BTC/USDT")
+        tf = getattr(self.cfg, "TIMEFRAME", "1h")
+        limit = int(getattr(self.cfg, "LIMIT_BARS", 300) or 300)
+
+        base_period = int(getattr(self.cfg, "TICK_PERIOD_SEC", 60) or 60)
+        jitter_pct = 0.15  # ±15% (фикс из рекомендаций)
+
+        while not self._stopped.is_set():
+            t0 = time.time()
+            try:
+                # основной flow
+                with metrics.timer() as t_flow:
+                    uc_eval_and_execute(self.cfg, self.broker, self.repos, symbol=sym, timeframe=tf, limit=limit, bus=self.bus, http=self.http)
+                metrics.observe_histogram("latency_flow_seconds", t_flow.elapsed)
+                # пусть RQ-снапшоты берутся из app.bus_wiring; здесь просто p99-бюджеты:
+                try:
+                    thr = int(getattr(self.cfg, "PERF_BUDGET_FLOW_P99_MS", 0) or 0)
+                    if thr > 0:
+                        # легкий «runtime» чек: отдельного p99 тут нет, но можем подсвечивать единичные проскоки
+                        if (t_flow.elapsed * 1000.0) > float(thr):
+                            metrics.inc("flow_latency_exceed_total")
+                except Exception:
+                    pass
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.exception("orchestrator_tick_failed: %s", e)
+                metrics.inc("orchestrator_tick_errors_total")
+
+            # randomized sleep
+            try:
+                base = max(1.0, float(base_period))
+                jitter = random.uniform(1.0 - jitter_pct, 1.0 + jitter_pct)
+                await asyncio.sleep(base * jitter)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("orchestrator_sleep_issue: %s", e)
+                await asyncio.sleep(base_period)
+
+    async def _maintenance_loop(self) -> None:
+        period = int(getattr(self.cfg, "MAINTENANCE_SEC", 60) or 60)
+        while not self._stopped.is_set():
+            try:
+                self._run_maintenance_once()
+                metrics.inc("maintenance_runs_total")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.exception("maintenance_failed: %s", e)
+                metrics.inc("maintenance_errors_total")
+            try:
+                base = max(5.0, float(period))
+                jitter = random.uniform(0.9, 1.1)
+                await asyncio.sleep(base * jitter)
+            except asyncio.CancelledError:
+                raise
+
+    # ---------- helpers ----------
+
+    def _run_maintenance_once(self) -> None:
+        """
+        Безопасные операции обслуживания БД/репозиториев.
+        1) Чистим истёкшую идемпотентность (значение — в gauge, не в лейбле).
+        2) Можно добавить VACUUM/ANALYZE по расписанию (здесь не трогаем).
+        """
+        cleaned = 0
+        idem = getattr(self.repos, "idempotency", None)
+        if idem is not None:
+            try:
+                # если есть явный метод purge — используем его
+                if hasattr(idem, "purge"):
+                    cleaned = int(idem.purge()) or 0  # метод сам решит TTL
+                else:
+                    # на всякий случай — попытка SQL (не уронит, если схемы нет)
+                    con = getattr(self.repos, "uow", None)
+                    con = getattr(con, "_con", None) or getattr(con, "con", None)
+                    if con is not None:
+                        cur = con.execute("DELETE FROM idempotency WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')")
+                        cleaned = int(cur.rowcount or 0)
+                        con.commit()
+            except Exception as e:
+                log.warning("idempotency_purge_failed: %s", e)
+                metrics.inc("idempotency_cleanup_errors_total")
+        metrics.gauge("idempotency_cleanup_count", float(cleaned))
