@@ -1,1 +1,1 @@
-web: PYTHONPATH=src gunicorn -k uvicorn.workers.UvicornWorker -w 1 -t 120 --graceful-timeout 30 --keep-alive 75 -b 0.0.0.0:$PORT crypto_ai_bot.app.server:app
+web: cd /app && PYTHONPATH=/app/src gunicorn -k uvicorn.workers.UvicornWorker -w 1 -t 120 --graceful-timeout 30 --keep-alive 75 -b 0.0.0.0:$PORT crypto_ai_bot.app.server:app
