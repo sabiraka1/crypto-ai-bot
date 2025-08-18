@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: ascii -*-
 from __future__ import annotations
 import os, sys, re, importlib, traceback
 from pathlib import Path
@@ -7,8 +7,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
 PKG = SRC / "crypto_ai_bot"
 
-def fail(msg): print("[FAIL]", msg); failures.append(msg)
-def ok(msg):   print("[ OK ]", msg)
+def fail(msg): 
+    print("[FAIL]", msg)
+    failures.append(msg)
+
+def ok(msg):   
+    print("[ OK ]", msg)
 
 def grep_sources(pattern: str, exclude=None):
     rx = re.compile(pattern)
@@ -24,12 +28,13 @@ def grep_sources(pattern: str, exclude=None):
             hits.append(p)
     return hits
 
-def rel(p: Path) -> str: return str(p.relative_to(REPO_ROOT))
+def rel(p: Path) -> str:
+    return str(p.relative_to(REPO_ROOT))
 
 failures = []
 os.environ.setdefault("PYTHONPATH", "src")
 
-# 0) Ключевые узлы
+# 0) Required nodes exist
 must = [
     PKG/"app/server.py", PKG/"app/middleware.py", PKG/"app/bus_wiring.py",
     PKG/"app/adapters/telegram.py",
@@ -41,11 +46,11 @@ must = [
 ]
 missing = [rel(p) for p in must if not p.exists()]
 if not missing:
-    ok("Структура: ключевые узлы присутствуют")
+    ok("Structure: required nodes present")
 else:
-    fail("Нет: " + ", ".join(missing))
+    fail("Structure: missing: " + ", ".join(missing))
 
-# 1) Smoke-импорты
+# 1) Smoke imports
 mods = [
   "crypto_ai_bot.core.events",
   "crypto_ai_bot.core.events.async_bus",
@@ -58,7 +63,8 @@ mods = [
 ]
 for m in mods:
     try:
-        importlib.import_module(m); ok(f"import {m}")
+        importlib.import_module(m)
+        ok(f"import {m}")
     except Exception:
         fail(f"import failed: {m}\n{traceback.format_exc()}")
 
@@ -66,29 +72,35 @@ for m in mods:
 try:
     ev = importlib.import_module("crypto_ai_bot.core.events")
     aeb, alias = hasattr(ev, "AsyncEventBus"), hasattr(ev, "AsyncBus")
-    ok("events exports: AsyncEventBus (+ AsyncBus alias)") if (aeb and alias)\
-        else fail(f"events exports mismatch: AsyncEventBus={aeb}, AsyncBus={alias}")
+    if aeb and alias:
+        ok("events exports: AsyncEventBus (+ AsyncBus alias)")
+    else:
+        fail(f"events exports mismatch: AsyncEventBus={aeb}, AsyncBus={alias}")
 except Exception as e:
     fail(f"events import error: {e}")
 
 # 3) Storage exports
 try:
     st = importlib.import_module("crypto_ai_bot.core.storage")
-    tx, uow, conn = hasattr(st,"in_txn"), hasattr(st,"SqliteUnitOfWork"), hasattr(st,"connect")
-    ok("storage exports: in_txn, SqliteUnitOfWork, connect") if (tx and uow and conn)\
-        else fail(f"storage exports mismatch: in_txn={tx}, SqliteUnitOfWork={uow}, connect={conn}")
+    tx, uow, conn = hasattr(st, "in_txn"), hasattr(st, "SqliteUnitOfWork"), hasattr(st, "connect")
+    if tx and uow and conn:
+        ok("storage exports: in_txn, SqliteUnitOfWork, connect")
+    else:
+        fail(f"storage exports mismatch: in_txn={tx}, SqliteUnitOfWork={uow}, connect={conn}")
 except Exception as e:
     fail(f"storage import error: {e}")
 
 # 4) Indicators
 try:
     ind = importlib.import_module("crypto_ai_bot.core.indicators.unified")
-    ok("indicators: build_indicators present") if hasattr(ind,"build_indicators")\
-        else fail("indicators: build_indicators missing")
+    if hasattr(ind, "build_indicators"):
+        ok("indicators: build_indicators present")
+    else:
+        fail("indicators: build_indicators missing")
 except Exception as e:
     fail(f"indicators import error: {e}")
 
-# 5) Telegram команды
+# 5) Telegram commands
 tg = PKG / "app" / "adapters" / "telegram.py"
 need = {"/help","/status","/test","/profit","/eval","/why"}
 if tg.exists():
@@ -103,7 +115,7 @@ if tg.exists():
 else:
     fail("adapters/telegram.py not found")
 
-# 6) Эндпоинты
+# 6) Endpoints
 paths = set()
 try:
     srv = importlib.import_module("crypto_ai_bot.app.server")
@@ -111,24 +123,28 @@ try:
     if app is not None:
         from starlette.routing import Route
         for r in app.routes:
-            if isinstance(r, Route): paths.add(r.path)
+            if isinstance(r, Route):
+                paths.add(r.path)
 except Exception:
     pass
 if not paths:
     s = (PKG / "app" / "server.py").read_text(encoding="utf-8", errors="ignore")
     for p in ("/health","/metrics","/status/extended","/telegram","/telegram/webhook"):
-        if p in s: paths.add(p)
+        if p in s:
+            paths.add(p)
 missing = {p for p in ("/health","/metrics","/status/extended") if p not in paths}
 has_tel = any("/telegram" in p for p in paths)
-if not missing and has_tel: ok("endpoints: /health /metrics /status/extended + /telegram present")
+if not missing and has_tel:
+    ok("endpoints: /health /metrics /status/extended + /telegram present")
 else:
     if missing: fail("endpoints missing: " + ", ".join(sorted(list(missing))))
     if not has_tel: fail("telegram endpoint missing")
 
 print()
 if failures:
-    print("==== SUMMARY FAIL ====")
-    for f in failures: print("-", f)
+    print("SUMMARY: FAIL")
+    for f in failures:
+        print("-", f)
     sys.exit(1)
 else:
     print("ALL CHECKS PASSED")
