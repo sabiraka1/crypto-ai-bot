@@ -68,12 +68,12 @@ class Settings:
     TAKE_PROFIT_PCT: float | None = float(os.getenv("TAKE_PROFIT_PCT")) if os.getenv("TAKE_PROFIT_PCT") else None
     TRAILING_PCT: float | None = float(os.getenv("TRAILING_PCT")) if os.getenv("TRAILING_PCT") else None
 
-    # ► ДОБАВЛЕНО: рычаги правил риска
+    # Рычаги риска
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "1"))
-    MAX_SPREAD_BPS: int = int(os.getenv("MAX_SPREAD_BPS", "25"))  # разрешённый спред, б.п.
+    MAX_SPREAD_BPS: int = int(os.getenv("MAX_SPREAD_BPS", "25"))
     RISK_HOURS_UTC: str = os.getenv("RISK_HOURS_UTC", "0-24")
     RISK_LOOKBACK_DAYS: int = int(os.getenv("RISK_LOOKBACK_DAYS", "7"))
-    RISK_MAX_DRAWDOWN_PCT: float = float(os.getenv("RISK_MAX_DRAWDOWN_PCT", "10"))  # 10% за окно
+    RISK_MAX_DRAWDOWN_PCT: float = float(os.getenv("RISK_MAX_DRAWDOWN_PCT", "10"))
     RISK_SEQUENCE_WINDOW: int = int(os.getenv("RISK_SEQUENCE_WINDOW", "3"))
     RISK_MAX_LOSSES: int = int(os.getenv("RISK_MAX_LOSSES", "3"))
 
@@ -99,7 +99,6 @@ class Settings:
     # --- Алерты ---
     ALERT_ON_DLQ: bool = os.getenv("ALERT_ON_DLQ", "true").lower() in {"1", "true", "yes"}
     ALERT_DLQ_EVERY_SEC: int = int(os.getenv("ALERT_DLQ_EVERY_SEC", "300"))
-
     ALERT_ON_LATENCY: bool = os.getenv("ALERT_ON_LATENCY", "false").lower() in {"1", "true", "yes"}
     DECISION_LATENCY_P99_ALERT_MS: int = int(os.getenv("DECISION_LATENCY_P99_ALERT_MS", "0"))
     ORDER_LATENCY_P99_ALERT_MS: int = int(os.getenv("ORDER_LATENCY_P99_ALERT_MS", "0"))
@@ -110,13 +109,23 @@ class Settings:
     PERF_BUDGET_ORDER_P99_MS: int = int(os.getenv("PERF_BUDGET_ORDER_P99_MS", "0"))
     PERF_BUDGET_FLOW_P99_MS: int = int(os.getenv("PERF_BUDGET_FLOW_P99_MS", "0"))
 
-    # --- Market Context ---
+    # --- Market Context источники ---
     CONTEXT_ENABLE: bool = os.getenv("CONTEXT_ENABLE", "true").lower() in {"1", "true", "yes"}
     CONTEXT_CACHE_TTL_SEC: int = int(os.getenv("CONTEXT_CACHE_TTL_SEC", "300"))
     CONTEXT_HTTP_TIMEOUT_SEC: float = float(os.getenv("CONTEXT_HTTP_TIMEOUT_SEC", "2.0"))
     CONTEXT_BTC_DOMINANCE_URL: str = os.getenv("CONTEXT_BTC_DOMINANCE_URL", "https://api.coingecko.com/api/v3/global")
     CONTEXT_FEAR_GREED_URL: str = os.getenv("CONTEXT_FEAR_GREED_URL", "https://api.alternative.me/fng/?limit=1")
-    CONTEXT_DXY_URL: str = os.getenv("CONTEXT_DXY_URL", "")  # опционально
+    CONTEXT_DXY_URL: str = os.getenv("CONTEXT_DXY_URL", "")
+
+    # --- Market Context веса (ручной режим) ---
+    CONTEXT_DECISION_WEIGHT: float = float(os.getenv("CONTEXT_DECISION_WEIGHT", "0"))
+    CTX_BTC_DOM_WEIGHT: float = float(os.getenv("CTX_BTC_DOM_WEIGHT", "0"))
+    CTX_FNG_WEIGHT: float = float(os.getenv("CTX_FNG_WEIGHT", "0"))
+    CTX_DXY_WEIGHT: float = float(os.getenv("CTX_DXY_WEIGHT", "0"))
+
+    # --- Market Context пресет (простой режим) ---
+    # off | simple | balanced | custom
+    CONTEXT_PRESET: str = os.getenv("CONTEXT_PRESET", "off").lower()
 
     # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {
@@ -151,6 +160,36 @@ class Settings:
     @classmethod
     def build(cls) -> "Settings":
         s = cls()
+
+        # Safe-mode отключает торговлю
         if s.SAFE_MODE:
             s.ENABLE_TRADING = False
+
+        # ---- ПРОСТОЙ ПРЕСЕТ КОНТЕКСТА ----
+        # Срабатывает только если вручную веса не заданы (все нули).
+        no_manual = (
+            float(s.CONTEXT_DECISION_WEIGHT) == 0.0 and
+            float(s.CTX_BTC_DOM_WEIGHT) == 0.0 and
+            float(s.CTX_FNG_WEIGHT) == 0.0 and
+            float(s.CTX_DXY_WEIGHT) == 0.0
+        )
+
+        if no_manual:
+            if s.CONTEXT_PRESET == "off":
+                # явно выключаем влияние
+                s.CONTEXT_DECISION_WEIGHT = 0.0
+            elif s.CONTEXT_PRESET == "simple":
+                # самый понятный вариант: только Fear&Greed
+                s.CONTEXT_DECISION_WEIGHT = 0.20
+                s.CTX_FNG_WEIGHT = 1.0
+                s.CTX_DXY_WEIGHT = 0.0
+                s.CTX_BTC_DOM_WEIGHT = 0.0
+            elif s.CONTEXT_PRESET == "balanced":
+                # умеренный микс: F&G + DXY + немного BTC.dominance
+                s.CONTEXT_DECISION_WEIGHT = 0.20
+                s.CTX_FNG_WEIGHT = 1.0
+                s.CTX_DXY_WEIGHT = 1.0
+                s.CTX_BTC_DOM_WEIGHT = 0.5
+            # 'custom' или неизвестное — ничего не трогаем (веса останутся нулевыми)
+
         return s

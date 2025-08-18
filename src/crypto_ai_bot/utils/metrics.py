@@ -1,154 +1,104 @@
+# src/crypto_ai_bot/utils/metrics.py
 from __future__ import annotations
 
 import time
-import threading
 from contextlib import contextmanager
-from typing import Dict, Tuple, Iterable, Optional, List
+from typing import Any, Dict, Optional
 
 try:
-    from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
-except Exception:
-    # Позволяет работать даже без установленного prometheus_client (например, в unit-тестах),
-    # но в проде библиотека должна быть установлена.
-    Counter = Gauge = Histogram = object  # type: ignore
-    class CollectorRegistry: ...
-    def generate_latest(*_a, **_k): return b""
-    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
+    # предпочитаем официальный клиент
+    from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram, generate_latest  # type: ignore
+    _PROM = True
+except Exception:  # pragma: no cover
+    _PROM = False
+    REGISTRY = None  # type: ignore
 
-_registry = CollectorRegistry() if isinstance(CollectorRegistry, type) else None  # type: ignore
+# ---------- внутренние реестры ----------
 
-_COUNTERS: Dict[str, Counter] = {}
-_GAUGES: Dict[str, Gauge] = {}
-_HISTS: Dict[str, Histogram] = {}
+_counters: Dict[str, Any] = {}
+_gauges: Dict[str, Any] = {}
+_hists: Dict[str, Any] = {}
 
-# Локальные резервуары последних значений для расчёта p95/p99 на /status/extended
-# (promql-квантили всё равно будут в Prometheus, но нам нужен быстрый «снимок» в API)
-_RESERVOIRS: Dict[str, List[float]] = {}
-_RESERVOIR_MAX = 2000  # кольцевой буфер
+# Бакеты: секунды (под сервера/HTTP/брокер), с плавной «верхушкой»
+_DEFAULT_BUCKETS = (
+    0.005, 0.01, 0.025, 0.05, 0.075,
+    0.1, 0.2, 0.3, 0.5,
+    0.75, 1.0, 1.5, 2.0, 3.0,
+    5.0, 7.5, 10.0, float("inf")
+)
 
-_LOCK = threading.RLock()
+def _labels_sorted(labels: Dict[str, str]) -> Dict[str, str]:
+    # стабилизируем порядок лейблов, чтобы не плодить уникальные серии
+    return dict(sorted((labels or {}).items()))
 
-# --- Бакеты по умолчанию ---
-# Латентности (сек): 5ms..5s
-_DEFAULT_LAT_BUCKETS = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
-# Скор (0..1)
-_DEFAULT_SCORE_BUCKETS = tuple(round(x / 100, 3) for x in range(0, 101, 5))  # 0.00,0.05,...,1.00
+def _norm_name(name: str) -> str:
+    # простая нормализация
+    return name.replace(".", "_").replace("-", "_").strip()
 
-# Явные профили бакетов по имени метрики (при необходимости можно дополнять)
-_BUCKETS_MAP: Dict[str, Tuple[float, ...]] = {
-    "latency_decide_seconds": _DEFAULT_LAT_BUCKETS,
-    "latency_order_seconds": _DEFAULT_LAT_BUCKETS,
-    "decision_score_histogram": _DEFAULT_SCORE_BUCKETS,
-}
+# ---------- публичное API ----------
 
-# --- Ленивая регистрация метрик ---
-def _counter(name: str, help_: str = "", labels: Iterable[str] = ()) -> Counter:
-    with _LOCK:
-        if name not in _COUNTERS:
-            if _registry is not None and isinstance(Counter, type):
-                _COUNTERS[name] = Counter(name, help_ or name, list(labels), registry=_registry)  # type: ignore
-            else:
-                _COUNTERS[name] = None  # type: ignore
-        return _COUNTERS[name]
+def inc(name: str, labels: Optional[Dict[str, str]] = None, *, value: float = 1.0) -> None:
+    n = _norm_name(name)
+    if _PROM:
+        key = (n, tuple(sorted((labels or {}).items())))
+        if key not in _counters:
+            _counters[key] = Counter(n, n, list((labels or {}).keys()))
+        _counters[key].labels(**_labels_sorted(labels or {})).inc(value)
+    else:  # no-op fallback
+        pass
 
-def _gauge(name: str, help_: str = "", labels: Iterable[str] = ()) -> Gauge:
-    with _LOCK:
-        if name not in _GAUGES:
-            if _registry is not None and isinstance(Gauge, type):
-                _GAUGES[name] = Gauge(name, help_ or name, list(labels), registry=_registry)  # type: ignore
-            else:
-                _GAUGES[name] = None  # type: ignore
-        return _GAUGES[name]
-
-def _hist(name: str, help_: str = "", buckets: Optional[Tuple[float, ...]] = None, labels: Iterable[str] = ()) -> Histogram:
-    with _LOCK:
-        if name not in _HISTS:
-            if buckets is None:
-                buckets = _BUCKETS_MAP.get(name)
-            if buckets is None:
-                # Фолбэк: латентности
-                buckets = _DEFAULT_LAT_BUCKETS
-            if _registry is not None and isinstance(Histogram, type):
-                _HISTS[name] = Histogram(name, help_ or name, list(labels), buckets=buckets, registry=_registry)  # type: ignore
-            else:
-                _HISTS[name] = None  # type: ignore
-        return _HISTS[name]
-
-# --- Публичное API (совместимое с существующим кодом) ---
-
-def inc(name: str, labels: Optional[Dict[str, str]] = None, *, help_: str = "") -> None:
-    c = _counter(name, help_, labels.keys() if labels else ())
-    if c is None:
-        return
-    if labels:
-        c.labels(**labels).inc()  # type: ignore[attr-defined]
+def gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
+    n = _norm_name(name)
+    if _PROM:
+        key = (n, tuple(sorted((labels or {}).items())))
+        if key not in _gauges:
+            _gauges[key] = Gauge(n, n, list((labels or {}).keys()))
+        _gauges[key].labels(**_labels_sorted(labels or {})).set(value)
     else:
-        c.inc()  # type: ignore[attr-defined]
+        pass
 
-def set(name: str, value: float, labels: Optional[Dict[str, str]] = None, *, help_: str = "") -> None:
-    g = _gauge(name, help_, labels.keys() if labels else ())
-    if g is None:
-        return
-    if labels:
-        g.labels(**labels).set(value)  # type: ignore[attr-defined]
+def set(name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
+    # алиас для gauge
+    gauge(name, value, labels)
+
+def observe_histogram(name: str, value_seconds: float, labels: Optional[Dict[str, str]] = None, *, buckets: Optional[tuple] = None) -> None:
+    n = _norm_name(name)
+    if _PROM:
+        key = (n, tuple(sorted((labels or {}).items())))
+        if key not in _hists:
+            _hists[key] = Histogram(n, n, list((labels or {}).keys()), buckets=buckets or _DEFAULT_BUCKETS)
+        _hists[key].labels(**_labels_sorted(labels or {})).observe(float(value_seconds))
     else:
-        g.set(value)  # type: ignore[attr-defined]
-
-def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None, *,
-                      help_: str = "", buckets: Optional[Tuple[float, ...]] = None) -> None:
-    """Единая точка наблюдения гистограмм (убираем дубли _observe_hist в коде)."""
-    h = _hist(name, help_, buckets, labels.keys() if labels else ())
-    if h is not None:
-        if labels:
-            h.labels(**labels).observe(value)  # type: ignore[attr-defined]
-        else:
-            h.observe(value)  # type: ignore[attr-defined]
-    # Параллельно пополняем локальный резервуар для быстрых квантилий на /status/extended
-    with _LOCK:
-        arr = _RESERVOIRS.setdefault(name, [])
-        arr.append(float(value))
-        if len(arr) > _RESERVOIR_MAX:
-            del arr[: len(arr) - _RESERVOIR_MAX]
+        pass
 
 @contextmanager
 def timer():
-    """Контекст-таймер: with timer() as t: ...; t.elapsed"""
-    start = time.perf_counter()
-    obj = type("T", (), {})()
-    obj.elapsed = 0.0
+    t0 = time.time()
+    class _T:
+        elapsed: float = 0.0
+    T = _T()
     try:
-        yield obj
+        yield T
     finally:
-        obj.elapsed = float(time.perf_counter() - start)
+        T.elapsed = max(0.0, time.time() - t0)
 
-def quantiles(name: str, probs: Iterable[float]) -> Dict[float, Optional[float]]:
-    """p95/p99 «на лету» из локального резервуара (для /status/extended).
-    Для точной аналитики использовать Prometheus (histogram_quantile)."""
-    with _LOCK:
-        data = list(_RESERVOIRS.get(name, []))
-    if not data:
-        return {p: None for p in probs}
-    data.sort()
-    out: Dict[float, Optional[float]] = {}
-    n = len(data)
-    for p in probs:
-        if not 0.0 <= p <= 1.0:
-            out[p] = None
-            continue
-        k = max(0, min(n - 1, int(round((n - 1) * p))))
-        out[p] = float(data[k])
-    return out
+def export() -> str:
+    """Совместимость: вернём Prometheus-текст (или пустую строку, если клиента нет)."""
+    if not _PROM:
+        return ""
+    try:
+        body = generate_latest()  # bytes
+        return body.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
 
-def check_performance_budget(metric: str, value_seconds: float, budget_seconds: Optional[float]) -> None:
-    """Если есть бюджет и он превышен — инкрементируем performance_budget_exceeded и логируем предупреждение."""
-    if budget_seconds is None:
-        return
-    if value_seconds > float(budget_seconds):
-        inc("performance_budget_exceeded", {"metric": metric})
-        # Логгер не подключаем здесь напрямую, чтобы не плодить зависимостей; логи — на уровне вызова.
-
-def export_prometheus() -> Tuple[bytes, str]:
-    """Отдаёт срез метрик для /metrics."""
-    if _registry is None:
-        return b"", CONTENT_TYPE_LATEST
-    return generate_latest(_registry), CONTENT_TYPE_LATEST
+# Дополнительно: бюджет (сейчас почти не используется; оставляем для обратной совместимости)
+def check_performance_budget(metric_key: str, value_seconds: float, budget_seconds: Optional[float]) -> None:
+    try:
+        if budget_seconds and value_seconds > float(budget_seconds):
+            gauge("performance_budget_exceeded_local", 1.0, {"type": metric_key})
+        else:
+            if budget_seconds:
+                gauge("performance_budget_exceeded_local", 0.0, {"type": metric_key})
+    except Exception:
+        pass

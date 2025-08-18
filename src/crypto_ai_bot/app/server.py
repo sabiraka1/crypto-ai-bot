@@ -47,6 +47,9 @@ from crypto_ai_bot.app.bus_wiring import build_bus, snapshot_quantiles
 # market context
 from crypto_ai_bot.market_context.snapshot import build_snapshot as build_market_context
 
+# middleware
+from crypto_ai_bot.app.middleware import register_middlewares
+
 # orchestrator (опционально)
 try:
     from crypto_ai_bot.core.orchestrator import Orchestrator, set_global_orchestrator
@@ -55,6 +58,7 @@ except Exception:
 
 app = FastAPI(title="crypto-ai-bot")
 init_logging()
+register_middlewares(app)  # ← добавили middleware (request-id, http-метрики)
 
 CFG: Settings = Settings.build()
 BREAKER = CircuitBreaker()
@@ -226,6 +230,17 @@ def health() -> JSONResponse:
         broker_detail = f"{type(e).__name__}: {e}"
     broker_latency_ms = int((time.time() - b0) * 1000)
 
+    # Breaker critical keys: если OPEN — деградируем
+    breaker_state = "ok"
+    try:
+        stats = BREAKER.get_stats()
+        critical_keys = {"fetch_ticker", "fetch_order_book", "fetch_ohlcv", "create_order"}
+        open_crit = any((stats.get(k, {}).get("state") == "open") for k in critical_keys)
+        if open_crit:
+            breaker_state = "open"
+    except Exception:
+        breaker_state = "unknown"
+
     # drift
     drift_ms = measure_time_drift(CFG, HTTP, urls=getattr(CFG, "TIME_DRIFT_URLS", None) or None, timeout=1.5)
     limit = int(getattr(CFG, "TIME_DRIFT_LIMIT_MS", 1000))
@@ -241,6 +256,7 @@ def health() -> JSONResponse:
         "mode": getattr(CFG, "MODE", "unknown"),
         "db": {"status": "ok" if db_ok else "error", "latency_ms": db_latency_ms, **({"detail": db_error} if not db_ok else {})},
         "broker": {"status": "ok" if broker_ok else "error", "latency_ms": broker_latency_ms, **({"detail": broker_detail} if not broker_ok else {})},
+        "breaker": {"status": breaker_state},
         "time": {"status": drift_status, "drift_ms": drift_ms if drift_ms is not None else -1, "limit_ms": limit},
         "bus": bus_state,
     }
@@ -270,14 +286,13 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         metrics.gauge("events_dead_letter_total", 0.0)
 
-    # performance budgets (p99)
+    # performance budgets (p99): см. bus_wiring.snapshot_quantiles()
     try:
         snap = snapshot_quantiles()
         thr_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0))
         thr_ord = int(getattr(CFG, "PERF_BUDGET_ORDER_P99_MS", 0))
         thr_flow = int(getattr(CFG, "PERF_BUDGET_FLOW_P99_MS", 0))
 
-        # агрегированный флаг «есть превышения»
         exceeded_any = False
 
         if thr_dec > 0:
@@ -342,8 +357,8 @@ def tick(body: Dict[str, Any] = Body(default=None)) -> JSONResponse:
     tf = normalize_timeframe((body or {}).get("timeframe") or getattr(CFG, "TIMEFRAME", "1h"))
     limit = int((body or {}).get("limit") or getattr(CFG, "LIMIT_BARS", 300))
     try:
-        decision = uc_eval_and_execute(CFG, BROKER, REPOS, symbol=sym, timeframe=tf, limit=limit, bus=BUS)
-        return JSONResponse({"status": "ok", "decision": decision, "symbol": sym, "timeframe": tf})
+        decision = uc_eval_and_execute(CFG, BROKER, REPOS, symbol=sym, timeframe=tf, limit=limit, bus=BUS, http=HTTP)
+        return JSONResponse({"status": "ok" if decision.get("status") == "ok" else decision.get("status"), **decision, "symbol": sym, "timeframe": tf})
     except Exception as e:
         return JSONResponse({"status": "error", "error": f"tick_failed: {type(e).__name__}: {e}"})
 
@@ -453,21 +468,3 @@ async def telegram_webhook(
 
     resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
     return JSONResponse(resp)
-
-
-@app.get("/context")
-def context() -> JSONResponse:
-    sym = getattr(CFG, "SYMBOL", "BTC/USDT")
-    tf  = getattr(CFG, "TIMEFRAME", "1h")
-    prof = CFG.get_profile_dict() if hasattr(CFG, "get_profile_dict") else {}
-    try:
-        qs = snapshot_quantiles()
-    except Exception:
-        qs = {}
-    return JSONResponse({
-        "symbol": sym,
-        "timeframe": tf,
-        "profile": prof,            # веса правил/AI и пороги
-        "quantiles_ms": qs,         # полная карта квантилей (как в /metrics)
-        "safe_config": _safe_config(CFG),
-    })
