@@ -34,6 +34,9 @@ try:
 except Exception:
     SqliteDecisionsRepository = None
 
+# ✅ НОВЫЙ импорт (через пакет validators)
+from crypto_ai_bot.core.validators import validate_config
+
 # time drift
 try:
     from crypto_ai_bot.utils.time_sync import measure_time_drift
