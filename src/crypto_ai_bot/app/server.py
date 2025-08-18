@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, Request, Body, Query, Header
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.utils import metrics
@@ -34,7 +34,7 @@ try:
 except Exception:
     SqliteDecisionsRepository = None
 
-# ✅ журнал событий
+# журнал событий
 from crypto_ai_bot.core.storage.repositories.events_journal import EventJournalRepository
 
 # валидатор конфига
@@ -53,6 +53,9 @@ from crypto_ai_bot.app.bus_wiring import build_bus, snapshot_quantiles
 # market context
 from crypto_ai_bot.market_context.snapshot import build_snapshot as build_market_context
 
+# charts (SVG)
+from crypto_ai_bot.utils.charts import render_price_spark_svg, render_profit_curve_svg
+
 # middleware
 from crypto_ai_bot.app.middleware import register_middlewares
 
@@ -63,10 +66,10 @@ except Exception:
     Orchestrator = None  # type: ignore
 
 app = FastAPI(title="crypto-ai-bot")
-init_logging()
+CFG: Settings = Settings.build()
+init_logging(level=getattr(CFG, "LOG_LEVEL", "INFO"), json_format=bool(getattr(CFG, "LOG_JSON", False)))
 register_middlewares(app)
 
-CFG: Settings = Settings.build()
 BREAKER = CircuitBreaker()
 HTTP = get_http_client()
 
@@ -80,7 +83,6 @@ class _Repos:
         self.uow = SqliteUnitOfWork(con)
         self.idempotency = SqliteIdempotencyRepository(con)
         self.decisions = SqliteDecisionsRepository(con) if SqliteDecisionsRepository else None
-        # ✅ журнал (ring-buffer)
         self.journal = EventJournalRepository(con, max_rows=int(getattr(CFG, "JOURNAL_MAX_ROWS", 10_000)))
 
 REPOS = _Repos(CONN)
@@ -91,7 +93,6 @@ BROKER = create_broker(CFG, bus=BUS)
 metrics.inc("app_start_total", {"mode": getattr(CFG, "MODE", "unknown")})
 metrics.inc("broker_created_total", {"mode": getattr(CFG, "MODE", "unknown")})
 
-# --- lifecycle: оркестратор + алерт-монитор ---
 _ORCH_TASK: Optional[asyncio.Task] = None
 _ALERT_TASK: Optional[asyncio.Task] = None
 _ALERTS = AlertState()
@@ -100,7 +101,7 @@ _ALERTS = AlertState()
 async def _on_startup() -> None:
     global _ORCH_TASK, _ALERT_TASK
     if getattr(CFG, "ORCHESTRATOR_AUTOSTART", False) and Orchestrator is not None:
-        orch = Orchestrator(CFG, BROKER, REPOS, bus=BUS)
+        orch = Orchestrator(CFG, BROKER, REPOS, bus=BUS, http=HTTP)
         set_global_orchestrator(orch)  # type: ignore
         async def _runner():
             await orch.start()
@@ -139,7 +140,6 @@ async def _alerts_runner() -> None:
 
             if getattr(CFG, "ALERT_ON_LATENCY", False):
                 snap = snapshot_quantiles()
-                # (оставим как есть — ключи формата "decision:*", "order:*" если кто-то пишет)
                 thr_dec = int(getattr(CFG, "DECISION_LATENCY_P99_ALERT_MS", 0))
                 thr_ord = int(getattr(CFG, "ORDER_LATENCY_P99_ALERT_MS", 0))
                 thr_flow = int(getattr(CFG, "FLOW_LATENCY_P99_ALERT_MS", 0))
@@ -349,7 +349,6 @@ def bus_dlq(limit: int = Query(50, ge=1, le=1000)) -> JSONResponse:
         items = []
     return JSONResponse({"status": "ok", "items": items})
 
-# ✅ НОВОЕ: агрегаты по журналу
 @app.get("/bus/stats")
 def bus_stats(since_ms: Optional[int] = Query(None, description="Фильтр по времени (UTC ms)")) -> JSONResponse:
     try:
@@ -359,6 +358,39 @@ def bus_stats(since_ms: Optional[int] = Query(None, description="Фильтр п
     except Exception as e:
         return JSONResponse({"status": "error", "error": f"{type(e).__name__}: {e}"}, status_code=500)
 
+# --------- Новые графики (SVG) ----------
+@app.get("/chart/test")
+def chart_test(
+    symbol: Optional[str] = Query(None),
+    timeframe: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=2, le=5000),
+) -> Response:
+    sym = normalize_symbol(symbol or getattr(CFG, "SYMBOL", "BTC/USDT"))
+    tf = normalize_timeframe(timeframe or getattr(CFG, "TIMEFRAME", "1h"))
+    n = int(limit or getattr(CFG, "LIMIT_BARS", 300))
+    try:
+        ohlcv = BREAKER.call(lambda: BROKER.fetch_ohlcv(sym, tf, n), key="broker.fetch_ohlcv", timeout=5.0)
+        closes = [float(x[4]) for x in ohlcv if x and len(x) >= 5]
+    except Exception:
+        closes = []
+    svg = render_price_spark_svg(closes, title=f"{sym} {tf}")
+    return Response(content=svg, media_type="image/svg+xml")
+
+@app.get("/chart/profit")
+def chart_profit(
+    symbol: Optional[str] = Query(None),
+    window: Optional[int] = Query(100, ge=2, le=2000),
+) -> Response:
+    sym = normalize_symbol(symbol or getattr(CFG, "SYMBOL", "BTC/USDT"))
+    pnls: List[float] = []
+    try:
+        if hasattr(REPOS.trades, "last_closed_pnls"):
+            pnls = [float(x) for x in REPOS.trades.last_closed_pnls(int(window or 100)) if x is not None]  # type: ignore
+    except Exception:
+        pnls = []
+    svg = render_profit_curve_svg(pnls, title=f"PnL {sym}")
+    return Response(content=svg, media_type="image/svg+xml")
+# ----------------------------------------
 
 @app.get("/context")
 def get_market_context() -> JSONResponse:
@@ -445,5 +477,5 @@ async def telegram_webhook(
     except Exception:
         update = {}
 
-    resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS)
+    resp = tg_adapter.handle_update(update, CFG, BROKER, HTTP, bus=BUS, repos=REPOS)
     return JSONResponse(resp)
