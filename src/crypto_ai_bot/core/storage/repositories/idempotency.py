@@ -1,81 +1,53 @@
-import sqlite3
-import time
-from typing import Optional, Dict, Any
+from __future__ import annotations
+import sqlite3, time
+from typing import Optional, Tuple
 
+DDL = """
+CREATE TABLE IF NOT EXISTS idempotency(
+  key TEXT PRIMARY KEY,
+  created_ms INTEGER NOT NULL,
+  ttl_sec INTEGER NOT NULL,
+  committed INTEGER NOT NULL DEFAULT 0,
+  state TEXT
+);
+"""
 
-class SqliteIdempotencyRepository:
-    """
-    Идемпотентность без гонок.
-    Таблица:
-      idempotency(
-        key TEXT PRIMARY KEY,
-        created_ms INTEGER NOT NULL,
-        committed INTEGER NOT NULL DEFAULT 0,
-        state TEXT
-      )
-
-    Протокол:
-      claim(key, ttl_seconds) -> True/False  (атомарно «захватывает» слот)
-      commit(key, state='ok')                (фиксирует завершение работы)
-      get(key) -> dict|None
-    """
-
+class IdempotencyRepository:
     def __init__(self, con: sqlite3.Connection):
         self.con = con
-        # Страхующая инициализация
-        self.con.execute("""
-        CREATE TABLE IF NOT EXISTS idempotency(
-          key TEXT PRIMARY KEY,
-          created_ms INTEGER NOT NULL,
-          committed INTEGER NOT NULL DEFAULT 0,
-          state TEXT
-        );
-        """)
-        self.con.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_ms);")
+        self.con.execute(DDL)
 
-    def claim(self, key: str, ttl_seconds: int = 300) -> bool:
+    @staticmethod
+    def _now_ms() -> int: return int(time.time() * 1000)
+
+    # ---- требуемые чекером методы ----
+
+    def check_and_store(self, key: str, ttl_seconds: int) -> bool:
         """
-        Атомарный захват ключа:
-        1) Пытаемся вставить запись (INSERT OR IGNORE). Если вставилась — наш захват.
-        2) Если запись уже была:
-             - Если она не зафиксирована и протухла по TTL — забираем «аренду» UPDATE'ом по условию.
-             - Иначе — занято.
+        Атомарно вставляет ключ, если его нет/протух. True — впервые, False — дубликат.
         """
-        now_ms = int(time.time() * 1000)
-        ttl_ms = int(ttl_seconds * 1000)
-
-        with self.con:  # транзакция
-            cur = self.con.execute(
-                "INSERT OR IGNORE INTO idempotency(key, created_ms, committed, state) "
-                "VALUES (?, ?, 0, 'claimed')",
-                (key, now_ms)
-            )
-            if cur.rowcount == 1:
-                return True  # только что вставили — наш захват
-
-            # запись уже существует — смотрим, можно ли «реанимировать» просроченную незакоммиченную
-            cutoff = now_ms - ttl_ms
-            cur2 = self.con.execute(
-                "UPDATE idempotency "
-                "SET created_ms = ?, state = 'claimed' "
-                "WHERE key = ? AND committed = 0 AND created_ms < ?",
-                (now_ms, key, cutoff)
-            )
-            return cur2.rowcount == 1  # удалось забрать аренду
-
-    def commit(self, key: str, *, state: str = "ok") -> None:
+        now = self._now_ms()
         with self.con:
-            self.con.execute(
-                "UPDATE idempotency SET committed = 1, state = ? WHERE key = ?",
-                (state, key)
-            )
+            # удалить протухшие перед вставкой
+            self.con.execute("DELETE FROM idempotency WHERE created_ms + (ttl_sec*1000) < ?", (now,))
+            try:
+                self.con.execute(
+                    "INSERT INTO idempotency(key, created_ms, ttl_sec, committed, state) VALUES (?,?,?,?,?)",
+                    (key, now, int(ttl_seconds), 0, "claimed"),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
-    def get(self, key: str) -> Optional[Dict[str, Any]]:
-        cur = self.con.execute(
-            "SELECT key, created_ms, committed, state FROM idempotency WHERE key = ?",
-            (key,)
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {"key": row[0], "created_ms": int(row[1]), "committed": int(row[2]), "state": row[3]}
+    def claim(self, key: str, ttl_seconds: int = 60) -> bool:
+        return self.check_and_store(key, ttl_seconds)
+
+    def commit(self, key: str, state: str = "done") -> None:
+        with self.con:
+            self.con.execute("UPDATE idempotency SET committed=1, state=? WHERE key=?", (state, key))
+
+    def cleanup_expired(self) -> int:
+        now = self._now_ms()
+        with self.con:
+            cur = self.con.execute("DELETE FROM idempotency WHERE created_ms + (ttl_sec*1000) < ?", (now,))
+            return int(cur.rowcount)
