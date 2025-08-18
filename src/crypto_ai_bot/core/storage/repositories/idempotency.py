@@ -1,66 +1,99 @@
+# src/crypto_ai_bot/core/storage/repositories/idempotency.py
 from __future__ import annotations
-import sqlite3, time
+import sqlite3
+import time
 from typing import Optional
 
-DDL = """
-CREATE TABLE IF NOT EXISTS idempotency(
-  key TEXT PRIMARY KEY,
-  created_ms INTEGER NOT NULL,
-  committed INTEGER NOT NULL DEFAULT 0,
-  state TEXT NOT NULL DEFAULT 'claimed'
-);
-"""
-IDX = "CREATE UNIQUE INDEX IF NOT EXISTS idx_idem_key ON idempotency(key);"
+from crypto_ai_bot.utils.idempotency import validate_key
 
-class IdempotencyRepository:
+class SqliteIdempotencyRepository:
+    """
+    Простой repo для идемпотентности (SQLite).
+    Таблица:
+      key TEXT PRIMARY KEY
+      created_ms INTEGER NOT NULL
+      committed INTEGER NOT NULL DEFAULT 0
+      state TEXT
+    """
+
     def __init__(self, con: sqlite3.Connection):
         self.con = con
-        self.con.execute(DDL)
-        self.con.execute(IDX)
+        self.con.execute("""
+        CREATE TABLE IF NOT EXISTS idempotency(
+            key TEXT PRIMARY KEY,
+            created_ms INTEGER NOT NULL,
+            committed INTEGER NOT NULL DEFAULT 0,
+            state TEXT
+        );
+        """)
 
-    def _now_ms(self) -> int:
-        return int(time.time() * 1000)
-
-    def cleanup_expired(self, ttl_seconds: int = 300) -> int:
-        """Удаляет старые ключи, у которых TTL вышел (и не зафиксированы)."""
-        now = self._now_ms()
-        limit_ms = now - int(ttl_seconds) * 1000
-        with self.con:
-            cur = self.con.execute(
-                "DELETE FROM idempotency WHERE committed=0 AND created_ms < ?", (limit_ms,)
-            )
-        return cur.rowcount
-
-    # --- основной атомарный метод ---
+    # ---- API ----
 
     def check_and_store(self, key: str, ttl_seconds: int = 300) -> bool:
         """
-        Атомарная попытка «захватить» ключ.
-        True  -> мы первые (можно выполнять действие)
-        False -> ключ уже есть/просрочен (дубликат или устаревший)
+        Атомарно пытается «забронировать» ключ.
+        Возвращает True, если бронь успешна (можно выполнять действие),
+        False — если ключ уже существует и ещё «живой» (дубликат).
+        Исключение ValueError — если ключ неверного формата.
         """
-        now = self._now_ms()
-        # 1) пробуем вставить (если ключ уже есть – вставка проигнорируется)
+        if not validate_key(key):
+            raise ValueError(f"invalid idempotency key: {key}")
+
+        now = int(time.time() * 1000)
+        ttl_ms = int(ttl_seconds) * 1000
+
         with self.con:
+            row = self.con.execute(
+                "SELECT created_ms, committed FROM idempotency WHERE key = ?",
+                (key,)
+            ).fetchone()
+
+            if row:
+                created_ms, committed = int(row[0]), int(row[1])
+                if committed:
+                    return False  # уже зафиксирован выполненный запрос
+                # некоммитнутая запись: проверяем TTL
+                if now - created_ms < ttl_ms:
+                    return False  # ещё свежая => дубликат
+                # просрочена: перезапишем
+                self.con.execute(
+                    "UPDATE idempotency SET created_ms=?, committed=0, state='claimed' WHERE key=?",
+                    (now, key),
+                )
+                return True
+
+            # нет записи — создаём бронь
             self.con.execute(
-                "INSERT OR IGNORE INTO idempotency(key, created_ms, committed, state) VALUES (?,?,0,'claimed')",
+                "INSERT INTO idempotency(key, created_ms, committed, state) VALUES (?,?,0,'claimed')",
                 (key, now),
             )
-        # 2) проверяем текущее состояние ключа
-        row = self.con.execute("SELECT created_ms, committed FROM idempotency WHERE key=?", (key,)).fetchone()
-        if row is None:
-            return False
-        created_ms, committed = int(row[0]), int(row[1])
-        if committed:
-            return False
-        # TTL ещё не вышел => наш захват валиден
-        if (now - created_ms) <= int(ttl_seconds) * 1000:
             return True
-        # просрочено – трактуем как нельзя выполнять
-        return False
 
     def commit(self, key: str) -> None:
+        """Помечает запись как завершённую (больше не дубликат)."""
         with self.con:
             self.con.execute(
-                "UPDATE idempotency SET committed=1, state='committed' WHERE key=?", (key,)
+                "UPDATE idempotency SET committed=1, state='committed' WHERE key=?",
+                (key,),
             )
+
+    def cleanup_expired(self, ttl_seconds: int = 300) -> int:
+        """
+        Удаляет все НЕкоммитнутые записи старше TTL.
+        Возвращает число удалённых строк.
+        """
+        now = int(time.time() * 1000)
+        ttl_ms = int(ttl_seconds) * 1000
+        with self.con:
+            cur = self.con.execute(
+                "DELETE FROM idempotency WHERE committed=0 AND (? - created_ms) > ?",
+                (now, ttl_ms),
+            )
+            return int(cur.rowcount or 0)
+
+    # (опционально) если где-то нужно посмотреть сырое состояние:
+    def get(self, key: str) -> Optional[tuple]:
+        return self.con.execute(
+            "SELECT key, created_ms, committed, state FROM idempotency WHERE key=?",
+            (key,),
+        ).fetchone()
