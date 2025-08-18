@@ -1,53 +1,75 @@
-# src/crypto_ai_bot/utils/rate_limit.py
+# src/crypto_ai_bot/core/use_cases/evaluate.py
 from __future__ import annotations
-import threading
-import time
-from typing import Dict
+
+from typing import Any, Dict, Optional
+
+from crypto_ai_bot.core.signals.builder import build as build_features
+from crypto_ai_bot.core.signals.policy import decide as decide_policy
+from crypto_ai_bot.core.use_cases.place_order import place_order
+from crypto_ai_bot.core.brokers.symbols import normalize_symbol
+from crypto_ai_bot.utils.rate_limit import MultiLimiter
 
 
-class TokenBucket:
-    """Простой thread-safe токен-бакет."""
-    def __init__(self, rate_per_sec: float, capacity: float | None = None):
-        self.rate = float(max(0.000001, rate_per_sec))
-        self.capacity = float(capacity if capacity is not None else rate_per_sec)
-        self.tokens = self.capacity
-        self.updated = time.monotonic()
-        self._lock = threading.Lock()
-
-    def try_acquire(self, tokens: float = 1.0) -> bool:
-        with self._lock:
-            now = time.monotonic()
-            elapsed = max(0.0, now - self.updated)
-            self.updated = now
-            # пополнение
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return True
-            return False
-
-
-class MultiLimiter:
+def evaluate(
+    *,
+    cfg: Any,
+    broker: Any,
+    positions_repo: Any,
+    symbol: Optional[str] = None,
+    external: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
-    Набор бакетов по именам. Пример:
-      lim = MultiLimiter(global_rps=10, write_rps=5)
-      lim.try_acquire("global")
+    ЧИСТАЯ оценка без торговых операций.
+    Возвращает {'decision': { 'action': 'buy|sell|hold', ...}, 'symbol': ... , 'features':..., 'context':... }
     """
-    def __init__(self, **rates: float):
-        self._buckets: Dict[str, TokenBucket] = {}
-        for name, r in rates.items():
-            if not name.endswith("_rps"):
-                # допустим и без _rps; нормализуем
-                key = name
-            else:
-                key = name[:-4]
-            self._buckets[key] = TokenBucket(rate_per_sec=float(r))
+    sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
+    feat = build_features(sym, cfg=cfg, broker=broker, positions_repo=positions_repo, external=external)
+    decision = decide_policy(feat.get("features", {}), feat.get("context", {}))
+    return {"decision": decision, "symbol": sym, "features": feat.get("features"), "context": feat.get("context")}
 
-    def try_acquire(self, name: str = "global", tokens: float = 1.0) -> bool:
-        b = self._buckets.get(name)
-        if b is None:
-            # если не настроен конкретный бакет — используем «global», если есть
-            b = self._buckets.get("global")
-            if b is None:
-                return True
-        return b.try_acquire(tokens)
+
+def evaluate_and_maybe_execute(
+    *,
+    cfg: Any,
+    broker: Any,
+    trades_repo: Any,
+    positions_repo: Any,
+    exits_repo: Any,
+    idempotency_repo: Optional[Any],
+    limiter: Optional[MultiLimiter],
+    symbol: Optional[str] = None,
+    external: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Оценка + (опционально) исполнение. Если action in {'buy','sell'} и лимитер пропускает — ставим market-ордер.
+    """
+    sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
+
+    feat = build_features(sym, cfg=cfg, broker=broker, positions_repo=positions_repo, external=external)
+    decision = decide_policy(feat.get("features", {}), feat.get("context", {}))
+    action = (decision or {}).get("action") or (decision or {}).get("side")
+
+    result: Dict[str, Any] = {"decision": decision, "symbol": sym}
+
+    if action not in ("buy", "sell"):
+        result["note"] = "hold"
+        return result
+
+    # rate limit перед исполнением
+    if limiter is not None and not limiter.try_acquire("orders"):
+        result["note"] = "rate_limited"
+        result["executed"] = {"accepted": False, "error": "rate_limited"}
+        return result
+
+    executed = place_order(
+        cfg=cfg,
+        broker=broker,
+        trades_repo=trades_repo,
+        positions_repo=positions_repo,
+        exits_repo=exits_repo,
+        symbol=sym,
+        side=str(action),
+        idempotency_repo=idempotency_repo,
+    )
+    result["executed"] = executed
+    return result

@@ -1,76 +1,86 @@
 # src/crypto_ai_bot/core/signals/builder.py
 from __future__ import annotations
-from typing import Any, Dict, Optional, List
+
+import logging
+from typing import Any, Dict, Optional
+
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
+logger = logging.getLogger("signals.builder")
 
-def _last_price(broker: Any, symbol: str) -> float:
-    try:
-        t = broker.fetch_ticker(symbol)
-        return _safe_float(t.get("last") or t.get("close") or 0.0)
-    except Exception:
-        return 0.0
 
-def _internal_metrics(*, broker: Any = None, positions_repo: Any = None, symbol: str) -> Dict[str, Any]:
-    """Собираем внутренние метрики (всегда безопасно, без падений)."""
-    out: Dict[str, Any] = {"open_positions": None, "notional_exposure_usd": None, "time_drift_ms": None}
-    # позиции
+def _safe(callable_, name: str, ctx_errors: list) -> Optional[float]:
     try:
-        if positions_repo and hasattr(positions_repo, "get_open"):
-            rows: List[Dict[str, Any]] = positions_repo.get_open()
-            out["open_positions"] = len(rows)
-            if broker:
-                total = 0.0
-                for r in rows:
-                    s = str(r.get("symbol") or symbol)
-                    qty = _safe_float(r.get("qty"), 0.0)
-                    px = _last_price(broker, s)
-                    total += qty * px
-                out["notional_exposure_usd"] = total
-    except Exception:
-        pass
-    # дрейф времени
-    try:
-        if broker:
-            from crypto_ai_bot.utils.time_sync import measure_time_drift_ms
-            m = measure_time_drift_ms(broker)
-            out["time_drift_ms"] = int(m.get("drift_ms", 0))
-    except Exception:
-        pass
-    return out
+        return float(callable_())
+    except Exception as e:
+        logger.exception("feature '%s' failed: %s", name, e)
+        ctx_errors.append({"feature": name, "error": repr(e)})
+        return None
+
 
 def build(
     symbol: str,
     *,
     cfg: Any,
-    broker: Any = None,
-    positions_repo: Any = None,
+    broker: Any,
+    positions_repo: Optional[Any] = None,
     external: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Единая точка сборки фич и контекста.
-    - external: сюда можно передать внешние индикаторы (btc_dominance, fear_greed, dxy, и т.п.)
-    - broker/positions_repo: чтобы добавить внутренние метрики (open_positions, notional_exposure_usd, time_drift_ms)
-    Возвращает: {"context": {...}, "features": {...}}
+    Единая точка построения features/context.
+    - Внутренние метрики (кол-во позиций, нотационал) считаются безопасно.
+    - Внешние индикаторы (btc_dominance/fear_greed/dxy) — по возможности.
+    - Все исключения попадают в context['errors'] и в логи.
     """
     sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
-    tf = getattr(cfg, "TIMEFRAME", "1h")
+    ctx_errors: list = []
 
-    # Контекст: минимум — символ и таймфрейм
-    context: Dict[str, Any] = {"symbol": sym, "timeframe": tf}
+    # ---- features из рыночных данных (минимум для примера) ----
+    def _last():
+        t = broker.fetch_ticker(sym)
+        return t.get("last") or t.get("close") or 0.0
 
-    # Внешние фичи (как и раньше собирались _build.py)
-    features: Dict[str, Any] = {}
-    if isinstance(external, dict):
-        features.update(external)
+    last = _safe(_last, "last_price", ctx_errors)
 
-    # Внутренние метрики
-    internal = _internal_metrics(broker=broker, positions_repo=positions_repo, symbol=sym)
-    context["internal"] = internal
+    # ---- внешние индикаторы (если переданы) ----
+    ext = external or {}
+    btc_dominance = None
+    fear_greed = None
+    dxy = None
+    if "btc_dominance" in ext:
+        btc_dominance = _safe(lambda: ext["btc_dominance"], "btc_dominance", ctx_errors)
+    if "fear_greed" in ext:
+        fear_greed = _safe(lambda: ext["fear_greed"], "fear_greed", ctx_errors)
+    if "dxy" in ext:
+        dxy = _safe(lambda: ext["dxy"], "dxy", ctx_errors)
 
-    return {"context": context, "features": features}
+    # ---- внутренние метрики по позициям ----
+    open_positions = 0
+    open_notional = 0.0
+    if positions_repo is not None:
+        try:
+            rows = positions_repo.get_open()
+            open_positions = len(rows)
+            if last:
+                for r in rows:
+                    qty = float(r.get("qty") or 0.0)
+                    open_notional += qty * float(last or 0.0)
+        except Exception as e:
+            logger.exception("positions_repo.get_open failed: %s", e)
+            ctx_errors.append({"feature": "positions_open", "error": repr(e)})
+
+    features = {
+        "last": last,
+        "btc_dominance": btc_dominance,
+        "fear_greed": fear_greed,
+        "dxy": dxy,
+    }
+
+    context = {
+        "symbol": sym,
+        "open_positions": open_positions,
+        "open_notional": float(open_notional),
+        "errors": ctx_errors,
+    }
+
+    return {"features": features, "context": context}
