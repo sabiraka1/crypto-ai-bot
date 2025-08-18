@@ -1,283 +1,169 @@
 # src/crypto_ai_bot/core/indicators/unified.py
-from __future__ import annotations
-
 """
-Единый векторный набор индикаторов без I/O и без ENV.
-Цели:
-- Консистентность расчётов во всей системе
-- Устойчивость к NaN/коротким рядам
-- Совместимость с TradingView/TA-Lib (в пределах безта-lib реализации)
+Единый модуль расчёта индикаторов без внешних зависимостей (pandas/ta не требуются).
+Все функции принимают списки/кортежи float и возвращают списки той же длины
+(с None на префиксе, где данных ещё недостаточно).
+
+Доступно:
+- sma(values, period)
+- ema(values, period)
+- rsi(closes, period=14)         # Wilder
+- macd(closes, fast=12, slow=26, signal=9) -> (macd, signal, hist)
+- bollinger(closes, period=20, k=2.0) -> (mid, upper, lower)
+- compute_all(closes, *, rsi_period=14, macd_fast=12, macd_slow=26, macd_signal=9, bb_period=20, bb_k=2.0)
 """
 
-from typing import Tuple
-
-import numpy as np
-import pandas as pd
-
-__all__ = [
-    "sma",
-    "ema",
-    "rsi",
-    "macd",
-    "true_range",
-    "atr",
-    "atr_last",
-    "atr_pct",
-    "calculate_all_indicators",
-]
+from math import sqrt
+from typing import Iterable, List, Tuple, Optional
 
 
-# ───────────────────────────── helpers ─────────────────────────────
-
-def _as_series(x: pd.Series | pd.DataFrame | np.ndarray | list | tuple) -> pd.Series:
-    if isinstance(x, pd.Series):
-        return x.astype(float)
-    if isinstance(x, pd.DataFrame):
-        # берём первый столбец
-        return x.iloc[:, 0].astype(float)
-    return pd.Series(x, dtype=float)
+Number = float
 
 
-def _safe_shift(s: pd.Series, n: int = 1) -> pd.Series:
-    return s.shift(n)
+def _as_list(values: Iterable[Number]) -> List[Number]:
+    return list(values)
 
 
-def _min_periods(n: int) -> int:
-    # Требуем, чтобы первые значения были NaN до накопления окна
-    return max(1, int(n))
+def sma(values: Iterable[Number], period: int) -> List[Optional[Number]]:
+    v = _as_list(values)
+    n = len(v)
+    out: List[Optional[Number]] = [None] * n
+    if period <= 0:
+        return out
+    s = 0.0
+    for i in range(n):
+        s += v[i]
+        if i >= period:
+            s -= v[i - period]
+        if i >= period - 1:
+            out[i] = s / period
+    return out
 
 
-# ───────────────────────────── базовые индикаторы ─────────────────────────────
-
-def sma(s: pd.Series, n: int) -> pd.Series:
-    s = _as_series(s)
-    return s.rolling(window=n, min_periods=_min_periods(n)).mean()
-
-
-def ema(s: pd.Series, n: int) -> pd.Series:
-    """EMA с adjust=False (как в большинстве торговых библиотек)."""
-    s = _as_series(s)
-    return s.ewm(span=n, adjust=False, min_periods=_min_periods(n)).mean()
-
-
-def rsi(s: pd.Series, n: int = 14) -> pd.Series:
-    """
-    RSI по Уайлдеру (Wilder):
-      - delta = diff(close)
-      - gains = max(delta, 0); losses = max(-delta, 0)
-      - smoothed EMA (alpha=1/n) для gains/losses
-      - RSI = 100 - 100/(1 + avg_gain/avg_loss)
-    """
-    s = _as_series(s)
-    delta = s.diff()
-
-    up = delta.clip(lower=0.0)
-    down = (-delta).clip(lower=0.0)
-
-    # Уайлдер: alpha = 1/n, adjust=False
-    gain = up.ewm(alpha=1.0 / n, adjust=False, min_periods=_min_periods(n)).mean()
-    loss = down.ewm(alpha=1.0 / n, adjust=False, min_periods=_min_periods(n)).mean()
-
-    rs = gain / loss.replace(0.0, np.nan)
-    out = 100.0 - (100.0 / (1.0 + rs))
-    return out.fillna(50.0)  # нейтральное значение для начальной части
+def ema(values: Iterable[Number], period: int) -> List[Optional[Number]]:
+    v = _as_list(values)
+    n = len(v)
+    out: List[Optional[Number]] = [None] * n
+    if period <= 0:
+        return out
+    alpha = 2.0 / (period + 1.0)
+    s = 0.0
+    # первичное значение — SMA(period)
+    cnt = 0
+    for i in range(n):
+        s += v[i]
+        cnt += 1
+        if cnt == period:
+            s /= period
+            out[i] = s
+            start = i + 1
+            break
+    else:
+        return out  # недостаточно данных
+    # сглаживание
+    prev = s
+    for i in range(start, n):
+        prev = alpha * v[i] + (1.0 - alpha) * prev
+        out[i] = prev
+    return out
 
 
-def true_range(h: pd.Series, l: pd.Series, c: pd.Series) -> pd.Series:
-    """TR = max( high - low, |high - prev_close|, |low - prev_close| )."""
-    h = _as_series(h)
-    l = _as_series(l)
-    c = _as_series(c)
-    pc = _safe_shift(c, 1)
-    a = (h - l).abs()
-    b = (h - pc).abs()
-    d = (l - pc).abs()
-    return pd.concat([a, b, d], axis=1).max(axis=1)
+def rsi(closes: Iterable[Number], period: int = 14) -> List[Optional[Number]]:
+    c = _as_list(closes)
+    n = len(c)
+    out: List[Optional[Number]] = [None] * n
+    if period <= 0 or n < period + 1:
+        return out
 
+    gains = 0.0
+    losses = 0.0
+    # первые period изменений
+    for i in range(1, period + 1):
+        ch = c[i] - c[i - 1]
+        if ch >= 0:
+            gains += ch
+        else:
+            losses -= ch
+    avg_gain = gains / period
+    avg_loss = losses / period
+    rs = (avg_gain / avg_loss) if avg_loss != 0 else float("inf")
+    out[period] = 100.0 - (100.0 / (1.0 + rs))
 
-def atr(h: pd.Series, l: pd.Series, c: pd.Series, n: int = 14) -> pd.Series:
-    """
-    ATR Уайлдера: EMA(TR, alpha=1/n, adjust=False).
-    """
-    tr = true_range(h, l, c)
-    return tr.ewm(alpha=1.0 / n, adjust=False, min_periods=_min_periods(n)).mean()
-
-
-def atr_last(h: pd.Series, l: pd.Series, c: pd.Series, n: int = 14) -> float:
-    """Последнее валидное значение ATR (float)."""
-    series = atr(h, l, c, n=n)
-    last_valid = series.dropna()
-    return float(last_valid.iloc[-1]) if not last_valid.empty else 0.0
-
-
-def atr_pct(h: pd.Series, l: pd.Series, c: pd.Series, n: int = 14) -> pd.Series:
-    """
-    ATR в процентах от close: 100 * ATR / close.
-    Если close=0 → NaN (оставляем NaN).
-    """
-    c = _as_series(c)
-    a = atr(h, l, c, n=n)
-    return (a / c.replace(0.0, np.nan)) * 100.0
+    for i in range(period + 1, n):
+        ch = c[i] - c[i - 1]
+        gain = max(ch, 0.0)
+        loss = max(-ch, 0.0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rs = (avg_gain / avg_loss) if avg_loss != 0 else float("inf")
+        out[i] = 100.0 - (100.0 / (1.0 + rs))
+    return out
 
 
 def macd(
-    s: pd.Series,
+    closes: Iterable[Number],
     fast: int = 12,
     slow: int = 26,
-    signal: int = 9,
-) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """
-    MACD линия = EMA_fast - EMA_slow
-    Signal = EMA(MACD, signal)
-    Hist = MACD - Signal
-    """
-    s = _as_series(s)
-    ema_fast = ema(s, fast)
-    ema_slow = ema(s, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=_min_periods(signal)).mean()
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
+    signal: int = 9
+) -> Tuple[List[Optional[Number]], List[Optional[Number]], List[Optional[Number]]]:
+    c = _as_list(closes)
+    ema_fast = ema(c, fast)
+    ema_slow = ema(c, slow)
+    n = len(c)
+    line: List[Optional[Number]] = [None] * n
+    for i in range(n):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            line[i] = ema_fast[i] - ema_slow[i]
+    sig = ema([x if x is not None else 0.0 for x in line], signal)  # ema игнорит префикс None
+    hist: List[Optional[Number]] = [None] * n
+    for i in range(n):
+        if line[i] is not None and sig[i] is not None:
+            hist[i] = line[i] - sig[i]
+    return line, sig, hist
 
 
-# ───────────────────────────── составная «витрина» ─────────────────────────────
+def bollinger(
+    closes: Iterable[Number],
+    period: int = 20,
+    k: float = 2.0
+) -> Tuple[List[Optional[Number]], List[Optional[Number]], List[Optional[Number]]]:
+    c = _as_list(closes)
+    n = len(c)
+    mid = sma(c, period)
+    upper: List[Optional[Number]] = [None] * n
+    lower: List[Optional[Number]] = [None] * n
+    for i in range(n):
+        if i >= period - 1 and mid[i] is not None:
+            s2 = 0.0
+            m = mid[i]
+            for j in range(i - period + 1, i + 1):
+                d = c[j] - m
+                s2 += d * d
+            stdev = sqrt(s2 / period)
+            upper[i] = m + k * stdev
+            lower[i] = m - k * stdev
+    return mid, upper, lower
 
-def calculate_all_indicators(
-    df: pd.DataFrame,
+
+def compute_all(
+    closes: Iterable[Number],
     *,
-    ema_fast: int = 20,
-    ema_slow: int = 50,
-    rsi_len: int = 14,
-    atr_len: int = 14,
-    macd_fast: int = 12,
-    macd_slow: int = 26,
-    macd_signal: int = 9,
-) -> pd.DataFrame:
-    """
-    Добавляет в DataFrame следующие столбцы (float64):
-      - ema_fast, ema_slow
-      - rsi
-      - macd, macd_signal, macd_hist
-      - atr, atr_pct
-    Требуемые входные столбцы: 'open','high','low','close','volume'
-    Порядок строк — исходный. Индекс сохраняется.
-    """
-    required = {"open", "high", "low", "close", "volume"}
-    missing = required.difference(map(str.lower, df.columns.astype(str)))
-    # допускаем разные кейсы названий столбцов
-    cols = {c.lower(): c for c in df.columns}
-    if missing:
-        # попробуем нормализовать регистр; если всё равно не хватает — бросим KeyError
-        if not required.issubset(set(cols.keys())):
-            raise KeyError(f"OHLCV columns required: {sorted(required)}; got: {list(df.columns)}")
-
-    o = df[cols.get("open", "open")].astype(float)
-    h = df[cols.get("high", "high")].astype(float)
-    l = df[cols.get("low", "low")].astype(float)
-    c = df[cols.get("close", "close")].astype(float)
-
-    out = df.copy()
-
-    # EMA
-    out["ema_fast"] = ema(c, ema_fast).astype(float)
-    out["ema_slow"] = ema(c, ema_slow).astype(float)
-
-    # RSI
-    out["rsi"] = rsi(c, rsi_len).astype(float)
-
-    # MACD
-    macd_line, signal_line, hist = macd(c, macd_fast, macd_slow, macd_signal)
-    out["macd"] = macd_line.astype(float)
-    out["macd_signal"] = signal_line.astype(float)
-    out["macd_hist"] = hist.astype(float)
-
-    # ATR & ATR%
-    a = atr(h, l, c, atr_len)
-    out["atr"] = a.astype(float)
-    out["atr_pct"] = atr_pct(h, l, c, atr_len).astype(float)
-
-    return out
-
-# --- adapter for signals/_build.py API (no math changes) ----------------------
-from typing import Any, Optional, Dict, List
-
-def _ohlcv_to_df(ohlcv: List[List[float]]):
-    import pandas as pd
-    norm = []
-    for row in ohlcv:
-        r = list(row)
-        if len(r) < 6:
-            r = (r + [0.0])[:6]
-        norm.append(r[:6])
-    return pd.DataFrame(norm, columns=["ts", "open", "high", "low", "close", "volume"])
-
-def build_indicators(
-    broker: Any = None,
-    symbol: Optional[str] = None,
-    timeframe: Optional[str] = None,
-    *,
-    limit: int = 300,
-    ohlcv: Optional[List[List[float]]] = None,
-    ema_fast: int = 20,
-    ema_slow: int = 50,
     rsi_period: int = 14,
-    atr_period: int = 14,
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
-) -> Dict[str, Any]:
-    """
-    Thin wrapper around calculate_all_indicators() that keeps your math intact.
-    Returns { "df": DataFrame, "features": {ema_fast, ema_slow, rsi, macd_hist, atr_pct} }.
-    """
-    # 1) get OHLCV
-    if ohlcv is None and broker is not None and symbol and timeframe:
-        try:
-            ohlcv = broker.fetch_ohlcv(symbol, timeframe, limit=limit)
-        except Exception:
-            ohlcv = None
-    if not ohlcv:
-        return {"df": None, "features": {}}
-
-    # 2) compute via existing vectorized logic (no math changes)
-    df = _ohlcv_to_df(ohlcv)
-
-    # Build kwargs for calculate_all_indicators using best-effort mapping
-    kwargs = {}
-    kwargs.update({
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "macd_fast": macd_fast,
-        "macd_slow": macd_slow,
-        "macd_signal": macd_signal,
-    })
-    param_set = {}
-    if "rsi_len" in param_set:
-        kwargs["rsi_len"] = rsi_period
-    else:
-        kwargs["rsi_len"] = rsi_period
-    if "atr_len" in param_set:
-        kwargs["atr_len"] = atr_period
-    else:
-        kwargs["atr_len"] = atr_period
-
-    df2 = calculate_all_indicators(df, **kwargs)
-
-    last = df2.iloc[-1]
-    features = {
-        "ema_fast": float(last.get("ema_fast", 0.0)),
-        "ema_slow": float(last.get("ema_slow", 0.0)),
-        "rsi": float(last.get("rsi", 0.0)),
-        "macd_hist": float(last.get("macd_hist", 0.0)),
-        "atr_pct": float(last.get("atr_pct", 0.0)),
-    }
-    return {"df": df2, "features": features}
-
-# export symbol
-try:
-    __all__.append("build_indicators")   # type: ignore
-except Exception:
-    try:
-        __all__ = list(set(globals().get("__all__", [])) | {"build_indicators"})
-    except Exception:
-        __all__ = ["build_indicators"]
+    bb_period: int = 20,
+    bb_k: float = 2.0
+) -> dict:
+    c = _as_list(closes)
+    out = {}
+    out["rsi"] = rsi(c, rsi_period)
+    macd_line, macd_sig, macd_hist = macd(c, macd_fast, macd_slow, macd_signal)
+    out["macd"] = macd_line
+    out["macd_signal"] = macd_sig
+    out["macd_hist"] = macd_hist
+    mid, up, lo = bollinger(c, bb_period, bb_k)
+    out["bb_mid"] = mid
+    out["bb_up"] = up
+    out["bb_lo"] = lo
+    return out
