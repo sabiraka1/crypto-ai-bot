@@ -1,81 +1,113 @@
 # src/crypto_ai_bot/utils/charts.py
 from __future__ import annotations
 
-from typing import List, Optional
-import math
+from typing import Iterable, List, Tuple, Optional
 
-def _svg_header(width: int, height: int) -> str:
-    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
 
-def _svg_footer() -> str:
-    return "</svg>"
+def _extent(vals: Iterable[float]) -> Tuple[float, float]:
+    xs = [float(v) for v in vals if v is not None]
+    if not xs:
+        return (0.0, 0.0)
+    lo = min(xs)
+    hi = max(xs)
+    if hi == lo:
+        # защитимся от деления на ноль — добавим 1%
+        pad = hi * 0.01 if hi != 0 else 1.0
+        return (lo - pad, hi + pad)
+    return (lo, hi)
 
-def _fmt(num: float) -> str:
-    # компактное форматирование до 2-4 значащих
-    if num == 0:
-        return "0"
-    order = int(math.floor(math.log10(abs(num))))
-    digits = max(0, 2 - order)
-    return f"{num:.{min(4, max(0, digits))}f}"
 
-def _polyline(points: List[tuple[float, float]], stroke: str = "#111", stroke_width: int = 2) -> str:
-    ps = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-    return f'<polyline fill="none" stroke="{stroke}" stroke-width="{stroke_width}" points="{ps}"/>'
+def _polyline(points: List[Tuple[float, float]]) -> str:
+    return " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
 
-def _text(x: float, y: float, s: str, size: int = 12, anchor: str = "start", color: str = "#111") -> str:
-    return f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{color}" text-anchor="{anchor}" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">{s}</text>'
 
-def _box(width: int, height: int, padding: int) -> str:
-    return f'<rect x="0" y="0" width="{width}" height="{height}" fill="#fff"/><rect x="{padding}" y="{padding}" width="{width-2*padding}" height="{height-2*padding}" fill="#fff" stroke="#e5e7eb"/>'
+def _scale_series(series: List[float], w: float, h: float, pad: float = 8.0) -> List[Tuple[float, float]]:
+    if not series:
+        return []
+    lo, hi = _extent(series)
+    rng = (hi - lo) if hi != lo else 1.0
+    n = len(series)
+    if n == 1:
+        n = 2  # одна точка — нарисуем вертикаль
+        series = [series[0], series[0]]
+    dx = (w - 2 * pad) / (n - 1)
+    out: List[Tuple[float, float]] = []
+    for i, v in enumerate(series):
+        x = pad + i * dx
+        # инвертируем Y (SVG-система координат сверху вниз)
+        y = pad + (h - 2 * pad) * (1.0 - (float(v) - lo) / rng)
+        out.append((x, y))
+    return out
 
-def _sparkline(values: List[float], *, width: int = 640, height: int = 240, padding: int = 24, title: Optional[str] = None, stroke: str = "#111") -> bytes:
-    if not values or len(values) < 2:
-        svg = [
-            _svg_header(width, height),
-            _box(width, height, padding),
-            _text(width/2, height/2, "no data", 14, anchor="middle", color="#9ca3af"),
-            _svg_footer(),
-        ]
-        return ("\n".join(svg)).encode("utf-8")
 
-    w = width - 2 * padding
-    h = height - 2 * padding
-    vmin = min(values)
-    vmax = max(values)
-    rng = (vmax - vmin) or 1.0
-
-    pts: List[tuple[float, float]] = []
-    n = len(values)
-    for i, v in enumerate(values):
-        x = padding + (w * i) / (n - 1)
-        # инверсия по Y: 0 внизу, max вверху
-        y = padding + h - ((v - vmin) / rng) * h
-        pts.append((x, y))
-
-    svg = [_svg_header(width, height)]
-    svg.append(_box(width, height, padding))
-    # ось Y мин/макс
-    svg.append(_text(padding + 4, padding + 12, _fmt(vmax), 11, "start", "#6b7280"))
-    svg.append(_text(padding + 4, height - padding + 12, _fmt(vmin), 11, "start", "#6b7280"))
-
+def _svg_wrap(paths: List[str], w: int, h: int, title: Optional[str] = None) -> bytes:
+    head = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="white"/>',
+    ]
     if title:
-        svg.append(_text(width/2, padding - 6, title, 13, anchor="middle", color="#111"))
+        head.append(f'<text x="12" y="20" font-family="sans-serif" font-size="14">{title}</text>')
+    body = "\n".join(paths)
+    tail = "</svg>"
+    return ("\n".join(head) + "\n" + body + "\n" + tail).encode("utf-8")
 
-    svg.append(_polyline(pts, stroke=stroke, stroke_width=2))
-    svg.append(_svg_footer())
-    return ("\n".join(svg)).encode("utf-8")
 
-def render_price_spark_svg(closes: List[float], *, title: Optional[str] = None) -> bytes:
-    return _sparkline(closes, title=title or "price", stroke="#111")
+def render_price_spark_svg(
+    closes: List[float],
+    *,
+    width: int = 640,
+    height: int = 200,
+    title: Optional[str] = None,
+) -> bytes:
+    """Простая линия цены (по close) как SVG (без зависимостей)."""
+    pts = _scale_series(closes, width, height)
+    if not pts:
+        return _svg_wrap([], width, height, title)
+    d = _polyline(pts)
+    paths = [
+        f'<polyline fill="none" stroke="#1f77b4" stroke-width="2" points="{d}"/>'
+    ]
+    # последняя точка
+    x, y = pts[-1]
+    paths.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3" fill="#1f77b4"/>')
+    return _svg_wrap(paths, width, height, title)
 
-def render_profit_curve_svg(pnls: List[float], *, title: Optional[str] = None) -> bytes:
-    # pnls — список доходностей по сделкам; строим кумулятив
-    acc: List[float] = []
+
+def render_profit_curve_svg(
+    pnls: List[float],
+    *,
+    width: int = 640,
+    height: int = 200,
+    title: Optional[str] = None,
+) -> bytes:
+    """Рисует кумулятивную доходность по последовательности PnL."""
+    cum: List[float] = []
     s = 0.0
     for p in pnls:
         try:
             s += float(p)
         except Exception:
             continue
-        acc.append(s)
-    return _sparkline(acc, title=title or "profit", stroke="#111")
+        cum.append(s)
+    pts = _scale_series(cum, width, height)
+    if not pts:
+        return _svg_wrap([], width, height, title)
+    d = _polyline(pts)
+    paths = [
+        f'<polyline fill="none" stroke="#2ca02c" stroke-width="2" points="{d}"/>'
+    ]
+    x, y = pts[-1]
+    paths.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3" fill="#2ca02c"/>')
+    return _svg_wrap(paths, width, height, title)
+
+
+def closes_from_ohlcv(ohlcv: List[List[float]]) -> List[float]:
+    """Достаёт close из стандартного OHLCV [[ts, o, h, l, c, v], ...]."""
+    out: List[float] = []
+    for row in ohlcv:
+        if len(row) >= 5:
+            try:
+                out.append(float(row[4]))
+            except Exception:
+                continue
+    return out

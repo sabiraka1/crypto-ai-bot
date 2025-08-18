@@ -16,6 +16,10 @@ from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.http_client import get_http_client
 from crypto_ai_bot.utils.alerts import AlertState, send_telegram_alert
 
+from fastapi.responses import Response
+from crypto_ai_bot.utils.charts import render_price_spark_svg, render_profit_curve_svg, closes_from_ohlcv
+from crypto_ai_bot.core.validators import validate_config
+
 from crypto_ai_bot.app.adapters import telegram as tg_adapter
 
 from crypto_ai_bot.core.brokers.base import create_broker
