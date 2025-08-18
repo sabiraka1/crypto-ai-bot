@@ -9,7 +9,15 @@ from crypto_ai_bot.utils import metrics
 from crypto_ai_bot.utils.rate_limit import rate_limit, RateLimitExceeded
 from crypto_ai_bot.core.positions.manager import PositionManager
 
-@rate_limit(max_calls=10, window=60)  # спецификация
+# IDs
+try:
+    from crypto_ai_bot.utils.logging import get_correlation_id, get_request_id
+except Exception:
+    def get_correlation_id(): return None  # type: ignore
+    def get_request_id(): return None      # type: ignore
+
+
+@rate_limit(max_calls=10, window=60)
 def place_order(
     cfg: Settings,
     broker: Any,
@@ -30,7 +38,6 @@ def place_order(
         metrics.inc("order_skip_total", {"reason": "hold"})
         return {"status": "skipped", "reason": "hold"}
 
-    # идемпотентность (spec)
     if idem_repo is not None:
         minute = int(int(decision.get("ts_ms", 0) or 0) // 60000)
         did = str(decision.get("id", ""))[:8]
@@ -49,7 +56,7 @@ def place_order(
     if side == "buy":
         snap = pm.open_or_add(symbol, size, px)
     elif side == "sell":
-        snap = pm.reduce(symbol, size, px)  # фикc: reduce_or_close -> reduce
+        snap = pm.reduce(symbol, size, px)
     else:
         return {"status": "error", "error": f"unknown_action:{action}"}
 
@@ -63,6 +70,8 @@ def place_order(
                 "qty": str(size),
                 "price": str(px),
                 "latency_ms": decision.get("latency_ms"),
+                "request_id": get_request_id(),
+                "correlation_id": get_correlation_id(),
             })
         except Exception:
             pass
