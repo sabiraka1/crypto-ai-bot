@@ -1,129 +1,172 @@
 # src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
-
 import time
+from collections import deque
+from threading import Lock
+from typing import Any, Dict, Optional
 
-from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
-from crypto_ai_bot.core.brokers.base import ExchangeInterface
-from crypto_ai_bot.core.brokers.symbols import to_exchange_symbol
+import ccxt  # синхронная версия под ваш server.py
+
+from .base import ExchangeInterface
+from ..events.bus import get_event_bus  # если у вас make_bus в app — bus сюда придёт через __init__
+from ...utils.metrics import metrics
 
 try:
-    import ccxt  # type: ignore
-except Exception:  # pragma: no cover
-    ccxt = None  # type: ignore
+    from ...utils.circuit_breaker import CircuitBreaker
+except Exception:
+    class CircuitBreaker:  # безопасный заглушечный fallback
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
 
+# Простой локальный rate-limit (token bucket) поверх ccxt.enableRateLimit
+class _TokenBucket:
+    def __init__(self, calls: int, per_seconds: float):
+        self.calls = max(1, int(calls))
+        self.per = float(per_seconds)
+        self._ts = deque()
+        self._lock = Lock()
+
+    def acquire(self):
+        with self._lock:
+            now = time.monotonic()
+            while self._ts and (now - self._ts[0]) >= self.per:
+                self._ts.popleft()
+            if len(self._ts) >= self.calls:
+                sleep_for = self.per - (now - self._ts[0])
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                    now = time.monotonic()
+                    while self._ts and (now - self._ts[0]) >= self.per:
+                        self._ts.popleft()
+            self._ts.append(time.monotonic())
 
 class CCXTExchange(ExchangeInterface):
     """
-    CCXT-адаптер с защитой:
-      • все сетевые вызовы через CircuitBreaker
-      • мягкие тайм-ауты, метрики, нормализация символа
+    Синхронный CCXT-адаптер под FastAPI-сервер (sync handlers).
+    - Локальный RL поверх ccxt.enableRateLimit
+    - CircuitBreaker на HTTP-вызовы
+    - Gate.io clientOrderId → 'text'
+    - Метрики: histogram/errs + DLQ на bus
     """
+    def __init__(self, settings, bus=None, exchange_name: str = None):
+        self.settings = settings
+        self.exchange_name = (exchange_name or getattr(settings, "EXCHANGE", "gateio")).lower()
+        self.bus = bus or get_event_bus()
+        self.breaker = CircuitBreaker(f"ccxt.{self.exchange_name}.http")
 
-    def __init__(self, client: Any, *, cfg: Any, breaker: Optional[CircuitBreaker] = None) -> None:
-        self._client = client
-        self.cfg = cfg
-        self._breaker = breaker or CircuitBreaker()
-        self._bus = None
+        timeout_ms = int(getattr(settings, "HTTP_TIMEOUT_MS", 15000))
+        klass = getattr(ccxt, self.exchange_name)
+        self.ccxt = klass({
+            "apiKey": getattr(settings, "API_KEY", None),
+            "secret": getattr(settings, "API_SECRET", None),
+            "enableRateLimit": True,
+            "timeout": timeout_ms,
+        })
 
-    # ------ фабрика, которую вызывает create_broker() ------
-    @classmethod
-    def from_settings(cls, cfg) -> "CCXTExchange":
-        if ccxt is None:
-            raise RuntimeError("ccxt is not installed")
+        # локальный бюджет вызовов; по умолчанию 8 rps
+        calls = int(getattr(settings, "CCXT_LOCAL_RL_CALLS", 8))
+        window = float(getattr(settings, "CCXT_LOCAL_RL_WINDOW", 1.0))
+        self._bucket = _TokenBucket(calls=calls, per_seconds=window)
 
-        ex_name = str(getattr(cfg, "EXCHANGE", "binance")).lower()
-        if not hasattr(ccxt, ex_name):
-            raise RuntimeError(f"unsupported exchange: {ex_name}")
+        # метрики
+        self.m_lat = {
+            "fetch_ticker": metrics.histogram("ccxt_fetch_ticker_seconds", "Latency of fetch_ticker", ["ex"]),
+            "fetch_ohlcv":  metrics.histogram("ccxt_fetch_ohlcv_seconds", "Latency of fetch_ohlcv", ["ex"]),
+            "create_order": metrics.histogram("ccxt_create_order_seconds", "Latency of create_order", ["ex"]),
+            "cancel_order": metrics.histogram("ccxt_cancel_order_seconds", "Latency of cancel_order", ["ex"]),
+        }
+        self.m_err = metrics.counter("ccxt_errors_total", "Total CCXT errors", ["ex", "op"])
 
-        klass = getattr(ccxt, ex_name)
-        opts: Dict[str, Any] = {"enableRateLimit": True, "timeout": 10_000}
+    # ---- helpers ----
+    def _with_rl(self):
+        self._bucket.acquire()
 
-        api_key = getattr(cfg, "API_KEY", None)
-        api_secret = getattr(cfg, "API_SECRET", None)
-        subaccount = getattr(cfg, "SUBACCOUNT", None)
+    def _obs(self, op: str, t0: float):
+        self.m_lat[op].labels(self.exchange_name).observe(time.perf_counter() - t0)
 
-        if api_key and api_secret:
-            opts["apiKey"] = api_key
-            opts["secret"] = api_secret
-            if subaccount:
-                # у некоторых бирж это 'headers'/'uid' — оставим мягко:
-                opts["headers"] = {"FTX-SUBACCOUNT": subaccount}
-
-        client = klass(opts)
-        return cls(client, cfg=cfg, breaker=CircuitBreaker())
-
-    # необязательная шина событий
-    def set_bus(self, bus) -> None:
-        self._bus = bus
-
-    # ------ helpers ------
-    def _call(self, fn, *, key: str, timeout: float = 2.5):
-        t0 = time.time()
+    def _dlq(self, op: str, err: Exception, extra: Optional[Dict[str, Any]] = None):
         try:
-            res = self._breaker.call(fn, key=key, timeout=timeout)
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": key, "code": "200"})
-            return res
+            payload = {"op": op, "exchange": self.exchange_name, "error": f"{type(err).__name__}: {err}"}
+            if extra:
+                payload.update(extra)
+            if self.bus and hasattr(self.bus, "publish"):
+                self.bus.publish({"type": "dlq.error", "payload": payload})
+        except Exception:
+            pass
+
+    # ---- API ----
+    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        self._with_rl()
+        t0 = time.perf_counter()
+        try:
+            with self.breaker:
+                return self.ccxt.fetch_ticker(symbol)
         except Exception as e:
-            metrics.inc("broker_requests_total", {"exchange": "ccxt", "method": key, "code": "error"})
-            # для некоторых мест полезно пробросить в DLQ
-            if self._bus:
-                try:
-                    self._bus.publish({"type": "BrokerError", "key": key, "error": f"{type(e).__name__}: {e}"})
-                except Exception:
-                    pass
+            self.m_err.labels(self.exchange_name, "fetch_ticker").inc()
+            self._dlq("fetch_ticker", e, {"symbol": symbol})
             raise
         finally:
-            metrics.observe_histogram("latency_broker_seconds", max(0.0, time.time() - t0))
+            self._obs("fetch_ticker", t0)
 
-    # ------ интерфейс ------
-    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        sym = to_exchange_symbol(symbol)
-        def _fn():
-            return self._client.fetch_ticker(sym)
-        return self._call(_fn, key="fetch_ticker", timeout=3.0)
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200):
+        self._with_rl()
+        t0 = time.perf_counter()
+        try:
+            with self.breaker:
+                return self.ccxt.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        except Exception as e:
+            self.m_err.labels(self.exchange_name, "fetch_ohlcv").inc()
+            self._dlq("fetch_ohlcv", e, {"symbol": symbol, "timeframe": timeframe, "limit": limit})
+            raise
+        finally:
+            self._obs("fetch_ohlcv", t0)
 
-    def fetch_order_book(self, symbol: str, limit: int = 10) -> Dict[str, Any]:
-        sym = to_exchange_symbol(symbol)
-        def _fn():
-            return self._client.fetch_order_book(sym, limit=limit)
-        return self._call(_fn, key="fetch_order_book", timeout=3.0)
+    def create_order(self, symbol: str, side: str, type_: str, amount: float,
+                     price: Optional[float] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._with_rl()
+        t0 = time.perf_counter()
+        p = dict(params or {})
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
-        sym = to_exchange_symbol(symbol)
-        tf = timeframe
-        lim = int(limit)
-        def _fn():
-            return self._client.fetch_ohlcv(sym, timeframe=tf, limit=lim)
-        return self._call(_fn, key="fetch_ohlcv", timeout=5.0)
+        # Gate.io: ccxt использует поле text как client ID, но clientOrderId тоже поддерживает многие биржи
+        client_oid = p.pop("clientOrderId", None) or p.pop("client_oid", None) or p.pop("text", None)
+        if client_oid:
+            p.setdefault("clientOrderId", client_oid)
+            # Gate.io ограничивает длину text (как правило ≤ 32)
+            p.setdefault("text", str(client_oid)[:32])
 
-    def create_order(
-        self,
-        symbol: str,
-        type_: str,
-        side: str,
-        amount: Decimal,
-        price: Optional[Decimal] = None,
-    ) -> Dict[str, Any]:
-        sym = to_exchange_symbol(symbol)
-        amt = float(amount)
-        px = float(price) if price is not None else None
-        def _fn():
-            if type_ == "market":
-                return self._client.create_order(sym, "market", side, amt)
-            return self._client.create_order(sym, "limit", side, amt, px)
-        return self._call(_fn, key="create_order", timeout=5.0)
+        try:
+            with self.breaker:
+                if type_ == "market":
+                    return self.ccxt.create_order(symbol, type="market", side=side, amount=amount, price=None, params=p)
+                return self.ccxt.create_order(symbol, type="limit", side=side, amount=amount, price=price, params=p)
+        except Exception as e:
+            self.m_err.labels(self.exchange_name, "create_order").inc()
+            self._dlq("create_order", e, {"symbol": symbol, "side": side, "type": type_, "amount": amount})
+            raise
+        finally:
+            self._obs("create_order", t0)
 
-    def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        def _fn():
-            return self._client.cancel_order(order_id)
-        return self._call(_fn, key="cancel_order", timeout=3.0)
+    def cancel_order(self, id_: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._with_rl()
+        t0 = time.perf_counter()
+        try:
+            with self.breaker:
+                return self.ccxt.cancel_order(id_, symbol, params or {})
+        except Exception as e:
+            self.m_err.labels(self.exchange_name, "cancel_order").inc()
+            self._dlq("cancel_order", e, {"orderId": id_, "symbol": symbol})
+            raise
+        finally:
+            self._obs("cancel_order", t0)
 
     def fetch_balance(self) -> Dict[str, Any]:
-        def _fn():
-            return self._client.fetch_balance()
-        return self._call(_fn, key="fetch_balance", timeout=4.0)
+        self._with_rl()
+        try:
+            with self.breaker:
+                return self.ccxt.fetch_balance()
+        except Exception as e:
+            self.m_err.labels(self.exchange_name, "fetch_balance").inc()
+            self._dlq("fetch_balance", e, {})
+            raise

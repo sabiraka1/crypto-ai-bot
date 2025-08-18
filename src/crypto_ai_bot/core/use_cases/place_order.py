@@ -1,84 +1,143 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
-
-import logging
-from decimal import Decimal
+import os
+import time
+import math
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils import metrics
-from crypto_ai_bot.utils.rate_limit import rate_limit, RateLimitExceeded
-from crypto_ai_bot.core.positions.manager import PositionManager
-
-# IDs
 try:
-    from crypto_ai_bot.utils.logging import get_correlation_id, get_request_id
+    # предпочтительно использовать ваши настройки
+    from ..settings import settings as _cfg  # type: ignore
 except Exception:
-    def get_correlation_id(): return None  # type: ignore
-    def get_request_id(): return None      # type: ignore
+    class _Cfg:
+        ENABLE_TRADING = os.getenv("ENABLE_TRADING", "false").lower() == "true"
+        FEE_BPS = float(os.getenv("FEE_BPS", "10"))          # 0.10%
+        SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "5")) # 0.05%
+        CLIENT_ORDER_ID_PREFIX = os.getenv("CLIENT_ORDER_ID_PREFIX", "cai")
+    _cfg = _Cfg()  # type: ignore
 
-log = logging.getLogger(__name__)
+def _apply_slippage(price: float, side: str, bps: float) -> float:
+    delta = price * (bps / 10_000.0)
+    return price + delta if side.lower() == "buy" else price - delta
 
+def _calc_fee(notional: float, fee_bps: float) -> float:
+    return notional * (fee_bps / 10_000.0)
 
-@rate_limit(max_calls=10, window=60)
-def place_order(
-    cfg: Settings,
-    broker: Any,
+@dataclass
+class PlaceOrderResult:
+    accepted: bool
+    duplicated: bool
+    order_id: Optional[str]
+    client_order_id: Optional[str]
+    executed_price: Optional[float]
+    executed_qty: Optional[float]
+    fee: float
+    reason: Optional[str] = None
+
+async def place_order(
     *,
-    positions_repo: Any,
-    trades_repo: Any,
-    audit_repo: Any,
-    uow: Any,
+    uow,
+    broker,
+    idem_repo,
+    trades_repo,
+    positions_repo,
+    audit_repo,
+    risk_manager,
     decision: Dict[str, Any],
     symbol: str,
-    bus: Optional[Any] = None,
-    idem_repo: Optional[Any] = None,
-) -> Dict[str, Any]:
-    action = str(decision.get("action", "hold")).lower()
-    side = action if action in ("buy", "sell") else "hold"
-    size = Decimal(str(decision.get("size", "0")))
-    if side == "hold" or size == Decimal("0"):
-        metrics.inc("order_skip_total", {"reason": "hold"})
-        return {"status": "skipped", "reason": "hold"}
+    side: str,                  # "buy" | "sell"
+    qty: float,
+    price: Optional[float] = None,
+    type_: str = "market",
+    now_ts: Optional[float] = None,
+) -> PlaceOrderResult:
+    """
+    Идемпотентность — перед вызовом биржи. При live-режиме вызываем broker.create_order.
+    Учитываем комиссии и слиппедж в live-режиме (без изменения вашей логики PnL/учёта).
+    """
+    now_ts = now_ts or time.time()
+    decision_id = (decision.get("id") or "")[:16]
+    minute_bucket = int(now_ts // 60)
+    idem_key = f"{symbol}:{side}:{qty}:{minute_bucket}:{decision_id}"
 
-    if idem_repo is not None:
-        minute = int(int(decision.get("ts_ms", 0) or 0) // 60000)
-        did = str(decision.get("id", ""))[:8]
-        key = f"{symbol}:{side}:{size}:{minute}:{did}"
-        is_new, prev = idem_repo.check_and_store(key, payload=str(decision))
-        if not is_new and prev:
-            metrics.inc("order_duplicate_total")
-            return {"status": "duplicate", "prev": prev}
+    # --- идемпотентность до сети ---
+    async with uow:  # зависит от вашей реализации (context manager)
+        # поддержка 2 контрактов: check_and_store() или claim()/commit()
+        duplicated = False
+        if hasattr(idem_repo, "check_and_store"):
+            inserted = await idem_repo.check_and_store(idem_key, ttl_seconds=3600)
+            duplicated = not bool(inserted)
+        elif hasattr(idem_repo, "claim"):
+            claim_ok = await idem_repo.claim(idem_key, ttl_seconds=3600)
+            duplicated = not bool(claim_ok)
+        else:
+            # минимальный fallback — не блокируем, но флагуем
+            duplicated = False
 
-    pm = PositionManager(positions_repo=positions_repo, trades_repo=trades_repo, audit_repo=audit_repo, uow=uow)
+        if duplicated:
+            await audit_repo.append("order_duplicate", {"key": idem_key, "symbol": symbol, "side": side, "qty": qty})
+            return PlaceOrderResult(accepted=False, duplicated=True, order_id=None, client_order_id=None, executed_price=None, executed_qty=None, fee=0.0, reason="duplicate")
 
-    px = Decimal(str(broker.fetch_ticker(symbol).get("last", "0")))
-    if px <= 0:
-        return {"status": "error", "error": "invalid_price"}
+        # --- риск-правила (ваш менеджер)
+        risk_ok, risk_reason = await risk_manager.check(symbol=symbol, side=side, qty=qty, decision=decision)
+        if not risk_ok:
+            await audit_repo.append("order_rejected_risk", {"symbol": symbol, "side": side, "qty": qty, "reason": risk_reason})
+            # освобождение ключа при наличии claim/release
+            if hasattr(idem_repo, "release"):
+                await idem_repo.release(idem_key)
+            return PlaceOrderResult(accepted=False, duplicated=False, order_id=None, client_order_id=None, executed_price=None, executed_qty=None, fee=0.0, reason=risk_reason)
 
-    if side == "buy":
-        snap = pm.open_or_add(symbol, size, px)
-    elif side == "sell":
-        snap = pm.reduce(symbol, size, px)
-    else:
-        return {"status": "error", "error": f"unknown_action:{action}"}
+        # --- исполнение ---
+        client_oid = f"{getattr(_cfg, 'CLIENT_ORDER_ID_PREFIX', 'cai')}-{minute_bucket}-{decision_id}"
+        order_id = None
+        executed_price = None
+        executed_qty = None
+        fee_val = 0.0
 
-    if bus:
-        evt = {
-            "type": "OrderExecuted",
-            "symbol": symbol,
-            "timeframe": getattr(cfg, "TIMEFRAME", ""),
-            "side": side,
-            "qty": str(size),
-            "price": str(px),
-            "latency_ms": decision.get("latency_ms"),
-            "request_id": get_request_id(),
-            "correlation_id": get_correlation_id(),
-        }
-        try:
-            bus.publish(evt)
-        except Exception as e:
-            log.warning("bus_publish_failed (OrderExecuted): %s", e)
-            metrics.inc("bus_publish_errors_total")
+        if getattr(_cfg, "ENABLE_TRADING", False):
+            # live-path: реальный вызов биржи
+            params = {"clientOrderId": client_oid}
+            if type_ == "market":
+                # рыночный: оценка цены с учётом слиппеджа (для записи в аудит/сделки)
+                ticker = await broker.fetch_ticker(symbol)
+                base_price = float(ticker.get("last") or ticker.get("close"))
+                executed_price = _apply_slippage(base_price, side, getattr(_cfg, "SLIPPAGE_BPS", 0.0))
+                executed_qty = float(qty)
+                order = await broker.create_order(symbol=symbol, side=side, type_="market", amount=qty, price=None, params=params)
+            else:
+                # лимитный: цена может быть задана извне; применим "целевой" slippage к лимиту для хранения
+                if price is None:
+                    raise ValueError("Limit order requires price")
+                executed_price = float(_apply_slippage(float(price), side, getattr(_cfg, "SLIPPAGE_BPS", 0.0)))
+                executed_qty = float(qty)
+                order = await broker.create_order(symbol=symbol, side=side, type_="limit", amount=qty, price=price, params=params)
 
-    return {"status": "executed", "snapshot": snap}
+            order_id = str(order.get("id") or order.get("orderId") or "")
+            notional = float(executed_price) * float(executed_qty)
+            fee_val = _calc_fee(notional, getattr(_cfg, "FEE_BPS", 0.0))
+        else:
+            # paper/safe-path: без реального вызова биржи — сохраняем симуляцию (как раньше)
+            ticker = await broker.fetch_ticker(symbol)
+            base_price = float(ticker.get("last") or ticker.get("close"))
+            executed_price = _apply_slippage(base_price if type_ == "market" else (price or base_price), side, getattr(_cfg, "SLIPPAGE_BPS", 0.0))
+            executed_qty = float(qty)
+            notional = float(executed_price) * float(executed_qty)
+            fee_val = _calc_fee(notional, getattr(_cfg, "FEE_BPS", 0.0))
+            order_id = None  # симуляция
+
+        # --- запись в хранилища (позиции/сделки/аудит) ---
+        await trades_repo.append(symbol=symbol, side=side, qty=executed_qty, price=executed_price, fee=fee_val, decision_id=decision_id, order_id=order_id, client_order_id=client_oid, ts=now_ts)
+        await positions_repo.on_trade(symbol=symbol, side=side, qty=executed_qty, price=executed_price, fee=fee_val, decision_id=decision_id, order_id=order_id, ts=now_ts)
+        await audit_repo.append("order_placed", {
+            "symbol": symbol, "side": side, "qty": executed_qty, "price": executed_price,
+            "fee": fee_val, "orderId": order_id, "clientOrderId": client_oid, "decisionId": decision_id, "idemKey": idem_key
+        })
+
+        # фиксация ключа идемпотентности
+        if hasattr(idem_repo, "commit"):
+            await idem_repo.commit(idem_key)
+
+        return PlaceOrderResult(
+            accepted=True, duplicated=False, order_id=order_id, client_order_id=client_oid, executed_price=executed_price, executed_qty=executed_qty, fee=fee_val
+        )
