@@ -1,7 +1,9 @@
+# src/crypto_ai_bot/app/server.py
+from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Optional
+import asyncio
 
-import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -11,31 +13,52 @@ from crypto_ai_bot.utils.metrics import export as export_metrics
 from crypto_ai_bot.app.tasks.reconciler import start_reconciler
 from crypto_ai_bot.app.middleware import register_middlewares
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
+from crypto_ai_bot.utils.time_sync import measure_time_drift_ms
 
 container: Optional[Container] = None
-_reconciler = None
+_reconciler_task: Optional[asyncio.Task] = None
+_cleanup_task: Optional[asyncio.Task] = None
 _cb_health = CircuitBreaker(failure_threshold=3, reset_timeout_sec=5.0, success_threshold=1)
+
+async def _cleanup_idempotency_loop():
+    while True:
+        try:
+            if container and hasattr(container, "idempotency_repo"):
+                container.idempotency_repo.cleanup_expired()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global container, _reconciler
+    global container, _reconciler_task, _cleanup_task
     container = build_container()
 
-    # JSON-логи
+    # JSON-логи + middleware
     setup_json_logging(container.settings)
-    # Мидлвары (rate/body/logging/request-id)
     register_middlewares(app, container.settings)
 
-    # старт фонового реконсилятора
-    _reconciler = start_reconciler(container)
+    # фоновый reconciler (если возвращает task)
+    try:
+        _reconciler_task = start_reconciler(container)
+    except Exception:
+        _reconciler_task = None
+
+    # периодический cleanup идемпотентности
+    _cleanup_task = asyncio.create_task(_cleanup_idempotency_loop())
 
     try:
         yield
     finally:
         # аккуратное завершение
         try:
-            if _reconciler:
-                _reconciler.cancel()
+            if _cleanup_task:
+                _cleanup_task.cancel()
+        except Exception:
+            pass
+        try:
+            if _reconciler_task:
+                _reconciler_task.cancel()
         except Exception:
             pass
         try:
@@ -57,28 +80,73 @@ def metrics():
 @app.get("/health")
 async def health():
     """
-    Быстрый healthcheck брокера с Circuit Breaker'ом и таймаутом.
+    Компонентный health: broker, db, bus, time_sync + degradation_level и статистика CB.
     """
-    def _probe_sync():
-        if _cb_health.state == "OPEN":
-            return False
-        def _call():
-            try:
-                t = container.broker.fetch_ticker(container.settings.SYMBOL)
-                return bool(t)
-            except Exception as e:
-                return _cb_health.call(lambda: (_ for _ in ()).throw(e))
+    details = {}
+    ok_components = 0
+    total = 4
+
+    # broker (неблокирующий вызов)
+    async def _probe_broker():
         try:
-            ok = _cb_health.call(lambda: _call())
-            return bool(ok)
+            from asyncio import to_thread
+            def _fetch():
+                try:
+                    t = container.broker.fetch_ticker(container.settings.SYMBOL)
+                    return bool(t)
+                except Exception as e:
+                    # регистрируем фэйл в CB
+                    try:
+                        _cb_health.call(lambda: (_ for _ in ()).throw(e))
+                    except Exception:
+                        pass
+                    return False
+            return await to_thread(_fetch)
         except Exception:
             return False
 
-    with anyio.move_on_after(2.0) as scope:
-        ok = await anyio.to_thread.run_sync(_probe_sync)
-    if not scope.cancel_called and ok:
-        return {"status": "ok", "circuit": _cb_health.state}
-    return JSONResponse({"status": "degraded", "circuit": _cb_health.state}, status_code=503)
+    if _cb_health.state == "OPEN":
+        b_ok = False
+    else:
+        try:
+            b_ok = await asyncio.wait_for(_probe_broker(), timeout=2.0)
+        except Exception:
+            b_ok = False
+    details["broker"] = bool(b_ok); ok_components += int(b_ok)
+
+    # db
+    try:
+        uv = container.con.execute("PRAGMA user_version;").fetchone()
+        details["db"] = True if uv is not None else False
+        ok_components += int(details["db"])
+    except Exception:
+        details["db"] = False
+
+    # bus
+    try:
+        hb = container.bus.health() if hasattr(container.bus, "health") else {"running": True}
+        details["bus"] = bool(hb.get("running", True))
+        ok_components += int(details["bus"])
+    except Exception:
+        details["bus"] = False
+
+    # time sync
+    try:
+        drift_ms = measure_time_drift_ms(container)
+        max_drift = int(getattr(container.settings, "MAX_TIME_DRIFT_MS", 5000))
+        td_ok = drift_ms <= max_drift
+        details["time_drift_ms"] = drift_ms
+        details["time_sync"] = td_ok
+        ok_components += int(td_ok)
+    except Exception:
+        details["time_sync"] = False
+
+    degr = int(round((1 - ok_components / total) * 100))
+    status = "ok" if degr == 0 else ("degraded" if degr < 100 else "unhealthy")
+    details["degradation_level"] = degr
+    details["circuit"] = _cb_health.get_stats()
+
+    return JSONResponse({"status": status, **details}, status_code=(200 if status == "ok" else 503))
 
 @app.get("/status/extended")
 def status_extended():
@@ -105,11 +173,6 @@ def status_extended():
 
 @app.post("/telegram")
 async def telegram(request: Request, x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)):
-    """
-    Безопасный webhook:
-      - секрет в заголовке (если настроен)
-      - lim/body-лимиты и логирование обеспечиваются мидлварами
-    """
     secret = getattr(container.settings, "TELEGRAM_WEBHOOK_SECRET", None)
     if secret and x_telegram_bot_api_secret_token != secret:
         raise HTTPException(status_code=403, detail="forbidden")
