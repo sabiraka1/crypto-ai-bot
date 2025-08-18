@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import time
@@ -46,7 +48,6 @@ except Exception:
 try:
     from crypto_ai_bot.app.bus_wiring import make_bus, snapshot_quantiles
 except Exception:
-    # Фоллбеки на случай отсутствия модуля
     class _DummyBus:
         def publish(self, event: Dict[str, Any]) -> None: ...
         def subscribe(self, type_: str, handler) -> None: ...
@@ -64,11 +65,9 @@ except Exception:
     def validate_config(*args, **kwargs):
         return {"ok": True, "checks": {"stub": {"status": "warn", "code": "validator_missing"}}}
 
-
-# =========================
+# =================================
 # Инициализация приложения
-# =========================
-
+# =================================
 app = FastAPI(title="crypto-ai-bot")
 
 CFG = Settings.build()
@@ -91,26 +90,106 @@ class _Repos:
 
 REPOS = _Repos(CONN)
 
-# Шина событий
 BUS = make_bus()
-
-# Брокер
 BROKER = create_broker(CFG, bus=BUS)
-
-# Сохраним ссылки в CFG (чтобы валидатор и др. могли их увидеть)
 try:
     CFG.BROKER = BROKER  # type: ignore[attr-defined]
 except Exception:
     pass
 
+# =================================
+# Вспомогательное
+# =================================
+def _collect_trades_rows(limit: Optional[int] = None, closed_only: bool = False) -> List[Dict[str, Any]]:
+    """
+    Универсальный сборщик «строк сделок» для экспорта.
+    Использует репозиторий, а если нет подходящих методов — пробует прямой SQL.
+    Возвращает список dict с полями: ts_ms, symbol, side, qty, price, pnl?, note?
+    """
+    rows: List[Dict[str, Any]] = []
 
-# ==============
+    # 1) Репозиторий: наиболее вероятные методы
+    try:
+        if hasattr(REPOS.trades, "list_all"):
+            data = REPOS.trades.list_all()  # type: ignore
+            for r in (data or []):
+                rows.append({
+                    "ts_ms": r.get("ts_ms") or r.get("timestamp") or 0,
+                    "symbol": r.get("symbol"),
+                    "side": r.get("side"),
+                    "qty": r.get("qty") or r.get("size"),
+                    "price": r.get("price"),
+                    "pnl": r.get("pnl"),
+                    "note": r.get("note"),
+                })
+        elif hasattr(REPOS.trades, "list_closed"):
+            data = REPOS.trades.list_closed(limit or 10000)  # type: ignore
+            for r in (data or []):
+                rows.append({
+                    "ts_ms": r.get("ts_ms") or r.get("timestamp") or 0,
+                    "symbol": r.get("symbol"),
+                    "side": r.get("side"),
+                    "qty": r.get("qty") or r.get("size"),
+                    "price": r.get("price"),
+                    "pnl": r.get("pnl"),
+                    "note": r.get("note"),
+                })
+        elif hasattr(REPOS.trades, "last_closed_pnls"):
+            # есть только PnL, соберём минимально возможное
+            pnls = REPOS.trades.last_closed_pnls(limit or 10000)  # type: ignore
+            t = 0
+            for p in (pnls or []):
+                t += 1
+                rows.append({
+                    "ts_ms": t,
+                    "symbol": CFG.SYMBOL,
+                    "side": "",
+                    "qty": "",
+                    "price": "",
+                    "pnl": float(p) if p is not None else None,
+                    "note": "pnl_only",
+                })
+    except Exception:
+        rows = []
+
+    # 2) Если пусто — попробуем прямым SQL по известной схеме
+    if not rows:
+        try:
+            cur = CONN.cursor()
+            # наиболее вероятные поля
+            q = "SELECT ts_ms, symbol, side, qty, price, pnl, note FROM trades ORDER BY ts_ms ASC"
+            res = cur.execute(q).fetchall()
+            for ts_ms, symbol, side, qty, price, pnl, note in res:
+                rows.append({
+                    "ts_ms": ts_ms,
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": qty,
+                    "price": price,
+                    "pnl": pnl,
+                    "note": note,
+                })
+            cur.close()
+        except Exception:
+            # fallback: минимум, если таблица и поля отличаются — пусто
+            rows = []
+
+    # 3) Фильтр по closed_only — если у строки нет pnl, считаем незакрытой
+    if closed_only:
+        rows = [r for r in rows if r.get("pnl") is not None]
+
+    # 4) Ограничение по limit
+    if limit is not None and limit > 0 and len(rows) > limit:
+        rows = rows[-limit:]
+
+    return rows
+
+
+# =================================
 # Эндпоинты
-# ==============
-
+# =================================
 @app.get("/health")
 def health() -> JSONResponse:
-    # лёгкая проверка основных зависимостей
     try:
         db_ok = True
         CONN.execute("SELECT 1")
@@ -182,7 +261,6 @@ def context_snapshot() -> JSONResponse:
 
 @app.get("/status/extended")
 def status_extended() -> JSONResponse:
-    # базовые сведения
     resp: Dict[str, Any] = {
         "mode": CFG.MODE,
         "symbol": CFG.SYMBOL,
@@ -197,38 +275,31 @@ def status_extended() -> JSONResponse:
             "flow": getattr(CFG, "PERF_BUDGET_FLOW_P99_MS", 0),
         },
     }
-
-    # состояние шины
     try:
         resp["bus"] = BUS.health()
     except Exception:
         resp["bus"] = {"status": "unknown"}
-
-    # квантильные снапшоты
     try:
+        from crypto_ai_bot.app.bus_wiring import snapshot_quantiles
         resp["quantiles"] = snapshot_quantiles()
     except Exception:
         resp["quantiles"] = {}
-
-    # вложенный market context
     if build_ctx_snapshot:
         try:
             resp["context"] = build_ctx_snapshot(CFG, HTTP, BREAKER)
         except Exception as e:
             resp["context"] = {"status": "error", "error": f"{type(e).__name__}: {e}"}
-
     return JSONResponse(resp)
 
 
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
-    # SQLite метрики
     try:
         _ = sqlite_snapshot(CONN, path_hint=getattr(CFG, "DB_PATH", None))
     except Exception:
         pass
 
-    # Загрузим метрики бэктеста из файла (если есть)
+    # метрики бэктеста (из JSON)
     try:
         metrics_path = getattr(CFG, "BACKTEST_METRICS_PATH", "backtest_metrics.json")
         if metrics_path and os.path.exists(metrics_path):
@@ -244,7 +315,6 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         pass
 
-    # DLQ счётчик
     try:
         h = BUS.health()
         dlq = int(h.get("dlq_size") or h.get("dlq_len") or h.get("dlq", 0) or 0)
@@ -252,8 +322,8 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         metrics.gauge("events_dead_letter_total", 0.0)
 
-    # performance budgets p99 по квантилям
     try:
+        from crypto_ai_bot.app.bus_wiring import snapshot_quantiles
         snap = snapshot_quantiles()
         thr_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0))
         thr_ord = int(getattr(CFG, "PERF_BUDGET_ORDER_P99_MS", 0))
@@ -273,17 +343,20 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         pass
 
-    # Состояния CircuitBreaker
+    # CircuitBreaker статусы (если реализовано)
     state_map = {"closed": 0, "half-open": 1, "open": 2}
     extra: List[str] = []
-    stats = BREAKER.get_stats()
-    for key, st in stats.items():
-        sname = st.get("state", "closed")
-        extra.append(f'breaker_state{{key="{key}"}} {state_map.get(sname, 0)}')
-        counters = st.get("counters") or {}
-        for cname, val in counters.items():
-            extra.append(f'breaker_{cname}_total{{key="{key}"}} {int(val)}')
-        extra.append(f'breaker_last_error_flag{{key="{key}"}} {1 if st.get("last_error") else 0}')
+    try:
+        stats = BREAKER.get_stats()
+        for key, st in stats.items():
+            sname = st.get("state", "closed")
+            extra.append(f'breaker_state{{key="{key}"}} {state_map.get(sname, 0)}')
+            counters = st.get("counters") or {}
+            for cname, val in counters.items():
+                extra.append(f'breaker_{cname}_total{{key="{key}"}} {int(val)}')
+            extra.append(f'breaker_last_error_flag{{key="{key}"}} {1 if st.get("last_error") else 0}')
+    except Exception:
+        pass
 
     base = metrics.export()
     payload = base.rstrip() + ("\n" if base and not base.endswith("\n") else "") + "\n".join(extra) + "\n"
@@ -291,7 +364,6 @@ def metrics_export() -> PlainTextResponse:
 
 
 # ---------- Графики (SVG) ----------
-
 from crypto_ai_bot.utils.charts import render_price_spark_svg, render_profit_curve_svg, closes_from_ohlcv
 
 @app.get("/chart/test")
@@ -324,8 +396,26 @@ def chart_profit():
     return Response(content=svg, media_type="image/svg+xml")
 
 
-# ---------- Основные действия ----------
+# ---------- Экспорт CSV ----------
+@app.get("/export/trades.csv")
+def export_trades_csv(limit: int = Query(10000), closed_only: bool = Query(False)):
+    rows = _collect_trades_rows(limit=limit, closed_only=closed_only)
+    # формируем CSV в памяти
+    fields = ["ts_ms", "symbol", "side", "qty", "price", "pnl", "note"]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=fields)
+    w.writeheader()
+    for r in rows:
+        w.writerow({k: r.get(k) for k in fields})
+    data = buf.getvalue().encode("utf-8")
+    headers = {
+        "Content-Disposition": 'attachment; filename="trades.csv"',
+        "Cache-Control": "no-store",
+    }
+    return Response(content=data, media_type="text/csv; charset=utf-8", headers=headers)
 
+
+# ---------- Основные действия ----------
 @app.post("/tick")
 def tick(
     payload: Dict[str, Any] = Body(default=None),
@@ -356,7 +446,6 @@ async def telegram(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
 ) -> JSONResponse:
-    # Опциональная проверка секрета
     secret = getattr(CFG, "TELEGRAM_WEBHOOK_SECRET", None)
     if secret and x_telegram_bot_api_secret_token != secret:
         return JSONResponse({"status": "forbidden"}, status_code=403)
@@ -366,7 +455,6 @@ async def telegram(
     except Exception:
         body = {}
 
-    # делегируем адаптеру; если что-то не так — мягко не падаем
     try:
         if hasattr(tg_adapter, "handle"):
             resp = await tg_adapter.handle(body, cfg=CFG, broker=BROKER, repos=REPOS, bus=BUS, http=HTTP)  # type: ignore
@@ -379,8 +467,7 @@ async def telegram(
     return JSONResponse(resp)
 
 
-# ---------- Диагностика/отладка ----------
-
+# ---------- Диагностика ----------
 @app.post("/dry/evaluate")
 def dry_evaluate(
     symbol: str = Query(None),

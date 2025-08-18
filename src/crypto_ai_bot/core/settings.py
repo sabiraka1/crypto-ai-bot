@@ -28,6 +28,7 @@ class Settings:
 
     # --- пути/БД ---
     DB_PATH: str = os.getenv("DB_PATH", "crypto.db")
+    EXPORT_DIR: str = os.getenv("EXPORT_DIR", "exports")
 
     # --- оркестратор ---
     TICK_PERIOD_SEC: int = int(os.getenv("TICK_PERIOD_SEC", "60"))
@@ -59,8 +60,9 @@ class Settings:
         "https://www.cloudflare.com",
     ]
 
-    # --- бэктест ---
+    # --- бэктест / экспорт ---
     BACKTEST_CSV_PATH: str = os.getenv("BACKTEST_CSV_PATH", "data/backtest.csv")
+    BACKTEST_METRICS_PATH: str = os.getenv("BACKTEST_METRICS_PATH", "backtest_metrics.json")
 
     # --- риск/размер ---
     POSITION_SIZE: str = os.getenv("POSITION_SIZE", "0.00")
@@ -77,10 +79,11 @@ class Settings:
     RISK_SEQUENCE_WINDOW: int = int(os.getenv("RISK_SEQUENCE_WINDOW", "3"))
     RISK_MAX_LOSSES: int = int(os.getenv("RISK_MAX_LOSSES", "3"))
 
-    # --- Telegram / webhooks ---
+    # --- Telegram / webhooks / public ---
     TELEGRAM_WEBHOOK_SECRET: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET") or None
     TELEGRAM_BOT_TOKEN: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN") or None
     ALERT_TELEGRAM_CHAT_ID: Optional[str] = os.getenv("ALERT_TELEGRAM_CHAT_ID") or None
+    PUBLIC_BASE_URL: Optional[str] = os.getenv("PUBLIC_BASE_URL") or None
 
     # --- профиль решений ---
     DECISION_PROFILE: str = os.getenv("DECISION_PROFILE", "balanced").lower()
@@ -127,15 +130,15 @@ class Settings:
     CTX_DXY_WEIGHT: float = float(os.getenv("CTX_DXY_WEIGHT", "0"))
 
     # --- Market Context пресет (простой режим) ---
-    # off | simple | balanced | custom
-    CONTEXT_PRESET: str = os.getenv("CONTEXT_PRESET", "off").lower()
+    CONTEXT_PRESET: str = os.getenv("CONTEXT_PRESET", "off").lower()  # off | simple | balanced | custom
 
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_JSON: bool = os.getenv("LOG_JSON", "false").lower() in {"1", "true", "yes"}
 
-    # --- Backtest metrics export (чтобы /metrics их видел) ---
-    BACKTEST_METRICS_PATH: str = os.getenv("BACKTEST_METRICS_PATH", "backtest_metrics.json")
+    # --- Торговые параметры симуляции (пока «опции», используем по мере надобности) ---
+    SLIPPAGE_BPS: Optional[float] = float(os.getenv("SLIPPAGE_BPS")) if os.getenv("SLIPPAGE_BPS") else None
+    FEE_BPS: Optional[float] = float(os.getenv("FEE_BPS")) if os.getenv("FEE_BPS") else None
 
     # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {
@@ -176,7 +179,6 @@ class Settings:
             s.ENABLE_TRADING = False
 
         # ---- ПРОСТОЙ ПРЕСЕТ КОНТЕКСТА ----
-        # Срабатывает только если вручную веса не заданы (все нули).
         no_manual = (
             float(s.CONTEXT_DECISION_WEIGHT) == 0.0 and
             float(s.CTX_BTC_DOM_WEIGHT) == 0.0 and
@@ -197,6 +199,6 @@ class Settings:
                 s.CTX_FNG_WEIGHT = 1.0
                 s.CTX_DXY_WEIGHT = 1.0
                 s.CTX_BTC_DOM_WEIGHT = 0.5
-            # 'custom' или неизвестное — ничего не трогаем
+            # 'custom' — не трогаем
 
         return s
