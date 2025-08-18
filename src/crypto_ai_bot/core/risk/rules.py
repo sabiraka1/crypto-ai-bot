@@ -1,289 +1,100 @@
-# src/crypto_ai_bot/core/use_cases/place_order.py
+# src/crypto_ai_bot/core/risk/rules.py
 from __future__ import annotations
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
-from typing import Any, Dict, Optional
+
 import time
-
-# ccxt (опционально): аккуратно импортируем категории ошибок
-try:  # pragma: no cover
-    import ccxt  # type: ignore
-    from ccxt.base.errors import (
-        DDoSProtection, RateLimitExceeded, ExchangeNotAvailable, NetworkError,
-        RequestTimeout, AuthenticationError, PermissionDenied,
-        InvalidOrder, InsufficientFunds, OrderNotFound
-    )  # type: ignore
-except Exception:  # pragma: no cover
-    ccxt = None
-    DDoSProtection = RateLimitExceeded = ExchangeNotAvailable = NetworkError = RequestTimeout = None  # type: ignore
-    AuthenticationError = PermissionDenied = InvalidOrder = InsufficientFunds = OrderNotFound = None  # type: ignore
-
-# ✅ единый модуль правил риска
-from crypto_ai_bot.core.risk.rules import (
-    risk_concurrent_positions_blocked,
-    risk_daily_loss_blocked,
-)
-
-getcontext().prec = 28
+from typing import Any, Dict, Optional
 
 
-# ---------- helpers ----------
-
-def _dec(x: Any) -> Decimal:
-    try:
-        return Decimal(str(x))
-    except Exception:
-        return Decimal(0)
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def _market_meta_from_broker(broker: Any, symbol: str) -> Dict[str, Any]:
-    """
-    Пытаемся аккуратно получить precision/limits из ccxt, если доступно.
-    Возвращаем dict с возможными ключами: amount_min, amount_step, price_step.
-    """
-    try:
-        ex = getattr(broker, "ccxt", None)
-        if ex is None:
-            return {}
-        if getattr(ex, "markets", None) is None or not ex.markets:
-            ex.load_markets()  # type: ignore[attr-defined]
-        m = ex.market(symbol)  # type: ignore[attr-defined]
-        out: Dict[str, Any] = {}
-        if "limits" in m and m["limits"]:
-            lim = m["limits"]
-            if lim.get("amount") and lim["amount"].get("min") is not None:
-                out["amount_min"] = float(lim["amount"]["min"])
-        if "precision" in m and m["precision"]:
-            prec = m["precision"]
-            if prec.get("amount") is not None:
-                out["amount_step"] = float(10 ** (-int(prec["amount"])))
-            if prec.get("price") is not None:
-                out["price_step"] = float(10 ** (-int(prec["price"])))
-        return out
-    except Exception:
-        return {}
-
-
-def _round_amount(side: str, amount: Decimal, step: Optional[float]) -> Decimal:
-    """
-    Округление количества: BUY — вниз (не превышать бюджет), SELL — вверх (не недопродать).
-    Если step неизвестен — используем 1e-8.
-    """
-    s = Decimal(str(step if step and step > 0 else 1e-8))
-    q = (amount / s).to_integral_value(rounding=ROUND_DOWN if side == "buy" else ROUND_UP)
-    return (q * s).normalize()
-
-
-def _apply_slippage(side: str, price: Decimal, slippage_bps: float) -> Decimal:
-    bps = Decimal(str(max(0.0, float(slippage_bps))))
-    if bps == 0:
-        return price
-    if side == "buy":
-        return price * (Decimal(1) + bps / Decimal(10_000))
-    else:
-        return price * (Decimal(1) - bps / Decimal(10_000))
-
-
-def _taker_fee_amount(notional: Decimal, fee_bps: float) -> Decimal:
-    fb = Decimal(str(max(0.0, float(fee_bps))))
-    return (notional * fb / Decimal(10_000)).normalize()
-
-
-def _build_idempotency_key(symbol: str, side: str, bucket_ms: int) -> str:
-    return f"{symbol}:{side}:{_now_ms() // int(max(1, bucket_ms))}"
-
-
-# ---------- основной use-case ----------
-
-@dataclass
-class PlaceOrderResult:
-    accepted: bool
-    error: Optional[str] = None          # 'rate_limited'|'invalid_args'|'no_position'|...
-    order: Optional[Dict[str, Any]] = None
-    idempotency_key: Optional[str] = None
-
-
-def place_order(
+def risk_concurrent_positions_blocked(
     *,
-    cfg: Any,
-    broker: Any,
-    trades_repo: Any,
     positions_repo: Any,
-    exits_repo: Any = None,
     symbol: str,
-    side: str,                      # 'buy' | 'sell'
-    idempotency_repo: Any = None,
-    price: Optional[float] = None,  # если None — возьмём last из тикера
-    amount: Optional[float] = None, # если None — посчитаем из POSITION_SIZE_USD
-    params: Optional[Dict[str, Any]] = None,
+    max_open_positions: int = 1,
 ) -> Dict[str, Any]:
     """
-    Исполнение спот-ордера в long-only стратегии.
-    Стабильные коды ошибок в result['error'].
+    Блокируем открытие новой позиции, если уже есть открытая,
+    либо если общее число открытых позиций превысит лимит.
     """
-    side = str(side or "").lower().strip()
-    if side not in ("buy", "sell"):
-        return {"accepted": False, "error": "invalid_args"}
-
-    # spot-only: подаём тип 'spot' в params, но не падаем, если биржа игнорирует
-    p = dict(params or {})
-    p.setdefault("type", "spot")
-
-    # нормализуем symbol на уровне брокера — сам брокер обязан понимать unified 'BASE/QUOTE'
-    sym = str(symbol)
-
-    # ---- RISK RULES (до идемпотентности) ----
-    # 1) лимит на число одновременных позиций (применим только к BUY)
     try:
-        max_pos = getattr(cfg, "MAX_CONCURRENT_POSITIONS", None) or getattr(cfg, "MAX_CONCURRENT_TRADES", None)
-        if side == "buy" and risk_concurrent_positions_blocked(positions_repo, limit=max_pos):
-            return {"accepted": False, "error": "risk_concurrent_limit"}
+        rows = positions_repo.get_open()
     except Exception:
-        # если репозиторий позиций отвалился — безопаснее блокировать BUY
+        rows = []
+    already_long = any(str(r.get("symbol")) == symbol and float(r.get("qty", 0)) > 0 for r in rows)
+    if already_long:
+        return {"blocked": True, "reason": "already_long"}
+    if len(rows) >= int(max_open_positions):
+        return {"blocked": True, "reason": "too_many_open_positions"}
+    return {"blocked": False}
+
+
+def realized_pnl_since_ms(
+    *,
+    trades_repo: Any,
+    since_ms: int,
+    symbol: Optional[str] = None,
+) -> float:
+    """
+    Простейший расчёт реализованного PnL с момента since_ms (long-only).
+    """
+    try:
+        rows = trades_repo.list_since_ms(since_ms, symbol=symbol)
+    except Exception:
+        rows = []
+
+    cash = 0.0
+    pos = 0.0
+    pnl = 0.0
+    for t in rows:
+        side = str(t.get("side", "")).lower()
+        px = float(t.get("price") or 0.0)
+        qty = float(t.get("qty") or t.get("amount") or 0.0)
+        if px <= 0 or qty <= 0:
+            continue
         if side == "buy":
-            return {"accepted": False, "error": "risk_concurrent_repo"}
+            cash -= px * qty
+            pos += qty
+        elif side == "sell":
+            if pos <= 0:
+                continue
+            q = min(pos, qty)
+            pnl += q * px + cash * (q / max(pos, 1e-9))
+            pos -= q
+            if pos > 0:
+                cash *= pos / max(pos + q, 1e-9)
+            else:
+                cash = 0.0
+    return float(pnl)
 
-    # 2) дневной убыток (UTC) — блокируем новые BUY при превышении
+
+def risk_daily_loss_blocked(
+    *,
+    trades_repo: Any,
+    daily_loss_limit_pct: float,
+    symbol: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Блокируем торговлю при превышении дневного лимита потерь в %.
+    """
+    # начало суток (UTC) — можно заменить на локаль по требованию
+    now = int(time.time() * 1000)
+    start_of_day_ms = now - (now % (24 * 60 * 60 * 1000))
+
+    realized = realized_pnl_since_ms(trades_repo=trades_repo, since_ms=start_of_day_ms, symbol=symbol)
+    # чтобы посчитать % к депозиту — нужен базовый капитал; в простом варианте считаем по POSITION_SIZE_USD
+    # если нужно — подмешай cfg.BASE_CAPITAL_USD
+    base = 0.0
     try:
-        con = getattr(trades_repo, "con", getattr(cfg, "con", None))
-        max_dd = getattr(cfg, "MAX_DAILY_LOSS_USD", None)
-        if side == "buy" and con is not None and risk_daily_loss_blocked(con, max_daily_loss_usd=max_dd, symbol=None):
-            return {"accepted": False, "error": "risk_daily_loss"}
+        base = float(getattr(trades_repo, "base_capital_usd", 0.0))  # опционально
     except Exception:
-        # не блокируем SELL, чтобы можно было уменьшить риск
-        if side == "buy":
-            return {"accepted": False, "error": "risk_daily_check_failed"}
+        base = 0.0
 
-    # long-only guard для SELL
-    try:
-        if side == "sell" and hasattr(positions_repo, "has_long") and not positions_repo.has_long(sym):
-            return {"accepted": False, "error": "no_position"}
-    except Exception:
-        return {"accepted": False, "error": "no_position_repo"}
+    # если базовый капитал неизвестен — сравним с позиционным лимитом
+    if base <= 0.0:
+        limit_hit = daily_loss_limit_pct <= 0.0 and realized < 0.0
+    else:
+        pct = (realized / base) * 100.0
+        limit_hit = pct <= -abs(float(daily_loss_limit_pct))
 
-    # ---- идемпотентность ----
-    idem_key: Optional[str] = None
-    try:
-        if idempotency_repo is not None:
-            bucket_ms = int(getattr(cfg, "IDEMPOTENCY_BUCKET_MS", 5_000))
-            ttl_sec   = int(getattr(cfg, "IDEMPOTENCY_TTL_SEC", 300))
-            idem_key = _build_idempotency_key(sym, side, bucket_ms)
-            ok = idempotency_repo.check_and_store(idem_key, ttl_seconds=ttl_sec)
-            if not ok:
-                return {"accepted": False, "error": "duplicate_request", "idempotency_key": idem_key}
-    except Exception:
-        idem_key = None  # не блокируем из-за репозитория идемпотентности
-
-    # ---- цена и объём ----
-    px = _dec(price) if price is not None else None
-    if px is None or px <= 0:
-        try:
-            t = broker.fetch_ticker(sym)
-            last = t.get("last") or t.get("close")
-            px = _dec(last)
-        except Exception as e:
-            return {"accepted": False, "error": "ticker_unavailable", "details": repr(e)}
-    if px <= 0:
-        return {"accepted": False, "error": "invalid_price"}
-
-    amt = _dec(amount) if amount is not None else Decimal(0)
-    if amt <= 0:
-        notional_usd = _dec(getattr(cfg, "POSITION_SIZE_USD", 0))
-        if notional_usd <= 0:
-            return {"accepted": False, "error": "position_size_not_set"}
-        px_eff_budget = _apply_slippage("buy", px, float(getattr(cfg, "SLIPPAGE_BPS", 0.0)))
-        if px_eff_budget <= 0:
-            px_eff_budget = px
-        amt = (notional_usd / px_eff_budget).normalize()
-
-    meta = _market_meta_from_broker(broker, sym)
-    amt = _round_amount(side, amt, meta.get("amount_step"))
-    if meta.get("amount_min") and float(amt) < float(meta["amount_min"]):
-        return {"accepted": False, "error": "amount_too_small", "amount": float(amt), "min": float(meta["amount_min"])}
-
-    if side == "sell":
-        try:
-            have = Decimal(str(positions_repo.long_qty(sym)))
-        except Exception:
-            have = Decimal(0)
-        if have <= 0:
-            return {"accepted": False, "error": "no_position"}
-        if amt > have:
-            amt = have
-
-    px_eff = _apply_slippage(side, px, float(getattr(cfg, "SLIPPAGE_BPS", 0.0)))
-
-    # ---- создаём ордер ----
-    try:
-        order = broker.create_order(
-            symbol=sym,
-            type="market",
-            side=side,
-            amount=float(amt),
-            price=None,     # market
-            params=p,
-        )
-    except Exception as e:
-        code = "exchange_error"
-        if RateLimitExceeded and isinstance(e, RateLimitExceeded): code = "rate_limited"  # type: ignore[arg-type]
-        elif RequestTimeout and isinstance(e, RequestTimeout): code = "timeout"  # type: ignore[arg-type]
-        elif NetworkError and isinstance(e, NetworkError): code = "network_error"  # type: ignore[arg-type]
-        elif InvalidOrder and isinstance(e, InvalidOrder): code = "invalid_order"  # type: ignore[arg-type]
-        elif InsufficientFunds and isinstance(e, InsufficientFunds): code = "insufficient_funds"  # type: ignore[arg-type]
-        elif AuthenticationError and isinstance(e, AuthenticationError): code = "auth_error"  # type: ignore[arg-type]
-        elif PermissionDenied and isinstance(e, PermissionDenied): code = "permission_denied"  # type: ignore[arg-type]
-        return {"accepted": False, "error": code, "details": repr(e), "idempotency_key": idem_key}
-
-    # ---- запись трейда (мягко) ----
-    try:
-        executed_price = order.get("price") or float(px_eff)
-        executed_qty   = order.get("amount") or float(amt)
-        fee_bps = float(getattr(cfg, "FEE_TAKER_BPS", 0.0))
-        fee_amt = float(_taker_fee_amount(_dec(executed_price) * _dec(executed_qty), fee_bps))
-        row = {
-            "symbol": sym,
-            "side": side,
-            "price": float(executed_price),
-            "qty": float(executed_qty),
-            "fee_amt": fee_amt,
-            "state": str(order.get("status") or "filled"),
-            "ts": int(order.get("timestamp") or _now_ms()),
-            "order_id": str(order.get("id") or ""),
-        }
-        if hasattr(trades_repo, "insert"):
-            trades_repo.insert(row)  # type: ignore[call-arg]
-        elif hasattr(trades_repo, "add"):
-            trades_repo.add(row)     # type: ignore[call-arg]
-        elif hasattr(trades_repo, "record"):
-            trades_repo.record(row)  # type: ignore[call-arg]
-    except Exception:
-        pass
-
-    # SELL — можно пересчитать позицию
-    try:
-        if hasattr(positions_repo, "recompute_from_trades"):
-            positions_repo.recompute_from_trades(sym)
-    except Exception:
-        pass
-
-    # фиксация идемпотентности
-    try:
-        if idempotency_repo is not None and idem_key:
-            idempotency_repo.commit(idem_key)
-    except Exception:
-        pass
-
-    return {
-        "accepted": True,
-        "order": {
-            "id": order.get("id"),
-            "status": order.get("status") or "filled",
-            "executed_price": float(order.get("price") or px_eff),
-            "executed_qty": float(order.get("amount") or amt),
-        },
-        "idempotency_key": idem_key,
-    }
+    if limit_hit:
+        return {"blocked": True, "reason": "daily_loss_limit_exceeded", "realized_pnl": realized}
+    return {"blocked": False, "realized_pnl": realized}

@@ -8,41 +8,33 @@ from typing import Any, Dict, Mapping, Optional
 class Settings:
     """
     Единый конфиг с поддержкой UPPER_CASE и snake_case алиасов.
-    Имеет build() (из os.environ) и from_reader(dict-like).
+    build() — из os.environ; from_reader() — из dict-like.
     """
 
-    # ---- значения по умолчанию (минимально необходимые проекту) ----
+    # ---- базовые поля и дефолты ----
     MODE: str = "paper"                  # paper | live | backtest
     EXCHANGE: str = "binance"
     SYMBOL: str = "BTC/USDT"
     TIMEFRAME: str = "1h"
 
-    # исполнение
     POSITION_SIZE_USD: float = 0.0
     FEE_TAKER_BPS: float = 20.0
     SLIPPAGE_BPS: float = 5.0
 
-    # идемпотентность
     IDEMPOTENCY_TTL_SEC: int = 300
     IDEMPOTENCY_BUCKET_MS: int = 5_000
-
-    # здоровье/время
     MAX_TIME_DRIFT_MS: int = 5_000
 
-    # Telegram
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_BOT_SECRET: Optional[str] = None
 
-    # backtest источники
     BACKTEST_CSV_PATH: Optional[str] = None
     BACKTEST_PRICES: Optional[list] = None
     BACKTEST_LAST_PRICE: float = 100.0
 
-    # профиль/окружение (для /status)
     PROFILE: Optional[str] = None
     ENV: Optional[str] = None
 
-    # ---- алиасы ключей (snake -> UPPER) ----
     _ALIASES: Dict[str, str] = {
         "mode": "MODE",
         "exchange": "EXCHANGE",
@@ -64,32 +56,21 @@ class Settings:
     }
 
     def __init__(self, **kwargs: Any) -> None:
-        # инициализируем известные поля, остальное — как есть
         for k, v in kwargs.items():
             setattr(self, self._normalize_key(k), v)
 
-    # ---------------- constructors ----------------
-
     @classmethod
     def from_reader(cls, env: Mapping[str, Any]) -> "Settings":
-        """
-        Строим Settings из dict-like. Поддерживает UPPER/snake и алиасы.
-        """
+        """Строим Settings из dict-like. Поддерживает UPPER/snake и алиасы."""
         def _g(*names: str, default: Any = None, cast: Optional[type] = None):
             for n in names:
-                # пробуем как есть
                 if n in env and env[n] is not None:
-                    val = env[n]
-                    return cast(val) if cast else val
-                # пробуем алиас
-                upper = cls._ALIASES.get(n.lower())
-                if upper and upper in env and env[upper] is not None:
-                    val = env[upper]
-                    return cast(val) if cast else val
-                # пробуем UPPER
+                    return cast(env[n]) if cast else env[n]
+                up = cls._ALIASES.get(n.lower())
+                if up and up in env and env[up] is not None:
+                    return cast(env[up]) if cast else env[up]
                 if n.upper() in env and env[n.upper()] is not None:
-                    val = env[n.upper()]
-                    return cast(val) if cast else val
+                    return cast(env[n.upper()]) if cast else env[n.upper()]
             return default
 
         return cls(
@@ -114,10 +95,7 @@ class Settings:
 
     @classmethod
     def build(cls) -> "Settings":
-        """Извлекаем из os.environ."""
         return cls.from_reader(os.environ)
-
-    # ---------------- helpers ----------------
 
     @classmethod
     def _normalize_key(cls, k: str) -> str:
@@ -130,15 +108,9 @@ class Settings:
         return k
 
     def __getattr__(self, name: str) -> Any:
-        # поддержка snake_case доступа
         if name in self._ALIASES:
             return getattr(self, self._ALIASES[name], None)
         raise AttributeError(name)
 
     def to_dict(self) -> Dict[str, Any]:
-        out = {}
-        for k, v in self.__dict__.items():
-            if k.startswith("_"):
-                continue
-            out[k] = v
-        return out
+        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}

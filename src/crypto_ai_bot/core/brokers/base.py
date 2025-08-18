@@ -35,7 +35,7 @@ def create_broker(settings: Any, bus: Any = None) -> ExchangeInterface:
     """
     Фабрика брокеров:
       - MODE=backtest  -> BacktestExchange
-      - MODE=paper/live -> CCXTExchange (ccxt_impl если есть, иначе ccxt_exchange)
+      - MODE=paper/live -> CCXTExchange (из core/brokers/ccxt_exchange.py)
     """
     mode = str(getattr(settings, "MODE", "paper")).lower()
     exchange_name = getattr(settings, "EXCHANGE", "binance")
@@ -44,11 +44,5 @@ def create_broker(settings: Any, bus: Any = None) -> ExchangeInterface:
         from .backtest_exchange import BacktestExchange
         return BacktestExchange(settings=settings, bus=bus, exchange_name="backtest")
 
-    # paper/live через CCXT
-    try:
-        # предпочтительно использовать новую реализацию, если она в проекте
-        from .ccxt_impl import CCXTExchange as _CCXT
-    except Exception:
-        from .ccxt_exchange import CCXTExchange as _CCXT
-
-    return _CCXT(settings=settings, bus=bus, exchange_name=exchange_name)
+    from .ccxt_exchange import CCXTExchange
+    return CCXTExchange(settings=settings, bus=bus, exchange_name=exchange_name)
