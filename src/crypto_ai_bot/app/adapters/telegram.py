@@ -6,15 +6,10 @@ import math
 import time
 from typing import Any, Dict, Optional, List, Tuple
 
-# Типичные зависимости — все пробрасываются из server.py
-# cfg: Settings
-# broker: exchange impl
-# repos: .positions, .trades, .audit, .uow, .idempotency (и т.п.)
-# bus: event bus
-# http: unified http client (utils.http_client.get_http_client())
+# нормализация символов/таймфреймов — единый реестр
+from crypto_ai_bot.core.brokers.symbols import normalize_symbol, normalize_timeframe
 
 
-# ------------- утилиты -------------
 def _get_token(cfg: Any) -> Optional[str]:
     return getattr(cfg, "TELEGRAM_BOT_TOKEN", None) or None
 
@@ -38,11 +33,6 @@ def _trim(s: str, limit: int = 3900) -> str:
 
 
 def _extract_cmd_args(text: str) -> Tuple[str, str]:
-    """
-    Возвращает (cmd, args) для строк вида:
-      '/eval BTC/USDT 1h 300'
-      ' /status '
-    """
     t = (text or "").strip()
     if not t.startswith("/"):
         return ("", "")
@@ -58,12 +48,10 @@ async def _send_text(http: Any, token: str, chat_id: str, text: str) -> None:
         payload = {"chat_id": chat_id, "text": _trim(text)}
         http.post_json(url, payload, timeout=3.5)
     except Exception:
-        # мягко игнорируем — вебхук всё равно вернёт 200
         pass
 
 
 def _public_base(cfg: Any) -> Optional[str]:
-    # необязательный параметр; если не задан — шлём просто текст без ссылки
     return getattr(cfg, "PUBLIC_BASE_URL", None) or None
 
 
@@ -89,13 +77,11 @@ def _format_status(cfg: Any, repos: Any, bus: Any) -> str:
     mode = getattr(cfg, "MODE", "paper")
     sym = getattr(cfg, "SYMBOL", "")
     tf = getattr(cfg, "TIMEFRAME", "")
-    # позиции
     try:
         opens = repos.positions.get_open() or []
         open_cnt = len(opens)
     except Exception:
         open_cnt = -1
-    # сделки (последние PnL)
     pnls: List[float] = []
     try:
         if hasattr(repos.trades, "last_closed_pnls"):
@@ -105,7 +91,6 @@ def _format_status(cfg: Any, repos: Any, bus: Any) -> str:
     eq = sum(pnls) if pnls else 0.0
     wins = sum(1 for x in pnls if x > 0)
     wr = (100.0 * wins / len(pnls)) if pnls else 0.0
-    # шина
     try:
         h = bus.health()
         dlq = int(h.get("dlq_size") or h.get("dlq_len") or 0)
@@ -124,7 +109,6 @@ def _format_status(cfg: Any, repos: Any, bus: Any) -> str:
     return "\n".join(lines)
 
 
-# ------------- команды -------------
 def _cmd_help() -> str:
     return _trim(
         "\n".join(
@@ -161,7 +145,6 @@ def _format_explain(explain: Dict[str, Any]) -> str:
         th_line = ", ".join(f"{k}:{float(v):.2f}" for k, v in thresholds.items())
         parts.append(f"thresholds: {th_line}")
     if ctx:
-        # вытащим несколько ключей
         keys = []
         for k in ("btc_dominance", "fear_greed", "dxy"):
             v = ctx.get(k) if isinstance(ctx, dict) else None
@@ -180,18 +163,13 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return default
 
 
-# ------------- публичный entrypoint -------------
 async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, bus: Any, http: Any) -> Dict[str, Any]:
-    """
-    Главная точка входа для /telegram вебхука. Возвращает короткий JSON.
-    При наличии TELEGRAM_BOT_TOKEN — отправляет ответ в чат.
-    """
     token = _get_token(cfg)
     chat_id = _chat_id_from_update(update)
     text = _text_from_update(update)
     cmd, args = _extract_cmd_args(text)
 
-    # Разбор аргументов для /eval и /test (symbol timeframe limit)
+    # Нормализуем ввод пользователя единым реестром символов/таймфреймов
     def parse_args(default_symbol: str, default_tf: str, default_limit: int) -> Tuple[str, str, int]:
         sym = default_symbol
         tf = default_tf
@@ -207,16 +185,16 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
                     limit = int(parts[2])
                 except Exception:
                     pass
+        # ЕДИНАЯ нормализация — критичное требование
+        sym = normalize_symbol(sym)
+        tf = normalize_timeframe(tf)
         return (sym, tf, limit)
 
-    # Подготовим ссылки на графики (если задан PUBLIC_BASE_URL)
     def chart_links(sym: str, tf: str, limit: int) -> Dict[str, str]:
         return _build_chart_links(cfg, symbol=sym, timeframe=tf, limit=limit)
 
-    # Заглушка ответа
     reply = {"status": "ok"}
 
-    # --- команды ---
     if cmd in ("", "/start", "/help"):
         out = "Привет! Это бот наблюдения за стратегией.\n\n" + _cmd_help()
         if token and chat_id:
@@ -230,22 +208,17 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
         return reply
 
     if cmd == "/test":
-        # мини-график + пробный сигнал (evaluate)
         sym, tf, limit = parse_args(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300))))
-        # сигнал
         try:
             from crypto_ai_bot.core.use_cases.evaluate import evaluate
             d = evaluate(cfg, broker, symbol=sym, timeframe=tf, limit=limit)
         except Exception as e:
             d = {"action": "hold", "error": f"{type(e).__name__}: {e}"}
-
-        # last price
         try:
             t = broker.fetch_ticker(sym)
             price = _safe_float(t.get("last"))
         except Exception:
             price = 0.0
-
         link = chart_links(sym, tf, limit).get("test")
         lines = [
             f"{sym} {tf}",
@@ -261,7 +234,6 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
 
     if cmd == "/profit":
         link = chart_links(getattr(cfg, "SYMBOL", "BTC/USDT"), getattr(cfg, "TIMEFRAME", "1h"), int(getattr(cfg, "LOOKBACK_LIMIT", getattr(cfg, "LIMIT_BARS", 300)))).get("profit")
-        # equity из репозитория
         try:
             if hasattr(repos.trades, "last_closed_pnls"):
                 pnls = [float(x) for x in (repos.trades.last_closed_pnls(10000) or []) if x is not None]  # type: ignore
@@ -303,7 +275,6 @@ async def handle(update: Dict[str, Any], *, cfg: Any, broker: Any, repos: Any, b
             await _send_text(http, token, chat_id, out)
         return reply
 
-    # неизвестная команда — поможем
     out = "Неизвестная команда.\n\n" + _cmd_help()
     if token and chat_id:
         await _send_text(http, token, chat_id, out)
