@@ -1,3 +1,4 @@
+# scripts/check_architecture.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -6,12 +7,24 @@ cd "$ROOT"
 
 echo "== Architecture sanity check =="
 
-# 1) Пустые (кроме __init__.py)
-echo "-- Empty / near-empty python files:"
-EMPTY=$(find src -type f -name "*.py" ! -name "__init__.py" -exec awk 'BEGIN{empty=1} { if (length($0) > 1 && $0 !~ /^[[:space:]]*#/) empty=0 } END{ if (empty) print FILENAME }' {} + || true)
-if [[ -n "${EMPTY:-}" ]]; then
-  echo "$EMPTY"
-  echo "✗ Found empty stubs ↑"
+# 1) Пустые или почти пустые (кроме __init__.py)
+echo "-- Empty / nearly-empty python files:"
+NEAR_EMPTY=$( \
+  find src -type f -name "*.py" ! -name "__init__.py" \
+  -exec awk '
+    BEGIN{nonblank=0}
+    {
+      line=$0
+      # считаем «содержательной» строкой то, что не только пробелы/комменты
+      if (line !~ /^[[:space:]]*$/ && line !~ /^[[:space:]]*#/) nonblank++
+    }
+    END{
+      if (nonblank <= 3) print FILENAME
+    }' {} + \
+)
+if [[ -n "${NEAR_EMPTY:-}" ]]; then
+  echo "$NEAR_EMPTY"
+  echo "✗ Found empty/nearly-empty stubs ↑"
 else
   echo "✓ none"
 fi
@@ -21,14 +34,15 @@ echo "-- Critical files presence:"
 CRIT=0
 for p in \
   "src/crypto_ai_bot/app/server.py" \
-  "src/crypto_ai_bot/utils/rate_limit.py" \
   "src/crypto_ai_bot/utils/metrics.py" \
   "src/crypto_ai_bot/utils/logging.py" \
-  "src/crypto_ai_bot/core/events/bus.py" \
+  "src/crypto_ai_bot/utils/rate_limit.py" \
   "src/crypto_ai_bot/core/events/async_bus.py" \
   "src/crypto_ai_bot/core/events/factory.py" \
   "src/crypto_ai_bot/core/use_cases/evaluate.py" \
   "src/crypto_ai_bot/core/use_cases/place_order.py" \
+  "src/crypto_ai_bot/core/use_cases/eval_and_execute.py" \
+  "src/crypto_ai_bot/core/brokers/ccxt_exchange.py" \
   "src/crypto_ai_bot/core/storage/sqlite_adapter.py"
 do
   if [[ -f "$p" ]]; then
@@ -38,7 +52,7 @@ do
   fi
 done
 
-echo "-- Hints:"
+echo "-- Tips:"
 echo "• Run 'uvicorn crypto_ai_bot.app.server:app --reload' and check /health, /status/extended, /metrics, /context."
-echo "• PERF_BUDGET_*_P99_MS envs enable budget flags."
+echo "• Use '.env.example' as canonical env template."
 exit $CRIT
