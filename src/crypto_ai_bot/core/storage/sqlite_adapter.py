@@ -1,28 +1,27 @@
-# src/crypto_ai_bot/core/storage/sqlite_adapter.py
 import sqlite3
-import time
+from typing import Optional
 
-def connect(path: str) -> sqlite3.Connection:
-    con = sqlite3.connect(path, isolation_level=None, check_same_thread=False, timeout=5.0)
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA synchronous=NORMAL;")
-    con.execute("PRAGMA busy_timeout=5000;")
-    return _RetryingConnection(con)
 
-class _RetryingConnection(sqlite3.Connection):
-    def __init__(self, con: sqlite3.Connection):
-        self.__dict__["_con"] = con
-
-    def __getattr__(self, item):
-        return getattr(self._con, item)
-
-    def execute(self, *a, **kw):
-        for i in range(5):
-            try:
-                return self._con.execute(*a, **kw)
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower():
-                    time.sleep(0.05 * (i+1))
-                    continue
-                raise
-        return self._con.execute(*a, **kw)
+def connect(path: str, *, timeout: float = 5.0) -> sqlite3.Connection:
+    """
+    Подключение SQLite с безопасными прагмами для прод-окружения.
+    - WAL журнал — параллельные чтения, меньше блокировок
+    - busy_timeout — ждём вместо немедленной ошибки «database is locked»
+    - foreign_keys — включены
+    - synchronous=NORMAL — баланс надёжность/скорость
+    """
+    con = sqlite3.connect(
+        path,
+        isolation_level=None,      # autocommit-подобный режим; транзакции через "with con:"
+        check_same_thread=False,   # разрешаем пул/потоки (мы осторожны в репозиториях)
+        timeout=timeout
+    )
+    # Прагмы
+    try:
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+        con.execute("PRAGMA foreign_keys=ON;")
+        con.execute(f"PRAGMA busy_timeout={int(timeout * 1000)};")
+    except Exception:
+        pass
+    return con
