@@ -4,19 +4,36 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
+
 logger = logging.getLogger("brokers.ccxt_exchange")
 
 try:
     import ccxt
+    from ccxt.base.errors import (
+        DDoSProtection, RateLimitExceeded, ExchangeNotAvailable, NetworkError,
+        RequestTimeout, AuthenticationError, PermissionDenied,
+        InvalidOrder, InsufficientFunds, OrderNotFound
+    )
 except Exception:  # pragma: no cover
     ccxt = None
 
 
+def _kind_from_exc(e: Exception) -> str:
+    if isinstance(e, (RateLimitExceeded, DDoSProtection)):
+        return "rate_limit"
+    if isinstance(e, (RequestTimeout, NetworkError, ExchangeNotAvailable)):
+        return "network"
+    if isinstance(e, (AuthenticationError, PermissionDenied)):
+        return "auth"
+    if isinstance(e, (InvalidOrder, InsufficientFunds, OrderNotFound)):
+        return "order"
+    return "other"
+
+
 class CCXTExchange:
     """
-    Обёртка над ccxt. Совместимая сигнатура create_order:
-      create_order(symbol=..., type='market', side=..., amount=..., price=None, params={})
-    Поддерживает старое имя аргумента 'type_' через kwargs.
+    Обёртка над ccxt с простым CB-учётом.
     """
 
     def __init__(self, settings: Any, bus: Any = None, exchange_name: str | None = None):
@@ -34,17 +51,33 @@ class CCXTExchange:
             "enableRateLimit": True,
         })
         self.bus = bus
+        self.cb = CircuitBreaker(name=f"ccxt:{name}")
+
         try:
             self.ccxt.load_markets()
+            self.cb.record_success()
         except Exception as e:
             logger.warning("load_markets failed: %s", e)
+            self.cb.record_error(_kind_from_exc(e), e)
 
     # ---- market data ----
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        return self.ccxt.fetch_ticker(symbol)
+        try:
+            res = self.ccxt.fetch_ticker(symbol)
+            self.cb.record_success()
+            return res
+        except Exception as e:
+            self.cb.record_error(_kind_from_exc(e), e)
+            raise
 
     def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.ccxt.fetch_balance(params or {})
+        try:
+            res = self.ccxt.fetch_balance(params or {})
+            self.cb.record_success()
+            return res
+        except Exception as e:
+            self.cb.record_error(_kind_from_exc(e), e)
+            raise
 
     # ---- orders ----
     def create_order(
@@ -57,20 +90,33 @@ class CCXTExchange:
         params: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """
-        Совместимо с вызовами:
-          create_order(symbol=..., type='market', side='buy'|'sell', amount=..., price=None, params={})
-        Поддержка старого имени аргумента: type_ (если передан и type пуст).
-        """
         if (not type) and ("type_" in kwargs):
             type = kwargs["type_"]
-        return self.ccxt.create_order(symbol, type, side, amount, price, params or {})
+        try:
+            res = self.ccxt.create_order(symbol, type, side, amount, price, params or {})
+            self.cb.record_success()
+            return res
+        except Exception as e:
+            self.cb.record_error(_kind_from_exc(e), e)
+            raise
 
     def cancel_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.ccxt.cancel_order(id, symbol, params or {})
+        try:
+            res = self.ccxt.cancel_order(id, symbol, params or {})
+            self.cb.record_success()
+            return res
+        except Exception as e:
+            self.cb.record_error(_kind_from_exc(e), e)
+            raise
 
     def fetch_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.ccxt.fetch_order(id, symbol, params or {})
+        try:
+            res = self.ccxt.fetch_order(id, symbol, params or {})
+            self.cb.record_success()
+            return res
+        except Exception as e:
+            self.cb.record_error(_kind_from_exc(e), e)
+            raise
 
     def fetch_open_orders(
         self,
@@ -79,4 +125,10 @@ class CCXTExchange:
         limit: Optional[int] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        return self.ccxt.fetch_open_orders(symbol, since, limit, params or {})
+        try:
+            res = self.ccxt.fetch_open_orders(symbol, since, limit, params or {})
+            self.cb.record_success()
+            return res
+        except Exception as e:
+            self.cb.record_error(_kind_from_exc(e), e)
+            raise
