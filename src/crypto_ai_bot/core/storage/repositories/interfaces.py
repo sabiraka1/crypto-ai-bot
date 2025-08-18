@@ -1,9 +1,6 @@
-# src/crypto_ai_bot/core/storage/repositories/interfaces.py
 from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Protocol, runtime_checkable
-
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 @runtime_checkable
 class PositionRepositoryInterface(Protocol):
@@ -11,19 +8,15 @@ class PositionRepositoryInterface(Protocol):
     def add(self, pos: Dict[str, Any]) -> None: ...
     def close(self, pos_id: Any, *, pnl: Optional[float] = None) -> None: ...
 
-
 @runtime_checkable
 class TradeRepositoryInterface(Protocol):
     def last_closed_pnls(self, n: int) -> List[float]: ...
-    # опционально
     def list_all(self) -> Optional[List[Dict[str, Any]]]: ...
     def list_closed(self, n: int) -> Optional[List[Dict[str, Any]]]: ...
-
 
 @runtime_checkable
 class AuditRepositoryInterface(Protocol):
     def add(self, event: Dict[str, Any]) -> None: ...
-
 
 @runtime_checkable
 class IdempotencyRepositoryInterface(Protocol):
@@ -31,7 +24,6 @@ class IdempotencyRepositoryInterface(Protocol):
     def commit(self, key: str, payload: Dict[str, Any]) -> None: ...
     def release(self, key: str) -> None: ...
     def check_and_store(self, key: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]: ...
-
 
 @runtime_checkable
 class UnitOfWorkInterface(Protocol):
@@ -41,7 +33,6 @@ class UnitOfWorkInterface(Protocol):
     def commit(self) -> None: ...
     def rollback(self) -> None: ...
 
-
 @dataclass
 class RepositoryInterfaces:
     positions: PositionRepositoryInterface
@@ -49,4 +40,4 @@ class RepositoryInterfaces:
     audit: AuditRepositoryInterface
     idempotency: IdempotencyRepositoryInterface
     uow: UnitOfWorkInterface
-    decisions: Optional[Any] = None  # если у тебя есть репозиторий решений — положим сюда
+    decisions: Optional[Any] = None
