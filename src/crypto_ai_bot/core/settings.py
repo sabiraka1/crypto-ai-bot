@@ -134,6 +134,9 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     LOG_JSON: bool = os.getenv("LOG_JSON", "false").lower() in {"1", "true", "yes"}
 
+    # --- Backtest metrics export (чтобы /metrics их видел) ---
+    BACKTEST_METRICS_PATH: str = os.getenv("BACKTEST_METRICS_PATH", "backtest_metrics.json")
+
     # --- профили по умолчанию ---
     _PROFILES: Dict[str, _DecisionProfile] = {
         "conservative": _DecisionProfile("conservative", 0.75, 0.25, 0.65, 0.35),
