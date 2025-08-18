@@ -68,7 +68,7 @@ except Exception:
 # =========================
 app = FastAPI(title="crypto-ai-bot")
 
-# >>> Correlation / Request-ID middleware ВКЛЮЧЕНО <<<
+# Correlation / Request-ID middleware — включено
 try:
     from crypto_ai_bot.app.middleware import register_middlewares
     register_middlewares(app)
@@ -105,12 +105,37 @@ except Exception:
 
 
 # =========================
+# Фоновые задачи (maintenance)
+# =========================
+_BG_TASKS: List[asyncio.Task] = []
+
+@app.on_event("startup")
+async def _on_startup():
+    # запускаем maintenance-петлю (очистка идемпотентности + sqlite snapshot)
+    try:
+        from crypto_ai_bot.app.maintenance import maintenance_loop
+        _BG_TASKS.append(asyncio.create_task(maintenance_loop(CONN, CFG)))
+    except Exception:
+        pass
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    for t in list(_BG_TASKS):
+        t.cancel()
+    # мягко подождём отмену
+    for t in list(_BG_TASKS):
+        try:
+            await t
+        except Exception:
+            pass
+    _BG_TASKS.clear()
+
+
+# =========================
 # Вспомогательное
 # =========================
 def _collect_trades_rows(limit: Optional[int] = None, closed_only: bool = False) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-
-    # Репозиторий — предпочтительно
     try:
         if hasattr(REPOS.trades, "list_all"):
             data = REPOS.trades.list_all()  # type: ignore
@@ -153,7 +178,6 @@ def _collect_trades_rows(limit: Optional[int] = None, closed_only: bool = False)
     except Exception:
         rows = []
 
-    # Прямой SQL — на случай другой реализации репозитория
     if not rows:
         try:
             cur = CONN.cursor()
@@ -286,13 +310,11 @@ def status_extended() -> JSONResponse:
 
 @app.get("/metrics")
 def metrics_export() -> PlainTextResponse:
-    # SQLite
     try:
         _ = sqlite_snapshot(CONN, path_hint=getattr(CFG, "DB_PATH", None))
     except Exception:
         pass
 
-    # backtest метрики из JSON
     try:
         metrics_path = getattr(CFG, "BACKTEST_METRICS_PATH", "backtest_metrics.json")
         if metrics_path and os.path.exists(metrics_path):
@@ -308,14 +330,12 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         pass
 
-    # DLQ
     try:
         dlq = int(BUS.health().get("dlq_size") or 0)
         metrics.gauge("events_dead_letter_total", float(dlq))
     except Exception:
         metrics.gauge("events_dead_letter_total", 0.0)
 
-    # performance budgets (по квантилям)
     try:
         snap = snapshot_quantiles()
         thr_dec = int(getattr(CFG, "PERF_BUDGET_DECISION_P99_MS", 0))
@@ -336,7 +356,6 @@ def metrics_export() -> PlainTextResponse:
     except Exception:
         pass
 
-    # export
     base = metrics.export()
     return PlainTextResponse(base, media_type="text/plain; version=0.0.4; charset=utf-8")
 
