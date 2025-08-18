@@ -1,104 +1,118 @@
 # src/crypto_ai_bot/core/brokers/backtest_exchange.py
 from __future__ import annotations
-from decimal import Decimal
-from typing import Any, Dict, List, Optional
-import time
-import os
 
-from crypto_ai_bot.core.brokers.base import ExchangeInterface
-from crypto_ai_bot.core.brokers.symbols import to_exchange_symbol
+import csv
+import os
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils import metrics
 
-try:
-    from crypto_ai_bot.io.csv_handler import read_ohlcv_csv  # опционально
-except Exception:
-    read_ohlcv_csv = None  # type: ignore
+log = get_logger(__name__)
 
 
-class BacktestExchange(ExchangeInterface):
-    """
-    Простой backtest-адаптер.
-    Если не передан источник OHLCV, отдаёт синтетические данные (как paper),
-    чтобы не рушить пайплайн.
-    """
+def _load_csv(path: str) -> List[List[float]]:
+    """Ожидается CSV с колонками: ts,open,high,low,close,volume."""
+    rows: List[List[float]] = []
+    if not path or not os.path.exists(path):
+        return rows
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            r = csv.reader(f)
+            header = next(r, None)
+            for line in r:
+                if not line:
+                    continue
+                try:
+                    ts = float(line[0]); o = float(line[1]); h = float(line[2]); l = float(line[3]); c = float(line[4])
+                    v = float(line[5]) if len(line) > 5 else 0.0
+                    rows.append([ts, o, h, l, c, v])
+                except Exception:
+                    continue
+    except Exception as e:
+        log.warning("Backtest CSV load failed: %s: %s", type(e).__name__, e)
+    return rows
 
-    def __init__(self, cfg, ohlcv_source: Optional[List[List[float]]] = None) -> None:
-        self.cfg = cfg
-        self._ohlcv_source = ohlcv_source or []
-        self._bus = None
 
-    # --------- фабрика ----------
+@dataclass
+class BacktestExchange:
+    """Простой backtest-брокер для оффлайн-данных."""
+    symbol: str
+    timeframe: str
+    ohlcv: List[List[float]]
+    bus: Optional[Any] = None
+
     @classmethod
-    def from_settings(cls, cfg) -> "BacktestExchange":
-        """
-        Унифицированная точка создания (требуется фабрикой create_broker()).
-        Пытаемся подхватить CSV, если он указан и доступен; иначе работаем на синтетике.
-        """
-        source: Optional[List[List[float]]] = None
-        path = getattr(cfg, "BACKTEST_CSV_PATH", None)
-        if path and isinstance(path, str) and os.path.exists(path) and read_ohlcv_csv:
-            try:
-                rows = read_ohlcv_csv(path)
-                # конвертируем в массивы [ts,o,h,l,c,v]
-                source = [[r["ts_ms"], r["open"], r["high"], r["low"], r["close"], r["volume"]] for r in rows]
-            except Exception:
-                source = None
-        return cls(cfg, ohlcv_source=source)
+    def from_settings(cls, cfg: Any, *, bus: Optional[Any] = None) -> "BacktestExchange":
+        path = getattr(cfg, "BACKTEST_CSV_PATH", "data/backtest.csv")
+        sym = getattr(cfg, "SYMBOL", "BTC/USDT")
+        tf = getattr(cfg, "TIMEFRAME", "1h")
+        data = _load_csv(path)
+        if not data:
+            log.warning("BacktestExchange: CSV '%s' is empty or missing; using synthetic flat price", path)
+            data = [[0, 0, 0, 0, 10_000.0, 0.0]]
+        return cls(symbol=sym, timeframe=tf, ohlcv=data, bus=bus)
 
-    def set_bus(self, bus) -> None:
-        self._bus = bus
-
-    def _now_ms(self) -> int:
-        return int(time.time() * 1000)
-
-    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        exch_sym = to_exchange_symbol(symbol)
-        px = 100.0 + (time.time() % 5)
-        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "fetch_ticker", "code": "200"})
-        return {"symbol": exch_sym, "last": px, "timestamp": self._now_ms(), "bid": px * 0.999, "ask": px * 1.001}
-
-    def fetch_order_book(self, symbol: str, limit: int = 10) -> Dict[str, Any]:
-        px = 100.0 + (time.time() % 5)
-        return {"bids": [[px * 0.999, 1.0]], "asks": [[px * 1.001, 1.0]], "timestamp": self._now_ms()}
-
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[float]]:
-        to_exchange_symbol(symbol)
-        if self._ohlcv_source:
-            data = self._ohlcv_source[-limit:]
-        else:
-            # синтетика если источник не передан
-            now = self._now_ms()
-            tf_ms = 60_000
-            base = 100.0
-            data = []
-            for i in range(limit, 0, -1):
-                t = now - i * tf_ms
-                o = base + (i % 30) * 0.15
-                h = o + 0.25
-                l = o - 0.15
-                c = o + 0.05
-                v = 1.0
-                data.append([t, o, h, l, c, v])
-        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "fetch_ohlcv", "code": "200"})
-        return data
-
-    def create_order(self, symbol: str, type_: str, side: str, amount: Decimal, price: Optional[Decimal] = None) -> Dict[str, Any]:
-        exch_sym = to_exchange_symbol(symbol)
-        # в бэктесте обычно нет реального исполнения — возвращаем событийную заглушку
-        oid = f"bt-{int(time.time()*1000)}"
-        order = {"id": oid, "symbol": exch_sym, "status": "accepted", "type": type_, "side": side, "amount": float(amount), "price": float(price) if price else None}
-        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "create_order", "code": "200"})
-        try:
-            if self._bus:
-                self._bus.publish({"type": "BacktestOrderAccepted", "order": order})
-        except Exception:
+    # -------- Market data --------
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 300) -> List[List[float]]:
+        if symbol != self.symbol:
+            # для простоты отдаём ту же серию — нормализация вне брокера
             pass
+        limit = max(1, int(limit))
+        return self.ohlcv[-limit:] if len(self.ohlcv) >= limit else self.ohlcv[:]
+
+    def fetch_ticker(self, symbol: str) -> Dict[str, float]:
+        series = self.ohlcv[-1] if self.ohlcv else [0, 0, 0, 0, 0, 0]
+        last = float(series[4]) if len(series) >= 5 else 0.0
+        return {"last": last, "bid": last * 0.999, "ask": last * 1.001}
+
+    def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
+        t = self.fetch_ticker(symbol)
+        bid = float(t.get("bid") or 0.0)
+        ask = float(t.get("ask") or 0.0)
+        return {"bids": [[bid, 1.0]], "asks": [[ask, 1.0]]}
+
+    # -------- Trading (synchronous fill) --------
+    def _safe_publish(self, ev: Dict[str, Any]) -> None:
+        b = self.bus
+        if not b:
+            return
+        try:
+            b.publish(ev)
+        except Exception as e:
+            # не падаем, но логируем и считаем
+            try:
+                metrics.inc("bus_publish_errors_total", {"exchange": "backtest", "type": str(ev.get("type"))})
+            except Exception:
+                pass
+            log.warning("BacktestExchange: bus.publish failed: %s: %s", type(e).__name__, e)
+
+    def place_order(self, *, symbol: str, side: str, amount: float) -> Dict[str, Any]:
+        """Имитация моментального исполнения рыночного ордера."""
+        t = self.fetch_ticker(symbol)
+        px = float(t.get("last") or 0.0)
+        order = {
+            "id": f"bt-{len(self.ohlcv)}",
+            "status": "executed",
+            "symbol": symbol,
+            "side": side,
+            "amount": float(amount),
+            "price": px,
+        }
+        # событие в шину
+        self._safe_publish({
+            "type": "OrderExecuted",
+            "symbol": symbol,
+            "side": side,
+            "amount": float(amount),
+            "price": px,
+        })
         return order
 
-    def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "cancel_order", "code": "200"})
-        return {"id": order_id, "status": "canceled"}
+    # часто в use_case вызывают create_order(...)/submit_order(...)
+    def create_order(self, symbol: str, side: str, amount: float, order_type: str = "market") -> Dict[str, Any]:
+        return self.place_order(symbol=symbol, side=side, amount=amount)
 
-    def fetch_balance(self) -> Dict[str, Any]:
-        metrics.inc("broker_requests_total", {"exchange": "backtest", "method": "fetch_balance", "code": "200"})
-        return {"total": {"USDT": 1_000_000.0}}
+    def submit_order(self, symbol: str, side: str, amount: float, order_type: str = "market") -> Dict[str, Any]:
+        return self.place_order(symbol=symbol, side=side, amount=amount)
