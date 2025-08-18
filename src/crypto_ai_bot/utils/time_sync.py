@@ -1,101 +1,122 @@
+# src/crypto_ai_bot/utils/time_sync.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterable, Optional, Dict, Any, List
-import email.utils as eut
+import time
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-# ВАЖНО: HTTP берём только из нашего клиента
-from crypto_ai_bot.utils.http_client import get_http_client
-
-
-_DEFAULT_URLS: List[str] = [
-    # JSON: {"unixtime": 1723800000, ...}
-    "https://worldtimeapi.org/api/timezone/Etc/UTC",
-    # JSON: {"currentUtcDateTime":"2025-08-16T13:08:49.123Z", ...}
-    "https://timeapi.io/api/Time/current/zone?timeZone=UTC",
-    # Fallback: заголовок Date
-    "https://www.google.com",
-    "https://www.cloudflare.com",
-]
-
-
-def _now_ms() -> int:
-    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-
-
-def _parse_remote_epoch_ms(url: str, body: Dict[str, Any] | None, headers: Dict[str, str]) -> Optional[int]:
+# Публичный API v2 (по спецификации): возвращаем кортеж (ok, drift_ms)
+def check_time_sync_status(
+    cfg: Any,
+    http: Any,
+    *,
+    urls: Optional[Iterable[str]] = None,
+    timeout: float = 1.5,
+    limit_ms: Optional[int] = None,
+) -> Tuple[bool, Optional[int], Dict[str, Any]]:
     """
-    Пытаемся достать удалённое UTC-время в миллисекундах:
-    1) известные JSON-поля;
-    2) заголовок Date (RFC 7231).
+    Возвращает:
+      ok: bool — дрейф в пределах лимита (или None → unknown → ok=True мягко)
+      drift_ms: |server_time - local_time| (ms) или None, если не смогли измерить
+      details: вспомогательные поля (urls, used, errors)
     """
-    # WorldTimeAPI
-    if body and "unixtime" in body and isinstance(body["unixtime"], (int, float)):
-        return int(float(body["unixtime"]) * 1000)
+    urls = list(urls or []) or [
+        "https://worldtimeapi.org/api/timezone/Etc/UTC",
+        "https://timeapi.io/api/Time/current/zone?timeZone=UTC",
+        # как запасной вариант — HEAD с Date:
+        "https://www.cloudflare.com",
+        "https://www.google.com",
+    ]
+    lim = int(limit_ms if limit_ms is not None else int(getattr(cfg, "TIME_DRIFT_LIMIT_MS", 1000)))
 
-    # timeapi.io
-    if body and "currentUtcDateTime" in body and isinstance(body["currentUtcDateTime"], str):
-        # формат вида 2025-08-16T13:08:49.123Z
-        try:
-            dt = datetime.fromisoformat(body["currentUtcDateTime"].replace("Z", "+00:00"))
-            return int(dt.timestamp() * 1000)
-        except Exception:
-            pass
+    errors: Dict[str, str] = {}
+    best: Optional[float] = None
+    used: Optional[str] = None
 
-    # Заголовок Date
-    date_hdr = None
-    for k, v in headers.items():
-        if k.lower() == "date":
-            date_hdr = v
-            break
-    if date_hdr:
+    # Ожидаемый интерфейс http-клиента: get_json(url, timeout) / get_text / head
+    for u in urls:
+        t0 = time.time()
         try:
-            # Пример: 'Sat, 16 Aug 2025 13:08:49 GMT'
-            tup = eut.parsedate_to_datetime(date_hdr)
-            if tup.tzinfo is None:
-                tup = tup.replace(tzinfo=timezone.utc)
-            return int(tup.timestamp() * 1000)
-        except Exception:
-            pass
+            server_ts = _extract_server_epoch_ms(http, u, timeout=timeout)
+            if server_ts is None:
+                continue
+            # t0 приблизительно локальное время отправки — достаточно для грубой оценки
+            local_ms = int(t0 * 1000)
+            drift = abs(int(server_ts) - local_ms)
+            if best is None or drift < best:
+                best = drift
+                used = u
+        except Exception as e:
+            errors[u] = f"{type(e).__name__}: {e}"
+
+    if best is None:
+        return True, None, {"limit_ms": lim, "urls": urls, "used": used, "errors": errors, "status": "unknown"}
+
+    ok = best <= lim
+    return ok, int(best), {"limit_ms": lim, "urls": urls, "used": used, "errors": errors, "status": "measured"}
+
+
+def _extract_server_epoch_ms(http: Any, url: str, *, timeout: float) -> Optional[int]:
+    """
+    Пытаемся получить серверное UTC-время в миллисекундах.
+    Поддерживаем 3 формы:
+      1) JSON с ключами 'unixtime' (сек) / 'unixtime_ms' (мс) / 'datetime' (ISO)
+      2) Заголовок Date из HEAD/GET
+      3) Падение → None
+    """
+    # 1) попробуем JSON
+    try:
+        if hasattr(http, "get_json"):
+            resp = http.get_json(url, timeout=timeout)  # type: ignore
+            if isinstance(resp, dict):
+                if "unixtime_ms" in resp:
+                    return int(resp["unixtime_ms"])
+                if "unixtime" in resp:
+                    return int(float(resp["unixtime"]) * 1000.0)
+                # worldtimeapi: {"unixtime": 1712345678}
+                if "datetime" in resp:
+                    # ISO «YYYY-MM-DDTHH:MM:SS.mmmZ»
+                    import datetime
+                    iso = str(resp["datetime"])
+                    dt = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                    return int(dt.timestamp() * 1000.0)
+    except Exception:
+        pass
+
+    # 2) заголовок Date
+    try:
+        # предпочтительно HEAD
+        if hasattr(http, "head"):
+            r = http.head(url, timeout=timeout)  # type: ignore
+            headers = getattr(r, "headers", None) or getattr(r, "Headers", None) or {}
+        else:
+            if hasattr(http, "get"):
+                r = http.get(url, timeout=timeout)  # type: ignore
+                headers = getattr(r, "headers", None) or {}
+            else:
+                headers = {}
+        datev = None
+        for k, v in headers.items():
+            if str(k).lower() == "date":
+                datev = v
+                break
+        if datev:
+            import email.utils as eut
+            import calendar, time as _t
+            ts = eut.parsedate(datev)  # type: ignore
+            if ts:
+                # gmttime → epoch sec
+                sec = calendar.timegm(ts)
+                return int(sec * 1000.0)
+    except Exception:
+        pass
 
     return None
 
 
-def measure_time_drift(cfg=None, http=None, *, urls: Iterable[str] | None = None, timeout: float = 3.0) -> Optional[int]:
+# v1-совместимость (как было в проекте):
+def measure_time_drift(cfg: Any, http: Any, *, urls=None, timeout: float = 1.5) -> Optional[int]:
     """
-    Возвращает минимальный |remote_ms - local_ms| среди источников.
-    Если все источники недоступны — None.
+    Старый API — возвращает только |drift_ms| или None. Сохраняем для совместимости.
     """
-    client = http or get_http_client()
-    url_list = list(urls or getattr(cfg, "TIME_DRIFT_URLS", None) or _DEFAULT_URLS)
-
-    best: Optional[int] = None
-    for url in url_list:
-        try:
-            # стараемся получить JSON; при ошибке — хотя бы заголовки
-            body = None
-            headers: Dict[str, str] = {}
-            try:
-                body = client.get_json(url, timeout=timeout)  # наш http-клиент
-                headers = {}  # в JSON пути у нас заголовков нет — но ок
-            except Exception:
-                # сделаем "сырой" GET ради заголовка Date
-                # наш HttpClient не обязан уметь "raw", поэтому попробуем ещё раз JSON,
-                # а заголовки ловим из Exception (многие клиенты кладут response в err)
-                # если заголовков нет — ниже просто не распарсим
-                body = None
-                headers = {}
-
-            remote_ms = _parse_remote_epoch_ms(url, body, headers)
-            if remote_ms is None:
-                # повторный запрос для получения заголовков (если клиент поддерживает)
-                # оставим как есть: у большинства источников JSON достаточно
-                continue
-
-            local_ms = _now_ms()
-            drift = abs(remote_ms - local_ms)
-            best = drift if best is None else min(best, drift)
-        except Exception:
-            continue
-
-    return best
+    ok, drift, _ = check_time_sync_status(cfg, http, urls=urls, timeout=timeout)
+    return drift
