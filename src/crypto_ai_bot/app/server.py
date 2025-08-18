@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/app/server.py
 from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -9,58 +8,75 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container, Container
 from crypto_ai_bot.utils.logging import setup_json_logging
-from crypto_ai_bot.utils.metrics import export as export_metrics
+from crypto_ai_bot.utils.metrics import export as export_metrics, inc
 from crypto_ai_bot.app.tasks.reconciler import start_reconciler
 from crypto_ai_bot.app.middleware import register_middlewares
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.time_sync import measure_time_drift_ms
+from crypto_ai_bot.core.storage.sqlite_maint import run_scheduled_maintenance
 
 container: Optional[Container] = None
 _reconciler_task: Optional[asyncio.Task] = None
-_cleanup_task: Optional[asyncio.Task] = None
+_housekeeping_task: Optional[asyncio.Task] = None
 _cb_health = CircuitBreaker(failure_threshold=3, reset_timeout_sec=5.0, success_threshold=1)
 
-async def _cleanup_idempotency_loop():
+async def _housekeeping_loop():
+    """
+    Раз в минуту:
+      - чистим просроченную идемпотентность
+      - по расписанию запускаем SQLite maintenance (quick/full)
+    """
     while True:
         try:
-            if container and hasattr(container, "idempotency_repo"):
-                container.idempotency_repo.cleanup_expired()
+            if container:
+                # idempotency cleanup
+                try:
+                    if hasattr(container, "idempotency_repo"):
+                        removed = container.idempotency_repo.cleanup_expired()
+                        if removed:
+                            inc("idempotency_cleanup_removed", {})
+                except Exception:
+                    pass
+
+                # db maintenance
+                try:
+                    mtype, dur = run_scheduled_maintenance(container.con, container.settings)
+                    if mtype != "skip":
+                        inc("db_maint_run", {"type": mtype})
+                except Exception:
+                    pass
         except Exception:
             pass
         await asyncio.sleep(60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global container, _reconciler_task, _cleanup_task
+    global container, _reconciler_task, _housekeeping_task
     container = build_container()
 
     # JSON-логи + middleware
     setup_json_logging(container.settings)
     register_middlewares(app, container.settings)
 
-    # фоновый reconciler (если возвращает task)
+    # фоновый reconciler
     try:
         _reconciler_task = start_reconciler(container)
     except Exception:
         _reconciler_task = None
 
-    # периодический cleanup идемпотентности
-    _cleanup_task = asyncio.create_task(_cleanup_idempotency_loop())
+    # housekeeping (idempotency + sqlite maint)
+    _housekeeping_task = asyncio.create_task(_housekeeping_loop())
 
     try:
         yield
     finally:
         # аккуратное завершение
-        try:
-            if _cleanup_task:
-                _cleanup_task.cancel()
-        except Exception:
-            pass
-        try:
-            if _reconciler_task:
-                _reconciler_task.cancel()
-        except Exception:
-            pass
+        for t in (_housekeeping_task, _reconciler_task):
+            try:
+                if t:
+                    t.cancel()
+            except Exception:
+                pass
         try:
             if hasattr(container.bus, "stop"):
                 container.bus.stop()
@@ -95,7 +111,6 @@ async def health():
                     t = container.broker.fetch_ticker(container.settings.SYMBOL)
                     return bool(t)
                 except Exception as e:
-                    # регистрируем фэйл в CB
                     try:
                         _cb_health.call(lambda: (_ for _ in ()).throw(e))
                     except Exception:

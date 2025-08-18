@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/app/compose.py
 from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
@@ -8,6 +7,7 @@ from crypto_ai_bot.core.brokers.base import create_broker
 from crypto_ai_bot.core.events.bus import AsyncEventBus
 from crypto_ai_bot.core.storage.sqlite_adapter import connect
 from crypto_ai_bot.core.storage.migrations.runner import apply_all
+from crypto_ai_bot.core.storage.sqlite_maint import apply_connection_pragmas
 
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
@@ -34,6 +34,7 @@ def build_container() -> Container:
 
     # DB
     con = connect(getattr(cfg, "DB_PATH", ":memory:"))
+    apply_connection_pragmas(con, cfg)   # <— безопасные PRAGMA
     apply_all(con)
 
     # repos
@@ -43,7 +44,7 @@ def build_container() -> Container:
     idem = IdempotencyRepository(con)
     audit = SqliteAuditRepository(con)
 
-    # bus (bounded queue + start)
+    # bus
     bus = AsyncEventBus(
         max_queue=int(getattr(cfg, "BUS_MAX_QUEUE", 2000)),
         dlq_limit=int(getattr(cfg, "BUS_DLQ_LIMIT", 500)),

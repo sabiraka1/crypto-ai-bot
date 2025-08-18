@@ -1,27 +1,18 @@
+from __future__ import annotations
 import sqlite3
-from typing import Optional
+from typing import Any
 
-
-def connect(path: str, *, timeout: float = 5.0) -> sqlite3.Connection:
+def connect(path: str) -> sqlite3.Connection:
     """
-    Подключение SQLite с безопасными прагмами для прод-окружения.
-    - WAL журнал — параллельные чтения, меньше блокировок
-    - busy_timeout — ждём вместо немедленной ошибки «database is locked»
-    - foreign_keys — включены
-    - synchronous=NORMAL — баланс надёжность/скорость
+    Подключение SQLite в autocommit (isolation_level=None) с безопасными параметрами.
     """
+    # Встроенный таймаут соединения; retry делает сам SQLite (busy_timeout мы задаём через PRAGMA)
     con = sqlite3.connect(
         path,
-        isolation_level=None,      # autocommit-подобный режим; транзакции через "with con:"
-        check_same_thread=False,   # разрешаем пул/потоки (мы осторожны в репозиториях)
-        timeout=timeout
+        isolation_level=None,      # autocommit — нам удобно для VACUUM/DDL
+        check_same_thread=False,   # доступ из разных потоков
+        timeout=30.0,              # базовый таймаут на открытие/блокировки
+        detect_types=0,
     )
-    # Прагмы
-    try:
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA synchronous=NORMAL;")
-        con.execute("PRAGMA foreign_keys=ON;")
-        con.execute(f"PRAGMA busy_timeout={int(timeout * 1000)};")
-    except Exception:
-        pass
+    # По умолчанию row-фабрику не меняем (минимальная совместимость)
     return con
