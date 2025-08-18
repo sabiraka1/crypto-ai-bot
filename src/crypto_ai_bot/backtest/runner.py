@@ -6,13 +6,20 @@
 - Считает индикаторы через core.indicators.unified.
 - Прогоняет стратегию (по умолчанию — RSI/MACD-демо).
 - Исполняет сделки через core.brokers.backtest_exchange.BacktestExchange.
-- Возвращает сводку результатов.
+- Возвращает сводку результатов + опционально трейды и equity-кривую.
+
+Сводка:
+{
+  'trades': int, 'wins': int, 'losses': int, 'win_rate': float,
+  'final_equity': float, 'pnl': float, 'max_drawdown': float,
+  'trades_list': [ ... ],     # если collect_trades=True
+  'equity_curve': [ ... ]     # если collect_equity=True
+}
 """
 
 from typing import List, Dict, Any, Optional
 from types import SimpleNamespace
 import csv
-import math
 
 from crypto_ai_bot.core.indicators.unified import compute_all
 from crypto_ai_bot.core.brokers.backtest_exchange import BacktestExchange, BacktestFees
@@ -24,8 +31,6 @@ def load_ohlcv_csv(path: str) -> List[List[float]]:
     with open(path, "r", newline="") as f:
         rd = csv.reader(f)
         header = next(rd, None)
-        # пытаемся понять порядок колонок
-        # ожидаем как минимум: ts, open, high, low, close
         for row in rd:
             if not row or len(row) < 5:
                 continue
@@ -38,9 +43,9 @@ def load_ohlcv_csv(path: str) -> List[List[float]]:
 
 class BasicRSIMACDStrategy:
     """
-    Демо-стратегия для примера:
-    - BUY, если RSI < 30 и MACD пересек выше сигнальной (последние 2 бара).
-    - SELL, если RSI > 70 или MACD пересек ниже сигнальной.
+    Демо-стратегия:
+    - BUY, если RSI < 30 и MACD пересёк выше сигнальной (последние 2 бара).
+    - SELL, если RSI > 70 или MACD пересёк ниже сигнальной.
     """
     def __init__(self, rsi_buy=30.0, rsi_sell=70.0):
         self.rsi_buy = rsi_buy
@@ -52,14 +57,10 @@ class BasicRSIMACDStrategy:
         sig = ind["macd_signal"][i]
         macd_prev = ind["macd"][i-1] if i-1 >= 0 else None
         sig_prev  = ind["macd_signal"][i-1] if i-1 >= 0 else None
-
-        # недостаточно данных
         if rsi is None or macd is None or sig is None or macd_prev is None or sig_prev is None:
             return None
-
         cross_up = macd_prev <= sig_prev and macd > sig
         cross_dn = macd_prev >= sig_prev and macd < sig
-
         if not has_long and rsi < self.rsi_buy and cross_up:
             return "buy"
         if has_long and (rsi > self.rsi_sell or cross_dn):
@@ -75,20 +76,10 @@ def run_backtest(
     trade_amount: float = 10.0,
     fee_taker_bps: float = 10.0,
     slippage_bps: float = 5.0,
-    strategy: Optional[BasicRSIMACDStrategy] = None
+    strategy: Optional[BasicRSIMACDStrategy] = None,
+    collect_trades: bool = False,
+    collect_equity: bool = False
 ) -> Dict[str, Any]:
-    """
-    Выполняет бэктест и возвращает сводку:
-    {
-      'trades': int,
-      'wins': int,
-      'losses': int,
-      'win_rate': float,
-      'final_equity': float,
-      'pnl': float,
-      'max_drawdown': float
-    }
-    """
     ohlcv = load_ohlcv_csv(csv_path)
     if len(ohlcv) < 50:
         raise ValueError("Недостаточно данных для бэктеста")
@@ -100,35 +91,33 @@ def run_backtest(
     fees = BacktestFees(taker_bps=fee_taker_bps, maker_bps=fee_taker_bps)
     ex = BacktestExchange(ohlcv=ohlcv, symbol=symbol, fees=fees)
 
-    # Псевдо-конфиг для sizing (совместим с compute_qty_for_notional)
-    cfg = SimpleNamespace(
-        TRADE_AMOUNT=trade_amount,
-        FEE_TAKER_BPS=fee_taker_bps,
-        SLIPPAGE_BPS=slippage_bps
-    )
+    # Псевдо-конфиг для sizing
+    cfg = SimpleNamespace(TRADE_AMOUNT=trade_amount, FEE_TAKER_BPS=fee_taker_bps, SLIPPAGE_BPS=slippage_bps)
 
     # State
     cash = float(starting_cash)
     position_qty = 0.0
     entry_price = 0.0
 
-    trades = 0
+    trades_cnt = 0
     wins = 0
     losses = 0
     equity_peak = cash
     equity = cash
 
+    trades_list: List[Dict[str, Any]] = []
+    equity_curve: List[Dict[str, Any]] = []
+
     strat = strategy or BasicRSIMACDStrategy()
 
-    # стартуем с индекса, где индикаторы уже готовы
-    lookback = max(
-        26,    # macd slow
-        20,    # bb period
-        14+1,  # rsi warmup
-    )
+    lookback = max(26, 20, 15)  # slow, bb, rsi(14)+1
     i = 0
     while i < len(ohlcv):
+        ts = int(ohlcv[i][0])
         if i < lookback:
+            equity = cash + position_qty * closes[i]
+            if collect_equity:
+                equity_curve.append({"ts": ts, "equity": equity})
             i += 1
             ex.advance() if i < len(ohlcv) else None
             continue
@@ -147,6 +136,8 @@ def run_backtest(
                     cash -= cost
                     position_qty += qty
                     entry_price = px
+                    if collect_trades:
+                        trades_list.append({"ts": ts, "side": "buy", "price": px, "qty": qty, "fee": fee})
 
         elif action == "sell" and has_long:
             qty = position_qty
@@ -155,50 +146,60 @@ def run_backtest(
                 fee = float(o["fee"]["cost"] if o.get("fee") else 0.0)
                 proceeds = px * qty - fee
                 cash += proceeds
-                # P/L trade
                 pnl_trade = (px - entry_price) * qty - fee
-                trades += 1
+                trades_cnt += 1
                 if pnl_trade >= 0:
                     wins += 1
                 else:
                     losses += 1
+                if collect_trades:
+                    trades_list.append({"ts": ts, "side": "sell", "price": px, "qty": qty, "fee": fee, "pnl": pnl_trade})
                 position_qty = 0.0
                 entry_price = 0.0
 
-        # пересчёт equity и max DD
         equity = cash + position_qty * px
         equity_peak = max(equity_peak, equity)
+        if collect_equity:
+            equity_curve.append({"ts": ts, "equity": equity})
 
         i += 1
         if i < len(ohlcv):
             ex.advance()
 
-    # закрытие позиции по финальной цене, если осталось
+    # Финальное закрытие
     if position_qty > 0.0:
+        ts = int(ohlcv[-1][0])
         px = float(closes[-1])
         fee = px * position_qty * (fee_taker_bps / 10_000.0)
         cash += px * position_qty - fee
         pnl_trade = (px - entry_price) * position_qty - fee
-        trades += 1
+        trades_cnt += 1
         if pnl_trade >= 0:
             wins += 1
         else:
             losses += 1
+        if collect_trades:
+            trades_list.append({"ts": ts, "side": "sell", "price": px, "qty": position_qty, "fee": fee, "pnl": pnl_trade})
         position_qty = 0.0
         entry_price = 0.0
         equity = cash
+        if collect_equity:
+            equity_curve.append({"ts": ts, "equity": equity})
 
     pnl = equity - starting_cash
-    dd = 0.0
-    if equity_peak > 0:
-        dd = (equity_peak - equity) / equity_peak
+    dd = (equity_peak - equity) / equity_peak if equity_peak > 0 else 0.0
 
-    return {
-        "trades": trades,
+    out = {
+        "trades": trades_cnt,
         "wins": wins,
         "losses": losses,
-        "win_rate": (wins / trades) if trades > 0 else 0.0,
+        "win_rate": (wins / trades_cnt) if trades_cnt > 0 else 0.0,
         "final_equity": equity,
         "pnl": pnl,
         "max_drawdown": dd
     }
+    if collect_trades:
+        out["trades_list"] = trades_list
+    if collect_equity:
+        out["equity_curve"] = equity_curve
+    return out

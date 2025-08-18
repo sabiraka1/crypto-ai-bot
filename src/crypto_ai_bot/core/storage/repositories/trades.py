@@ -6,23 +6,20 @@ from typing import Dict, Any, List, Optional
 class SqliteTradeRepository:
     def __init__(self, con: sqlite3.Connection):
         self.con = con
-        # Базовая схема предполагается миграциями, но гарантируем наличие таблицы
         self.con.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts INTEGER NOT NULL,
             symbol TEXT NOT NULL,
-            side TEXT NOT NULL,           -- 'buy' | 'sell'
+            side TEXT NOT NULL,
             price REAL NOT NULL,
             qty REAL NOT NULL,
             pnl REAL DEFAULT 0.0
         );
         """)
-        # Новые поля — через миграции (0090_orders_fsm.sql)
 
-    # ---- старые методы (совместимость) ----
+    # ---- совместимость ----
     def insert_trade(self, symbol: str, side: str, price: float, qty: float, pnl: float = 0.0) -> int:
-        """Исторический путь (бумажный режим), совместимость."""
         with self.con:
             cur = self.con.execute(
                 "INSERT INTO trades(ts, symbol, side, price, qty, pnl, state) VALUES(?,?,?,?,?,?, 'filled')",
@@ -40,14 +37,11 @@ class SqliteTradeRepository:
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-    # ---- новые FSM-методы ----
-    def create_pending_order(self, *, symbol: str, side: str, exp_price: float, qty: float,
-                             order_id: str) -> int:
-        """Создаёт запись о принятом ордере (state='pending'), без фиксации pnl."""
+    # ---- FSM ----
+    def create_pending_order(self, *, symbol: str, side: str, exp_price: float, qty: float, order_id: str) -> int:
         with self.con:
             cur = self.con.execute(
-                "INSERT INTO trades(ts, symbol, side, price, qty, pnl, order_id, state) "
-                "VALUES(?,?,?,?,?,?,?, 'pending')",
+                "INSERT INTO trades(ts, symbol, side, price, qty, pnl, order_id, state) VALUES(?,?,?,?,?,?,?, 'pending')",
                 (int(time.time()), symbol, side, float(exp_price), float(qty), 0.0, order_id)
             )
             return int(cur.lastrowid)
@@ -56,9 +50,7 @@ class SqliteTradeRepository:
         with self.con:
             self.con.execute("UPDATE trades SET state=? WHERE order_id=?", (state, order_id,))
 
-    def fill_order(self, *, order_id: str, executed_price: float, executed_qty: float,
-                   fee_amt: float = 0.0, fee_ccy: str = "USDT") -> None:
-        """Отмечает исполнение. PnL не считаем здесь — зависит от закрытия позиции."""
+    def fill_order(self, *, order_id: str, executed_price: float, executed_qty: float, fee_amt: float = 0.0, fee_ccy: str = "USDT") -> None:
         with self.con:
             self.con.execute(
                 "UPDATE trades SET state='filled', price=?, qty=?, fee_amt=?, fee_ccy=? WHERE order_id=?",
@@ -84,3 +76,8 @@ class SqliteTradeRepository:
         cur = self.con.execute(q, tuple(p))
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def count_pending(self) -> int:
+        cur = self.con.execute("SELECT COUNT(1) FROM trades WHERE state='pending'")
+        (n,) = cur.fetchone() or (0,)
+        return int(n)
