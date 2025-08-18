@@ -1,53 +1,66 @@
 from __future__ import annotations
 import sqlite3, time
-from typing import Optional, Tuple
+from typing import Optional
 
 DDL = """
 CREATE TABLE IF NOT EXISTS idempotency(
   key TEXT PRIMARY KEY,
   created_ms INTEGER NOT NULL,
-  ttl_sec INTEGER NOT NULL,
   committed INTEGER NOT NULL DEFAULT 0,
-  state TEXT
+  state TEXT NOT NULL DEFAULT 'claimed'
 );
 """
+IDX = "CREATE UNIQUE INDEX IF NOT EXISTS idx_idem_key ON idempotency(key);"
 
 class IdempotencyRepository:
     def __init__(self, con: sqlite3.Connection):
         self.con = con
         self.con.execute(DDL)
+        self.con.execute(IDX)
 
-    @staticmethod
-    def _now_ms() -> int: return int(time.time() * 1000)
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000)
 
-    # ---- требуемые чекером методы ----
+    def cleanup_expired(self, ttl_seconds: int = 300) -> int:
+        """Удаляет старые ключи, у которых TTL вышел (и не зафиксированы)."""
+        now = self._now_ms()
+        limit_ms = now - int(ttl_seconds) * 1000
+        with self.con:
+            cur = self.con.execute(
+                "DELETE FROM idempotency WHERE committed=0 AND created_ms < ?", (limit_ms,)
+            )
+        return cur.rowcount
 
-    def check_and_store(self, key: str, ttl_seconds: int) -> bool:
+    # --- основной атомарный метод ---
+
+    def check_and_store(self, key: str, ttl_seconds: int = 300) -> bool:
         """
-        Атомарно вставляет ключ, если его нет/протух. True — впервые, False — дубликат.
+        Атомарная попытка «захватить» ключ.
+        True  -> мы первые (можно выполнять действие)
+        False -> ключ уже есть/просрочен (дубликат или устаревший)
         """
         now = self._now_ms()
+        # 1) пробуем вставить (если ключ уже есть – вставка проигнорируется)
         with self.con:
-            # удалить протухшие перед вставкой
-            self.con.execute("DELETE FROM idempotency WHERE created_ms + (ttl_sec*1000) < ?", (now,))
-            try:
-                self.con.execute(
-                    "INSERT INTO idempotency(key, created_ms, ttl_sec, committed, state) VALUES (?,?,?,?,?)",
-                    (key, now, int(ttl_seconds), 0, "claimed"),
-                )
-                return True
-            except sqlite3.IntegrityError:
-                return False
+            self.con.execute(
+                "INSERT OR IGNORE INTO idempotency(key, created_ms, committed, state) VALUES (?,?,0,'claimed')",
+                (key, now),
+            )
+        # 2) проверяем текущее состояние ключа
+        row = self.con.execute("SELECT created_ms, committed FROM idempotency WHERE key=?", (key,)).fetchone()
+        if row is None:
+            return False
+        created_ms, committed = int(row[0]), int(row[1])
+        if committed:
+            return False
+        # TTL ещё не вышел => наш захват валиден
+        if (now - created_ms) <= int(ttl_seconds) * 1000:
+            return True
+        # просрочено – трактуем как нельзя выполнять
+        return False
 
-    def claim(self, key: str, ttl_seconds: int = 60) -> bool:
-        return self.check_and_store(key, ttl_seconds)
-
-    def commit(self, key: str, state: str = "done") -> None:
+    def commit(self, key: str) -> None:
         with self.con:
-            self.con.execute("UPDATE idempotency SET committed=1, state=? WHERE key=?", (state, key))
-
-    def cleanup_expired(self) -> int:
-        now = self._now_ms()
-        with self.con:
-            cur = self.con.execute("DELETE FROM idempotency WHERE created_ms + (ttl_sec*1000) < ?", (now,))
-            return int(cur.rowcount)
+            self.con.execute(
+                "UPDATE idempotency SET committed=1, state='committed' WHERE key=?", (key,)
+            )

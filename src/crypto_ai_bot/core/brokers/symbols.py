@@ -65,3 +65,17 @@ def symbol_variants(raw: str) -> List[str]:
     base, quote = _split_base_quote(raw)
     canon = f"{base}/{quote}"
     return [canon, f"{base}{quote}", f"{base}_{quote}", f"{base}-{quote}"]
+
+def normalize_symbol(raw: str, exchange: str | None = None) -> str:
+    """Алиас для дашборда/старого кода — возвращает 'BASE/QUOTE'."""
+    return to_ccxt_symbol(raw, exchange)
+
+_TIMEFRAME_MAP = {
+    "1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m",
+    "1h":"1h","2h":"2h","4h":"4h","6h":"6h","12h":"12h",
+    "1d":"1d","3d":"3d","1w":"1w",
+}
+def normalize_timeframe(tf: str) -> str:
+    if not tf: return "1h"
+    return _TIMEFRAME_MAP.get(str(tf).strip().lower(), "1h")
+
