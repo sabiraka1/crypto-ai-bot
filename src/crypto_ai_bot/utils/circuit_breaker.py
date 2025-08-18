@@ -1,74 +1,74 @@
 from __future__ import annotations
 import time
-from typing import List, Dict, Any, Optional
+from typing import Callable, Any, Optional
+
 
 class CircuitBreaker:
     """
-    Простой полублокирующий Circuit Breaker со статусами:
-    closed → open → half-open → closed
-    Ведёт transitions_log и отдаёт get_stats().
+    Простой полурегулируемый Circuit Breaker:
+      - failure_threshold: сколько подряд ошибок, чтобы перейти в OPEN
+      - reset_timeout_sec: сколько ждать в OPEN, прежде чем попробовать HALF-OPEN
+      - success_threshold: сколько подряд успешных вызовов в HALF-OPEN, чтобы закрыть
+
+    Использование:
+      cb = CircuitBreaker()
+      result = cb.call(fn, on_error=...)
     """
-    def __init__(self, name: str = "breaker", failure_threshold: int = 5,
-                 recovery_time_seconds: float = 30.0) -> None:
-        self.name = name
-        self.failure_threshold = int(failure_threshold)
-        self.recovery_time = float(recovery_time_seconds)
-        self._state = "closed"
+    def __init__(self,
+                 failure_threshold: int = 5,
+                 reset_timeout_sec: float = 10.0,
+                 success_threshold: int = 2):
+        self.failure_threshold = max(1, int(failure_threshold))
+        self.reset_timeout_sec = float(reset_timeout_sec)
+        self.success_threshold = max(1, int(success_threshold))
+
+        self._state = "CLOSED"        # CLOSED | OPEN | HALF_OPEN
         self._failures = 0
-        self._opened_at: Optional[float] = None
-        self.transitions_log: List[Dict[str, Any]] = []
+        self._successes = 0
+        self._opened_at = 0.0
 
-    def _transition(self, new_state: str, reason: str) -> None:
-        old = self._state
-        if old == new_state:  # нет смысла
-            return
-        self._state = new_state
-        self.transitions_log.append({
-            "ts": int(time.time() * 1000),
-            "from": old,
-            "to": new_state,
-            "reason": reason,
-            "name": self.name,
-        })
+    @property
+    def state(self) -> str:
+        # автопереход OPEN -> HALF_OPEN по таймауту
+        if self._state == "OPEN" and (time.time() - self._opened_at) >= self.reset_timeout_sec:
+            self._state = "HALF_OPEN"
+            self._successes = 0
+            self._failures = 0
+        return self._state
 
-    def _on_failure(self, err: BaseException) -> None:
-        self._failures += 1
-        if self._state == "closed" and self._failures >= self.failure_threshold:
-            self._opened_at = time.monotonic()
-            self._transition("open", f"failures={self._failures}")
-        elif self._state == "half-open":
-            # при провале в half-open снова уходим в open
-            self._opened_at = time.monotonic()
-            self._transition("open", "half-open failure")
+    def call(self, fn: Callable[[], Any], *, on_error: Optional[Callable[[Exception], None]] = None) -> Any:
+        st = self.state
+        if st == "OPEN":
+            raise RuntimeError("circuit_open")
+
+        try:
+            result = fn()
+            self._on_success()
+            return result
+        except Exception as e:
+            if on_error:
+                try:
+                    on_error(e)
+                except Exception:
+                    pass
+            self._on_failure()
+            raise
 
     def _on_success(self) -> None:
-        self._failures = 0
-        if self._state in ("open", "half-open"):
-            self._transition("closed", "success")
+        if self._state in ("CLOSED",):
+            self._failures = 0
+            return
+        # HALF_OPEN
+        self._successes += 1
+        if self._successes >= self.success_threshold:
+            self._state = "CLOSED"
+            self._failures = 0
+            self._successes = 0
 
-    def __enter__(self):
-        # проверка состояния
-        if self._state == "open":
-            elapsed = time.monotonic() - (self._opened_at or 0.0)
-            if elapsed >= self.recovery_time:
-                self._transition("half-open", "recovery window passed")
-            else:
-                raise RuntimeError(f"CircuitBreaker[{self.name}] is OPEN")
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if exc is None:
-            self._on_success()
-            return False
-        self._on_failure(exc)   # тип не глотаем
-        return False
-
-    def get_stats(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "state": self._state,
-            "failures": self._failures,
-            "recovery_time": self.recovery_time,
-            "opened_at_monotonic": self._opened_at,
-            "transitions": list(self.transitions_log)[-50:],  # не распухать
-        }
+    def _on_failure(self) -> None:
+        if self._state in ("HALF_OPEN", "CLOSED"):
+            self._failures += 1
+            if self._failures >= self.failure_threshold:
+                self._state = "OPEN"
+                self._opened_at = time.time()
+                self._successes = 0

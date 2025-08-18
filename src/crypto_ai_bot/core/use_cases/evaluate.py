@@ -17,6 +17,7 @@ def eval_and_execute(*, cfg, broker, repos, symbol: str, decision: Dict[str, Any
     trades_repo     = _get(repos, "trades_repo", "trades")
     positions_repo  = _get(repos, "positions_repo", "positions")
     exits_repo      = _get(repos, "exits_repo", "exits")
+    idemp_repo      = _get(repos, "idempotency_repo", "idempotency")
 
     if trades_repo is None or positions_repo is None:
         return {"accepted": False, "error": "repos-missing"}
@@ -33,8 +34,9 @@ def eval_and_execute(*, cfg, broker, repos, symbol: str, decision: Dict[str, Any
         exits_repo=exits_repo,
         symbol=symbol,
         side=side,
+        idempotency_repo=idemp_repo,   # <— NEW
     )
 
-# На случай старых импортов вида: from core.use_cases.init import evaluate(...):
+# Прежний импорт-псевдоним
 def evaluate(*args, **kwargs):
     return eval_and_execute(*args, **kwargs)
