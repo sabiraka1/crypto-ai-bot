@@ -1,11 +1,25 @@
 # src/crypto_ai_bot/core/types/events.py
 from __future__ import annotations
-from typing import TypedDict, Dict, Any, Optional
-from .base import Millis
+from typing import TypedDict, NotRequired, Any, Dict
 
-class Event(TypedDict, total=False):
+
+class BusEvent(TypedDict, total=False):
     type: str
-    ts_ms: Millis
-    request_id: Optional[str]
-    correlation_id: Optional[str]
-    payload: Dict[str, Any]
+    ts_ms: int
+    symbol: str
+    timeframe: str
+    payload: NotRequired[Dict[str, Any]]
+    error: NotRequired[str]
+
+
+class DecisionEvaluatedEvent(BusEvent, total=False):
+    type: str  # "DecisionEvaluated"
+    decision: Dict[str, Any]
+
+
+class OrderExecutedEvent(BusEvent, total=False):
+    type: str  # "OrderExecuted"
+    order_id: str
+    side: str
+    qty: str
+    price: float

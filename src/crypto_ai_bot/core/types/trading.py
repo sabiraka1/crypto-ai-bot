@@ -1,20 +1,13 @@
 # src/crypto_ai_bot/core/types/trading.py
 from __future__ import annotations
-from typing import TypedDict, Optional
+from typing import TypedDict, NotRequired
 
-class OrderRequest(TypedDict, total=False):
+
+class Order(TypedDict, total=False):
+    id: str
     symbol: str
-    side: str           # "buy" | "sell"
-    qty: str            # Decimal as str
-    type: str           # "market" | "limit"
-    price: Optional[str]
-
-class OrderResult(TypedDict, total=False):
-    status: str         # "executed"|"skipped"|"duplicate"|"error"
-    price: Optional[str]
-    payload: dict
-
-class PositionSnapshot(TypedDict, total=False):
-    symbol: str
+    side: str        # "buy" | "sell"
     qty: str
-    avg_price: str
+    price: float
+    status: str      # "executed" | "rejected" | "failed"
+    reason: NotRequired[str]
