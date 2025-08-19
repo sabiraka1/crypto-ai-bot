@@ -6,7 +6,7 @@ import json
 import logging
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi.responses import JSONResponse
 
@@ -30,6 +30,7 @@ def _make_reply(chat_id: int, text: str) -> Dict[str, Any]:
 def _help_text() -> str:
     return (
         "Команды:\n"
+        "/start — приветствие\n"
         "/help — помощь\n"
         "/status — состояние бота\n"
         "/profit [SYMBOL] — сводка PnL по закрытым сделкам\n"
@@ -37,17 +38,16 @@ def _help_text() -> str:
     )
 
 
-def _json(body: bytes) -> Dict[str, Any]:
+def _json_from_bytes(body: bytes) -> Dict[str, Any]:
     try:
         return json.loads(body.decode("utf-8"))
     except Exception:
         return {}
 
 
-def _get_pnl_summary(trades_repo: Any, symbol: Optional[str]) -> Dict[str, float]:
+def _pnl_summary(trades_repo: Any, symbol: Optional[str]) -> Dict[str, float]:
     """
-    Унифицированный PnL из trades_repo (единый источник правды).
-    Ожидаем, что в репозитории есть реализация агрегата.
+    Единый источник PnL — репозиторий сделок.
     """
     try:
         if hasattr(trades_repo, "realized_pnl_summary"):
@@ -61,13 +61,21 @@ def _get_pnl_summary(trades_repo: Any, symbol: Optional[str]) -> Dict[str, float
 
 async def _telegram_send_message(token: str, chat_id: int, text: str) -> bool:
     """
-    Без внешних зависимостей (urllib). Блокирующий вызов запускаем в отдельном потоке.
+    Без внешних зависимостей: urllib. Блокирующую отправку уводим в отдельный поток.
     """
     url = f"https://api.telegram.org/bot{urllib.parse.quote(token)}/sendMessage"
-    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}).encode("utf-8")
+    data = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true"
+    }).encode("utf-8")
 
     def _do():
-        req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status == 200
 
@@ -78,17 +86,40 @@ async def _telegram_send_message(token: str, chat_id: int, text: str) -> bool:
         return False
 
 
-# ---------- public API ----------
+def _settings_from(app_or_container: Any) -> Any:
+    # допускаем как app.state.container.settings, так и container.settings
+    if app_or_container is None:
+        return None
+    st = getattr(app_or_container, "settings", None)
+    if st is not None:  # container
+        return st
+    # app
+    state = getattr(app_or_container, "state", None)
+    if state is not None:
+        cont = getattr(state, "container", None)
+        if cont is not None:
+            return getattr(cont, "settings", None)
+    return None
 
-async def handle_update(app, raw_body: bytes, container) -> JSONResponse:
-    """
-    Принимает webhook update и возвращает JSON с методом Telegram Bot API.
-    """
-    if not getattr(container.settings, "TELEGRAM_BOT_TOKEN", None):
+
+def _container_and_settings(app: Any, container: Any) -> Tuple[Any, Any]:
+    if container is not None:
+        return container, _settings_from(container)
+    # fallback: попробовать достать из app
+    cont = None
+    if app is not None:
+        cont = getattr(getattr(app, "state", None), "container", None)
+    return cont, _settings_from(cont)
+
+
+# ---------- внутренняя реализация ----------
+
+async def _handle_update_impl(app: Any, container: Any, payload: Dict[str, Any]) -> JSONResponse:
+    container, settings = _container_and_settings(app, container)
+    if settings is None or not getattr(settings, "TELEGRAM_BOT_TOKEN", None):
         return JSONResponse({"ok": False, "error": "telegram_not_configured"})
 
-    upd = _json(raw_body)
-    msg = (upd.get("message") or upd.get("edited_message") or {})
+    msg = (payload.get("message") or payload.get("edited_message") or {})
     chat = msg.get("chat") or {}
     chat_id = int(chat.get("id") or 0)
     text = str(msg.get("text") or "").strip()
@@ -97,21 +128,23 @@ async def handle_update(app, raw_body: bytes, container) -> JSONResponse:
         return JSONResponse({"ok": True, "result": "noop"})
 
     # ---- routing ----
+    if text.startswith("/start"):
+        return JSONResponse(_make_reply(chat_id, "Привет! Я бот crypto-ai-bot.\nНапиши /help."))
+
     if text.startswith("/help"):
         return JSONResponse(_make_reply(chat_id, _help_text()))
 
     if text.startswith("/status"):
         try:
-            st = container.settings
-            sym = normalize_symbol(getattr(st, "SYMBOL", "BTC/USDT"))
-            timeframe = getattr(st, "TIMEFRAME", "15m")
+            sym = normalize_symbol(getattr(settings, "SYMBOL", "BTC/USDT"))
+            timeframe = getattr(settings, "TIMEFRAME", "15m")
             bus_h = container.bus.health() if hasattr(container.bus, "health") else {"running": True}
             pending = container.trades_repo.count_pending() if hasattr(container.trades_repo, "count_pending") else 0
             exits = 0
             if hasattr(container.exits_repo, "count_active"):
                 exits = int(container.exits_repo.count_active(symbol=sym))
             resp = (
-                f"mode: {getattr(st, 'MODE', 'paper')}\n"
+                f"mode: {getattr(settings, 'MODE', 'paper')}\n"
                 f"symbol: {sym}\n"
                 f"timeframe: {timeframe}\n"
                 f"bus: {bus_h}\n"
@@ -125,8 +158,8 @@ async def handle_update(app, raw_body: bytes, container) -> JSONResponse:
     if text.startswith("/profit"):
         try:
             parts = text.split()
-            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(getattr(container.settings, "SYMBOL", "BTC/USDT"))
-            summary = _get_pnl_summary(container.trades_repo, sym)
+            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(getattr(settings, "SYMBOL", "BTC/USDT"))
+            summary = _pnl_summary(container.trades_repo, sym)
             wl = f"{int(summary.get('wins', 0))}/{int(summary.get('losses', 0))}"
             resp = (
                 f"{sym}\n"
@@ -140,7 +173,7 @@ async def handle_update(app, raw_body: bytes, container) -> JSONResponse:
 
     if text.startswith("/positions"):
         try:
-            sym = normalize_symbol(getattr(container.settings, "SYMBOL", "BTC/USDT"))
+            sym = normalize_symbol(getattr(settings, "SYMBOL", "BTC/USDT"))
             rows = container.positions_repo.get_open() if hasattr(container.positions_repo, "get_open") else []
             if not rows:
                 return JSONResponse(_make_reply(chat_id, "Открытых позиций нет"))
@@ -159,16 +192,45 @@ async def handle_update(app, raw_body: bytes, container) -> JSONResponse:
     return JSONResponse(_make_reply(chat_id, "Неизвестная команда. /help"))
 
 
-async def send_alert(app, text: str, chat_id: Optional[int] = None) -> bool:
+# ---------- универсальная обёртка (совместима с обеими сигнатурами) ----------
+
+async def handle_update(*args, **kwargs) -> JSONResponse:
     """
-    Отправка алерта в Telegram.
-    Если chat_id не указан — пытается взять settings.TELEGRAM_ALERT_CHAT_ID (если задан).
-    Возвращает True/False по факту попытки.
+    Поддерживает 2 сигнатуры:
+      1) handle_update(app, raw_body_bytes, container)
+      2) handle_update(container, parsed_payload_dict)
     """
-    try:
-        settings = app.state.container.settings
-    except Exception:
-        logger.warning("send_alert: no settings container found")
+    # вариант 1
+    if len(args) == 3:
+        app, raw_body, container = args
+        payload = _json_from_bytes(raw_body) if isinstance(raw_body, (bytes, bytearray)) else {}
+        return await _handle_update_impl(app, container, payload)
+
+    # вариант 2
+    if len(args) == 2:
+        container, payload = args
+        app = getattr(container, "app", None) or getattr(container, "application", None)
+        if not isinstance(payload, dict):
+            try:
+                payload = dict(payload)
+            except Exception:
+                payload = {}
+        return await _handle_update_impl(app, container, payload)
+
+    return JSONResponse({"ok": False, "error": "bad_handler_signature"})
+
+
+# ---------- alerts ----------
+
+async def send_alert(app_or_container: Any, text: str, chat_id: Optional[int] = None) -> bool:
+    """
+    Отправка аварийного уведомления.
+    Принимает либо app (FastAPI), либо container.
+    Если chat_id не указан — берёт TELEGRAM_ALERT_CHAT_ID из настроек.
+    """
+    settings = _settings_from(app_or_container)
+    if settings is None:
+        logger.warning("send_alert: settings not found")
         return False
 
     token = getattr(settings, "TELEGRAM_BOT_TOKEN", None)
@@ -178,7 +240,7 @@ async def send_alert(app, text: str, chat_id: Optional[int] = None) -> bool:
 
     target = chat_id or getattr(settings, "TELEGRAM_ALERT_CHAT_ID", None)
     if not target:
-        logger.warning("send_alert: no chat_id provided and TELEGRAM_ALERT_CHAT_ID not set")
+        logger.warning("send_alert: chat_id not provided and TELEGRAM_ALERT_CHAT_ID not set")
         return False
 
     try:
