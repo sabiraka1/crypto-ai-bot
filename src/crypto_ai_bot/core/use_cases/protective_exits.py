@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Optional, Dict, Any, List
 from decimal import Decimal
 
@@ -5,17 +6,20 @@ def _D(x) -> Decimal:
     return Decimal(str(x))
 
 def ensure_protective_exits(
-    cfg,
-    exits_repo,
-    positions_repo,
+    cfg: Any,
+    exits_repo: Any,
+    positions_repo: Any,  # зарезервировано под расширения (валидаторы/контекст)
     *,
     symbol: str,
     entry_price: float,
-    position_id: Optional[int] = None
+    position_id: Optional[int] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
-    На открытии long-позиции фиксирует soft SL/TP в БД.
-    Исполнение делает реконсилиратор при достижении цены.
+    Регистрирует soft SL/TP в БД для long-only позиции.
+    Ожидается, что проценты заданы долей (напр., 0.02 = 2%).
+    Исполнение делает оркестратор (tick_exits).
+
+    Возвращает: {"created": [{"kind": "sl"|"tp", "trigger_px": float, "id": Any}, ...]}
     """
     created: List[Dict[str, Any]] = []
     price = _D(entry_price)

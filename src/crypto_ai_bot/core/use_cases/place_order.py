@@ -1,15 +1,3 @@
-"""
-Сценарий размещения торговых ордеров (spot, long-only, Gate.io friendly).
-
-— End-to-end идемпотентность:
-    • приложенческая (idempotency_repo)
-    • биржевая (Gate.io client order id через params["text"], см. правила)
-— MARKET BUY на Gate.io принимает КОТИРОВАЛЬНУЮ сумму (quote-cost), поэтому:
-    • передаём params["createMarketBuyOrderRequiresPrice"] = False
-    • amount = quote_cost (USDT) с учётом комиссии/слиппеджа
-— MARKET SELL принимает базовый объём: продаём фактический открытый qty, если доступен
-— Спред-гард и квантование объёмов по precision/минимумам
-"""
 from __future__ import annotations
 
 import binascii
@@ -20,6 +8,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Dict, Optional, TypedDict, NotRequired
 
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
+from crypto_ai_bot.core.use_cases.protective_exits import ensure_protective_exits
 from crypto_ai_bot.utils.idempotency import build_key
 from crypto_ai_bot.utils.metrics import inc
 
@@ -62,9 +51,6 @@ def _calc_spread_bps(tkr: Dict[str, float]) -> float:
 
 
 def _get_market_meta(broker: Any, symbol: str) -> Dict[str, Any]:
-    """
-    precision/limits из ccxt.markets, если доступны
-    """
     try:
         ex = getattr(broker, "ccxt", None) or broker
         markets = getattr(ex, "markets", None)
@@ -96,26 +82,16 @@ def _quantize_amount(side: str, amount: float, amount_precision: Optional[int], 
     return max(0.0, out)
 
 
-# ---------- sizing helpers (slippage & fee aware) ----------
-
 def _effective_price(last_price: float, slippage_bps: float) -> float:
     return float(last_price) * (1.0 + float(slippage_bps) / 10_000.0)
 
 
 def _buy_quote_budget(notional_quote: float, fee_bps: float) -> float:
-    """
-    Gate spot market BUY: amount = QUOTE cost.
-    Чтобы не упереться в недостаток средств из-за комиссии, уменьшаем бюджет на fee.
-    """
     fee_part = float(notional_quote) * (float(fee_bps) / 10_000.0)
     return max(0.0, float(notional_quote) - fee_part)
 
 
 def _sell_base_qty_from_positions(positions_repo: Any, symbol: str) -> float:
-    """
-    Из репозитория позиций достаём фактический открытый qty для SELL.
-    Если нет — вернём 0.0 (лучше не продавать «с потолка»).
-    """
     try:
         if hasattr(positions_repo, "get_open"):
             rows = positions_repo.get_open() or []
@@ -129,26 +105,19 @@ def _sell_base_qty_from_positions(positions_repo: Any, symbol: str) -> float:
     return 0.0
 
 
-# ---------- Gate.io client order id (params["text"]) ----------
-
 def _gateio_text_from(idem_key: Optional[str]) -> str:
-    """
-    Gate: params['text'] должен начинаться с 't-' и содержать <= 28 байт полезной части.
-    Разрешены: 0-9, A-Z, a-z, underscore(_), hyphen(-), dot(.)
-    """
     ts = int(time.time() * 1000)
     body = f"cai{format(ts % 10**9, 'x')}"
     if idem_key:
+        import binascii
         h = format(binascii.crc32(idem_key.encode("utf-8")) & 0xFFFF_FFFF, "x")
         body = f"{body}{h}"
     body = body[:28]
     if not SAFE_TEXT_RE.fullmatch(body):
         body = re.sub(r"[^0-9A-Za-z_.-]", ".", body)
         body = body[:28]
-    return f"t-{body}"  # общая длина <= 30
+    return f"t-{body}"
 
-
-# ---------- main ----------
 
 def place_order(
     *,
@@ -163,10 +132,6 @@ def place_order(
     now_ms: Optional[int] = None,
     bus: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """
-    Возврат:
-      {'accepted': bool, 'error': Optional[str], 'executed_price': float, 'executed_qty': float, 'idempotency_key': Optional[str]}
-    """
     ts = int(now_ms or _now_ms())
     sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
     side = str(side or "buy").lower()
@@ -174,18 +139,15 @@ def place_order(
     if side not in ("buy", "sell"):
         return {"accepted": False, "error": "unsupported_side", "executed_price": 0.0, "executed_qty": 0.0}
 
-    # spot only
     meta = _get_market_meta(broker, sym)
     if not bool(meta.get("spot", True)):
         return {"accepted": False, "error": "spot_only", "executed_price": 0.0, "executed_qty": 0.0}
 
-    # ордер SELL — только при наличии позиции
     if side == "sell":
         pos_qty = _sell_base_qty_from_positions(positions_repo, sym)
         if pos_qty <= 0.0:
             return {"accepted": False, "error": "no_long_position", "executed_price": 0.0, "executed_qty": 0.0}
 
-    # идемпотентность приложения
     idem_key = None
     if idempotency_repo is not None:
         try:
@@ -198,7 +160,6 @@ def place_order(
         except Exception as e:
             logger.exception("idempotency claim failed: %s", e)
 
-    # котировки + спред-guard
     tkr = _last_ticker(broker, sym)
     last = float(tkr["last"])
     if last <= 0.0:
@@ -208,35 +169,28 @@ def place_order(
     if spread_bps > max_spread:
         return {"accepted": False, "error": "spread_too_wide", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
 
-    # параметры слиппеджа/комиссий
     slippage_bps = float(getattr(cfg, "SLIPPAGE_BPS", 20.0))
     fee_bps = float(getattr(cfg, "TAKER_FEE_BPS", 10.0))
     eff_price = _effective_price(last, slippage_bps)
 
-    # объём
     executed_price = 0.0
     executed_qty = 0.0
 
     try:
-        params: Dict[str, Any] = {"text": _gateio_text_from(idem_key)}  # Gate.io client order id
-        # Пер-endpoint rate limit: общий "orders" ведём здесь; в брокере можно делать более тонко
+        params: Dict[str, Any] = {"text": _gateio_text_from(idem_key)}
         limiter = getattr(cfg, "limiter", None) or getattr(broker, "limiter", None)
         if limiter is not None and hasattr(limiter, "try_acquire"):
             if not limiter.try_acquire("orders"):
                 return {"accepted": False, "error": "rate_limited", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
 
         if side == "buy":
-            # Gate spot market buy: amount = QUOTE (USDT) with createMarketBuyOrderRequiresPrice=False
             params["createMarketBuyOrderRequiresPrice"] = False
             notional = float(getattr(cfg, "POSITION_SIZE_USD", getattr(cfg, "POSITION_SIZE", 0.0)) or 0.0)
             if notional <= 0.0:
                 return {"accepted": False, "error": "zero_notional", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
             quote_cost = _buy_quote_budget(notional, fee_bps)
-            # квантование по amount_precision для quote стоит делать на стороне биржи; оставим как есть
             od = broker.create_order(symbol=sym, type="market", side="buy", amount=float(quote_cost), price=None, params=params)
-
         else:
-            # SELL: продаём фактический объём позиции (base qty)
             base_qty = _sell_base_qty_from_positions(positions_repo, sym)
             base_qty = _quantize_amount("sell", base_qty, meta.get("amount_precision"), meta.get("amount_min"))
             if base_qty <= 0.0:
@@ -263,7 +217,6 @@ def place_order(
             }))
         return {"accepted": False, "error": "broker_error", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
 
-    # запись сделки (best-effort), сохраняем client_order_id в info
     try:
         payload = {
             "ts": ts,
@@ -280,21 +233,19 @@ def place_order(
     except Exception as e:
         logger.debug("trade persistence failed (non-fatal): %r", e)
 
-    # commit идемпотентности
     if idempotency_repo is not None and idem_key:
         try:
             idempotency_repo.commit(idem_key)
         except Exception as e:
             logger.debug("idempotency commit failed (non-fatal): %r", e)
 
-    # планирование защитных выходов (опционально)
+    # ✅ единый источник SL/TP: use-case ensure_protective_exits
     try:
-        if exits_repo and hasattr(exits_repo, "schedule_for") and side == "buy":
-            exits_repo.schedule_for(symbol=sym, side=side, entry_price=executed_price, qty=executed_qty, ts=ts)
+        if exits_repo and side == "buy":
+            ensure_protective_exits(cfg, exits_repo, positions_repo, symbol=sym, entry_price=executed_price, position_id=None)
     except Exception as e:
-        logger.debug("protective exits scheduling failed (non-fatal): %r", e)
+        logger.debug("ensure_protective_exits failed (non-fatal): %r", e)
 
-    # событие
     inc("orders_success_total")
     if bus is not None and hasattr(bus, "publish"):
         import asyncio
