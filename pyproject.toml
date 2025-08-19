@@ -16,47 +16,36 @@ dependencies = [
   "fastapi>=0.115,<1.0",
   "uvicorn[standard]>=0.30,<0.31", 
   "gunicorn>=21.2,<22",
-  "httpx>=0.27,<0.28",           # Для http_client
-  "ccxt>=4.2,<5",                # Gate.io интеграция
-  "prometheus-client>=0.20,<0.21", # Метрики
-  "pydantic>=2.7,<3",            # Валидация
-  "requests>=2.31,<3",           # Fallback HTTP client
+  "httpx>=0.27,<0.28",
+  "ccxt>=4.2,<5",
+  "prometheus-client>=0.20,<0.21",
+  "pydantic>=2.7,<3",
+  "requests>=2.31,<3",
 ]
 
 [project.optional-dependencies]
-# Production dependencies
 production = [
-  "psycopg2-binary>=2.9,<3",    # PostgreSQL для scale
-  "redis>=5.0,<6",               # Cache/queues для scale
-  "celery>=5.3,<6",              # Async tasks (future)
+  "psycopg2-binary>=2.9,<3",
+  "redis>=5.0,<6",
+  "celery>=5.3,<6",
 ]
-
-# Charts и визуализация (убрать из core, сделать optional)
-charts = [
-  "matplotlib>=3.8,<3.10",
-]
-
-# Backtest и аналитика - ВЫДЕЛИТЬ отдельно
+charts = ["matplotlib>=3.8,<3.10"]
 backtest = [
   "numpy>=1.26,<2.0",
   "pandas>=2.2,<3.0",
 ]
-
-# Development tools - РАСШИРИТЬ
 dev = [
   "pytest>=8.2,<9",
-  "pytest-asyncio>=0.23,<1",     # Для async тестов
-  "pytest-mock>=3.12,<4",        # Мокинг
+  "pytest-asyncio>=0.23,<1",
+  "pytest-mock>=3.12,<4",
   "ruff>=0.6,<0.7",
   "pre-commit>=3.6,<4",
-  "mypy>=1.8,<2",                # Типизация
-  "coverage>=7.4,<8",            # Покрытие тестов
+  "mypy>=1.8,<2",
+  "coverage>=7.4,<8",
 ]
-
-# Monitoring и observability
 monitoring = [
-  "structlog>=24.1,<25",         # Structured logging
-  "sentry-sdk[fastapi]>=1.40,<2", # Error tracking
+  "structlog>=24.1,<25",
+  "sentry-sdk[fastapi]>=1.40,<2",
 ]
 
 [tool.setuptools]
@@ -66,35 +55,27 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["crypto_ai_bot*"]
 
-# === АРХИТЕКТУРНЫЕ ПРАВИЛА ===
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E","F","W","I","B","C4","PIE","PT","RUF","UP","SIM"]
-ignore = ["E501", "B008"]  # Добавили B008 для FastAPI Depends
+ignore = ["E501", "B008"]
 
-# === КРИТИЧНО: Запрещаем архитектурные нарушения ===
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-# Запрет прямого ENV доступа
 "os.getenv" = { msg = "Use Settings instead of os.getenv (see core/settings.py)" }
 "os.environ" = { msg = "Use Settings instead of os.environ (see core/settings.py)" }
-
-# Запрет прямых HTTP вызовов (кроме разрешенных мест)
 "requests.get" = { msg = "Use utils/http_client.py instead of direct requests" }
 "requests.post" = { msg = "Use utils/http_client.py instead of direct requests" }
 "urllib.request" = { msg = "Use utils/http_client.py for HTTP calls" }
-
-# Запрет прямого time.sleep в async коде
 "time.sleep" = { msg = "Use asyncio.sleep in async code" }
 
 [tool.ruff.lint.per-file-ignores]
 "src/crypto_ai_bot/core/config/env_reader.py" = ["E402"]
-"src/crypto_ai_bot/utils/http_client.py" = ["E402"]  # Разрешаем requests здесь
-"tests/**/*.py" = ["S101", "S106"]  # Разрешаем assert и hardcoded passwords в тестах
+"src/crypto_ai_bot/utils/http_client.py" = ["E402"]
+"tests/**/*.py" = ["S101", "S106"]
 
-# === MYPY КОНФИГУРАЦИЯ ===
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true
@@ -111,7 +92,6 @@ ignore_missing_imports = true
 module = "prometheus_client.*"
 ignore_missing_imports = true
 
-# === PYTEST КОНФИГУРАЦИЯ ===
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = [
@@ -131,14 +111,13 @@ markers = [
     "unit: marks tests as unit tests",
 ]
 
-# === COVERAGE КОНФИГУРАЦИЯ ===
 [tool.coverage.run]
 source = ["crypto_ai_bot"]
 omit = [
     "*/tests/*",
-    "*/backtest/*",       # Исключаем backtest из coverage
-    "*/types/*",          # Будет удален
-    "*/analytics/*",      # Будет удален
+    "*/backtest/*",
+    "*/types/*",
+    "*/analytics/*",
 ]
 
 [tool.coverage.report]
