@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
+from typing import Any
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
@@ -20,7 +21,7 @@ from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 class Container:
     settings: Settings
     con: sqlite3.Connection
-    broker: any
+    broker: Any
     bus: AsyncEventBus
     trades_repo: SqliteTradeRepository
     positions_repo: SqlitePositionRepository
@@ -34,7 +35,7 @@ def build_container() -> Container:
 
     # DB
     con = connect(getattr(cfg, "DB_PATH", ":memory:"))
-    apply_connection_pragmas(con, cfg)   # <— безопасные PRAGMA
+    apply_connection_pragmas(con, cfg)   # безопасные PRAGMA
     apply_all(con)
 
     # repos
@@ -44,15 +45,12 @@ def build_container() -> Container:
     idem = IdempotencyRepository(con)
     audit = SqliteAuditRepository(con)
 
-    # bus
+    # bus (совместимо с текущим AsyncEventBus)
     bus = AsyncEventBus(
         max_queue=int(getattr(cfg, "BUS_MAX_QUEUE", 2000)),
-        dlq_limit=int(getattr(cfg, "BUS_DLQ_LIMIT", 500)),
-        workers=int(getattr(cfg, "BUS_WORKERS", 4)),
-        backpressure=str(getattr(cfg, "BUS_BACKPRESSURE", "drop_new")),
-        enqueue_timeout_sec=float(getattr(cfg, "BUS_ENQ_TIMEOUT_SEC", 0.25)),
+        concurrency=int(getattr(cfg, "BUS_WORKERS", 4)),
     )
-    bus.start()
+    # ВАЖНО: не запускаем здесь; запуск/остановка в FastAPI lifespan (app/server.py)
 
     # broker
     broker = create_broker(cfg, bus=bus)
