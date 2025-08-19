@@ -36,18 +36,26 @@ class Settings:
     ENV: Optional[str] = None
 
     _ALIASES: Dict[str, str] = {
+        # общие алиасы
         "mode": "MODE",
         "exchange": "EXCHANGE",
         "symbol": "SYMBOL",
         "timeframe": "TIMEFRAME",
+        # sizing / комиссии
         "position_size_usd": "POSITION_SIZE_USD",
+        "position_size": "POSITION_SIZE_USD",   # NEW: поддержка POSITION_SIZE из .env
         "fee_taker_bps": "FEE_TAKER_BPS",
+        "fee_bps": "FEE_TAKER_BPS",            # NEW: поддержка FEE_BPS из .env
         "slippage_bps": "SLIPPAGE_BPS",
+        # идемпотентность/время
         "idempotency_ttl_sec": "IDEMPOTENCY_TTL_SEC",
         "idempotency_bucket_ms": "IDEMPOTENCY_BUCKET_MS",
         "max_time_drift_ms": "MAX_TIME_DRIFT_MS",
+        # telegram
         "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
         "telegram_bot_secret": "TELEGRAM_BOT_SECRET",
+        "telegram_webhook_secret": "TELEGRAM_BOT_SECRET",  # NEW
+        # backtest / профили
         "backtest_csv_path": "BACKTEST_CSV_PATH",
         "backtest_prices": "BACKTEST_PRICES",
         "backtest_last_price": "BACKTEST_LAST_PRICE",
@@ -78,17 +86,25 @@ class Settings:
             EXCHANGE=_g("EXCHANGE", "exchange", default="binance", cast=str),
             SYMBOL=_g("SYMBOL", "symbol", default="BTC/USDT", cast=str),
             TIMEFRAME=_g("TIMEFRAME", "timeframe", default="1h", cast=str),
-            POSITION_SIZE_USD=_g("POSITION_SIZE_USD", "position_size_usd", default=0.0, cast=float),
-            FEE_TAKER_BPS=_g("FEE_TAKER_BPS", "fee_taker_bps", default=20.0, cast=float),
+
+            # поддерживаем POSITION_SIZE и POSITION_SIZE_USD
+            POSITION_SIZE_USD=_g("POSITION_SIZE_USD", "position_size_usd", "POSITION_SIZE", "position_size", default=0.0, cast=float),
+
+            # поддерживаем FEE_BPS и FEE_TAKER_BPS
+            FEE_TAKER_BPS=_g("FEE_TAKER_BPS", "fee_taker_bps", "FEE_BPS", "fee_bps", default=20.0, cast=float),
+
             SLIPPAGE_BPS=_g("SLIPPAGE_BPS", "slippage_bps", default=5.0, cast=float),
             IDEMPOTENCY_TTL_SEC=_g("IDEMPOTENCY_TTL_SEC", "idempotency_ttl_sec", default=300, cast=int),
             IDEMPOTENCY_BUCKET_MS=_g("IDEMPOTENCY_BUCKET_MS", "idempotency_bucket_ms", default=5000, cast=int),
             MAX_TIME_DRIFT_MS=_g("MAX_TIME_DRIFT_MS", "max_time_drift_ms", default=5000, cast=int),
+
             TELEGRAM_BOT_TOKEN=_g("TELEGRAM_BOT_TOKEN", "telegram_bot_token", default=None, cast=str),
-            TELEGRAM_BOT_SECRET=_g("TELEGRAM_BOT_SECRET", "telegram_bot_secret", default=None, cast=str),
+            TELEGRAM_BOT_SECRET=_g("TELEGRAM_BOT_SECRET", "telegram_bot_secret", "TELEGRAM_WEBHOOK_SECRET", "telegram_webhook_secret", default=None, cast=str),
+
             BACKTEST_CSV_PATH=_g("BACKTEST_CSV_PATH", "backtest_csv_path", default=None, cast=str),
             BACKTEST_PRICES=_g("BACKTEST_PRICES", "backtest_prices", default=None),
             BACKTEST_LAST_PRICE=_g("BACKTEST_LAST_PRICE", "backtest_last_price", default=100.0, cast=float),
+
             PROFILE=_g("PROFILE", "profile", default=None, cast=str),
             ENV=_g("ENV", "env", default=None, cast=str),
         )

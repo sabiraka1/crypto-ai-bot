@@ -3,11 +3,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from crypto_ai_bot.core.signals.builder import build as build_features
-from crypto_ai_bot.core.signals.policy import decide as decide_policy
+from crypto_ai_bot.core.signals._fusion import build as build_features, decide as decide_policy
 from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 from crypto_ai_bot.utils.rate_limit import MultiLimiter
+
+
+def _decision_to_dict(decision: Any) -> Dict[str, Any]:
+    # Поддерживаем dataclass Decision и словарь
+    if hasattr(decision, "action"):
+        return {"action": decision.action, "score": getattr(decision, "score", 0.0), "reason": getattr(decision, "reason", None)}
+    return dict(decision or {})
 
 
 def evaluate(
@@ -24,7 +30,7 @@ def evaluate(
     """
     sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
     feat = build_features(sym, cfg=cfg, broker=broker, positions_repo=positions_repo, external=external)
-    decision = decide_policy(feat.get("features", {}), feat.get("context", {}))
+    decision = _decision_to_dict(decide_policy(feat.get("features", {}), feat.get("context", {})))
     return {"decision": decision, "symbol": sym, "features": feat.get("features"), "context": feat.get("context")}
 
 
@@ -46,8 +52,8 @@ def evaluate_and_maybe_execute(
     sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
 
     feat = build_features(sym, cfg=cfg, broker=broker, positions_repo=positions_repo, external=external)
-    decision = decide_policy(feat.get("features", {}), feat.get("context", {}))
-    action = (decision or {}).get("action") or (decision or {}).get("side")
+    decision = _decision_to_dict(decide_policy(feat.get("features", {}), feat.get("context", {})))
+    action = (decision or {}).get("action")
 
     result: Dict[str, Any] = {"decision": decision, "symbol": sym}
 

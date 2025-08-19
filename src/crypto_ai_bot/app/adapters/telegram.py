@@ -4,8 +4,7 @@ import json
 from typing import Any, Dict, List
 from fastapi.responses import JSONResponse
 
-# единый расчёт PnL и единая нормализация символа
-from crypto_ai_bot.core.analytics.pnl import realized_pnl_summary
+# единая нормализация символа
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 
 
@@ -23,7 +22,6 @@ def _help_text() -> str:
     )
 
 def _make_reply(chat_id: int | None, text: str) -> JSONResponse:
-    # Telegram webhook reply: можно сразу вернуть JSON c методом
     if chat_id is None:
         return JSONResponse({"ok": True})
     payload = {"method": "sendMessage", "chat_id": chat_id, "text": text}
@@ -83,7 +81,6 @@ async def handle_update(app, body: bytes, container: Any):
             sym = normalize_symbol(sym)
 
             rows = container.positions_repo.get_open()
-            # если пользователь передал символ — показываем только его
             if sym:
                 rows = [r for r in rows if str(r.get("symbol")) == sym]
 
@@ -120,8 +117,8 @@ async def handle_update(app, body: bytes, container: Any):
             sym = parts[1].strip() if len(parts) > 1 else default_sym
             sym = normalize_symbol(sym)
 
-            # единый расчёт PnL по БД
-            summary = realized_pnl_summary(container.con, sym)
+            # единый расчёт PnL через репозиторий сделок
+            summary = container.trades_repo.realized_pnl_summary(symbol=sym)
             wl = f"{int(summary['wins'])}/{int(summary['losses'])}"
             resp = (
                 f"{sym}\n"

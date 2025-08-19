@@ -80,7 +80,7 @@ class SqliteTradeRepository:
         with self.con:
             cur = self.con.execute(
                 "INSERT OR REPLACE INTO trades(ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, last_exchange_status, last_update_ts) "
-                "VALUES(?,?,?,?,?,?,?, 'pending', ?, NULL, ?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (now, symbol, side, float(exp_price), 0.0, 0.0, order_id, float(qty), now)
             )
             return int(cur.lastrowid)
@@ -202,7 +202,7 @@ class SqliteTradeRepository:
         with self.con:
             self.con.execute(
                 "UPDATE trades SET state='filled', price=?, qty=?, fee_amt=?, fee_ccy=?, last_exchange_status='filled', last_update_ts=? WHERE order_id=?",
-                (float(executed_price), float(executed_qty), float(fee_amt), fee_ccy, int(time.time()), order_id)
+                (float(executed_price), float(execut_qty), float(fee_amt), fee_ccy, int(time.time()), order_id)
             )
 
     def cancel_order(self, *, order_id: str) -> None:
@@ -218,3 +218,91 @@ class SqliteTradeRepository:
                 "UPDATE trades SET state='rejected', last_exchange_status='rejected', last_update_ts=? WHERE order_id=?",
                 (int(time.time()), order_id)
             )
+
+    # ---------- NEW: агрегаты PnL по закрытым сделкам (FIFO) ----------
+
+    def realized_pnl_summary(self, symbol: Optional[str] = None) -> Dict[str, float]:
+        """
+        Реализованный PnL по закрытым сделкам (FIFO), в котируемой валюте (обычно USDT).
+
+        Параметры:
+            symbol: если указан — фильтруем по символу
+
+        Возвращает dict:
+            {
+              'closed_trades': float,   # количество закрывающих продаж, учтённых в PnL
+              'wins': float,            # число положительных сделок
+              'losses': float,          # число отрицательных сделок
+              'pnl_abs': float,         # суммарный реализованный PnL (в котируемой валюте)
+              'pnl_pct': float          # относительный PnL к суммарной себестоимости закрытых лотов, %
+            }
+        """
+        # 1) забираем только исполненные сделки
+        q = ("SELECT ts, symbol, side, price, qty, fee_amt, fee_ccy "
+             "FROM trades WHERE state='filled'")
+        params: List[Any] = []
+        if symbol:
+            q += " AND symbol=?"
+            params.append(symbol)
+        q += " ORDER BY ts ASC"
+        cur = self.con.execute(q, tuple(params))
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+        # 2) FIFO учёт: накапливаем покупки, при продаже списываем себестоимость в порядке поступления
+        buys: List[Dict[str, float]] = []     # каждый лот: {'qty': float, 'cost': float}
+        realized: List[float] = []            # pnl по каждой продаже
+        cost_bases: List[float] = []          # себестоимость закрытых объёмов (для %-метрики)
+
+        for r in rows:
+            side = (r.get("side") or "").lower()
+            px = float(r.get("price") or 0.0)
+            qty = max(0.0, float(r.get("qty") or 0.0))
+            fee = max(0.0, float(r.get("fee_amt") or 0.0))  # предполагаем, что fee в котируемой валюте
+            if qty <= 0 or px <= 0:
+                continue
+
+            if side == "buy":
+                # себестоимость покупки = цена*кол-во + комиссия
+                buys.append({"qty": qty, "cost": px * qty + fee})
+            elif side == "sell":
+                remain = qty
+                revenue = px * qty - fee            # выручка от продажи минус комиссия продажи
+                cost_taken = 0.0
+
+                while remain > 0 and buys:
+                    lot = buys[0]
+                    take = min(remain, lot["qty"])
+                    if lot["qty"] <= 1e-12:
+                        buys.pop(0)
+                        continue
+                    unit_cost = lot["cost"] / lot["qty"]  # средняя себестоимость единицы в лоте
+                    cost_for_take = unit_cost * take
+
+                    # скорректировать лот
+                    lot["qty"] -= take
+                    lot["cost"] -= cost_for_take
+                    if lot["qty"] <= 1e-12:
+                        buys.pop(0)
+
+                    cost_taken += cost_for_take
+                    remain -= take
+
+                if cost_taken > 0:
+                    realized.append(revenue - cost_taken)
+                    cost_bases.append(cost_taken)
+
+        closed = len(realized)
+        pnl_abs = float(sum(realized))
+        wins = float(sum(1 for x in realized if x > 0))
+        losses = float(sum(1 for x in realized if x < 0))
+        base = float(sum(cost_bases)) if cost_bases else 1.0
+        pnl_pct = (pnl_abs / base) * 100.0
+
+        return {
+            "closed_trades": float(closed),
+            "wins": wins,
+            "losses": losses,
+            "pnl_abs": pnl_abs,
+            "pnl_pct": float(pnl_pct),
+        }
