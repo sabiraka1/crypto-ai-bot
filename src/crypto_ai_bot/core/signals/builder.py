@@ -1,13 +1,14 @@
-# src/crypto_ai_bot/core/signals/builder.py
 from __future__ import annotations
+from typing import Any, Dict, Tuple
 
-# Единая точка: старая логика иногда звала build_signals, новая — build.
-# Делаем совместимость: оба имени указывают на одну функцию.
-try:
-    from ._build import build as build
-except Exception:
-    # Если переименуете обратно — не забудьте обновить импорт
-    from .build import build as build  # fallback
+# Единая точка сборки сигналов: вся агрегация — в _fusion
+from ._fusion import fuse_signals, Explain
 
-# Старое имя, на которое могли ссылаться прежние модули:
-build_signals = build
+
+def build_signal(context: Dict[str, Any], indicators: Dict[str, float]) -> Tuple[float, Explain]:
+    """
+    Сконструировать итоговый скор ([-1..+1]) и объяснение по входящим индикаторам.
+    Контракт совместим с прежними вызовами builder.build_signal(...).
+    """
+    score, explain = fuse_signals(indicators=indicators, ctx=context)
+    return score, explain
