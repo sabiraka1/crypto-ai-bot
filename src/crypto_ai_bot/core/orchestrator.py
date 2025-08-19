@@ -6,7 +6,6 @@ import time
 from typing import Any, Dict, Optional, Set
 
 from crypto_ai_bot.core.use_cases.evaluate import evaluate_and_maybe_execute
-from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 from crypto_ai_bot.utils.metrics import inc, gauge
 
@@ -16,7 +15,6 @@ log = logging.getLogger(__name__)
 class Orchestrator:
     """
     Lifecycle менеджер и фоновые тики (evaluate / exits / reconcile / balance / watchdog / DLQ).
-    Сигнатуры и поведение совместимы с текущим проектом.
     """
 
     def __init__(
@@ -50,7 +48,6 @@ class Orchestrator:
         self._last_balance_ms: int = 0
         self._last_latency_ms: int = 0
 
-        # normalized symbol used in logs/keys
         try:
             self._symbol = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
         except Exception:
@@ -111,9 +108,7 @@ class Orchestrator:
             except Exception as e:
                 log.exception("tick %s failed: %s", name, e)
                 inc("tick_errors_total", {"tick": name})
-            # record heartbeat
             self._hb_ms = int(time.time() * 1000)
-            # sleep adjusted by work time
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),
@@ -127,7 +122,14 @@ class Orchestrator:
     async def _tick_eval(self) -> None:
         """
         Evaluate signals and maybe execute trade (long-only).
+        Kill-switch: если ENABLE_TRADING = False, просто выходим.
         """
+        if not bool(getattr(self.settings, "ENABLE_TRADING", True)):
+            # Торговые операции заблокированы, но exits/reconcile работают в своих тиках.
+            self._last_eval_ms = int(time.time() * 1000)
+            gauge("tick_eval_disabled", 1, {"symbol": self._symbol})
+            return
+
         t0 = time.time()
         try:
             await evaluate_and_maybe_execute(
@@ -151,23 +153,14 @@ class Orchestrator:
             gauge("tick_eval_duration_sec", dt, {"symbol": self._symbol})
 
     async def _tick_exits(self) -> None:
-        """
-        Monitor & execute protective exits (SL/TP).
-        """
         await self._tick_exits_once()
         self._last_exits_ms = int(time.time() * 1000)
 
     async def _tick_reconcile(self) -> None:
-        """
-        Reconcile pending/partial orders with the exchange.
-        """
         await self._tick_reconcile_once()
         self._last_reconcile_ms = int(time.time() * 1000)
 
     async def _tick_balance_and_latency(self) -> None:
-        """
-        Periodically sample account balance and API latency.
-        """
         try:
             t0 = time.time()
             bal = await asyncio.to_thread(self.broker.fetch_balance)
@@ -188,13 +181,9 @@ class Orchestrator:
             log.debug("balance/latency tick failed: %s", e)
 
     async def _tick_watchdog(self) -> None:
-        """
-        Detect stalled ticks and emit events.
-        """
         stall = float(getattr(self.settings, "WATCHDOG_STALL_SEC", 120.0))
         if stall <= 0:
             return
-        now = int(time.time() * 1000)
         gauge("watchdog_stall_budget_ms", int(stall * 1000), {})
         while not self._stop.is_set():
             now = int(time.time() * 1000)
@@ -217,9 +206,6 @@ class Orchestrator:
                 pass
 
     async def _tick_bus_dlq(self) -> None:
-        """
-        Try to republish messages from DLQ periodically.
-        """
         try:
             interval = float(getattr(self.settings, "BUS_DLQ_RETRY_SEC", 10.0))
         except Exception:
@@ -238,10 +224,6 @@ class Orchestrator:
     # -------- single-iteration helpers (для CLI-обёрток) --------
 
     async def _tick_exits_once(self) -> None:
-        """
-        Одна итерация проверки и исполнения protective exits.
-        Без бесконечного цикла — удобно для scripts/protective_exits.py.
-        """
         try:
             if not hasattr(self.exits_repo, "list_active"):
                 return
@@ -249,25 +231,18 @@ class Orchestrator:
             if not exits:
                 return
 
-            # Получаем актуальную цену один раз
             ticker = await asyncio.to_thread(self.broker.fetch_ticker, self._symbol)
             last_px = float(ticker.get("last") or ticker.get("close") or 0.0)
 
             for ex in exits:
                 trig = float(ex.get("trigger_px") or 0.0)
                 kind = ex.get("kind")
-                if kind == "sl" and last_px <= trig:
-                    hit = True
-                elif kind == "tp" and last_px >= trig:
-                    hit = True
-                else:
-                    hit = False
+                hit = (kind == "sl" and last_px <= trig) or (kind == "tp" and last_px >= trig)
                 if not hit:
                     continue
 
                 qty = float(ex.get("qty") or 0.0)
                 if qty <= 0.0:
-                    # если количество не задано — продаём весь остаток по позиции
                     pos = self.positions_repo.get(self._symbol) if hasattr(self.positions_repo, "get") else None
                     qty = float(pos.get("qty") or 0.0) if isinstance(pos, dict) else float(getattr(pos, "qty", 0.0) or 0.0)
 
@@ -280,7 +255,7 @@ class Orchestrator:
                             "sell",
                             qty,
                             None,
-                            {"text": None},  # брокер сам подставит clientOrderId если None
+                            {"text": None},
                         )
                         inc("protective_exit_executed_total", {"symbol": self._symbol, "kind": kind})
                     finally:
@@ -293,12 +268,7 @@ class Orchestrator:
             log.exception("tick_exits_once failed: %s", e)
 
     async def _tick_reconcile_once(self) -> None:
-        """
-        Одна итерация сверки pending ордеров с биржей.
-        Без бесконечного цикла — удобно для scripts/reconciler.py.
-        """
         try:
-            # поддержка двух возможных имён методов
             if hasattr(self.trades_repo, "find_pending_orders"):
                 pend = self.trades_repo.find_pending_orders()
             elif hasattr(self.trades_repo, "find_pending"):
@@ -314,7 +284,6 @@ class Orchestrator:
                 if not oid:
                     continue
                 ex_od = await asyncio.to_thread(self.broker.fetch_order, oid, self._symbol)
-                # единая точка обновления в репозитории
                 if hasattr(self.trades_repo, "record_exchange_update"):
                     self.trades_repo.record_exchange_update(oid, ex_od)
                 elif hasattr(self.trades_repo, "record_update"):

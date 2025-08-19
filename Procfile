@@ -1,1 +1,1 @@
-web: cd src && python -m uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port ${PORT:-8080}
+web: uvicorn --app-dir src crypto_ai_bot.app.server:app --host 0.0.0.0 --port ${PORT}
