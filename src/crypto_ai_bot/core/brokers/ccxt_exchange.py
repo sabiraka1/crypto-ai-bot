@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
 
 import logging

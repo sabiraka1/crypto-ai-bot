@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/use_cases/place_order.py
 """
 Сценарий размещения торговых ордеров (spot, long-only, Gate.io friendly).
 

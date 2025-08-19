@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/app/server.py
 from __future__ import annotations
 
 import logging

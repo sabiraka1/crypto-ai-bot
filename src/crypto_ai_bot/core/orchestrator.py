@@ -1,4 +1,3 @@
-# core/orchestrator.py (замена целиком)
 from __future__ import annotations
 
 import asyncio
