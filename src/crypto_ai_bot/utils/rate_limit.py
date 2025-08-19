@@ -1,53 +1,59 @@
-# src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
-import threading
+
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 
 class TokenBucket:
-    """Простой thread-safe токен-бакет."""
-    def __init__(self, rate_per_sec: float, capacity: float | None = None):
-        self.rate = float(max(0.000001, rate_per_sec))
-        self.capacity = float(capacity if capacity is not None else rate_per_sec)
-        self.tokens = self.capacity
+    def __init__(self, capacity: int, refill_per_sec: float) -> None:
+        self.capacity = int(max(1, capacity))
+        self.refill_per_sec = float(max(0.0001, refill_per_sec))
+        self.tokens = float(self.capacity)
         self.updated = time.monotonic()
-        self._lock = threading.Lock()
 
-    def try_acquire(self, tokens: float = 1.0) -> bool:
-        with self._lock:
-            now = time.monotonic()
-            elapsed = max(0.0, now - self.updated)
-            self.updated = now
-            # пополнение
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            if self.tokens >= tokens:
-                self.tokens -= tokens
-                return True
-            return False
+    def try_acquire(self, n: int = 1) -> bool:
+        now = time.monotonic()
+        dt = now - self.updated
+        self.updated = now
+        self.tokens = min(self.capacity, self.tokens + dt * self.refill_per_sec)
+        if self.tokens >= n:
+            self.tokens -= n
+            return True
+        return False
 
 
 class MultiLimiter:
     """
-    Набор бакетов по именам. Пример:
-      lim = MultiLimiter(global_rps=10, write_rps=5)
-      lim.try_acquire("global")
+    Простой глобальный лимитер (суммарный).
     """
-    def __init__(self, **rates: float):
-        self._buckets: Dict[str, TokenBucket] = {}
-        for name, r in rates.items():
-            if not name.endswith("_rps"):
-                # допустим и без _rps; нормализуем
-                key = name
-            else:
-                key = name[:-4]
-            self._buckets[key] = TokenBucket(rate_per_sec=float(r))
+    def __init__(self, global_rps: float = 10.0) -> None:
+        self.bucket = TokenBucket(capacity=int(max(1, global_rps * 2.0)), refill_per_sec=float(global_rps))
 
-    def try_acquire(self, name: str = "global", tokens: float = 1.0) -> bool:
-        b = self._buckets.get(name)
-        if b is None:
-            # если не настроен конкретный бакет — используем «global», если есть
-            b = self._buckets.get("global")
-            if b is None:
-                return True
+    def try_acquire(self, _key: str = "global", tokens: int = 1) -> bool:
+        return self.bucket.try_acquire(tokens)
+
+
+class GateIOLimiter:
+    """
+    Per-endpoint buckets: 'orders', 'market_data', 'account'.
+    Значения по умолчанию — консервативные; переопределяются через Settings.
+    """
+    def __init__(
+        self,
+        *,
+        orders_capacity: int = 100,
+        orders_window_sec: float = 10.0,
+        market_capacity: int = 600,
+        market_window_sec: float = 10.0,
+        account_capacity: int = 300,
+        account_window_sec: float = 10.0,
+    ) -> None:
+        self.buckets: Dict[str, TokenBucket] = {
+            "orders": TokenBucket(orders_capacity, orders_capacity / max(0.001, orders_window_sec)),
+            "market_data": TokenBucket(market_capacity, market_capacity / max(0.001, market_window_sec)),
+            "account": TokenBucket(account_capacity, account_capacity / max(0.001, account_window_sec)),
+        }
+
+    def try_acquire(self, endpoint_type: str, tokens: int = 1) -> bool:
+        b = self.buckets.get(endpoint_type) or self.buckets["orders"]
         return b.try_acquire(tokens)

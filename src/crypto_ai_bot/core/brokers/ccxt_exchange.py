@@ -1,27 +1,22 @@
+# src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
 
+import binascii
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
-from crypto_ai_bot.utils.retry import retry, is_retryable_ccxt  # NEW
 
 logger = logging.getLogger("brokers.ccxt_exchange")
 
 try:
     import ccxt
     from ccxt.base.errors import (
-        DDoSProtection,
-        RateLimitExceeded,
-        ExchangeNotAvailable,
-        NetworkError,
-        RequestTimeout,
-        AuthenticationError,
-        PermissionDenied,
-        InvalidOrder,
-        InsufficientFunds,
-        OrderNotFound,
+        DDoSProtection, RateLimitExceeded, ExchangeNotAvailable, NetworkError,
+        RequestTimeout, AuthenticationError, PermissionDenied,
+        InvalidOrder, InsufficientFunds, OrderNotFound
     )
 except Exception:  # pragma: no cover
     ccxt = None
@@ -39,47 +34,28 @@ def _kind_from_exc(e: Exception) -> str:
     return "other"
 
 
-def _is_spot_market(ex: Any, symbol: str) -> bool:
-    """
-    Возвращает True, если символ относится к spot.
-    Пытаемся читать из ex.markets[symbol] -> {'spot': True} или type == 'spot'.
-    """
-    try:
-        markets = getattr(ex, "markets", None)
-        if markets and symbol in markets:
-            m = markets[symbol] or {}
-            if m.get("spot") is True:
-                return True
-            if (m.get("type") or "").lower() == "spot":
-                return True
-    except Exception:
-        pass
-    return False
+_SAFE_TEXT_RE = re.compile(r"[0-9A-Za-z_.-]+")
 
 
-def _merge_params(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    if a:
-        out.update(a)
-    if b:
-        out.update(b)
-    return out
-
-
-def _derive_coid(symbol: str, side: str, amount: float) -> str:
+def _gateio_text_from(seed: Optional[str] = None) -> str:
     """
-    Фолбэк на случай, если clientOrderId не передали снаружи:
-    короткий детерминированный идентификатор (на минутном бакете).
+    Gate.io client order id: params['text'] должен начинаться с 't-' и умещаться в ~30 байт.
+    Допустимые символы: 0-9 A-Z a-z _ . -
     """
-    bucket = int(time.time() // 60)
-    raw = f"coid:{symbol}|{side}|{round(amount, 8)}|{bucket}"
-    # CCXT/биржи часто ограничивают длину; укоротим до 32 символов.
-    return raw[:32]
+    ts = int(time.time() * 1000)
+    body = f"cai{format(ts % 10**9, 'x')}"
+    if seed:
+        h = format(binascii.crc32(seed.encode("utf-8")) & 0xFFFF_FFFF, "x")
+        body = f"{body}{h}"
+    body = body[:28]
+    if not _SAFE_TEXT_RE.fullmatch(body):
+        body = re.sub(r"[^0-9A-Za-z_.-]", ".", body)[:28]
+    return f"t-{body}"
 
 
 class CCXTExchange:
     """
-    Обёртка над ccxt с простым CircuitBreaker-учётом.
+    Обёртка над ccxt с простым CircuitBreaker-учётом и per-endpoint rate limiting.
     Совместимая сигнатура create_order(..., type=..., ...), поддержка старого type_.
     """
 
@@ -87,41 +63,67 @@ class CCXTExchange:
         if ccxt is None:
             raise RuntimeError("ccxt is not installed")
 
-        name = exchange_name or getattr(settings, "EXCHANGE", "binance")
+        name = exchange_name or getattr(settings, "EXCHANGE", "gateio")
         if not hasattr(ccxt, name):
             raise ValueError(f"Unknown ccxt exchange: {name}")
 
         klass = getattr(ccxt, name)
-        self.ccxt = klass(
-            {
-                "apiKey": getattr(settings, "API_KEY", None),
-                "secret": getattr(settings, "API_SECRET", None),
-                "enableRateLimit": True,
-            }
-        )
+        self.ccxt = klass({
+            "apiKey": getattr(settings, "API_KEY", None),
+            "secret": getattr(settings, "API_SECRET", None),
+            "enableRateLimit": True,
+        })
+        # Диалект биржи (для легких ветвлений):
+        self.exchange_id: str = getattr(self.ccxt, "id", str(name)).lower()
         self.bus = bus
         self.cb = CircuitBreaker(name=f"ccxt:{name}")
+
+        # Per-endpoint limiter — опционально (ожидаем GateIOLimiter или аналог)
+        self.limiter = getattr(settings, "limiter", None) or getattr(self.ccxt, "limiter", None)
+
+        # sandbox/spot-only: если у настроек есть такие флаги — уважаем
+        try:
+            if bool(getattr(settings, "SANDBOX", False)) and hasattr(self.ccxt, "set_sandbox_mode"):
+                self.ccxt.set_sandbox_mode(True)
+        except Exception:
+            pass
 
         try:
             self.ccxt.load_markets()
             self.cb.record_success()
         except Exception as e:
-            logger.warning("load_markets failed: %s", e)
+            logger.warning("load_markets failed: %r", e)
             self.cb.record_error(_kind_from_exc(e), e)
 
-    # ---- market data ----
-    @retry(max_attempts=5, backoff_base=0.4, metric_prefix="ccxt", retry_if=is_retryable_ccxt)
-    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+    # ---- helpers ----
+
+    def _rl(self, bucket: str) -> bool:
+        lim = self.limiter
+        if lim is None:
+            return True
         try:
-            res = self.ccxt.fetch_ticker(symbol)
+            if hasattr(lim, "try_acquire"):
+                return bool(lim.try_acquire(bucket))
+        except Exception:
+            return True
+        return True
+
+    # ---- market data / account ----
+
+    def fetch_ticker(self, symbol: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self._rl("market_data"):
+            raise RateLimitExceeded("market_data rate limit exceeded")
+        try:
+            res = self.ccxt.fetch_ticker(symbol, params or {})
             self.cb.record_success()
             return res
         except Exception as e:
             self.cb.record_error(_kind_from_exc(e), e)
             raise
 
-    @retry(max_attempts=5, backoff_base=0.4, metric_prefix="ccxt", retry_if=is_retryable_ccxt)
     def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self._rl("account"):
+            raise RateLimitExceeded("account rate limit exceeded")
         try:
             res = self.ccxt.fetch_balance(params or {})
             self.cb.record_success()
@@ -131,7 +133,7 @@ class CCXTExchange:
             raise
 
     # ---- orders ----
-    @retry(max_attempts=5, backoff_base=0.5, metric_prefix="ccxt", retry_if=is_retryable_ccxt)
+
     def create_order(
         self,
         symbol: str,
@@ -143,24 +145,27 @@ class CCXTExchange:
         **kwargs,
     ) -> Dict[str, Any]:
         """
-        Создание ордера с биржевой идемпотентностью:
-        - требуем spot-рынок
-        - проставляем clientOrderId/text (если не пришёл извне)
+        Gate spot:
+          - market BUY: amount = quote cost, нужен params['createMarketBuyOrderRequiresPrice']=False
+          - client order id: params['text'] = 't-...'
+        Для других бирж лишние параметры будут проигнорированы.
         """
-        if (not type) and ("type_" in kwargs):
+        if not self._rl("orders"):
+            raise RateLimitExceeded("orders rate limit exceeded")
+
+        if (not type) and ("type_" in kwargs):  # совместимость со старой сигнатурой
             type = kwargs["type_"]
 
-        # Только spot
-        if not _is_spot_market(self.ccxt, symbol):
-            raise ValueError(f"spot_only: {symbol}")
-
-        # Биржевая идемпотентность: берём из params/kwargs или строим фолбэк
         p = dict(params or {})
-        coid = p.get("clientOrderId") or p.get("text") or kwargs.get("clientOrderId") or kwargs.get("client_order_id")
-        if not coid:
-            coid = _derive_coid(symbol, side, float(amount))
-        # Широкая совместимость: и clientOrderId, и text (например, gate.io использует 'text')
-        p = _merge_params(p, {"clientOrderId": coid, "text": coid})
+
+        # Проставим client-order-id, если не передали
+        if "text" not in p and self.exchange_id == "gateio":
+            seed = kwargs.get("idempotency_key") or kwargs.get("client_order_id")
+            p["text"] = _gateio_text_from(seed)
+
+        # Особенность Gate spot market BUY: amount = QUOTE (cost)
+        if self.exchange_id == "gateio" and type == "market" and side.lower() == "buy":
+            p.setdefault("createMarketBuyOrderRequiresPrice", False)
 
         try:
             res = self.ccxt.create_order(symbol, type, side, amount, price, p)
@@ -170,8 +175,9 @@ class CCXTExchange:
             self.cb.record_error(_kind_from_exc(e), e)
             raise
 
-    @retry(max_attempts=5, backoff_base=0.4, metric_prefix="ccxt", retry_if=is_retryable_ccxt)
     def cancel_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self._rl("orders"):
+            raise RateLimitExceeded("orders rate limit exceeded")
         try:
             res = self.ccxt.cancel_order(id, symbol, params or {})
             self.cb.record_success()
@@ -180,8 +186,9 @@ class CCXTExchange:
             self.cb.record_error(_kind_from_exc(e), e)
             raise
 
-    @retry(max_attempts=5, backoff_base=0.4, metric_prefix="ccxt", retry_if=is_retryable_ccxt)
     def fetch_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self._rl("orders"):
+            raise RateLimitExceeded("orders rate limit exceeded")
         try:
             res = self.ccxt.fetch_order(id, symbol, params or {})
             self.cb.record_success()
@@ -190,7 +197,6 @@ class CCXTExchange:
             self.cb.record_error(_kind_from_exc(e), e)
             raise
 
-    @retry(max_attempts=5, backoff_base=0.4, metric_prefix="ccxt", retry_if=is_retryable_ccxt)
     def fetch_open_orders(
         self,
         symbol: Optional[str] = None,
@@ -198,6 +204,8 @@ class CCXTExchange:
         limit: Optional[int] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        if not self._rl("orders"):
+            raise RateLimitExceeded("orders rate limit exceeded")
         try:
             res = self.ccxt.fetch_open_orders(symbol, since, limit, params or {})
             self.cb.record_success()
