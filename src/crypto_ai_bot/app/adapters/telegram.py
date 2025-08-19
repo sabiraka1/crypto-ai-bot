@@ -1,154 +1,190 @@
 # src/crypto_ai_bot/app/adapters/telegram.py
 from __future__ import annotations
+
+import asyncio
 import json
-from typing import Any, Dict, List
+import logging
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, Optional
+
 from fastapi.responses import JSONResponse
 
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
-from crypto_ai_bot.core.use_cases.evaluate import evaluate
-from crypto_ai_bot.core.signals._fusion import explain as explain_signals
+
+logger = logging.getLogger("adapters.telegram")
+
+
+# ---------- helpers ----------
+
+def _make_reply(chat_id: int, text: str) -> Dict[str, Any]:
+    return {
+        "method": "sendMessage",
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
 
 
 def _help_text() -> str:
     return (
         "Команды:\n"
-        "/start      — приветствие\n"
-        "/help       — краткая справка и список команд\n"
-        "/status     — текущее состояние (режим, символ, таймфрейм, профиль, health)\n"
-        "/test       — тестовый ответ (smoke)\n"
-        "/profit     — PnL% и кумулятив по закрытым сделкам\n"
-        "/positions  — открытые позиции (опц.: /positions BTCUSDT)\n"
-        "/eval [SYMBOL] [TF] [LIMIT] — разовая оценка без торговли\n"
-        "/why [SYMBOL] [TF] [LIMIT]  — объяснение последнего решения\n"
+        "/help — помощь\n"
+        "/status — состояние бота\n"
+        "/profit [SYMBOL] — сводка PnL по закрытым сделкам\n"
+        "/positions — открытые позиции\n"
     )
 
-def _make_reply(chat_id: int | None, text: str) -> JSONResponse:
-    if chat_id is None:
-        return JSONResponse({"ok": True})
-    payload = {"method": "sendMessage", "chat_id": chat_id, "text": text}
-    return JSONResponse(payload)
 
-def _fmt_positions(rows: List[Dict[str, Any]]) -> str:
-    if not rows:
-        return "Нет открытых позиций."
-    lines = []
-    for r in rows:
-        sym = r.get("symbol", "?")
-        qty = float(r.get("qty", 0.0))
-        avg = r.get("avg_price", None)
-        if avg is None:
-            lines.append(f"• {sym}: qty={qty}")
-        else:
-            lines.append(f"• {sym}: qty={qty}, avg={float(avg):.6f}")
-    return "\n".join(lines)
-
-
-async def handle_update(app, body: bytes, container: Any):
+def _json(body: bytes) -> Dict[str, Any]:
     try:
-        update = json.loads(body.decode("utf-8"))
+        return json.loads(body.decode("utf-8"))
     except Exception:
-        return JSONResponse({"ok": False, "error": "bad-json"}, status_code=400)
+        return {}
 
-    msg = (update.get("message") or {}) if isinstance(update, dict) else {}
-    text = (msg.get("text") or "").strip()
+
+def _get_pnl_summary(trades_repo: Any, symbol: Optional[str]) -> Dict[str, float]:
+    """
+    Унифицированный PnL из trades_repo (единый источник правды).
+    Ожидаем, что в репозитории есть реализация агрегата.
+    """
+    try:
+        if hasattr(trades_repo, "realized_pnl_summary"):
+            return trades_repo.realized_pnl_summary(symbol=symbol)
+        if hasattr(trades_repo, "pnl_summary"):
+            return trades_repo.pnl_summary(symbol=symbol)
+    except Exception as e:
+        logger.debug("pnl_summary failed: %r", e)
+    return {"closed_trades": 0, "wins": 0, "losses": 0, "pnl_abs": 0.0, "pnl_pct": 0.0}
+
+
+async def _telegram_send_message(token: str, chat_id: int, text: str) -> bool:
+    """
+    Без внешних зависимостей (urllib). Блокирующий вызов запускаем в отдельном потоке.
+    """
+    url = f"https://api.telegram.org/bot{urllib.parse.quote(token)}/sendMessage"
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}).encode("utf-8")
+
+    def _do():
+        req = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+
+    try:
+        return await asyncio.to_thread(_do)
+    except Exception as e:
+        logger.warning("telegram sendMessage failed: %r", e)
+        return False
+
+
+# ---------- public API ----------
+
+async def handle_update(app, raw_body: bytes, container) -> JSONResponse:
+    """
+    Принимает webhook update и возвращает JSON с методом Telegram Bot API.
+    """
+    if not getattr(container.settings, "TELEGRAM_BOT_TOKEN", None):
+        return JSONResponse({"ok": False, "error": "telegram_not_configured"})
+
+    upd = _json(raw_body)
+    msg = (upd.get("message") or upd.get("edited_message") or {})
     chat = msg.get("chat") or {}
-    chat_id = chat.get("id")
+    chat_id = int(chat.get("id") or 0)
+    text = str(msg.get("text") or "").strip()
 
-    if not text:
-        return _make_reply(chat_id, "Пришлите команду. /help")
+    if not chat_id or not text:
+        return JSONResponse({"ok": True, "result": "noop"})
 
-    if text.startswith("/start"):
-        return _make_reply(chat_id, "Привет! Я бот торговой системы. Наберите /help.")
-
+    # ---- routing ----
     if text.startswith("/help"):
-        return _make_reply(chat_id, _help_text())
-
-    if text.startswith("/test"):
-        return _make_reply(chat_id, "✅ OK (smoke). Бот отвечает и подключён к приложению.")
-
-    if text.startswith("/positions"):
-        try:
-            parts = text.split(None, 1)
-            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
-            sym = parts[1].strip() if len(parts) > 1 else default_sym
-            sym = normalize_symbol(sym)
-
-            rows = container.positions_repo.get_open()
-            if sym:
-                rows = [r for r in rows if str(r.get("symbol")) == sym]
-
-            msg_text = _fmt_positions(rows) if rows else f"{sym}: нет открытых позиций"
-            return _make_reply(chat_id, msg_text)
-        except Exception as e:
-            return _make_reply(chat_id, f"Ошибка: {e!r}")
+        return JSONResponse(_make_reply(chat_id, _help_text()))
 
     if text.startswith("/status"):
         try:
-            mode = getattr(container.settings, "MODE", "paper")
-            symbol = getattr(container.settings, "SYMBOL", "BTC/USDT")
-            timeframe = getattr(container.settings, "TIMEFRAME", "1h")
-            profile = getattr(container.settings, "PROFILE", getattr(container.settings, "ENV", "default"))
-            bus_h = container.bus.health() if hasattr(container.bus, "health") else {"running": True, "dlq_size": None}
-            pending = container.trades_repo.count_pending()
-            lines = [
-                f"mode: {mode}",
-                f"symbol: {symbol}",
-                f"timeframe: {timeframe}",
-                f"profile: {profile}",
-                f"bus: running={bus_h.get('running')}, dlq={bus_h.get('dlq_size')}, p99={bus_h.get('p99_ms')}ms",
-                f"pending orders: {pending}",
-            ]
-            return _make_reply(chat_id, "\n".join(lines))
+            st = container.settings
+            sym = normalize_symbol(getattr(st, "SYMBOL", "BTC/USDT"))
+            timeframe = getattr(st, "TIMEFRAME", "15m")
+            bus_h = container.bus.health() if hasattr(container.bus, "health") else {"running": True}
+            pending = container.trades_repo.count_pending() if hasattr(container.trades_repo, "count_pending") else 0
+            exits = 0
+            if hasattr(container.exits_repo, "count_active"):
+                exits = int(container.exits_repo.count_active(symbol=sym))
+            resp = (
+                f"mode: {getattr(st, 'MODE', 'paper')}\n"
+                f"symbol: {sym}\n"
+                f"timeframe: {timeframe}\n"
+                f"bus: {bus_h}\n"
+                f"pending orders: {pending}\n"
+                f"active exits: {exits}"
+            )
+            return JSONResponse(_make_reply(chat_id, resp))
         except Exception as e:
-            return _make_reply(chat_id, f"Ошибка: {e!r}")
+            return JSONResponse(_make_reply(chat_id, f"Ошибка: {e!r}"))
 
     if text.startswith("/profit"):
         try:
-            parts = text.split(None, 1)
-            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
-            sym = parts[1].strip() if len(parts) > 1 else default_sym
-            sym = normalize_symbol(sym)
-
-            summary = container.trades_repo.realized_pnl_summary(symbol=sym)
-            wl = f"{int(summary['wins'])}/{int(summary['losses'])}"
+            parts = text.split()
+            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(getattr(container.settings, "SYMBOL", "BTC/USDT"))
+            summary = _get_pnl_summary(container.trades_repo, sym)
+            wl = f"{int(summary.get('wins', 0))}/{int(summary.get('losses', 0))}"
             resp = (
                 f"{sym}\n"
-                f"Closed trades: {int(summary['closed_trades'])} (W/L {wl})\n"
-                f"PnL: {float(summary['pnl_abs']):.6f} USDT\n"
-                f"PnL%: {float(summary['pnl_pct']):.4f}%"
+                f"Closed trades: {int(summary.get('closed_trades', 0))} (W/L {wl})\n"
+                f"PnL: {float(summary.get('pnl_abs', 0.0)):.6f} USDT\n"
+                f"PnL%: {float(summary.get('pnl_pct', 0.0)):.4f}%"
             )
-            return _make_reply(chat_id, resp)
+            return JSONResponse(_make_reply(chat_id, resp))
         except Exception as e:
-            return _make_reply(chat_id, f"Ошибка: {e!r}")
+            return JSONResponse(_make_reply(chat_id, f"Ошибка: {e!r}"))
 
-    if text.startswith("/eval"):
-        # /eval [SYMBOL] [TF] [LIMIT]   (TF/LIMIT пока опциональны; TF может использоваться внутри build)
+    if text.startswith("/positions"):
         try:
-            parts = text.split()
-            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
-            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(default_sym)
-            out = evaluate(cfg=container.settings, broker=container.broker, positions_repo=container.positions_repo, symbol=sym, external=None, bus=container.bus)
-            d = out.get("decision", {})
-            return _make_reply(chat_id, f"{sym}\nDecision: {d.get('action')} | score={float(d.get('score', 0.0)):.4f} | reason={d.get('reason')}")
+            sym = normalize_symbol(getattr(container.settings, "SYMBOL", "BTC/USDT"))
+            rows = container.positions_repo.get_open() if hasattr(container.positions_repo, "get_open") else []
+            if not rows:
+                return JSONResponse(_make_reply(chat_id, "Открытых позиций нет"))
+            lines = [f"Открытые позиции:"]
+            for r in rows:
+                if str(r.get("symbol")) != sym:
+                    continue
+                qty = float(r.get("qty") or 0.0)
+                avg = float(r.get("avg_price") or 0.0)
+                lines.append(f"{sym}: qty={qty}, avg={avg}")
+            return JSONResponse(_make_reply(chat_id, "\n".join(lines)))
         except Exception as e:
-            return _make_reply(chat_id, f"Ошибка: {e!r}")
+            return JSONResponse(_make_reply(chat_id, f"Ошибка: {e!r}"))
 
-    if text.startswith("/why"):
-        # /why [SYMBOL] [TF] [LIMIT]
-        try:
-            parts = text.split()
-            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
-            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(default_sym)
-            out = evaluate(cfg=container.settings, broker=container.broker, positions_repo=container.positions_repo, symbol=sym, external=None, bus=None)
-            features = out.get("features") or {}
-            ctx = out.get("context") or {}
-            exp = explain_signals(features, ctx)
-            top = list(exp["contributions"].items())[:6]
-            lines = [f"{sym}", "Top signals:"]
-            lines += [f"• {k}: {v:+.4f}" for k, v in top]
-            lines.append(f"Score: {sum(exp['contributions'].values()):+.4f} | buy≥{exp['thresholds']['buy']} sell≤{exp['thresholds']['sell']}")
-            return _make_reply(chat_id, "\n".join(lines))
-        except Exception as e:
-            return _make_reply(chat_id, f"Ошибка: {e!r}")
+    # дефолт
+    return JSONResponse(_make_reply(chat_id, "Неизвестная команда. /help"))
 
-    return _make_reply(chat_id, "Неизвестная команда. /help")
+
+async def send_alert(app, text: str, chat_id: Optional[int] = None) -> bool:
+    """
+    Отправка алерта в Telegram.
+    Если chat_id не указан — пытается взять settings.TELEGRAM_ALERT_CHAT_ID (если задан).
+    Возвращает True/False по факту попытки.
+    """
+    try:
+        settings = app.state.container.settings
+    except Exception:
+        logger.warning("send_alert: no settings container found")
+        return False
+
+    token = getattr(settings, "TELEGRAM_BOT_TOKEN", None)
+    if not token:
+        logger.warning("send_alert: TELEGRAM_BOT_TOKEN is not set")
+        return False
+
+    target = chat_id or getattr(settings, "TELEGRAM_ALERT_CHAT_ID", None)
+    if not target:
+        logger.warning("send_alert: no chat_id provided and TELEGRAM_ALERT_CHAT_ID not set")
+        return False
+
+    try:
+        target = int(target)
+    except Exception:
+        logger.warning("send_alert: invalid chat_id %r", target)
+        return False
+
+    return await _telegram_send_message(token, target, text)
