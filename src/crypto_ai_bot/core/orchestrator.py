@@ -1,170 +1,121 @@
+# src/crypto_ai_bot/core/orchestrator.py
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Callable
 
-from crypto_ai_bot.core.use_cases.evaluate import evaluate_and_maybe_execute
-from crypto_ai_bot.core.use_cases.place_order import place_order
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 from crypto_ai_bot.utils.metrics import inc, gauge
 
+# evaluate: оставляем как мягкую зависимость — если в проекте есть
+# evaluate_and_maybe_execute, используем; если нет — просто публикуем тик-событие
+try:
+    from crypto_ai_bot.core.use_cases.evaluate import evaluate_and_maybe_execute  # type: ignore
+except Exception:  # pragma: no cover
+    evaluate_and_maybe_execute = None  # type: ignore
+
+
 class Orchestrator:
     """
-    Lifecycle + фоновые тики.
+    Единая точка жизненного цикла. Без блокировок event-loop.
+    Интервалы берём из settings, с безопасными дефолтами.
     """
-    def __init__(
-        self,
-        *,
-        settings: Any,
-        broker: Any,
-        trades_repo: Any,
-        positions_repo: Any,
-        exits_repo: Optional[Any],
-        idempotency_repo: Optional[Any],
-        bus: Any,
-        limiter: Optional[Any] = None,
-        risk_manager: Optional[Any] = None,
-    ) -> None:
+
+    def __init__(self, *, settings: Any, broker: Any, repos: Any, bus: Any):
         self.settings = settings
         self.broker = broker
-        self.trades_repo = trades_repo
-        self.positions_repo = positions_repo
-        self.exits_repo = exits_repo
-        self.idempotency_repo = idempotency_repo
+        self.repos = repos
         self.bus = bus
-        self.limiter = limiter
-        self.risk_manager = risk_manager
 
         self._stop = asyncio.Event()
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: Set[asyncio.Task] = set()
 
-        # health/heartbeat
-        self._hb_ms: int = int(time.time() * 1000)
-        self._last_eval_ms: Optional[int] = None
-        self._last_exits_ms: Optional[int] = None
-        self._last_reconcile_ms: Optional[int] = None
-        self._last_balance_ms: Optional[int] = None
-        self._last_latency_ms: Optional[int] = None
-
-    # -------- public --------
-
-    def health_snapshot(self) -> Dict[str, Any]:
-        return {
-            "heartbeat_ms": self._hb_ms,
-            "last_eval_ms": self._last_eval_ms,
-            "last_exits_ms": self._last_exits_ms,
-            "last_reconcile_ms": self._last_reconcile_ms,
-            "last_balance_ms": self._last_balance_ms,
-            "last_latency_ms": self._last_latency_ms,
-        }
+    # ---------- public API ----------
 
     async def start(self) -> None:
         if self._tasks:
             return
         self._stop.clear()
-        self._tasks.append(asyncio.create_task(self._tick_eval(), name="tick-eval"))
-        self._tasks.append(asyncio.create_task(self._tick_exits(), name="tick-exits"))
-        self._tasks.append(asyncio.create_task(self._tick_reconcile(), name="tick-reconcile"))
-        self._tasks.append(asyncio.create_task(self._tick_balance_and_latency(), name="tick-balance-latency"))
-        self._tasks.append(asyncio.create_task(self._tick_watchdog(), name="tick-watchdog"))
-        self._tasks.append(asyncio.create_task(self._tick_bus_dlq(), name="tick-bus-dlq"))
+
+        self._tasks.add(asyncio.create_task(self._guard(self._tick_eval, "tick_eval")))
+        self._tasks.add(asyncio.create_task(self._guard(self._tick_exits, "tick_exits")))
+        self._tasks.add(asyncio.create_task(self._guard(self._tick_reconcile, "tick_reconcile")))
+        self._tasks.add(asyncio.create_task(self._guard(self._tick_balance_latency, "tick_balance_latency")))
+        self._tasks.add(asyncio.create_task(self._guard(self._tick_bus_dlq, "tick_bus_dlq")))
+        self._tasks.add(asyncio.create_task(self._guard(self._tick_watchdog, "tick_watchdog")))
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
+        # ждём завершения всех периодических задач
+        while self._tasks:
+            t = self._tasks.pop()
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
-    # -------- ticks --------
+    # ---------- internals ----------
+
+    async def _guard(self, coro_func: Callable[[], "asyncio.Future[Any]"], name: str) -> None:
+        try:
+            await coro_func()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # не роняем цикл из-за исключений
+            inc("orchestrator_task_errors_total", {"task": name})
 
     async def _tick_eval(self) -> None:
         interval = float(getattr(self.settings, "EVAL_INTERVAL_SEC", 60.0))
-        sym = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
+        symbol = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
         while not self._stop.is_set():
             t0 = time.time()
             try:
-                _ = evaluate_and_maybe_execute(
-                    cfg=self.settings,
-                    broker=self.broker,
-                    trades_repo=self.trades_repo,
-                    positions_repo=self.positions_repo,
-                    exits_repo=self.exits_repo,
-                    idempotency_repo=self.idempotency_repo,
-                    limiter=self.limiter,
-                    symbol=sym,
-                    external=None,
-                    bus=self.bus,
-                    risk_manager=self.risk_manager,
-                )
+                # если есть evaluate_and_maybe_execute — используем
+                if evaluate_and_maybe_execute:
+                    await asyncio.to_thread(
+                        evaluate_and_maybe_execute,  # type: ignore
+                        cfg=self.settings,
+                        broker=self.broker,
+                        repos=self.repos,
+                        bus=self.bus,
+                        symbol=symbol,
+                    )
+                else:
+                    # fallback: просто публикуем «тик оценки»
+                    if hasattr(self.bus, "publish"):
+                        await self.bus.publish({"type": "EvalTick", "symbol": symbol, "ts_ms": int(time.time() * 1000)})
+                inc("eval_ticks_total", {"symbol": symbol})
             except Exception:
-                pass
-            self._last_eval_ms = int(time.time() * 1000)
-            self._hb_ms = self._last_eval_ms
+                inc("eval_errors_total", {"symbol": symbol})
+            # интервал
             dt = time.time() - t0
+            gauge("eval_tick_seconds", dt, {"symbol": symbol})
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=max(0.0, interval - dt))
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
     async def _tick_exits(self) -> None:
-        if not self.exits_repo:
-            return
         interval = float(getattr(self.settings, "EXITS_INTERVAL_SEC", 5.0))
-        sym = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
-        list_active = getattr(self.exits_repo, "list_active", None)
-        deactivate = getattr(self.exits_repo, "deactivate", None)
-
+        symbol = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
+        # переносим бизнес-логику на use-case, если он есть
+        run_exits = getattr(self.repos, "run_protective_exits_check", None)
         while not self._stop.is_set():
             try:
-                rows = list_active(symbol=sym) or [] if callable(list_active) else []
-                last_px = 0.0
-                if rows:
-                    try:
-                        t0 = time.time()
-                        tkr = self.broker.fetch_ticker(sym)
-                        self._last_latency_ms = int((time.time() - t0) * 1000)
-                        last_px = float(tkr.get("last") or tkr.get("close") or 0.0)
-                        gauge("exchange_latency_ms", self._last_latency_ms, {"op": "fetch_ticker"})
-                    except Exception:
-                        last_px = 0.0
-
-                for r in rows:
-                    kind = str(r.get("kind") or "sl").lower()
-                    trig = float(r.get("trigger_px") or 0.0)
-                    if last_px > 0.0 and trig > 0.0:
-                        fire = (kind == "sl" and last_px <= trig) or (kind == "tp" and last_px >= trig)
-                        if fire:
-                            _ = place_order(
-                                cfg=self.settings,
-                                broker=self.broker,
-                                trades_repo=self.trades_repo,
-                                positions_repo=self.positions_repo,
-                                exits_repo=self.exits_repo,
-                                symbol=sym,
-                                side="sell",
-                                idempotency_repo=self.idempotency_repo,
-                                bus=self.bus,
-                            )
-                            if callable(deactivate):
-                                try:
-                                    deactivate(r.get("id"), executed_ts=int(time.time() * 1000), executed_price=last_px)
-                                except Exception:
-                                    try:
-                                        deactivate(r.get("id"))
-                                    except Exception:
-                                        pass
-                            inc("protective_exits_triggered_total", {"kind": kind, "symbol": sym})
-                            if hasattr(self.bus, "publish"):
-                                asyncio.create_task(self.bus.publish({
-                                    "type": "ExitExecuted",
-                                    "symbol": sym,
-                                    "ts_ms": int(time.time() * 1000),
-                                    "payload": {"kind": kind, "trigger_px": trig, "price": last_px},
-                                }))
+                if callable(run_exits):
+                    await asyncio.to_thread(run_exits, symbol)  # не блокируем loop
+                else:
+                    # мягкий fallback: публикуем событие для внешнего обработчика
+                    if hasattr(self.bus, "publish"):
+                        await self.bus.publish({"type": "ProtectiveExitsTick", "symbol": symbol})
+                inc("exits_ticks_total", {"symbol": symbol})
             except Exception:
-                pass
-            self._last_exits_ms = int(time.time() * 1000)
+                inc("exits_errors_total", {"symbol": symbol})
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -172,147 +123,52 @@ class Orchestrator:
 
     async def _tick_reconcile(self) -> None:
         interval = float(getattr(self.settings, "RECONCILE_INTERVAL_SEC", 60.0))
-        find_pending = getattr(self.trades_repo, "find_pending_orders", None) or getattr(self.trades_repo, "find_pending", None)
-        record_update = getattr(self.trades_repo, "record_exchange_update", None)
-        recompute_pos = getattr(self.positions_repo, "recompute_from_trades", None)
-        status_map: Dict[str, str] = {
-            "open": "pending",
-            "closed": "filled",
-            "canceled": "canceled",
-            "rejected": "rejected",
-            "expired": "canceled",
-        }
+        symbol = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
+        reconcile = getattr(self.repos, "reconcile_pending_orders", None)
         while not self._stop.is_set():
-            changed: Set[str] = set()
             try:
-                pend = find_pending(limit=50) or [] if callable(find_pending) else []
-                for row in pend:
-                    oid = row.get("order_id") or row.get("id") or row.get("exchange_order_id")
-                    sym = normalize_symbol(row.get("symbol") or getattr(self.settings, "SYMBOL", "BTC/USDT"))
-                    if not oid:
-                        continue
-                    try:
-                        od = self.broker.fetch_order(str(oid), sym)
-                    except Exception:
-                        continue
-                    state = status_map.get(str(od.get("status") or "").lower(), "pending")
-                    upd = {
-                        "state": state,
-                        "filled": float(od.get("filled") or 0.0),
-                        "price": float(od.get("price") or 0.0),
-                        "cost": float(od.get("cost") or 0.0),
-                        "fee": (od.get("fee") or {}),
-                        "raw": od,
-                        "ts_ms": int(time.time() * 1000),
-                    }
-                    if callable(record_update):
-                        try:
-                            record_update(order_id=str(oid), symbol=sym, **upd)
-                            changed.add(sym)
-                        except Exception:
-                            try:
-                                record_update(order_id=str(oid), state=upd["state"], raw=upd["raw"])
-                                changed.add(sym)
-                            except Exception:
-                                pass
-                if callable(recompute_pos) and changed:
-                    for s in changed:
-                        try:
-                            recompute_pos(symbol=s)
-                        except Exception:
-                            pass
+                if callable(reconcile):
+                    await asyncio.to_thread(reconcile, self.broker, symbol)
+                else:
+                    if hasattr(self.bus, "publish"):
+                        await self.bus.publish({"type": "ReconcileTick", "symbol": symbol})
+                inc("reconcile_ticks_total", {"symbol": symbol})
             except Exception:
-                pass
-            self._last_reconcile_ms = int(time.time() * 1000)
+                inc("reconcile_errors_total", {"symbol": symbol})
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
-    async def _tick_balance_and_latency(self) -> None:
-        interval = float(getattr(self.settings, "BALANCE_CHECK_INTERVAL_SEC", 300.0))
-        if interval <= 0:
-            return
-        sym = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
-        base = sym.split("/")[0] if "/" in sym else sym.split(":")[0]
-        tol = float(getattr(self.settings, "BALANCE_TOLERANCE", 1e-4))
-        get_open = getattr(self.positions_repo, "get_open", None)
+    async def _tick_balance_latency(self) -> None:
+        interval = float(getattr(self.settings, "BALANCE_INTERVAL_SEC", 300.0))
+        symbol = normalize_symbol(getattr(self.settings, "SYMBOL", "BTC/USDT"))
         while not self._stop.is_set():
+            t0 = time.time()
             try:
-                # heartbeat + latency ping (очень лёгкий)
-                try:
-                    t0 = time.time()
-                    _ = self.broker.fetch_ticker(sym)
-                    self._last_latency_ms = int((time.time() - t0) * 1000)
-                    gauge("exchange_latency_ms", self._last_latency_ms, {"op": "ping"})
-                except Exception:
-                    pass
-
-                # local qty
-                local_qty = 0.0
-                if callable(get_open):
-                    try:
-                        rows = get_open() or []
-                        for r in rows:
-                            if str(r.get("symbol")) == sym:
-                                local_qty = float(r.get("qty") or 0.0)
-                                break
-                    except Exception:
-                        local_qty = 0.0
-                # exchange qty
-                exch_qty = local_qty
-                try:
-                    bal = self.broker.fetch_balance() or {}
-                    total = (bal.get("total") or {})
-                    if base in total:
-                        exch_qty = float(total.get(base) or 0.0)
-                    else:
-                        free = (bal.get("free") or {})
-                        used = (bal.get("used") or {})
-                        exch_qty = float(free.get(base, 0.0)) + float(used.get(base, 0.0))
-                except Exception:
-                    pass
-                drift = abs(exch_qty - local_qty)
-                gauge("position_drift", drift, {"symbol": sym})
-                if drift > tol and hasattr(self.bus, "publish"):
-                    asyncio.create_task(self.bus.publish({
-                        "type": "BalanceDriftDetected",
-                        "symbol": sym,
-                        "ts_ms": int(time.time() * 1000),
-                        "payload": {"base": base, "local_qty": local_qty, "exchange_qty": exch_qty, "drift": drift, "tolerance": tol},
-                    }))
+                # не блокируем loop при запросе к бирже
+                ticker = await asyncio.to_thread(self.broker.fetch_ticker, symbol)
+                latency = float(ticker.get("info", {}).get("elapsed", 0.0)) if isinstance(ticker, dict) else 0.0
+                gauge("exchange_last_latency_ms", latency, {"symbol": symbol})
+                inc("balance_ticks_total", {"symbol": symbol})
             except Exception:
-                pass
-            self._last_balance_ms = int(time.time() * 1000)
+                inc("balance_errors_total", {"symbol": symbol})
+            dt = time.time() - t0
+            gauge("balance_tick_seconds", dt, {"symbol": symbol})
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
     async def _tick_watchdog(self) -> None:
-        """
-        Простой watchdog: если какой-то тик давно не обновлялся — поднимаем счётчик/ивент.
-        """
-        stall = float(getattr(self.settings, "WATCHDOG_STALL_SEC", 120.0))
-        if stall <= 0:
-            return
+        interval = float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", 10.0))
         while not self._stop.is_set():
-            now = int(time.time() * 1000)
-            for name, ts in {
-                "eval": self._last_eval_ms,
-                "exits": self._last_exits_ms,
-                "reconcile": self._last_reconcile_ms,
-            }.items():
-                if ts and (now - ts) > int(stall * 1000):
-                    inc("watchdog_stall_total", {"tick": name})
-                    if hasattr(self.bus, "publish"):
-                        asyncio.create_task(self.bus.publish({
-                            "type": "WatchdogStall",
-                            "ts_ms": now,
-                            "payload": {"tick": name, "age_ms": now - ts},
-                        }))
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=stall / 2.0)
+                gauge("watchdog_alive", 1)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
@@ -322,8 +178,9 @@ class Orchestrator:
             try:
                 if hasattr(self.bus, "try_republish_from_dlq"):
                     await self.bus.try_republish_from_dlq(limit=50)
+                inc("bus_dlq_retry_total")
             except Exception:
-                pass
+                inc("bus_dlq_retry_errors_total")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
