@@ -4,11 +4,10 @@ import json
 from typing import Any, Dict, List
 from fastapi.responses import JSONResponse
 
-# единая нормализация символа
 from crypto_ai_bot.core.brokers.symbols import normalize_symbol
+from crypto_ai_bot.core.use_cases.evaluate import evaluate
+from crypto_ai_bot.core.signals._fusion import explain as explain_signals
 
-
-# ---------- helpers: formatting ----------
 
 def _help_text() -> str:
     return (
@@ -19,6 +18,8 @@ def _help_text() -> str:
         "/test       — тестовый ответ (smoke)\n"
         "/profit     — PnL% и кумулятив по закрытым сделкам\n"
         "/positions  — открытые позиции (опц.: /positions BTCUSDT)\n"
+        "/eval [SYMBOL] [TF] [LIMIT] — разовая оценка без торговли\n"
+        "/why [SYMBOL] [TF] [LIMIT]  — объяснение последнего решения\n"
     )
 
 def _make_reply(chat_id: int | None, text: str) -> JSONResponse:
@@ -42,13 +43,7 @@ def _fmt_positions(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# ---------- main handler ----------
-
 async def handle_update(app, body: bytes, container: Any):
-    """
-    Сигнатура, которую вызывает server.py.
-    """
-    # 1) Парсим апдейт
     try:
         update = json.loads(body.decode("utf-8"))
     except Exception:
@@ -62,7 +57,6 @@ async def handle_update(app, body: bytes, container: Any):
     if not text:
         return _make_reply(chat_id, "Пришлите команду. /help")
 
-    # 2) Роутинг команд
     if text.startswith("/start"):
         return _make_reply(chat_id, "Привет! Я бот торговой системы. Наберите /help.")
 
@@ -73,7 +67,6 @@ async def handle_update(app, body: bytes, container: Any):
         return _make_reply(chat_id, "✅ OK (smoke). Бот отвечает и подключён к приложению.")
 
     if text.startswith("/positions"):
-        # синтаксис: /positions [SYMBOL]
         try:
             parts = text.split(None, 1)
             default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
@@ -102,7 +95,7 @@ async def handle_update(app, body: bytes, container: Any):
                 f"symbol: {symbol}",
                 f"timeframe: {timeframe}",
                 f"profile: {profile}",
-                f"bus: running={bus_h.get('running')}, dlq={bus_h.get('dlq_size')}",
+                f"bus: running={bus_h.get('running')}, dlq={bus_h.get('dlq_size')}, p99={bus_h.get('p99_ms')}ms",
                 f"pending orders: {pending}",
             ]
             return _make_reply(chat_id, "\n".join(lines))
@@ -110,14 +103,12 @@ async def handle_update(app, body: bytes, container: Any):
             return _make_reply(chat_id, f"Ошибка: {e!r}")
 
     if text.startswith("/profit"):
-        # синтаксис: /profit [SYMBOL]
         try:
             parts = text.split(None, 1)
             default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
             sym = parts[1].strip() if len(parts) > 1 else default_sym
             sym = normalize_symbol(sym)
 
-            # единый расчёт PnL через репозиторий сделок
             summary = container.trades_repo.realized_pnl_summary(symbol=sym)
             wl = f"{int(summary['wins'])}/{int(summary['losses'])}"
             resp = (
@@ -130,5 +121,34 @@ async def handle_update(app, body: bytes, container: Any):
         except Exception as e:
             return _make_reply(chat_id, f"Ошибка: {e!r}")
 
-    # 3) Дефолт
+    if text.startswith("/eval"):
+        # /eval [SYMBOL] [TF] [LIMIT]   (TF/LIMIT пока опциональны; TF может использоваться внутри build)
+        try:
+            parts = text.split()
+            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
+            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(default_sym)
+            out = evaluate(cfg=container.settings, broker=container.broker, positions_repo=container.positions_repo, symbol=sym, external=None, bus=container.bus)
+            d = out.get("decision", {})
+            return _make_reply(chat_id, f"{sym}\nDecision: {d.get('action')} | score={float(d.get('score', 0.0)):.4f} | reason={d.get('reason')}")
+        except Exception as e:
+            return _make_reply(chat_id, f"Ошибка: {e!r}")
+
+    if text.startswith("/why"):
+        # /why [SYMBOL] [TF] [LIMIT]
+        try:
+            parts = text.split()
+            default_sym = getattr(container.settings, "SYMBOL", "BTC/USDT")
+            sym = normalize_symbol(parts[1]) if len(parts) > 1 else normalize_symbol(default_sym)
+            out = evaluate(cfg=container.settings, broker=container.broker, positions_repo=container.positions_repo, symbol=sym, external=None, bus=None)
+            features = out.get("features") or {}
+            ctx = out.get("context") or {}
+            exp = explain_signals(features, ctx)
+            top = list(exp["contributions"].items())[:6]
+            lines = [f"{sym}", "Top signals:"]
+            lines += [f"• {k}: {v:+.4f}" for k, v in top]
+            lines.append(f"Score: {sum(exp['contributions'].values()):+.4f} | buy≥{exp['thresholds']['buy']} sell≤{exp['thresholds']['sell']}")
+            return _make_reply(chat_id, "\n".join(lines))
+        except Exception as e:
+            return _make_reply(chat_id, f"Ошибка: {e!r}")
+
     return _make_reply(chat_id, "Неизвестная команда. /help")

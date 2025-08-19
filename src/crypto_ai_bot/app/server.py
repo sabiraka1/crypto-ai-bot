@@ -1,241 +1,124 @@
-# src/crypto_ai_bot/app/server.py
+"""
+FastAPI сервер приложения:
+— Lifespan: старт/стоп AsyncEventBus и Orchestrator (graceful)
+— /health, /ready, /metrics, /telegram/webhook
+— Готов к запуску через gunicorn: gunicorn -k uvicorn.workers.UvicornWorker crypto_ai_bot.app.server:app
+"""
 from __future__ import annotations
 
 import asyncio
-import logging
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Dict
 
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-# --- middleware (опционально; если файла нет — просто пропустим) ---
-try:
-    from crypto_ai_bot.app.middleware import RateLimitMiddleware  # noqa: F401
-    _HAS_RLMW = True
-except Exception:
-    _HAS_RLMW = False
-
-# --- контейнер и составление зависимостей ---
-from crypto_ai_bot.app.compose import build_container  # ваша фабрика контейнера
-
-# --- метрики ---
-from crypto_ai_bot.utils import metrics
-# в utils.metrics экспортёр называется export()
-from crypto_ai_bot.utils.metrics import export as export_metrics
-
-# --- телеграм-адаптер (делегируем обработку апдейтов) ---
-try:
-    from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update
-except Exception:
-    telegram_handle_update = None  # graceful fallback
-
-logger = logging.getLogger("server")
+# DI-контейнер
+from crypto_ai_bot.app.compose import build_container  # ожидается в репозитории
+# Telegram адаптер
+from crypto_ai_bot.app.adapters.telegram import handle_update
+# Orchestrator
+from crypto_ai_bot.core.orchestrator import Orchestrator
 
 
-async def _housekeeping_loop(container: Any) -> None:
-    """
-    Периодическая «домработа»: тик защитных выходов, очистка идемпотентности,
-    необязательная оптимизация БД. Любая ошибка — в лог + метрика.
-    """
-    idem = getattr(container, "idempotency_repo", None)
-    exits = getattr(container, "exits_repo", None)
-    con = getattr(container, "con", None)
-    interval = float(getattr(container.settings, "HOUSEKEEPING_INTERVAL_SEC", 60.0))
-
-    while True:
-        try:
-            # 1) защитные выходы (если есть)
-            if exits is not None and hasattr(exits, "tick"):
-                exits.tick()
-
-            # 2) очистка идемпотентности
-            if idem is not None and hasattr(idem, "cleanup_expired"):
-                ttl = int(getattr(container.settings, "IDEMPOTENCY_TTL_SEC", 300))
-                deleted = idem.cleanup_expired(ttl_seconds=ttl)
-                if deleted:
-                    logger.info("housekeeping: idempotency deleted=%s", deleted)
-
-            # 3) периодическая оптимизация SQLite (опционально)
-            if con is not None:
-                con.execute("PRAGMA optimize")
-
-        except asyncio.CancelledError:
-            # штатное завершение фоновой задачи
-            break
-        except Exception:
-            # ВАЖНО: не глушим — пишем стектрейс и инкрементим метрику
-            logger.exception("housekeeping tick failed")
-            metrics.inc("housekeeping_tick_failures_total", value=1.0)
-        finally:
-            await asyncio.sleep(interval)
+def _safe(obj: Any, name: str, default: Any = None) -> Any:
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Инициализация контейнера, запуск bus/housekeeping, корректное завершение.
-    """
+    # Сборка контейнера
     container = build_container()
     app.state.container = container
 
-    # стартуем EventBus (если есть оболочка bus с .start/.stop)
-    bus = getattr(container, "bus", None)
-    if bus is not None and hasattr(bus, "start"):
-        try:
-            await bus.start()
-        except Exception:
-            logger.exception("bus start failed")
+    # Старт EventBus
+    if hasattr(container, "bus") and hasattr(container.bus, "start"):
+        await container.bus.start()
 
-    # фоновая «домработа»
-    hk_task = asyncio.create_task(_housekeeping_loop(container), name="housekeeping")
+    # Старт Orchestrator
+    app.state.orchestrator = Orchestrator(
+        settings=container.settings,
+        broker=container.broker,
+        trades_repo=container.trades_repo,
+        positions_repo=container.positions_repo,
+        exits_repo=getattr(container, "exits_repo", None),
+        idempotency_repo=getattr(container, "idempotency_repo", None),
+        bus=container.bus,
+        limiter=getattr(container, "limiter", None),
+    )
+    await app.state.orchestrator.start()
 
     try:
         yield
     finally:
-        # graceful shutdown housekeeping
-        hk_task.cancel()
+        # Graceful stop orchestrator
         try:
-            await hk_task
-        except asyncio.CancelledError:
-            pass
+            if getattr(app.state, "orchestrator", None):
+                await app.state.orchestrator.stop()
         except Exception:
-            logger.exception("housekeeping join failed")
-
-        # останавливаем bus
-        if bus is not None and hasattr(bus, "stop"):
-            try:
-                await bus.stop()
-            except Exception:
-                logger.exception("bus stop failed")
-
-        # закрываем соединения БД (если требуется)
-        con = getattr(container, "con", None)
-        if con is not None:
-            try:
-                con.close()
-            except Exception:
-                logger.exception("db close failed")
+            pass
+        # Stop EventBus
+        try:
+            if hasattr(container, "bus") and hasattr(container.bus, "stop"):
+                await container.bus.stop()
+        except Exception:
+            pass
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(lifespan=lifespan)
+    application = FastAPI(title="crypto-ai-bot", version="1.0", lifespan=lifespan)
 
-    # rate limit middleware (если присутствует в проекте)
-    if _HAS_RLMW:
-        app.add_middleware(RateLimitMiddleware, global_rps=20.0)
+    @application.get("/", tags=["meta"])
+    async def root():
+        return {"ok": True, "name": "crypto-ai-bot"}
 
-    @app.get("/health")
-    async def health() -> JSONResponse:
-        """
-        Лёгкий health с базовой информацией и CB-статами брокера.
-        Без синхронных сетевых вызовов.
-        """
-        cont = app.state.container
-        cfg = cont.settings
+    @application.get("/ready", tags=["meta"])
+    async def ready():
+        c = application.state.container
+        bus_h = c.bus.health() if hasattr(c.bus, "health") else {"running": True}
+        ok = bool(bus_h.get("running"))
+        return JSONResponse({"ready": ok, "bus": bus_h}, status_code=200 if ok else 503)
 
-        broker = getattr(cont, "broker", None)
-        cb_stats: Optional[dict] = None
-        if broker is not None and hasattr(broker, "cb"):
-            try:
-                cb_stats = broker.cb.get_stats()  # utils.circuit_breaker
-            except Exception:
-                logger.debug("health: cb.get_stats failed", exc_info=True)
-                cb_stats = None
+    @application.get("/health", tags=["meta"])
+    async def health():
+        c = application.state.container
+        bus_h = c.bus.health() if hasattr(c.bus, "health") else {"running": True}
+        details: Dict[str, Any] = {
+            "mode": getattr(c.settings, "MODE", "paper"),
+            "symbol": getattr(c.settings, "SYMBOL", "BTC/USDT"),
+            "timeframe": getattr(c.settings, "TIMEFRAME", "1h"),
+            "bus": bus_h,
+            "pending_orders": _safe(c.trades_repo, "count_pending", lambda: 0)(),
+        }
+        return JSONResponse({"ok": True, "details": details})
 
-        bus = getattr(cont, "bus", None)
-        bus_health = None
-        if bus is not None and hasattr(bus, "health"):
-            try:
-                bus_health = bus.health()
-            except Exception:
-                logger.debug("health: bus.health failed", exc_info=True)
-
-        return JSONResponse(
-            {
-                "ok": True,
-                "mode": getattr(cfg, "MODE", "paper"),
-                "exchange": getattr(cfg, "EXCHANGE", "binance"),
-                "symbol": getattr(cfg, "SYMBOL", "BTC/USDT"),
-                "timeframe": getattr(cfg, "TIMEFRAME", "1h"),
-                "broker_circuit_breaker": cb_stats,
-                "bus": bus_health,
-            }
-        )
-
-    @app.get("/metrics")
-    async def metrics_endpoint() -> PlainTextResponse:
-        return PlainTextResponse(export_metrics(), media_type="text/plain; version=0.0.4")
-
-    @app.get("/status")
-    async def status() -> JSONResponse:
-        """
-        Расширенный статус по открытым позициям и idempotency.
-        Работает быстро и без блокировки event loop.
-        """
-        cont = app.state.container
-        positions_repo = getattr(cont, "positions_repo", None)
-
-        open_positions = []
+    @application.get("/metrics", tags=["meta"])
+    async def metrics():
+        # Лёгкая интеграция: utils.metrics.export() если есть
         try:
-            if positions_repo is not None:
-                open_positions = positions_repo.get_open()
+            from crypto_ai_bot.utils import metrics as m  # type: ignore
+            if hasattr(m, "export"):
+                return PlainTextResponse(m.export())
         except Exception:
-            logger.exception("status: positions_repo.get_open failed")
+            pass
+        # Фолбэк: несколько ключевых метрик из bus.health
+        c = application.state.container
+        bus_h = c.bus.health() if hasattr(c.bus, "health") else {}
+        text = []
+        for k, v in bus_h.items():
+            text.append(f"app_bus_{k} {v}")
+        return PlainTextResponse("\n".join(text) + "\n")
 
-        idem_repo = getattr(cont, "idempotency_repo", None)
-        idem_size = None
-        try:
-            if idem_repo is not None and hasattr(idem_repo, "approx_size"):
-                idem_size = idem_repo.approx_size()
-        except Exception:
-            logger.debug("status: idempotency approx_size failed", exc_info=True)
+    @application.post("/telegram/webhook", tags=["adapters"])
+    async def telegram_webhook(request: Request):
+        body = await request.body()
+        c = application.state.container
+        return await handle_update(application, body, c)
 
-        return JSONResponse(
-            {
-                "open_positions": open_positions,
-                "idempotency_size": idem_size,
-            }
-        )
-
-    @app.post("/telegram")
-    async def telegram(
-        request: Request,
-        x_telegram_bot_api_secret_token: Optional[str] = Header(default=None),
-    ) -> JSONResponse:
-        """
-        Простой webhook хендлер. Секрет — через заголовок (если задан в конфиге).
-        Делегируем обработку в adapters.telegram.handle_update, если он есть.
-        """
-        cont = app.state.container
-        secret = getattr(cont.settings, "TELEGRAM_BOT_SECRET", None)
-        if secret and x_telegram_bot_api_secret_token != secret:
-            return JSONResponse({"status": "forbidden"}, status_code=403)
-
-        try:
-            payload = await request.json()
-        except Exception:
-            return JSONResponse({"status": "bad_request"}, status_code=400)
-
-        if telegram_handle_update is None:
-            # адаптер не подключён — просто «эхаем»
-            return JSONResponse({"status": "ok", "echo": payload})
-
-        try:
-            # делегируем
-            out = await telegram_handle_update(cont, payload)
-            return JSONResponse(out or {"status": "ok"})
-        except Exception:
-            logger.exception("telegram handler failed")
-            return JSONResponse({"status": "error"}, status_code=500)
-
-    # простой «smoke» для проверки, что сервер жив
-    @app.get("/test")
-    async def test() -> JSONResponse:
-        return JSONResponse({"ok": True})
-
-    return app
+    return application
 
 
-# Gunicorn/Uvicorn entrypoint
 app = create_app()

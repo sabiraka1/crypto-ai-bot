@@ -1,7 +1,26 @@
+# === CORE DEPENDENCIES ===
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<0.31
 gunicorn>=21.2,<22
-httpx>=0.27,<0.28
-ccxt>=4.2,<5
-prometheus-client>=0.20,<0.21
 pydantic>=2.7,<3
+
+# === TRADING INFRASTRUCTURE ===
+ccxt>=4.2,<5
+httpx>=0.27,<0.28
+requests>=2.31,<3
+
+# === MONITORING & OBSERVABILITY ===
+prometheus-client>=0.20,<0.21
+
+# === PRODUCTION DEPENDENCIES ===
+# Раскомментировать для production scale:
+# psycopg2-binary>=2.9,<3    # PostgreSQL
+# redis>=5.0,<6              # Cache/queues
+# structlog>=24.1,<25        # Structured logging
+# sentry-sdk[fastapi]>=1.40,<2  # Error tracking
+
+# === DEVELOPMENT (remove in production) ===
+# pytest>=8.2,<9
+# pytest-asyncio>=0.23,<1
+# ruff>=0.6,<0.7
+# mypy>=1.8,<2

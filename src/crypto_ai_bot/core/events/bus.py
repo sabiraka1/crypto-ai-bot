@@ -1,134 +1,142 @@
 # src/crypto_ai_bot/core/events/bus.py
-"""
-Асинхронная шина событий для обмена сообщениями между компонентами системы.
-Поддерживает публикацию/подписку с очередью и обработкой ошибок.
-"""
 from __future__ import annotations
 
 import asyncio
-import logging
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict, NotRequired
+import time
+from collections import defaultdict, deque
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, TypedDict, NotRequired
 
-logger = logging.getLogger("events.bus")
-
-# Тип обработчика событий
-Handler = Callable[[str, Dict[str, Any]], Awaitable[None]]
-
+# -------------------- Типы событий --------------------
 
 class BusEvent(TypedDict, total=False):
-    """Базовое событие шины с общими полями."""
     type: str
     ts_ms: int
     symbol: str
     timeframe: str
     payload: NotRequired[Dict[str, Any]]
     error: NotRequired[str]
-
+    key: NotRequired[str]          # для явной сериализации по ключу
 
 class DecisionEvaluatedEvent(BusEvent, total=False):
-    """Событие о принятом торговом решении."""
-    type: str  # "DecisionEvaluated"
+    type: str                      # "DecisionEvaluated"
     decision: Dict[str, Any]
 
-
 class OrderExecutedEvent(BusEvent, total=False):
-    """Событие об исполненном ордере."""
-    type: str  # "OrderExecuted"
+    type: str                      # "OrderExecuted"
     order_id: str
     side: str
     qty: str
     price: float
 
 
+# -------------------- AsyncEventBus --------------------
+
+Handler = Callable[[BusEvent], Awaitable[None]]
+
 class AsyncEventBus:
     """
-    Единый асинхронный шиной.
-    - publish() — неблокирующая публикация (кладём в очередь)
-    - worker-поток доставляет сообщения подписчикам (параллельно, но с ограничением concurrency)
-    - DLQ на ошибки, health()
+    Минимальный асинхронный EventBus:
+      - FIFO очередь
+      - per-key ordering (по symbol/key)
+      - DLQ и репаблиш
+      - p95/p99 latency по последним N обработкам
     """
-    def __init__(self, *, max_queue: int = 1000, concurrency: int = 8) -> None:
-        """
-        Инициализация шины событий.
-        
-        Args:
-            max_queue: Максимальный размер очереди событий
-            concurrency: Количество worker-потоков для обработки
-        """
-        self._q: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue(max_queue)
-        self._handlers: Dict[str, List[Handler]] = {}
-        self._dlq: List[Dict[str, Any]] = []  # Dead Letter Queue для ошибок
-        self._running = False
-        self._workers: List[asyncio.Task] = []
+
+    def __init__(self, *, max_queue: int = 1000, concurrency: int = 4) -> None:
+        self._q: asyncio.Queue[BusEvent] = asyncio.Queue(maxsize=max_queue)
+        self._handlers: Dict[str, List[Handler]] = defaultdict(list)
+        self._running: bool = False
+        self._tasks: List[asyncio.Task] = []
+        self._locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)  # per-key lock
+        self._dlq: List[Dict[str, Any]] = []
+        self._latency_ms: Deque[float] = deque(maxlen=2048)  # кольцевой буфер для pctl
         self._concurrency = max(1, int(concurrency))
 
-    def subscribe(self, topic: str, handler: Handler) -> None:
-        """Подписаться на события определенного типа."""
-        self._handlers.setdefault(topic, []).append(handler)
+    # ---- подписки/публикации ----
 
-    async def publish(self, topic: str, payload: Dict[str, Any]) -> None:
-        """Опубликовать событие в шину (неблокирующе)."""
-        if not self._running:
-            logger.warning("event bus not running; dropping event topic=%s", topic)
-            return
-        await self._q.put((topic, payload))
+    def subscribe(self, event_type: str, handler: Handler) -> None:
+        self._handlers[event_type].append(handler)
 
-    def health(self) -> Dict[str, Any]:
-        """Получить статус здоровья шины событий."""
-        return {
-            "running": self._running,
-            "queue_size": self._q.qsize() if self._running else None,
-            "queue_cap": self._q.maxsize if self._running else None,
-            "dlq_size": len(self._dlq),
-        }
+    async def publish(self, event: BusEvent) -> None:
+        if "ts_ms" not in event:
+            event["ts_ms"] = int(time.time() * 1000)
+        await self._q.put(event)
 
-    async def _worker(self) -> None:
-        """Worker-поток для обработки событий из очереди."""
-        while self._running:
-            try:
-                topic, payload = await self._q.get()
-                handlers = list(self._handlers.get(topic, []))
-                if not handlers:
-                    self._q.task_done()
-                    continue
-
-                # доставляем параллельно, но ждём все
-                async def _deliver(h: Handler) -> None:
-                    """Доставка события одному обработчику с обработкой ошибок."""
-                    try:
-                        await h(topic, payload)
-                    except Exception as e:
-                        logger.exception("event handler failed: %s", e)
-                        self._dlq.append({"topic": topic, "payload": payload, "error": repr(e)})
-
-                await asyncio.gather(*[_deliver(h) for h in handlers], return_exceptions=False)
-                self._q.task_done()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.exception("event bus worker failed: %s", e)
+    # ---- управление жизненным циклом ----
 
     async def start(self) -> None:
-        """Запустить шину событий."""
         if self._running:
             return
         self._running = True
-        self._workers = [asyncio.create_task(self._worker(), name=f"bus-worker-{i}") for i in range(self._concurrency)]
+        for _ in range(self._concurrency):
+            self._tasks.append(asyncio.create_task(self._worker(), name="bus-worker"))
 
     async def stop(self) -> None:
-        """Остановить шину событий."""
         if not self._running:
             return
         self._running = False
-        # Отменяем все worker-задачи
-        for t in self._workers:
-            t.cancel()
-        # Ждем завершения всех worker-ов
-        for t in self._workers:
+        # мягко завершим: пустим sentinel None через очередь
+        for _ in self._tasks:
+            await self._q.put({"type": "__stop__"})
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+
+    # ---- DLQ / репаблиш ----
+
+    def dlq_size(self) -> int:
+        return len(self._dlq)
+
+    async def try_republish_from_dlq(self, limit: int = 50) -> int:
+        n = min(limit, len(self._dlq))
+        ok = 0
+        for _ in range(n):
+            item = self._dlq.pop(0)
+            ev = item.get("event")
+            if ev:
+                await self.publish(ev)  # retry
+                ok += 1
+        return ok
+
+    # ---- диагностика / метрики ----
+
+    def _percentile(self, p: float) -> float:
+        # простая pctl по буферу
+        if not self._latency_ms:
+            return 0.0
+        data = sorted(self._latency_ms)
+        k = int(round((p / 100.0) * (len(data) - 1)))
+        return float(data[max(0, min(k, len(data) - 1))])
+
+    def health(self) -> Dict[str, Any]:
+        return {
+            "running": self._running,
+            "queue_size": self._q.qsize(),
+            "dlq_size": self.dlq_size(),
+            "p95_ms": self._percentile(95.0),
+            "p99_ms": self._percentile(99.0),
+        }
+
+    # ---- воркеры ----
+
+    async def _worker(self) -> None:
+        while True:
+            event = await self._q.get()
+            if event.get("type") == "__stop__":
+                return
+            t0 = time.time()
+            etype = str(event.get("type") or "")
+            # определяем ключ сериализации
+            key = str(event.get("key") or event.get("symbol") or "*")
+            lock = self._locks[key]
             try:
-                await t
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.warning("bus worker termination error: %s", e)
-        self._workers.clear()
+                async with lock:
+                    handlers = list(self._handlers.get(etype, ()))
+                    for h in handlers:
+                        try:
+                            await h(event)
+                        except Exception as e:
+                            # в DLQ кладём оригинал + ошибка/таймштамп
+                            self._dlq.append({"ts_ms": int(time.time() * 1000), "event": dict(event), "error": repr(e), "handler": getattr(h, "__name__", "handler")})
+            finally:
+                dt_ms = (time.time() - t0) * 1000.0
+                self._latency_ms.append(dt_ms)
