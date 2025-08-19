@@ -4,6 +4,8 @@ from __future__ import annotations
 import sqlite3
 import time
 from typing import Callable, Iterable, Optional, Tuple, Any
+from .sqlite_adapter import apply_connection_pragmas, connect, execute, executemany  # и др., если нужны
+__all__ = ["apply_connection_pragmas", "connect", "execute", "executemany"]
 
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000

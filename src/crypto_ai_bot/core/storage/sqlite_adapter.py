@@ -74,3 +74,41 @@ def executemany(con: sqlite3.Connection, sql: str, seq_of_params: Iterable[Tuple
     def _do():
         return con.executemany(sql, seq_of_params)
     return _retry_write(_do)
+
+
+def apply_connection_pragmas(conn):
+    cur = conn.cursor()
+    # Безопасные/полезные дефолты для прод-бота
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
+    cur.execute("PRAGMA foreign_keys=ON;")
+    cur.execute("PRAGMA temp_store=MEMORY;")
+    cur.execute("PRAGMA busy_timeout=5000;")  # 5s
+    cur.close()
+    return conn
+
+
+def snapshot_metrics(conn) -> dict:
+    cur = conn.cursor()
+    # базовые индикаторы файла БД
+    cur.execute("PRAGMA page_count;")
+    page_count = cur.fetchone()[0]
+    cur.execute("PRAGMA page_size;")
+    page_size = cur.fetchone()[0]
+    cur.execute("PRAGMA freelist_count;")
+    freelist_count = cur.fetchone()[0]
+    # попытка мягкого чекпоинта WAL (не обязателен)
+    try:
+        cur.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        wal = cur.fetchall()
+    except Exception:
+        wal = []
+    cur.close()
+    return {
+        "page_count": int(page_count),
+        "page_size": int(page_size),
+        "freelist_count": int(freelist_count),
+        "db_size_bytes": int(page_count) * int(page_size),
+        "wal": wal,
+    }
+
