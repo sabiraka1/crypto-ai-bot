@@ -1,25 +1,17 @@
-# src/crypto_ai_bot/app/compose.py
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any
 
 from crypto_ai_bot.core.settings import Settings
 from crypto_ai_bot.core.brokers.base import create_broker
 from crypto_ai_bot.core.events.bus import AsyncEventBus
-
-from crypto_ai_bot.core.storage.sqlite_adapter import (
-    connect,
-    apply_connection_pragmas,
-)
+from crypto_ai_bot.core.storage.sqlite_adapter import connect, apply_connection_pragmas
 from crypto_ai_bot.core.storage.migrations.runner import apply_all
 
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
-from crypto_ai_bot.core.storage.repositories.protective_exits import (
-    SqliteProtectiveExitsRepository,
-)
+from crypto_ai_bot.core.storage.repositories.protective_exits import SqliteProtectiveExitsRepository
 from crypto_ai_bot.core.storage.repositories.idempotency import IdempotencyRepository
 from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 
@@ -27,41 +19,60 @@ from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 @dataclass
 class Container:
     settings: Settings
-    con: sqlite3.Connection
-    broker: object
+    con: Any
+    broker: Any
     bus: AsyncEventBus
-    trades_repo: SqliteTradeRepository
-    positions_repo: SqlitePositionRepository
-    exits_repo: SqliteProtectiveExitsRepository
-    idempotency_repo: IdempotencyRepository
-    audit_repo: SqliteAuditRepository
+    trades_repo: Any
+    positions_repo: Any
+    exits_repo: Any
+    idempotency_repo: Any
+    audit_repo: Any
 
 
-def build_container(settings: Optional[Settings] = None) -> Container:
+def _build_bus(cfg: Settings) -> AsyncEventBus:
     """
-    Собирает DI-контейнер. Ничего не «стартует» (bus/orchestrator поднимаются в server.lifespan).
+    Создаёт AsyncEventBus, совместимый с обеими версиями конструктора:
+    - новый: (max_queue, dlq_limit, workers, backpressure, enqueue_timeout_sec)
+    - старый: (max_queue, concurrency)
     """
-    cfg = settings or Settings.build()
+    max_queue = int(getattr(cfg, "BUS_MAX_QUEUE", 2000))
+    workers = int(getattr(cfg, "BUS_WORKERS", 4))
+    try:
+        return AsyncEventBus(
+            max_queue=max_queue,
+            dlq_limit=int(getattr(cfg, "BUS_DLQ_LIMIT", 500)),
+            workers=workers,
+            backpressure=str(getattr(cfg, "BUS_BACKPRESSURE", "drop_new")),
+            enqueue_timeout_sec=float(getattr(cfg, "BUS_ENQ_TIMEOUT_SEC", 0.5)),
+        )
+    except TypeError:
+        # Совместимость со старой сигнатурой
+        return AsyncEventBus(max_queue=max_queue, concurrency=workers)
 
-    # --- DB connect + PRAGMA + миграции ---
-    con = connect(cfg.DB_PATH)
+
+def build_container() -> Container:
+    """
+    Конструирует DI-контейнер без побочных эффектов запуска.
+    НИЧЕГО не стартуем здесь: ни bus, ни orchestrator.
+    """
+    cfg = Settings()
+
+    # БД
+    con = connect(getattr(cfg, "DB_PATH", "bot.sqlite"))
     apply_connection_pragmas(con)
     apply_all(con)
 
-    # --- Event Bus (без старта тут) ---
-    max_queue = int(getattr(cfg, "BUS_MAX_QUEUE", 2000))
-    workers = int(getattr(cfg, "BUS_WORKERS", 4))
-    # допускаем расширенную сигнатуру, если она у вас в bus уже есть:
-    bus = AsyncEventBus(max_queue=max_queue, concurrency=workers)
-
-    # --- Repos ---
+    # repos
     trades = SqliteTradeRepository(con)
     positions = SqlitePositionRepository(con)
     exits = SqliteProtectiveExitsRepository(con)
     idem = IdempotencyRepository(con)
     audit = SqliteAuditRepository(con)
 
-    # --- Broker (с лимитами/ретраями/CB внутри реализации) ---
+    # bus
+    bus = _build_bus(cfg)
+
+    # broker
     broker = create_broker(cfg, bus=bus)
 
     return Container(
