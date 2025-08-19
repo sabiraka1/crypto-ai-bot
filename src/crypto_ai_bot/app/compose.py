@@ -55,10 +55,22 @@ def build_container() -> Container:
     Конструирует DI-контейнер без побочных эффектов запуска.
     НИЧЕГО не стартуем здесь: ни bus, ни orchestrator.
     """
-    cfg = Settings.build()
+    cfg = Settings.build()  # Используем build() для загрузки из ENV
+
+    # Ensure database directory exists
+    import os
+    db_path = getattr(cfg, "DB_PATH", "bot.sqlite")
+    db_dir = os.path.dirname(db_path)
+    
+    if db_dir and db_dir != '.':
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+            print(f"Database directory ensured: {db_dir}")
+        except Exception as e:
+            print(f"Warning: Could not create directory {db_dir}: {e}")
 
     # БД
-    con = connect(getattr(cfg, "DB_PATH", "bot.sqlite"))
+    con = connect(db_path)
     apply_connection_pragmas(con)
     apply_all(con)
 
@@ -86,26 +98,3 @@ def build_container() -> Container:
         idempotency_repo=idem,
         audit_repo=audit,
     )
-
-def build_container() -> Container:
-    """Build DI container with all dependencies."""
-    cfg = Settings.build()  # ← ИСПРАВЛЕНО
-    
-    # Ensure database directory exists
-    import os
-    db_path = getattr(cfg, "DB_PATH", "bot.sqlite")
-    db_dir = os.path.dirname(db_path)
-    
-    if db_dir and db_dir != '.':
-        try:
-            os.makedirs(db_dir, exist_ok=True)
-            print(f"Database directory ensured: {db_dir}")
-        except Exception as e:
-            print(f"Warning: Could not create directory {db_dir}: {e}")
-    
-    # БД
-    con = connect(db_path)
-    apply_connection_pragmas(con)
-    apply_all(con)
-    
-    # ... остальной код без изменений
