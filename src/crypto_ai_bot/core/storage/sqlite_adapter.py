@@ -27,6 +27,12 @@ def apply_connection_pragmas(conn: sqlite3.Connection) -> sqlite3.Connection:
 
 
 def connect(path: str) -> sqlite3.Connection:
+    # Ensure directory exists
+    import os
+    db_dir = os.path.dirname(path)
+    if db_dir and db_dir != '.':
+        os.makedirs(db_dir, exist_ok=True)
+    
     conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return apply_connection_pragmas(conn)
