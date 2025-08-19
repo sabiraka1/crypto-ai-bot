@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
 
 import binascii
@@ -37,9 +38,15 @@ def _kind_from_exc(e: Exception) -> str:
 _SAFE_TEXT_RE = re.compile(r"[0-9A-Za-z_.-]+")
 
 
-def _gateio_text_from(seed: Optional[str] = None) -> str:
+def _gateio_text_from(prefix: str, seed: Optional[str] = None) -> str:
+    """
+    Gate.io client order id:
+      - params['text'] должен начинаться с 't-'
+      - допустимы [0-9A-Za-z_.-]
+      - общая длина ~30 байт (оставим запас)
+    """
     ts = int(time.time() * 1000)
-    body = f"cai{format(ts % 10**9, 'x')}"
+    body = f"{prefix}{format(ts % 10**9, 'x')}" if prefix else f"cai{format(ts % 10**9, 'x')}"
     if seed:
         h = format(binascii.crc32(seed.encode("utf-8")) & 0xFFFF_FFFF, "x")
         body = f"{body}{h}"
@@ -53,10 +60,10 @@ class CCXTExchange:
     """
     Обёртка над ccxt с CircuitBreaker и per-endpoint rate limiting.
     Важные особенности:
-      - При OPEN состоянии брекера — немедленно отклоняем вызов (fail-fast).
-      - При RateLimit/Network — выполняем несколько ретраев с экспоненциальным бэкоффом + джиттер.
-      - Gate spot market BUY: amount = quote cost, params['createMarketBuyOrderRequiresPrice']=False.
-      - Gate client order id: params['text'] = 't-...'
+      - При OPEN состоянии брекера — fail-fast через cb.allow()
+      - RateLimit/Network: несколько ретраев с экспоненциальным бэкоффом + джиттер
+      - Gate spot market BUY: amount = quote cost, params['createMarketBuyOrderRequiresPrice']=False
+      - Gate client order id: params['text'] = 't-...' (с префиксом из Settings)
     """
 
     def __init__(self, settings: Any, bus: Any = None, exchange_name: str | None = None):
@@ -76,7 +83,6 @@ class CCXTExchange:
         self.exchange_id: str = getattr(self.ccxt, "id", str(name)).lower()
         self.bus = bus
 
-        # Circuit breaker: параметры можно пробросить из Settings при желании
         self.cb = CircuitBreaker(
             name=f"ccxt:{name}",
             fail_threshold=int(getattr(settings, "CB_FAIL_THRESHOLD", 5)),
@@ -85,7 +91,7 @@ class CCXTExchange:
             window_sec=float(getattr(settings, "CB_WINDOW_SEC", 60.0)),
         )
 
-        # Per-endpoint limiter — опционально (ожидаем GateIOLimiter или аналог)
+        # per-endpoint limiter (ожидаем GateIOLimiter или аналог), опционально
         self.limiter = getattr(settings, "limiter", None) or getattr(self.ccxt, "limiter", None)
 
         try:
@@ -94,6 +100,9 @@ class CCXTExchange:
         except Exception as e:
             logger.warning("load_markets failed: %r", e)
             self.cb.record_error(_kind_from_exc(e), e)
+
+        # префикс для client order id
+        self._client_prefix: str = str(getattr(settings, "CLIENT_ORDER_ID_PREFIX", "cai") or "cai")
 
     # ---- helpers ----
 
@@ -112,17 +121,13 @@ class CCXTExchange:
         """
         Универсальная обёртка с брекером и бэкоффом.
         """
-        # fail-fast, если брекер открыт и не настало half-open окно
         if not self.cb.allow():
             raise RateLimitExceeded("circuit_open")
 
-        # экспоненц. бэкофф + джиттер
         max_attempts = int(getattr(self.ccxt, "_max_attempts", 4))
         base = 0.25
         for attempt in range(1, max_attempts + 1):
-            # per-endpoint rate limit
             if not self._rl(bucket):
-                # быстрый короткий сон, чтобы не лупить впустую
                 time.sleep(0.05)
                 continue
             try:
@@ -132,18 +137,14 @@ class CCXTExchange:
             except Exception as e:
                 kind = _kind_from_exc(e)
                 self.cb.record_error(kind, e)
-                # на auth/invalid order — ретраить бессмысленно
                 if kind in ("auth", "order"):
                     raise
-                # на открытый брекер — сразу выходим
                 if self.cb.state() == "open":
                     raise
-                # RateLimit/Network — backoff
                 if attempt >= max_attempts:
                     raise
-                # jitter 20%
                 sleep_s = base * (2 ** (attempt - 1))
-                sleep_s *= (0.8 + 0.4 * random.random())
+                sleep_s *= (0.8 + 0.4 * random.random())  # jitter
                 time.sleep(min(2.5, sleep_s))
 
     # ---- market data / account ----
@@ -167,9 +168,10 @@ class CCXTExchange:
         **kwargs,
     ) -> Dict[str, Any]:
         p = dict(params or {})
+        # префикс берём из Settings; seed — из idempotency_key/client_order_id
         if "text" not in p and self.exchange_id == "gateio":
             seed = kwargs.get("idempotency_key") or kwargs.get("client_order_id")
-            p["text"] = _gateio_text_from(seed)
+            p["text"] = _gateio_text_from(self._client_prefix, seed)
         if self.exchange_id == "gateio" and type == "market" and side.lower() == "buy":
             p.setdefault("createMarketBuyOrderRequiresPrice", False)
         return self._with_retries(self.ccxt.create_order, symbol, type, side, amount, price, p, bucket="orders")
