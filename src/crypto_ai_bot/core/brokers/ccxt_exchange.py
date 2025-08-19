@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import time
-import math
 import hashlib
 from typing import Any, Dict, List, Optional
 
@@ -32,7 +31,7 @@ except Exception:  # pragma: no cover
     class OrderNotFound(Exception): ...
 
 
-# ---------------------- маленький per-endpoint limiter -----------------------
+# ---------------------- per-endpoint limiter ----------------------
 
 class _TokenBucket:
     def __init__(self, capacity: int, refill_per_sec: float) -> None:
@@ -64,7 +63,6 @@ class _EndpointLimiter:
       RL_ORDERS_PER_10S, RL_MARKET_DATA_PER_10S, RL_ACCOUNT_PER_10S
     """
     def __init__(self, *, window_sec: int, orders: int, market_data: int, account: int) -> None:
-        # переводим квоты в refill (tokens/sec)
         def mk(cap: int) -> _TokenBucket:
             refill = cap / float(max(1, window_sec))
             return _TokenBucket(capacity=cap, refill_per_sec=refill)
@@ -80,21 +78,23 @@ class _EndpointLimiter:
         wnd = int(getattr(s, "RL_WINDOW_SEC", 10))
         return cls(
             window_sec=wnd,
-            orders=int(getattr(s, "RL_ORDERS_PER_10S", 100)),       # по умолчанию «мягко»
+            orders=int(getattr(s, "RL_ORDERS_PER_10S", 100)),
             market_data=int(getattr(s, "RL_MARKET_DATA_PER_10S", 600)),
             account=int(getattr(s, "RL_ACCOUNT_PER_10S", 300)),
         )
 
     def acquire_or_raise(self, endpoint: str) -> None:
-        b = self._buckets.get(endpoint)
-        if b is None:
-            # незнакомый endpoint — используем корзину orders
-            b = self._buckets["orders"]
+        b = self._buckets.get(endpoint, self._buckets["orders"])
         if not b.try_acquire(1.0):
             raise RateLimitExceeded(f"local rate limit exceeded for '{endpoint}'")
 
+    # ⇩ добавлено для совместимости с пречеком в use-case (не бросает)
+    def try_acquire(self, endpoint: str) -> bool:
+        b = self._buckets.get(endpoint, self._buckets["orders"])
+        return b.try_acquire(1.0)
 
-# ------------------------------ CCXT обёртка ---------------------------------
+
+# --------------------------- CCXT wrapper ---------------------------
 
 def _kind_from_exc(e: Exception) -> str:
     if isinstance(e, (RateLimitExceeded, DDoSProtection)): return "rate_limit"
@@ -106,11 +106,11 @@ def _kind_from_exc(e: Exception) -> str:
 
 class CCXTExchange:
     """
-    Минимально-дефолтная реализация интерфейса брокера.
+    Минимальная реализация брокера для CCXT.
     Важные моменты:
-      • clientOrderId для Gate.io генерится здесь (параметр `text`), единая точка правды
-      • per-endpoint rate-limiting (orders/market_data/account)
-      • circuit-breaker для сетевых/лимитных ошибок
+      • Единственная генерация clientOrderId для Gate.io (params['text'])
+      • Per-endpoint rate-limiting (orders / market_data / account)
+      • CircuitBreaker с окном и half-open
     """
 
     def __init__(self, settings: Any, bus: Any = None, exchange_name: str | None = None):
@@ -122,13 +122,11 @@ class CCXTExchange:
             raise ValueError(f"Unknown ccxt exchange: {name}")
 
         klass = getattr(ccxt, name)
-        # enableRateLimit оставляем включённым — это «второй рубеж» защиты
         self.ccxt = klass({
             "apiKey": getattr(settings, "API_KEY", None),
             "secret": getattr(settings, "API_SECRET", None),
             "enableRateLimit": True,
             "options": {
-                # для market BUY на Gate.io нам не нужен price
                 "createMarketBuyOrderRequiresPrice": False,
             },
         })
@@ -136,26 +134,41 @@ class CCXTExchange:
         self.settings = settings
         self.bus = bus
 
-        # circuit-breaker параметры
+        # ---- CircuitBreaker (обновлённые параметры) ----
         self.cb = CircuitBreaker(
+            name="ccxt_broker",
             fail_threshold=int(getattr(settings, "CB_FAIL_THRESHOLD", 5)),
-            recovery_time_sec=float(getattr(settings, "CB_RECOVERY_SEC", 10.0)),
-            half_open_max_calls=int(getattr(settings, "CB_HALF_OPEN_MAX", 2)),
+            open_timeout_sec=float(getattr(settings, "CB_OPEN_TIMEOUT_SEC", 30.0)),
+            half_open_max_calls=int(getattr(settings, "CB_HALF_OPEN_CALLS", 1)),
+            window_sec=float(getattr(settings, "CB_WINDOW_SEC", 60.0)),
         )
 
-        # per-endpoint limiter
+        # ---- per-endpoint limiter ----
         self._limiter = _EndpointLimiter.from_settings(settings)
 
-    # -------------------------- utility: client id ---------------------------
+    # пробрасываем наружу для мягкого пречека в use-case
+    @property
+    def limiter(self) -> _EndpointLimiter:
+        return self._limiter
+
+    # ------------------------------ utils ------------------------------
+
+    def _ensure_cb(self) -> None:
+        # если брейкер открыт — не бьём в сеть (сразу «429»-подобная ошибка)
+        try:
+            allow = getattr(self.cb, "allow", None)
+            if callable(allow) and not allow():
+                raise RateLimitExceeded("circuit_open")
+        except Exception:
+            # если у cb нет allow — считаем, что разрешено
+            pass
 
     def _gateio_text_from(self, *, symbol: str, side: str, idem_hint: Optional[str]) -> str:
         """
-        Формирует допустимый для Gate.io `text` (clientOrderId):
+        Gate.io clientOrderId via params['text']:
           - начинается с 't-'
           - длина <= 28
-          - [A-Za-z0-9._-] (мы используем base36-хэш)
-        Если есть idem_hint (например, idempotency_key из use-case), делаем стабильную строку.
-        Иначе — уникальная строка с time-bucket, чтобы ретраи в том же окне были одинаковыми.
+          - алфавит [A-Za-z0-9._-] — используем base36(crc32)
         """
         base = f"{symbol}:{side}:{idem_hint}" if idem_hint else f"{symbol}:{side}:{int(time.time()//2)}"
         h = int(hashlib.crc32(base.encode("utf-8")) & 0xFFFFFFFF)
@@ -176,9 +189,10 @@ class CCXTExchange:
             s.append(chars[r])
         return "".join(reversed(s))
 
-    # ------------------------------ API методы ------------------------------
+    # ------------------------------ API ------------------------------
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        self._ensure_cb()
         self._limiter.acquire_or_raise("market_data")
         try:
             res = self.ccxt.fetch_ticker(symbol)
@@ -189,6 +203,7 @@ class CCXTExchange:
             raise
 
     def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._ensure_cb()
         self._limiter.acquire_or_raise("account")
         try:
             res = self.ccxt.fetch_balance(params or {})
@@ -199,6 +214,7 @@ class CCXTExchange:
             raise
 
     def fetch_order(self, order_id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._ensure_cb()
         self._limiter.acquire_or_raise("orders")
         try:
             res = self.ccxt.fetch_order(order_id, symbol, params or {})
@@ -210,6 +226,7 @@ class CCXTExchange:
 
     def fetch_open_orders(self, symbol: Optional[str] = None, since: Optional[int] = None,
                           limit: Optional[int] = None, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        self._ensure_cb()
         self._limiter.acquire_or_raise("orders")
         try:
             res = self.ccxt.fetch_open_orders(symbol, since, limit, params or {})
@@ -220,6 +237,7 @@ class CCXTExchange:
             raise
 
     def cancel_order(self, order_id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._ensure_cb()
         self._limiter.acquire_or_raise("orders")
         try:
             res = self.ccxt.cancel_order(order_id, symbol, params or {})
@@ -240,17 +258,17 @@ class CCXTExchange:
     ) -> Dict[str, Any]:
         """
         Единая точка генерации clientOrderId для Gate.io:
-        - Если в params есть 'text' — уважаем его (вдруг хотим форсировать).
-        - Если есть 'idempotency_key' или 'client_id' — используем как hint для стабильности.
+        - Если в params уже есть 'text' — уважаем.
+        - Если есть 'idempotency_key'/'client_id' — используем как hint (стабильный CID).
         - Иначе генерим на основе (symbol, side, time-bucket).
         """
+        self._ensure_cb()
         self._limiter.acquire_or_raise("orders")
-        p = dict(params or {})
 
-        if self.exchange_id == "gateio":
-            if "text" not in p:
-                idem_hint = p.get("idempotency_key") or p.get("client_id")
-                p["text"] = self._gateio_text_from(symbol=symbol, side=side, idem_hint=idem_hint)
+        p = dict(params or {})
+        if self.exchange_id == "gateio" and "text" not in p:
+            idem_hint = p.get("idempotency_key") or p.get("client_id")
+            p["text"] = self._gateio_text_from(symbol=symbol, side=side, idem_hint=idem_hint)
 
         try:
             od = self.ccxt.create_order(symbol=symbol, type=type, side=side, amount=amount, price=price, params=p)

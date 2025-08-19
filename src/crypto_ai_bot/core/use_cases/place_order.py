@@ -2,21 +2,24 @@
 """
 Сценарий размещения торговых ордеров (spot, long-only, Gate.io friendly).
 
+Изменения:
+- Генерация clientOrderId (Gate.io params["text"]) УДАЛЕНА из use-case.
+- Теперь мы передаем ТОЛЬКО params["idempotency_key"] в брокер;
+  уникальный clientOrderId формируется внутри ccxt_exchange.py.
+
 — End-to-end идемпотентность:
     • приложенческая (idempotency_repo)
-    • биржевая (Gate.io client order id через params["text"], см. правила)
+    • биржевая (Gate.io client order id через брокер)
 — MARKET BUY на Gate.io принимает КОТИРОВАЛЬНУЮ сумму (quote-cost), поэтому:
     • передаём params["createMarketBuyOrderRequiresPrice"] = False
-    • amount = quote_cost (USDT) с учётом комиссии/слиппеджа
+    • amount = quote_cost (USDT) с учётом комиссии
 — MARKET SELL принимает базовый объём: продаём фактический открытый qty, если доступен
 — Спред-гард и квантование объёмов по precision/минимумам
 — Метрики: trade_attempts_total / trade_fills_total / trade_slippage_bps (гистограмма)
 """
 from __future__ import annotations
 
-import binascii
 import logging
-import re
 import time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Dict, Optional, TypedDict, NotRequired
@@ -37,9 +40,6 @@ class Order(TypedDict, total=False):
     price: float
     status: str      # "executed" | "rejected" | "failed"
     reason: NotRequired[str]
-
-
-SAFE_TEXT_RE = re.compile(r"[0-9A-Za-z_.-]+")
 
 
 def _now_ms() -> int:
@@ -132,25 +132,6 @@ def _sell_base_qty_from_positions(positions_repo: Any, symbol: str) -> float:
     return 0.0
 
 
-# ---------- Gate.io client order id (params["text"]) ----------
-
-def _gateio_text_from(idem_key: Optional[str]) -> str:
-    """
-    Gate: params['text'] должен начинаться с 't-' и содержать <= 28 байт полезной части.
-    Разрешены: 0-9, A-Z, a-z, underscore(_), hyphen(-), dot(.)
-    """
-    ts = int(time.time() * 1000)
-    body = f"cai{format(ts % 10**9, 'x')}"
-    if idem_key:
-        h = format(binascii.crc32(idem_key.encode("utf-8")) & 0xFFFF_FFFF, "x")
-        body = f"{body}{h}"
-    body = body[:28]
-    if not SAFE_TEXT_RE.fullmatch(body):
-        body = re.sub(r"[^0-9A-Za-z_.-]", ".", body)
-        body = body[:28]
-    return f"t-{body}"
-
-
 # ---------- main ----------
 
 def place_order(
@@ -221,14 +202,22 @@ def place_order(
 
     executed_price = 0.0
     executed_qty = 0.0
+    od: Dict[str, Any] = {}
 
     try:
-        params: Dict[str, Any] = {"text": _gateio_text_from(idem_key)}  # Gate.io client order id
-        # Per-endpoint rate limit: общий "orders" ведём здесь; в брокере можно делать более тонко
-        limiter = getattr(cfg, "limiter", None) or getattr(broker, "limiter", None)
+        # ⬇️ ТОЛЬКО передаём идемпотентный ключ; clientOrderId сгенерит брокер
+        params: Dict[str, Any] = {"idempotency_key": idem_key}
+
+        # Per-endpoint rate limit (опционально): если у брокера есть локальный лимитер — уважаем
+        limiter = getattr(broker, "limiter", None) or getattr(broker, "_limiter", None)
         if limiter is not None and hasattr(limiter, "try_acquire"):
-            if not limiter.try_acquire("orders"):
-                return {"accepted": False, "error": "rate_limited", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
+            try:
+                ok = limiter.try_acquire("orders")  # type: ignore[attr-defined]
+                if not ok:
+                    return {"accepted": False, "error": "rate_limited", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
+            except Exception:
+                # не критично — продолжаем (на брокере всё равно есть защита)
+                pass
 
         if side == "buy":
             # Gate spot market buy: amount = QUOTE (USDT) with createMarketBuyOrderRequiresPrice=False
@@ -253,6 +242,11 @@ def place_order(
     except Exception as e:
         inc("orders_fail_total")
         logger.exception("broker.create_order failed: %s", e)
+        if idempotency_repo is not None and idem_key:
+            try:
+                idempotency_repo.rollback(idem_key)
+            except Exception:
+                pass
         if bus is not None and hasattr(bus, "publish"):
             import asyncio
             asyncio.create_task(bus.publish({
@@ -267,7 +261,7 @@ def place_order(
             }))
         return {"accepted": False, "error": "broker_error", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
 
-    # запись сделки (best-effort), сохраняем client_order_id в info
+    # запись сделки (best-effort), сохраняем ожидания/идемпотентность
     try:
         payload = {
             "ts": ts,
@@ -277,7 +271,6 @@ def place_order(
             "qty": executed_qty,
             "info": {
                 "idempotency_key": idem_key,
-                "client_order_id": params.get("text"),
                 "expected_price": eff_price,  # ⇦ для аудита ожиданий
                 "exchange_order": od,
             },
