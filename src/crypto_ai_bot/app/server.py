@@ -259,7 +259,7 @@ def create_app() -> FastAPI:
                     lines.append(f"cb_{k} {v if v is not None else 0}")
         return PlainTextResponse("\n".join(lines) + "\n")
 
-    @application.post("/telegram/webhook", tags=["adapters"])
+    @application.post("/telegram", tags=["adapters"])  # Убрали /webhook
     async def telegram_webhook(request: Request):
         body = await request.body()
         c = application.state.container
