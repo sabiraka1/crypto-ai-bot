@@ -32,16 +32,25 @@ async def lifespan(app: FastAPI):
     # build DI
     container = build_container()
     app.state.container = container
-
+    
     # EventBus
     if hasattr(container, "bus") and hasattr(container.bus, "start"):
         await container.bus.start()
-
-    # Orchestrator
-    orch = Orchestrator(settings=container.settings, broker=container.broker, repos=container.repos, bus=container.bus)
+    
+    # Orchestrator - ИСПРАВЛЕНО
+    orch = Orchestrator(
+        settings=container.settings,
+        broker=container.broker,
+        trades_repo=container.trades_repo,
+        positions_repo=container.positions_repo,
+        exits_repo=container.exits_repo,
+        idempotency_repo=container.idempotency_repo,
+        bus=container.bus,
+        risk_manager=None
+    )
     app.state.orchestrator = orch
     await orch.start()
-
+    
     try:
         yield
     finally:
@@ -57,7 +66,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
         # закрываем репозитории/соединения
-        for name in ("trades_repo", "positions_repo", "exits_repo", "idempotency_repo", "storage", "db"):
+        for name in ("trades_repo", "positions_repo", "exits_repo", "idempotency_repo", "storage", "db", "con"):
             try:
                 obj = getattr(container, name, None)
                 if obj and hasattr(obj, "close"):
