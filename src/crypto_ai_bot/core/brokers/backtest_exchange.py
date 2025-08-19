@@ -1,176 +1,93 @@
 # src/crypto_ai_bot/core/brokers/backtest_exchange.py
 from __future__ import annotations
-
-import csv
-import os
-import time
 from typing import Any, Dict, List, Optional
-
-
-class _ClockShim:
-    """Простой shim, чтобы time_sync и прочие места могли вызвать broker.ccxt.fetch_time()."""
-
-    @staticmethod
-    def fetch_time() -> int:
-        return int(time.time() * 1000)
-
-    @staticmethod
-    def milliseconds() -> int:
-        return int(time.time() * 1000)
-
+import csv
 
 class BacktestExchange:
     """
-    Лёгкий «бумажный» брокер для режима backtest.
-
-    Совместимость с фабрикой: __init__(settings, bus=None, exchange_name: str|None=None)
-
-    Источники цены (по приоритету):
-      1) CSV (settings.BACKTEST_CSV_PATH) с колонками: time,open,high,low,close,volume
-      2) Массив цен settings.BACKTEST_PRICES: List[float]
-      3) Константа settings.BACKTEST_LAST_PRICE (по умолчанию 100.0)
-
-    Поведение:
-      - fetch_ticker(symbol) -> {"last": px, "close": px, "timestamp": ...}
-      - create_order(...)    -> мгновенно "filled" по текущей цене; сдвигает курсор цены вперёд
-      - остальные методы возвращают минимально достаточные структуры
-
-    Примечания:
-      - Имеет атрибуты `markets` (пустой словарь) и `ccxt` (ClockShim),
-        чтобы не падали вызовы precision/limits и time_sync.
+    Простая backtest-реализация под ExchangeInterface.
+    Источник цены:
+      - settings.BACKTEST_PRICES: list[float] (опционально)
+      - или settings.BACKTEST_CSV_PATH: CSV с колонкой 'close' (или первой числовой)
+      - fallback: settings.BACKTEST_LAST_PRICE (float)
+    Ордеры исполняются по текущей last (market).
     """
 
-    def __init__(self, settings: Any, bus: Any = None, exchange_name: str | None = None):
+    def __init__(self, settings: Any, bus: Any = None, exchange_name: str | None = None) -> None:
         self.settings = settings
         self.bus = bus
         self.exchange_name = exchange_name or "backtest"
+        self._i = 0
+        self._prices: List[float] = []
 
-        # shim'ы для совместимости
-        self.ccxt = _ClockShim()
-        self.markets: Dict[str, Dict[str, Any]] = {}  # precision/limits недоступны — пусть будет пусто
-
-        # загрузка цен
-        self._prices: List[float] = self._load_prices(settings)
-        self._idx: int = 0
-        self._orders: Dict[str, Dict[str, Any]] = {}
-
-    # ------------- загрузка данных -------------
-    def _load_prices(self, settings: Any) -> List[float]:
-        # 1) CSV
-        p = getattr(settings, "BACKTEST_CSV_PATH", None)
-        if isinstance(p, str) and p and os.path.exists(p):
-            out: List[float] = []
-            try:
-                with open(p, "r", newline="", encoding="utf-8") as f:
-                    r = csv.DictReader(f)
-                    for row in r:
-                        c = row.get("close")
-                        if c is None:
-                            continue
-                        try:
-                            out.append(float(c))
-                        except Exception:
-                            pass
-                if out:
-                    return out
-            except Exception:
-                pass
-
-        # 2) Явный список цен
-        arr = getattr(settings, "BACKTEST_PRICES", None)
-        if isinstance(arr, list) and arr:
-            try:
-                return [float(x) for x in arr]
-            except Exception:
-                pass
-
-        # 3) Константа
-        return [float(getattr(settings, "BACKTEST_LAST_PRICE", 100.0))]
-
-    # ------------- market data -------------
-    def _cur_px(self) -> float:
+        prices = getattr(settings, "BACKTEST_PRICES", None)
+        if isinstance(prices, list) and prices:
+            self._prices = [float(x) for x in prices if x is not None]
+        elif getattr(settings, "BACKTEST_CSV_PATH", None):
+            self._prices = self._load_csv(getattr(settings, "BACKTEST_CSV_PATH"))
         if not self._prices:
-            return 100.0
-        i = min(max(0, self._idx), len(self._prices) - 1)
-        return float(self._prices[i])
+            self._prices = [float(getattr(settings, "BACKTEST_LAST_PRICE", 100.0))]
 
-    def _advance(self) -> None:
-        if self._idx < len(self._prices) - 1:
-            self._idx += 1
+    def _load_csv(self, path: str) -> List[float]:
+        out: List[float] = []
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            r = csv.DictReader(f)
+            if "close" in r.fieldnames:
+                for row in r:
+                    try:
+                        out.append(float(row["close"]))
+                    except Exception:
+                        pass
+            else:
+                f.seek(0)
+                rr = csv.reader(f)
+                for row in rr:
+                    try:
+                        out.append(float(row[0]))
+                    except Exception:
+                        pass
+        return out or [float(getattr(self.settings, "BACKTEST_LAST_PRICE", 100.0))]
+
+    # --- market data ---
+    def _cur(self) -> float:
+        if self._i >= len(self._prices):
+            self._i = len(self._prices) - 1
+        if self._i < 0:
+            self._i = 0
+        return float(self._prices[self._i])
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        px = self._cur_px()
-        return {
-            "symbol": symbol,
-            "last": px,
-            "close": px,
-            "timestamp": int(time.time() * 1000),
-            "info": {"src": "backtest"},
-        }
+        return {"symbol": symbol, "last": self._cur(), "close": self._cur()}
 
     def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        # минимальный заглушечный баланс; многим участкам достаточно наличия метода
-        return {"info": {"mode": "backtest"}}
+        # для smoke тестов: фиктивный баланс
+        return {"free": {"USDT": 1_000_000.0}, "total": {"USDT": 1_000_000.0}}
 
-    # ------------- orders -------------
+    # --- orders ---
     def create_order(
-        self,
-        symbol: str,
-        type: str,
-        side: str,
-        amount: float,
-        price: Optional[float] = None,
-        params: Optional[Dict[str, Any]] = None,
-        **kwargs,
+        self, symbol: str, type: str, side: str, amount: float,
+        price: Optional[float] = None, params: Optional[Dict[str, Any]] = None, **kwargs
     ) -> Dict[str, Any]:
-        """
-        Совместимо с вызовом из use_case:
-          create_order(symbol=..., type='market', side='buy'|'sell', amount=..., price=None, params={})
-        """
-        ts = int(time.time() * 1000)
-        px = self._cur_px()
-        order_id = f"bt-{ts}-{len(self._orders) + 1}"
-        od = {
-            "id": order_id,
-            "timestamp": ts,
-            "status": "filled",
+        last = self._cur()
+        px = last if type == "market" or price is None else float(price)
+        return {
+            "id": f"bt-{self._i}",
             "symbol": symbol,
             "side": side,
             "type": type,
             "price": float(px),
             "amount": float(amount),
+            "status": "closed",
         }
-        self._orders[order_id] = od
-        # имитируем движение по ряду
-        self._advance()
-        return od
 
-    def cancel_order(
-        self,
-        id: str,
-        symbol: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        od = self._orders.get(id)
-        if not od:
-            return {"id": id, "status": "canceled", "symbol": symbol}
-        od["status"] = "canceled"
-        return od
+    def cancel_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return {"id": id, "canceled": True}
 
-    def fetch_order(
-        self,
-        id: str,
-        symbol: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        return self._orders.get(id, {"id": id, "status": "closed", "symbol": symbol})
+    def fetch_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return {"id": id, "status": "closed"}
 
     def fetch_open_orders(
-        self,
-        symbol: Optional[str] = None,
-        since: Optional[int] = None,
-        limit: Optional[int] = None,
-        params: Optional[Dict[str, Any]] = None,
+        self, symbol: Optional[str] = None, since: Optional[int] = None,
+        limit: Optional[int] = None, params: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        # исполняем мгновенно — «открытых» нет
         return []

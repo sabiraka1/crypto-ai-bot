@@ -14,23 +14,51 @@ _TERMINAL = {"filled", "canceled", "rejected"}
 class SqliteTradeRepository:
     def __init__(self, con: sqlite3.Connection):
         self.con = con
-        # Базовая схема — создаётся мигратором. Здесь — страховка для первого старта.
-        self.con.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            side TEXT NOT NULL,
-            price REAL NOT NULL,
-            qty REAL NOT NULL,
-            pnl REAL DEFAULT 0.0
-        );
-        """)
-        # Идентичные поля добавляются мигратором
-        try:
-            self.con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);")
-        except Exception:
-            pass
+        self.con.execute("PRAGMA foreign_keys = ON;")
+        self._ensure_schema()
+
+    # ---------- Страхующая инициализация схемы (на случай первого старта без миграторов) ----------
+
+    def _ensure_schema(self) -> None:
+        # Базовая таблица (включая все поля, которые используются кодом)
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price REAL NOT NULL,
+                qty REAL NOT NULL,
+                pnl REAL DEFAULT 0.0,
+                order_id TEXT UNIQUE,
+                state TEXT DEFAULT 'pending',
+                exp_qty REAL DEFAULT 0.0,
+                fee_amt REAL DEFAULT 0.0,
+                fee_ccy TEXT DEFAULT 'USDT',
+                last_exchange_status TEXT,
+                last_update_ts INTEGER DEFAULT (strftime('%s','now'))
+            );
+            """
+        )
+        # Досоздание недостающих столбцов, если база старая
+        cur = self.con.execute("PRAGMA table_info('trades');")
+        existing_cols = {row[1] for row in cur.fetchall()}
+
+        def add_col(name: str, ddl: str) -> None:
+            if name not in existing_cols:
+                self.con.execute(f"ALTER TABLE trades ADD COLUMN {ddl};")
+
+        add_col("order_id", "order_id TEXT UNIQUE")
+        add_col("state", "state TEXT DEFAULT 'pending'")
+        add_col("exp_qty", "exp_qty REAL DEFAULT 0.0")
+        add_col("fee_amt", "fee_amt REAL DEFAULT 0.0")
+        add_col("fee_ccy", "fee_ccy TEXT DEFAULT 'USDT'")
+        add_col("last_exchange_status", "last_exchange_status TEXT")
+        add_col("last_update_ts", "last_update_ts INTEGER DEFAULT (strftime('%s','now'))")
+
+        # Индекс по order_id
+        self.con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);")
 
     # ---------- Совместимость со старым кодом ----------
 
@@ -97,7 +125,7 @@ class SqliteTradeRepository:
         (n,) = cur.fetchone() or (0,)
         return int(n)
 
-    # ---------- FSM-транзишены (новое) ----------
+    # ---------- FSM-транзишены ----------
 
     def record_exchange_update(
         self,

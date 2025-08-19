@@ -37,6 +37,9 @@ htmlcov/
 *.iml
 .DS_Store
 Thumbs.db
+*~
+*.swp
+*.swo
 
 # --- Notebooks / caches ---
 .ipynb_checkpoints/
@@ -44,24 +47,50 @@ Thumbs.db
 # --- Project: runtime data / secrets / logs ---
 .env
 .env.*
-*.db
-*.sqlite
-*.sqlite3
+*.log
+*.log.*
 logs/
 tmp/
 tmp/**
 
-# --- Project: backtest datasets / artifacts ---
-backtest/data/
-backtest/**/*.csv
-*.csv
+# --- Project: databases ---
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+backups/
+snapshots/
 
-# --- Project: app artifacts ---
-# Если генерируете SVG/PNG отчёты — храните вне репо или добавьте исключения
+# --- Project: trading artifacts ---
+# Исключаем сгенерированные данные, но оставляем примеры
+backtest/data/
+backtest/runs/
+metrics/data/
+reports/generated/
+
+# --- Project: charts and exports ---
+# Исключаем автогенерированные, но оставляем статичные
+charts/generated/
+exports/
 *.svg
 *.png
+# Исключения для важных статичных файлов:
+!docs/**/*.png
+!docs/**/*.svg
+!examples/**/*.csv
 
-# --- Misc ---
-# Если используете Railway/Nixpacks локально:
+# --- Security ---
+*.pem
+*.key
+*.crt
+*.p12
+
+# --- Deployment ---
 .nixpacks/
 .nix/
+.dockerignore
+
+# --- Performance ---
+*.prof
+*.pstats

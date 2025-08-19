@@ -1,0 +1,11 @@
+# Пример интеграции с Prometheus + Alertmanager
+version: '3.8'
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    volumes:
+      - ./alerts.yml:/etc/prometheus/alerts.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.rule-file=/etc/prometheus/alerts.yml'

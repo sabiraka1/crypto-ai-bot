@@ -3,7 +3,7 @@
 - Domain не импортирует Infrastructure.
 - Запрещён прямой доступ к ос.переменным вне core/settings.py.
 - Запрещён прямой requests вне utils/http_client.py.
-- Поиск циклических залежимостей между внутренними модулями.
+- Поиск циклических зависимостей между внутренними модулями.
 
 Запуск:  python -m scripts.arch_check
 Код выхода 0/1.
@@ -11,20 +11,22 @@
 from __future__ import annotations
 import os, sys, ast
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 ROOT = Path(__file__).resolve().parents[1]           # repo/
 SRC  = ROOT / "src" / "crypto_ai_bot"                # src/crypto_ai_bot
 PKG  = "crypto_ai_bot"
 
 # ---- классификация слоёв ----
+# ВАЖНО: core/types удалён — здесь его больше нет.
 DOMAIN_DIRS = [
     SRC / "core" / "risk",
     SRC / "core" / "signals",
-    SRC / "core" / "positions",
     SRC / "core" / "indicators",
-    SRC / "core" / "types",
+    SRC / "core" / "use_cases",
+    # SRC / "core" / "positions",  # если есть — не мешает; если нет — игнорируется
 ]
+
 INFRA_PREFIXES = [
     f"{PKG}.app",
     f"{PKG}.utils",
@@ -45,8 +47,7 @@ def _py_files(root: Path) -> List[Path]:
 def _module_name(path: Path) -> str:
     rel = path.relative_to(SRC.parent)  # src/...
     parts = list(rel.with_suffix("").parts)
-    # drop 'src'
-    if parts[0] == "src":
+    if parts and parts[0] == "src":
         parts = parts[1:]
     return ".".join(parts)
 
@@ -108,7 +109,6 @@ def _find_cycles(graph: Dict[str, Set[str]]) -> List[List[str]]:
             if state == 0:
                 dfs(v)
             elif state == 1:
-                # цикл: срез до v
                 try:
                     i = stack.index(v)
                     cycles.append(stack[i:] + [v])
