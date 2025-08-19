@@ -1,1 +1,1 @@
-web: gunicorn -k uvicorn.workers.UvicornWorker crypto_ai_bot.app.server:app --bind 0.0.0.0:${PORT} --workers 1 --timeout 75 --access-logfile -
+web: cd src && python -m uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port ${PORT:-8080}
