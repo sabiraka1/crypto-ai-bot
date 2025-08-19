@@ -1,97 +1,40 @@
-# --- Python / packaging ---
+# ---- Python artifacts ----
 __pycache__/
 *.py[cod]
-*.pyc
 *.pyo
 *.pyd
-*.so
-*.egg
-*.egg-info/
-.eggs/
-build/
-dist/
-pip-wheel-metadata/
-.Python
-.python-version
 
-# --- Virtualenvs ---
+# Byte-compiled / compiled / C extensions
+*.so
+*.dll
+*.dylib
+
+# ---- Envs / local configs ----
 .venv/
 venv/
-env/
-ENV/
+.env
+.env.*
+*.env
 
-# --- Tools / linters / tests ---
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.mypy_cache/
-.ruff_cache/
-.pyre/
-.hypothesis/
-
-# --- Editors / OS ---
+# ---- Editors / IDE ----
 .vscode/
 .idea/
-*.iml
-.DS_Store
-Thumbs.db
-*~
 *.swp
 *.swo
 
-# --- Notebooks / caches ---
-.ipynb_checkpoints/
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
 
-# --- Project: runtime data / secrets / logs ---
-.env
-.env.*
-*.log
-*.log.*
-logs/
-tmp/
-tmp/**
-
-# --- Project: databases ---
-*.db
+# ---- Project data / local db ----
+data/
 *.sqlite
+*.db
+*.db-journal
 *.sqlite3
-*.sqlite-wal
-*.sqlite-shm
-backups/
-snapshots/
 
-# --- Project: trading artifacts ---
-# Исключаем сгенерированные данные, но оставляем примеры
-backtest/data/
-backtest/runs/
-metrics/data/
-reports/generated/
-
-# --- Project: charts and exports ---
-# Исключаем автогенерированные, но оставляем статичные
-charts/generated/
-exports/
-*.svg
-*.png
-# Исключения для важных статичных файлов:
-!docs/**/*.png
-!docs/**/*.svg
-!examples/**/*.csv
-
-# --- Security ---
-*.pem
-*.key
-*.crt
-*.p12
-
-# --- Deployment ---
-.nixpacks/
-.nix/
-.dockerignore
-
-# --- Performance ---
-*.prof
-*.pstats
+# ---- Cache ----
+.cache/
+.mypy_cache/
+.pytest_cache/
+ruff_cache/

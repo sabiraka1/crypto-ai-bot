@@ -3,112 +3,131 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Optional, Tuple
-
-DEFAULT_BUSY_TIMEOUT_MS = 5000       # ожидание при блокировке БД
-DEFAULT_RETRY_ATTEMPTS = 3           # кол-во повторов на write-операциях
-DEFAULT_RETRY_BACKOFF_MS = 50        # пауза между повторами (мс)
+from typing import Any, Iterable, Optional, Sequence, Tuple, Dict
 
 
-def connect(path: str) -> sqlite3.Connection:
+# -------------------------
+# PRAGMAS / CONNECT
+# -------------------------
+
+def apply_connection_pragmas(conn: sqlite3.Connection) -> sqlite3.Connection:
     """
-    Надёжное подключение к SQLite:
-      - autocommit (isolation_level=None)
-      - check_same_thread=False (позволяем использование коннекта в нескольких потоках)
-      - PRAGMA journal_mode=WAL, synchronous=NORMAL, busy_timeout
-      - foreign_keys=ON
+    Безопасные/полезные PRAGMA для прод-процесса бота.
     """
-    con = sqlite3.connect(
-        path,
-        isolation_level=None,  # autocommit
-        check_same_thread=False,
-        timeout=DEFAULT_BUSY_TIMEOUT_MS / 1000.0,
-        detect_types=sqlite3.PARSE_DECLTYPES,
-    )
-
-    # Базовые настройки надёжности/производительности
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
-    con.execute("PRAGMA foreign_keys=ON")
-    con.execute("PRAGMA temp_store=MEMORY")
-
-    return con
-
-
-def _retry_write(fn: Callable[[], Any],
-                 attempts: int = DEFAULT_RETRY_ATTEMPTS,
-                 backoff_ms: int = DEFAULT_RETRY_BACKOFF_MS) -> Any:
-    """
-    Примитивный retry для write-операций по ошибкам блокировки.
-    """
-    last_err: Optional[Exception] = None
-    for _ in range(max(1, attempts)):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            msg = str(e).lower()
-            if "database is locked" in msg or "busy" in msg:
-                last_err = e
-                time.sleep(backoff_ms / 1000.0)
-                continue
-            raise
-    if last_err:
-        raise last_err
-
-
-def execute(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> sqlite3.Cursor:
-    """
-    Обёртка для write (INSERT/UPDATE/DELETE) с retry.
-    Используйте для всех модифицирующих запросов.
-    """
-    def _do():
-        return con.execute(sql, params)
-    return _retry_write(_do)
-
-
-def executemany(con: sqlite3.Connection, sql: str, seq_of_params: Iterable[Tuple]) -> sqlite3.Cursor:
-    """
-    Обёртка для пакетных write-запросов с retry.
-    """
-    def _do():
-        return con.executemany(sql, seq_of_params)
-    return _retry_write(_do)
-
-
-def apply_connection_pragmas(conn):
     cur = conn.cursor()
-    # Безопасные/полезные дефолты для прод-бота
-    cur.execute("PRAGMA journal_mode=WAL;")
-    cur.execute("PRAGMA synchronous=NORMAL;")
-    cur.execute("PRAGMA foreign_keys=ON;")
-    cur.execute("PRAGMA temp_store=MEMORY;")
-    cur.execute("PRAGMA busy_timeout=5000;")  # 5s
-    cur.close()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA synchronous=NORMAL;")
+        cur.execute("PRAGMA foreign_keys=ON;")
+        cur.execute("PRAGMA temp_store=MEMORY;")
+        cur.execute("PRAGMA busy_timeout=5000;")  # 5s
+    finally:
+        cur.close()
     return conn
 
 
-def snapshot_metrics(conn) -> dict:
+def connect(db_path: str, *, detect_types: int = sqlite3.PARSE_DECLTYPES) -> sqlite3.Connection:
+    """
+    Единая точка подключения (автокоммит) + row_factory = dict.
+    """
+    conn = sqlite3.connect(
+        db_path,
+        timeout=5.0,
+        isolation_level=None,  # autocommit
+        detect_types=detect_types,
+        check_same_thread=False,
+    )
+    conn.row_factory = _dict_factory
+    return apply_connection_pragmas(conn)
+
+
+def _dict_factory(cursor: sqlite3.Cursor, row: Sequence[Any]) -> Dict[str, Any]:
+    d = {}
+    for idx, col in enumerate(cursor.description or []):
+        d[col[0]] = row[idx]
+    return d
+
+
+# -------------------------
+# RETRY / EXEC HELPERS
+# -------------------------
+
+def _retry_write(fn, *args, attempts: int = 5, base_sleep: float = 0.02, **kwargs):
+    """
+    Универсальный ретрай для write-операций (busy/locked).
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            last = e
+            if "locked" in msg or "busy" in msg:
+                time.sleep(min(0.25, base_sleep * (2 ** i)))
+                continue
+            raise
+    if last:
+        raise last
+
+
+def execute(conn: sqlite3.Connection, sql: str, params: Optional[Sequence[Any]] = None) -> sqlite3.Cursor:
+    """
+    Единый execute с ретраем для write.
+    """
     cur = conn.cursor()
-    # базовые индикаторы файла БД
-    cur.execute("PRAGMA page_count;")
-    page_count = cur.fetchone()[0]
-    cur.execute("PRAGMA page_size;")
-    page_size = cur.fetchone()[0]
-    cur.execute("PRAGMA freelist_count;")
-    freelist_count = cur.fetchone()[0]
-    # попытка мягкого чекпоинта WAL (не обязателен)
+    if _is_write_sql(sql):
+        return _retry_write(cur.execute, sql, params or [])
+    return cur.execute(sql, params or [])
+
+
+def executemany(conn: sqlite3.Connection, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> sqlite3.Cursor:
+    """
+    Единый executemany с ретраем для write.
+    """
+    cur = conn.cursor()
+    if _is_write_sql(sql):
+        return _retry_write(cur.executemany, sql, seq_of_params)
+    return cur.executemany(sql, seq_of_params)
+
+
+def _is_write_sql(sql: str) -> bool:
+    head = (sql or "").lstrip().split(None, 1)
+    if not head:
+        return False
+    op = head[0].upper()
+    return op in ("INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER", "VACUUM")
+
+
+# -------------------------
+# METRICS SNAPSHOT
+# -------------------------
+
+def snapshot_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """
+    Лёгкий снэпшот внутренних метрик SQLite.
+    """
+    cur = conn.cursor()
     try:
-        cur.execute("PRAGMA wal_checkpoint(PASSIVE);")
-        wal = cur.fetchall()
-    except Exception:
-        wal = []
-    cur.close()
+        cur.execute("PRAGMA page_count;")
+        page_count = int(cur.fetchone()[0])
+        cur.execute("PRAGMA page_size;")
+        page_size = int(cur.fetchone()[0])
+        cur.execute("PRAGMA freelist_count;")
+        freelist_count = int(cur.fetchone()[0])
+        # попытка soft checkpoint WAL
+        wal = None
+        try:
+            cur.execute("PRAGMA wal_checkpoint(PASSIVE);")
+            wal = cur.fetchall()
+        except Exception:
+            wal = None
+    finally:
+        cur.close()
     return {
-        "page_count": int(page_count),
-        "page_size": int(page_size),
-        "freelist_count": int(freelist_count),
-        "db_size_bytes": int(page_count) * int(page_size),
+        "page_count": page_count,
+        "page_size": page_size,
+        "freelist_count": freelist_count,
+        "db_size_bytes": page_count * page_size,
         "wal": wal,
     }
-

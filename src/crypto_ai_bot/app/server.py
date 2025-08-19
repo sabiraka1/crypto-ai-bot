@@ -1,7 +1,6 @@
-# app/server.py (замена целиком)
+# src/crypto_ai_bot/app/server.py
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import time
@@ -18,9 +17,25 @@ from crypto_ai_bot.core.brokers.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
+# --- optional middlewares (request_id + rate limit) ---
+try:
+    from crypto_ai_bot.app.middleware import RequestIdMiddleware, RateLimitMiddleware  # type: ignore
+except Exception:
+    RequestIdMiddleware = None
+    RateLimitMiddleware = None
+
 
 class RedactFilter(logging.Filter):
-    KEYS = ("API_KEY", "API_SECRET", "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_SECRET", "GATEIO_KEY", "GATEIO_SECRET", "DB_URL")
+    KEYS = (
+        "API_KEY",
+        "API_SECRET",
+        "TELEGRAM_TOKEN",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_BOT_SECRET",
+        "GATEIO_KEY",
+        "GATEIO_SECRET",
+        "DB_URL",
+    )
     RE = re.compile(r"(?i)\b(" + "|".join(re.escape(k) for k in KEYS) + r")\b\s*[:=]\s*([^\s,;]+)")
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -47,17 +62,15 @@ def _param_bool(v: Optional[str]) -> bool:
 
 async def _check_ohlcv_gaps(broker: Any, symbol: str, timeframe: str, limit: int = 50) -> Dict[str, Any]:
     """
-    Лёгкая проверка качества данных: есть ли разрывы тайм-серии в последних N свечах.
-    Не делаем её по умолчанию, только в deep-режиме (чтобы не жечь лимиты).
+    Быстрая проверка качества данных: есть ли разрывы тайм-серии в последних N свечах.
+    Мы не дергаем её по умолчанию (дорого по лимитам) — только когда ?deep=1.
     """
     try:
         if not hasattr(broker.ccxt, "fetch_ohlcv"):
             return {"ok": True, "checked": 0}
-        # ccxt не всегда асинхронный — вызываем синхронно
         rows = broker.ccxt.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit) or []
         if len(rows) < 3:
             return {"ok": True, "checked": len(rows)}
-        # шаг из последних двух интервалов
         step = rows[-1][0] - rows[-2][0]
         gaps = []
         for i in range(1, len(rows)):
@@ -75,9 +88,11 @@ async def lifespan(app: FastAPI):
     container = build_container()
     app.state.container = container
 
+    # Шину событий запускаем в lifespan, а не в compose.py
     if hasattr(container, "bus") and hasattr(container.bus, "start"):
         await container.bus.start()
 
+    # Единый оркестратор всех фоновых задач
     app.state.orchestrator = Orchestrator(
         settings=container.settings,
         broker=container.broker,
@@ -94,6 +109,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Корректная остановка: ждём завершение тик-тасков, затем шину
         try:
             if getattr(app.state, "orchestrator", None):
                 await app.state.orchestrator.stop()
@@ -104,6 +120,7 @@ async def lifespan(app: FastAPI):
                 await container.bus.stop()
         except Exception:
             pass
+        # Закрываем подключения репозиториев/БД
         for name in ("trades_repo", "positions_repo", "exits_repo", "idempotency_repo", "storage", "db"):
             try:
                 obj = getattr(container, name, None)
@@ -115,6 +132,12 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     application = FastAPI(title="crypto-ai-bot", version="1.1", lifespan=lifespan)
+
+    # Включаем middleware, если доступны
+    if RequestIdMiddleware:
+        application.add_middleware(RequestIdMiddleware)
+    if RateLimitMiddleware:
+        application.add_middleware(RateLimitMiddleware)
 
     @application.get("/", tags=["meta"])
     async def root():
@@ -130,7 +153,7 @@ def create_app() -> FastAPI:
     @application.get("/health", tags=["meta"])
     async def health(deep: Optional[str] = None):
         """
-        Базовые проверки всегда; глубокие — при ?deep=1 (дороже по лимитам).
+        Базовые проверки всегда; «дорогие» — при ?deep=1.
         """
         c = application.state.container
         st = c.settings
@@ -138,7 +161,6 @@ def create_app() -> FastAPI:
         timeframe = getattr(st, "TIMEFRAME", "15m")
 
         # --- heartbeat / snapshots от оркестратора ---
-        snap = {}
         try:
             snap = application.state.orchestrator.health_snapshot()
         except Exception:
@@ -182,7 +204,7 @@ def create_app() -> FastAPI:
         except Exception:
             exits_active = None
 
-        # --- latency до биржи (лёгкий ping, без deep) ---
+        # --- latency до биржи (лёгкий ping, если снапшот пуст) ---
         last_latency_ms = snap.get("last_latency_ms")
         if last_latency_ms is None:
             try:
@@ -193,7 +215,7 @@ def create_app() -> FastAPI:
                 last_latency_ms = None
 
         # --- deep: проверка качества OHLCV ---
-        deep_checks = {}
+        deep_checks: Dict[str, Any] = {}
         if _param_bool(deep):
             deep_checks["ohlcv"] = await _check_ohlcv_gaps(c.broker, sym, timeframe=timeframe, limit=50)
 
@@ -217,14 +239,13 @@ def create_app() -> FastAPI:
 
     @application.get("/metrics", tags=["meta"])
     async def metrics():
-        # Отдаём registries из utils.metrics, если есть; иначе — базовый текст
+        # Отдаём registries из utils.metrics, если есть; иначе — простой fallback
         try:
             from crypto_ai_bot.utils import metrics as m  # type: ignore
             if hasattr(m, "export"):
                 return PlainTextResponse(m.export())
         except Exception:
             pass
-        # fallback
         c = application.state.container
         lines = []
         cb = getattr(getattr(c, "broker", None), "cb", None)
@@ -233,7 +254,7 @@ def create_app() -> FastAPI:
             for k, v in s.items():
                 if k == "errors_by_kind":
                     for kk, vv in (v or {}).items():
-                        lines.append(f"cb_errors_by_kind{{kind=\"{kk}\"}} {vv}")
+                        lines.append(f'cb_errors_by_kind{{kind="{kk}"}} {vv}')
                 else:
                     lines.append(f"cb_{k} {v if v is not None else 0}")
         return PlainTextResponse("\n".join(lines) + "\n")
@@ -242,7 +263,11 @@ def create_app() -> FastAPI:
     async def telegram_webhook(request: Request):
         body = await request.body()
         c = application.state.container
-        return await handle_update(application, body, c)
+        # Совместимость со старой и новой сигнатурой хендлера:
+        try:
+            return await handle_update(c, body)                  # новая: (container, payload)
+        except TypeError:
+            return await handle_update(application, body, c)     # старая: (app, body, container)
 
     return application
 
