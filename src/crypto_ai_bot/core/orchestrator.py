@@ -133,12 +133,13 @@ class Orchestrator:
         t0 = time.time()
         try:
             await evaluate_and_maybe_execute(
-                settings=self.settings,
+                cfg=self.settings,
                 broker=self.broker,
                 trades_repo=self.trades_repo,
                 positions_repo=self.positions_repo,
                 exits_repo=self.exits_repo,
                 idempotency_repo=self.idempotency_repo,
+                limiter=None,
                 symbol=self._symbol,
                 external=None,
                 bus=self.bus,
