@@ -1,1 +1,1 @@
-web: gunicorn -k uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:$PORT --chdir src crypto_ai_bot.app.server:app
+web: gunicorn -k uvicorn.workers.UvicornWorker crypto_ai_bot.app.server:app --bind 0.0.0.0:${PORT} --workers 1 --timeout 75 --access-logfile -
