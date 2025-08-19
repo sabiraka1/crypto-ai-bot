@@ -13,7 +13,10 @@ from crypto_ai_bot.core.storage.sqlite_maint import apply_connection_pragmas
 from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
 from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
 from crypto_ai_bot.core.storage.repositories.protective_exits import SqliteProtectiveExitsRepository
-from crypto_ai_bot.core.storage.repositories.idempotency import IdempotencyRepository
+from crypto_ai_bot.core.storage.repositories.idempotency import (
+    IdempotencyRepository,
+    SqliteIdempotencyRepository,
+)
 from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
 
 
@@ -42,7 +45,7 @@ def build_container() -> Container:
     trades = SqliteTradeRepository(con)
     positions = SqlitePositionRepository(con)
     exits = SqliteProtectiveExitsRepository(con)
-    idem = IdempotencyRepository(con)
+    idem: IdempotencyRepository = SqliteIdempotencyRepository(con)
     audit = SqliteAuditRepository(con)
 
     # bus (совместимо с текущим AsyncEventBus)

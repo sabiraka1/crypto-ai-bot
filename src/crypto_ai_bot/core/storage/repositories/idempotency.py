@@ -1,10 +1,19 @@
-# src/crypto_ai_bot/core/storage/repositories/idempotency.py
 from __future__ import annotations
 import sqlite3
 import time
-from typing import Optional
+from typing import Optional, Protocol
 
 from crypto_ai_bot.utils.idempotency import validate_key
+
+
+class IdempotencyRepository(Protocol):
+    """Контракт для репозитория идемпотентности."""
+    def check_and_store(self, key: str, ttl_seconds: int = 300) -> bool: ...
+    def commit(self, key: str) -> None: ...
+    def cleanup_expired(self, ttl_seconds: int = 300) -> int: ...
+    # Для совместимости со старым кодом (если вызывали cleanup)
+    def cleanup(self, ttl_seconds: int = 300) -> int: ...
+
 
 class SqliteIdempotencyRepository:
     """
@@ -18,14 +27,16 @@ class SqliteIdempotencyRepository:
 
     def __init__(self, con: sqlite3.Connection):
         self.con = con
-        self.con.execute("""
-        CREATE TABLE IF NOT EXISTS idempotency(
-            key TEXT PRIMARY KEY,
-            created_ms INTEGER NOT NULL,
-            committed INTEGER NOT NULL DEFAULT 0,
-            state TEXT
-        );
-        """)
+        self.con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency(
+                key TEXT PRIMARY KEY,
+                created_ms INTEGER NOT NULL,
+                committed INTEGER NOT NULL DEFAULT 0,
+                state TEXT
+            );
+            """
+        )
 
     # ---- API ----
 
@@ -45,7 +56,7 @@ class SqliteIdempotencyRepository:
         with self.con:
             row = self.con.execute(
                 "SELECT created_ms, committed FROM idempotency WHERE key = ?",
-                (key,)
+                (key,),
             ).fetchone()
 
             if row:
@@ -91,9 +102,16 @@ class SqliteIdempotencyRepository:
             )
             return int(cur.rowcount or 0)
 
+    # Backward-compat: если где-то вызывали .cleanup(...)
+    def cleanup(self, ttl_seconds: int = 300) -> int:
+        return self.cleanup_expired(ttl_seconds)
+
     # (опционально) если где-то нужно посмотреть сырое состояние:
     def get(self, key: str) -> Optional[tuple]:
         return self.con.execute(
             "SELECT key, created_ms, committed, state FROM idempotency WHERE key=?",
             (key,),
         ).fetchone()
+
+
+__all__ = ["IdempotencyRepository", "SqliteIdempotencyRepository"]
