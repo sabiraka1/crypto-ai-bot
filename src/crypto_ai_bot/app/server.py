@@ -8,148 +8,124 @@ from typing import Any, Dict
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from crypto_ai_bot.app.middleware import RateLimitMiddleware
 from crypto_ai_bot.app.compose import build_container
-from crypto_ai_bot.app.middleware import RequestIdMiddleware, RateLimitMiddleware
-from crypto_ai_bot.utils.rate_limit import MultiLimiter, TokenBucket
 from crypto_ai_bot.utils.logging import get_logger
+
+# Telegram adapter (унифицированная сигнатура)
+try:
+    from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update
+except Exception:  # pragma: no cover
+    telegram_handle_update = None  # type: ignore
 
 logger = get_logger(__name__)
 
-# -------- Prometheus /metrics mount (если установлен prometheus_client) ----------
-try:
-    from prometheus_client import make_asgi_app  # type: ignore
-    _PROM = True
-except Exception:
-    _PROM = False
 
-# --------- DI Container in app.state --------------------------------------------
-app = FastAPI(title="crypto-ai-bot", version="1.0.0")
-
-# Входной rate-limit (общий для всего инстанса)
-_ingress_limiter = MultiLimiter(
-    buckets={
-        "ingress": TokenBucket(capacity=60, refill_per_sec=6.0),  # ~60 r/m
-    },
-    default_bucket="ingress",
-)
-
-app.add_middleware(RequestIdMiddleware)
-app.add_middleware(RateLimitMiddleware, limiter=_ingress_limiter, bucket_name="ingress")
-
-if _PROM:
-    app.mount("/metrics", make_asgi_app())  # экспонируем метрики
-
-# ------------------------ Lifespan: build container, start/stop ------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Собираем контейнер и всё окружение
     c = build_container()
     app.state.container = c
-    # Запускаем EventBus и Orchestrator
+
+    # Запуск шины и оркестратора: строго await
     await c.bus.start()
     await c.orchestrator.start()
-    logger.info("Application started: mode=%s symbol=%s", c.settings.MODE, c.settings.SYMBOL)
+    logger.info("application started: mode=%s exchange=%s db=%s", c.settings.MODE, c.settings.EXCHANGE, c.settings.DB_PATH)
+
     try:
         yield
     finally:
-        # Корректная остановка
+        # Корректное завершение: сначала оркестратор, затем шина
         try:
             await c.orchestrator.stop()
-        except Exception as e:
-            logger.error("orchestrator.stop failed: %s", e)
+        except Exception as e:  # pragma: no cover
+            logger.exception("orchestrator.stop failed: %s", e)
+
         try:
             await c.bus.stop()
-        except Exception as e:
-            logger.error("bus.stop failed: %s", e)
-        logger.info("Application stopped.")
+        except Exception as e:  # pragma: no cover
+            logger.exception("bus.stop failed: %s", e)
 
-app.router.lifespan_context = lifespan  # bind lifespan
-
-# ------------------------------- Health endpoints --------------------------------
-@app.get("/health", tags=["meta"])
-async def health() -> Dict[str, Any]:
-    c = app.state.container
-    return {
-        "ok": True,
-        "mode": c.settings.MODE,
-        "exchange": c.settings.EXCHANGE,
-        "symbol": c.settings.SYMBOL,
-        "orchestrator_running": c.orchestrator.is_running,
-        "bus_running": c.bus.is_running,
-    }
-
-@app.get("/", tags=["meta"])
-async def root() -> Dict[str, str]:
-    return {"name": "crypto-ai-bot", "status": "ok"}
-
-# ------------------------------ Telegram webhook ---------------------------------
-# Хендлер должен соответствовать: await handle_update(container, payload)
-try:
-    from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update  # type: ignore
-    _TELEGRAM_READY = True
-except Exception as e:
-    logger.warning("telegram adapter not available: %s", e)
-    _TELEGRAM_READY = False
-
-@app.get("/telegram", tags=["telegram"])
-async def telegram_get(secret: str | None = None) -> Response:
-    """
-    Небольшая проверка доступности вебхука (GET — для быстрой ручной проверки).
-    Для реальных обновлений используем POST /telegram/webhook.
-    """
-    if not _TELEGRAM_READY:
-        return PlainTextResponse("telegram adapter not configured", status_code=501)
-
-    c = app.state.container
-    if secret and secret == c.settings.TELEGRAM_BOT_SECRET:
-        return PlainTextResponse("ok", status_code=200)
-    return PlainTextResponse("Method Not Allowed", status_code=405)
-
-@app.post("/telegram/webhook", tags=["telegram"])
-async def telegram_webhook(request: Request) -> Response:
-    if not _TELEGRAM_READY:
-        return PlainTextResponse("telegram adapter not configured", status_code=501)
-
-    c = app.state.container
-    # Простейшая защита вебхука секретом через ?secret=...
-    secret = request.query_params.get("secret")
-    if not secret or secret != c.settings.TELEGRAM_BOT_SECRET:
-        return PlainTextResponse("forbidden", status_code=403)
-
-    try:
-        payload = await request.json()
-    except Exception:
-        # fallback: попытка прочитать сырое тело
-        body = await request.body()
+        # Закрыть БД-подключение (если есть .close)
         try:
-            payload = json.loads(body.decode("utf-8"))
+            if hasattr(c.db, "close"):
+                c.db.close()
+        except Exception as e:  # pragma: no cover
+            logger.warning("db.close failed: %s", e)
+
+        logger.info("application stopped")
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="crypto-ai-bot", lifespan=lifespan)
+
+    # Подключаем входной rate-limit + request-id middleware
+    # Параметры берём из settings, чтобы не дублировать конфиг
+    @app.middleware("http")
+    async def _attach_container_to_request(request: Request, call_next):
+        # небольшой трюк, чтобы мидлварь могла читать settings
+        request.state.container = getattr(app.state, "container", None)
+        return await call_next(request)
+
+    app.add_middleware(
+        RateLimitMiddleware,
+        settings=lambda: getattr(app.state, "container", None) and app.state.container.settings,  # lazy, но совместимо
+    )
+
+    @app.get("/health")
+    async def health() -> Dict[str, Any]:
+        c = app.state.container
+        ok = True
+        details = {
+            "mode": c.settings.MODE,
+            "exchange": c.settings.EXCHANGE,
+            "symbol": c.settings.SYMBOL,
+            "db_path": c.settings.DB_PATH,
+            "bus": {"queue_size": c.bus.qsize(), "concurrency": c.bus.concurrency},
+            "orchestrator": {"running": c.orchestrator.is_running()},
+        }
+        return {"ok": ok, "details": details}
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        # лёгкая интеграция с utils.metrics; если нет — возвращаем заглушку
+        try:
+            from crypto_ai_bot.utils.metrics import export_as_text  # type: ignore
+            return PlainTextResponse(export_as_text(), media_type="text/plain; version=0.0.4")
+        except Exception:
+            return PlainTextResponse("# no metrics exporter wired\n", media_type="text/plain")
+
+    @app.post("/telegram/webhook")
+    async def telegram_webhook(request: Request):
+        c = app.state.container
+        if not telegram_handle_update:
+            return JSONResponse({"ok": False, "error": "telegram adapter not available"}, status_code=status.HTTP_501_NOT_IMPLEMENTED)
+
+        # простая проверка секрета из query (?secret=...)
+        secret = request.query_params.get("secret")
+        if secret != c.settings.TELEGRAM_BOT_SECRET:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+
+        try:
+            payload = await request.json()
+        except Exception:
+            body = await request.body()
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except Exception:
+                return JSONResponse({"ok": False, "error": "invalid json"}, status_code=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # унифицированная сигнатура: (container, payload)
+            await telegram_handle_update(c, payload)  # type: ignore[arg-type]
+            return JSONResponse({"ok": True})
         except Exception as e:
-            logger.warning("telegram payload parse failed: %s", e)
-            return PlainTextResponse("bad payload", status_code=400)
+            logger.exception("telegram handler failed: %s", e)
+            return JSONResponse({"ok": False, "error": "internal"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    try:
-        await telegram_handle_update(c, payload)
-        return PlainTextResponse("ok", status_code=200)
-    except Exception as e:
-        logger.error("telegram handler failed: %s", e, extra={"payload": payload})
-        return PlainTextResponse("error", status_code=500)
+    return app
 
-# ------------------------------- Extended status ---------------------------------
-@app.get("/status/extended", tags=["meta"])
-async def status_extended() -> JSONResponse:
-    """
-    Лёгкий расширенный статус — без тяжёлых операций, пригоден для внешнего мониторинга.
-    """
-    c = app.state.container
-    body = {
-        "mode": c.settings.MODE,
-        "exchange": c.settings.EXCHANGE,
-        "symbol": c.settings.SYMBOL,
-        "perf_budgets_ms": {
-            "eval_p99": c.settings.PERF_BUDGET_EVAL_P99_MS,
-            "place_order_p99": c.settings.PERF_BUDGET_PLACE_ORDER_P99_MS,
-            "reconcile_p99": c.settings.PERF_BUDGET_RECONCILE_P99_MS,
-        },
-        "bus": {"running": c.bus.is_running, "concurrency": c.bus.concurrency, "max_queue": c.bus.max_queue},
-        "orchestrator": {"running": c.orchestrator.is_running},
-    }
-    return JSONResponse(body, status_code=status.HTTP_200_OK)
+
+# Uvicorn entrypoint:
+# uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8080
+app = create_app()
