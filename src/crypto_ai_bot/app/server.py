@@ -1,137 +1,119 @@
 # src/crypto_ai_bot/app/server.py
 from __future__ import annotations
 
-import json
-import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request, Response, status
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.app.compose import build_container
 from crypto_ai_bot.app.middleware import RateLimitMiddleware
+from crypto_ai_bot.app.compose import build_container
 from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update
+from crypto_ai_bot.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# Загружаем единый инстанс настроек один раз (без прямого os.environ вне Settings)
+_SETTINGS = Settings.load()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Жизненный цикл приложения:
-    - собираем DI-контейнер
-    - стартуем Orchestrator
-    - на shutdown — останавливаем таски аккуратно (graceful)
-    """
-    settings = Settings.load()
-    container = build_container(settings=settings)
+    # Сборка DI-контейнера
+    container = build_container(settings=_SETTINGS)
+    app.state.settings = _SETTINGS
     app.state.container = container
 
-    # Запуск оркестратора
+    # Старт инфраструктуры
     try:
-        await container.orchestrator.start()
-        logger.info("Orchestrator started")
-    except Exception:
-        logger.exception("Failed to start orchestrator")
-        raise
+        bus = getattr(container, "bus", None)
+        if bus and hasattr(bus, "start"):
+            await bus.start()
 
-    try:
+        orchestrator = getattr(container, "orchestrator", None)
+        if orchestrator and hasattr(orchestrator, "start"):
+            await orchestrator.start()
+
+        yield
+
+    except Exception as e:
+        logger.exception("lifespan startup error: %s", e)
+        # Если ошибка на старте — корректно дойдём до shutdown-блока
         yield
     finally:
+        # Graceful shutdown
         try:
-            await container.orchestrator.stop()
-            logger.info("Orchestrator stopped")
+            orchestrator = getattr(app.state.container, "orchestrator", None)
+            if orchestrator and hasattr(orchestrator, "stop"):
+                await orchestrator.stop()
         except Exception:
-            logger.exception("Failed to stop orchestrator")
+            logger.exception("orchestrator stop failed")
+
+        try:
+            bus = getattr(app.state.container, "bus", None)
+            if bus and hasattr(bus, "stop"):
+                await bus.stop()
+        except Exception:
+            logger.exception("event bus stop failed")
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="crypto-ai-bot", version="1.0.0", lifespan=lifespan)
 
-# Входной rate-limit и request_id
-app.add_middleware(RateLimitMiddleware)
-
-
-@app.get("/")
-async def root() -> Dict[str, Any]:
-    c = app.state.container
-    s = c.settings
-    return {
-        "name": "crypto-ai-bot",
-        "mode": s.MODE,
-        "symbol": s.SYMBOL,
-        "exchange": s.EXCHANGE,
-        "running": True,
-    }
+# Глобальный входной rate-limit (ASGI)
+app.add_middleware(RateLimitMiddleware, settings=_SETTINGS)
 
 
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     c = app.state.container
-    ok_db = True
-    ok_bus = True
-    ok_orch = True
-    try:
-        # Лёгкий «пульс» БД: PRAGMA user_version
-        _ = c.sqlite.execute("PRAGMA user_version").fetchone()
-    except Exception:
-        ok_db = False
-    try:
-        ok_bus = c.bus is not None
-    except Exception:
-        ok_bus = False
-    try:
-        ok_orch = c.orchestrator is not None
-    except Exception:
-        ok_orch = False
-
-    status_overall = ok_db and ok_bus and ok_orch
+    s: Settings = app.state.settings
+    # Лёгкий health: без запросов к бирже/БД — это liveness
     return {
-        "status": "ok" if status_overall else "degraded",
-        "db": ok_db,
-        "bus": ok_bus,
-        "orchestrator": ok_orch,
+        "ok": True,
+        "mode": getattr(s, "MODE", "paper"),
+        "exchange": getattr(s, "EXCHANGE", "gateio"),
+        "telegram": bool(getattr(s, "TELEGRAM_BOT_TOKEN", "")),
+        "orchestrator": bool(getattr(c, "orchestrator", None)),
+        "bus": bool(getattr(c, "bus", None)),
     }
 
 
-@app.post("/telegram/webhook")
+@app.get("/telegram")
+async def telegram_probe() -> Dict[str, Any]:
+    # не вебхук — просто быстрый пробник, чтобы 405 не светился в логах
+    return {"ok": True, "hint": "use POST /telegram for webhook"}
+
+
+@app.post("/telegram")
 async def telegram_webhook(request: Request) -> Response:
     """
-    Идемпотентный Telegram webhook:
-    - сверяем секрет (X-Telegram-Secret-Token или ?secret=)
-    - безопасно парсим JSON
-    - вызываем handle_update(container, payload)
+    Telegram webhook:
+      - проверяем секрет (заголовок X-Telegram-Bot-Api-Secret-Token или query ?secret=)
+      - проксируем апдейт в адаптер handle_update(container, payload)
     """
-    c = app.state.container
-    secret_cfg = c.settings.TELEGRAM_BOT_SECRET.strip()
-    # Секрет может прийти в заголовке Telegram либо как query
-    secret_in = request.headers.get("X-Telegram-Secret-Token") or request.query_params.get("secret") or ""
+    s: Settings = app.state.settings
+    cont = app.state.container
 
-    if secret_cfg and secret_in != secret_cfg:
-        return Response(
-            content=json.dumps({"ok": False, "error": "forbidden"}),
-            status_code=status.HTTP_403_FORBIDDEN,
-            media_type="application/json",
-        )
-
-    try:
-        body = await request.body()
-        payload = json.loads(body.decode("utf-8") or "{}")
-    except Exception:
-        logger.exception("telegram_webhook: bad json")
-        return Response(
-            content=json.dumps({"ok": False, "error": "bad_json"}),
-            status_code=status.HTTP_400_BAD_REQUEST,
-            media_type="application/json",
-        )
+    # секьюрная проверка секрета
+    provided = (
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        or request.query_params.get("secret")
+        or ""
+    )
+    expected = getattr(s, "TELEGRAM_BOT_SECRET", "") or ""
+    if expected and provided != expected:
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED, content="invalid secret")
 
     try:
-        await telegram_handle_update(c, payload)
-        return Response(content=json.dumps({"ok": True}), media_type="application/json")
+        payload = await request.json()
     except Exception:
-        logger.exception("telegram_webhook: handler failed")
-        return Response(
-            content=json.dumps({"ok": False, "error": "handler_error"}),
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            media_type="application/json",
-        )
+        logger.warning("telegram webhook: invalid JSON")
+        return Response(status_code=status.HTTP_400_BAD_REQUEST, content="invalid json")
+
+    try:
+        await telegram_handle_update(cont, payload)
+        return Response(status_code=status.HTTP_200_OK, content="ok")
+    except Exception as e:
+        logger.exception("telegram handler failed: %s", e)
+        return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content="handler error")
