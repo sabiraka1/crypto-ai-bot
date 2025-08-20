@@ -1,308 +1,232 @@
 # src/crypto_ai_bot/core/storage/repositories/trades.py
+from __future__ import annotations
+
+import json
 import sqlite3
-import time
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-# Допустимые состояния:
-# 'pending' -> 'partial' -> 'filled'
-# 'pending' ---------> 'canceled' | 'rejected'
-# 'partial' ---------> 'filled'   | 'canceled' | 'rejected'
-
-_TERMINAL = {"filled", "canceled", "rejected"}
+from crypto_ai_bot.core._time import now_ms
 
 
 class SqliteTradeRepository:
-    def __init__(self, con: sqlite3.Connection):
-        self.con = con
-        self.con.execute("PRAGMA foreign_keys = ON;")
-        self._ensure_schema()
+    """
+    Хранилище сделок (trades) + утилиты reconcile.
+    Поддерживает:
+      - create_pending_order(...)
+      - update_client_order_id(order_id, client_order_id)
+      - record_exchange_update(order_id, raw)
+      - get_by_exchange_order_id(order_id)
+    Схема самопроверяется на наличие client_order_id.
+    """
 
-    # ---------- Страхующая инициализация схемы (на случай первого старта без миграторов) ----------
-
-    def _ensure_schema(self) -> None:
-        # Базовая таблица (включая все поля, которые используются кодом)
-        self.con.execute(
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+        self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts INTEGER NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                price REAL NOT NULL,
-                qty REAL NOT NULL,
-                pnl REAL DEFAULT 0.0,
-                order_id TEXT UNIQUE,
-                state TEXT DEFAULT 'pending',
-                exp_qty REAL DEFAULT 0.0,
-                fee_amt REAL DEFAULT 0.0,
-                fee_ccy TEXT DEFAULT 'USDT',
-                last_exchange_status TEXT,
-                last_update_ts INTEGER DEFAULT (strftime('%s','now'))
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_ms          INTEGER NOT NULL,
+                updated_ms          INTEGER NOT NULL,
+                symbol              TEXT NOT NULL,
+                side                TEXT NOT NULL,             -- 'buy' | 'sell'
+                state               TEXT NOT NULL DEFAULT 'pending', -- 'pending'|'partial'|'filled'|'canceled'
+                exp_price           REAL DEFAULT 0,            -- ожидаемая цена (для аудита/метрик)
+                qty                 REAL DEFAULT 0,            -- запрошенное количество (для sell) или 0 для buy
+                filled_qty          REAL DEFAULT 0,
+                avg_price           REAL DEFAULT 0,
+                fee_amt             REAL DEFAULT 0,
+                fee_ccy             TEXT,
+                exchange_order_id   TEXT,                      -- id ордера на бирже
+                client_order_id     TEXT,                      -- Gate.io 'text' / CCXT 'clientOrderId'
+                raw                 TEXT                       -- последний «raw» от биржи (JSON)
             );
             """
         )
-        # Досоздание недостающих столбцов, если база старая
-        cur = self.con.execute("PRAGMA table_info('trades');")
-        existing_cols = {row[1] for row in cur.fetchall()}
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_exchange_order_id ON trades(exchange_order_id);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_client_order_id ON trades(client_order_id);")
+        self.conn.commit()
 
-        def add_col(name: str, ddl: str) -> None:
-            if name not in existing_cols:
-                self.con.execute(f"ALTER TABLE trades ADD COLUMN {ddl};")
+        # Самодиагностика: если колонка отсутствует (старые БД), добавим.
+        self._maybe_add_column("trades", "client_order_id", "TEXT")
+        self.conn.commit()
 
-        add_col("order_id", "order_id TEXT UNIQUE")
-        add_col("state", "state TEXT DEFAULT 'pending'")
-        add_col("exp_qty", "exp_qty REAL DEFAULT 0.0")
-        add_col("fee_amt", "fee_amt REAL DEFAULT 0.0")
-        add_col("fee_ccy", "fee_ccy TEXT DEFAULT 'USDT'")
-        add_col("last_exchange_status", "last_exchange_status TEXT")
-        add_col("last_update_ts", "last_update_ts INTEGER DEFAULT (strftime('%s','now'))")
+    # ------------------------------ schema helpers ---------------------------
 
-        # Индекс по order_id
-        self.con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);")
+    def _maybe_add_column(self, table: str, column: str, decl: str) -> None:
+        cur = self.conn.execute(f"PRAGMA table_info({table});")
+        cols = [r[1] for r in cur.fetchall()]  # name in col#2
+        if column not in cols:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl};")
+            if column == "client_order_id":
+                self.conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_client_order_id ON trades(client_order_id);")
 
-    # ---------- Совместимость со старым кодом ----------
+    # ------------------------------ CRUD -------------------------------------
 
-    def insert_trade(self, symbol: str, side: str, price: float, qty: float, pnl: float = 0.0) -> int:
-        with self.con:
-            cur = self.con.execute(
-                "INSERT INTO trades(ts, symbol, side, price, qty, pnl, state) VALUES(?,?,?,?,?,?, 'filled')",
-                (int(time.time()), symbol, side, float(price), float(qty), float(pnl))
-            )
-            return int(cur.lastrowid)
+    def create_pending_order(
+        self,
+        *,
+        symbol: str,
+        side: str,                  # 'buy' | 'sell'
+        exp_price: float,
+        qty: float,
+        order_id: str,              # exchange order id (если ещё неизвестен, можно 'unknown')
+        client_order_id: Optional[str] = None,
+    ) -> int:
+        ts = now_ms()
+        cur = self.conn.execute(
+            """
+            INSERT INTO trades (created_ms, updated_ms, symbol, side, state, exp_price, qty,
+                                exchange_order_id, client_order_id)
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?);
+            """,
+            (ts, ts, symbol, side, float(exp_price), float(qty), order_id, client_order_id),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
 
-    # ---------- Создание/поиск ----------
-
-    def create_pending_order(self, *, symbol: str, side: str, exp_price: float, qty: float, order_id: str) -> int:
+    def update_client_order_id(self, *, order_id: str, client_order_id: str) -> bool:
         """
-        Создаём запись о предполагаемом ордере. Храним exp_qty — ожидаемое, qty=0 (фактически исполненное).
+        Проставляет client_order_id для записи, найденной по exchange_order_id.
+        Возвращает True, если апдейт затронул строку.
         """
-        now = int(time.time())
-        with self.con:
-            cur = self.con.execute(
-                "INSERT OR REPLACE INTO trades(ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, last_exchange_status, last_update_ts) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (now, symbol, side, float(exp_price), 0.0, 0.0, order_id, float(qty), now)
-            )
-            return int(cur.lastrowid)
+        cur = self.conn.execute(
+            """
+            UPDATE trades
+               SET client_order_id = ?, updated_ms = ?
+             WHERE exchange_order_id = ?;
+            """,
+            (client_order_id, now_ms(), order_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
-    def get_by_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
-        cur = self.con.execute(
-            "SELECT id, ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, fee_amt, fee_ccy, last_exchange_status, last_update_ts "
-            "FROM trades WHERE order_id=?",
-            (order_id,)
+    def record_exchange_update(self, *, order_id: str, raw: Dict[str, Any]) -> None:
+        """
+        Обновляет состояние записи по «сырому» ответу биржи.
+        Понимает поля CCXT/Gate: status/state, filled, amount, average/price, fee, clientOrderId/text.
+        """
+        ts = now_ms()
+        state, filled_qty, avg_price, fee_amt, fee_ccy = self._parse_raw_state(raw)
+        coid = raw.get("clientOrderId") or raw.get("text")
+
+        # если вдруг ордер неизвестен — создать каркас (безопасная защита)
+        if not self._exists_by_exchange_order_id(order_id):
+            self.conn.execute(
+                """
+                INSERT INTO trades (created_ms, updated_ms, symbol, side, state, exp_price, qty,
+                                    exchange_order_id, client_order_id, filled_qty, avg_price, fee_amt, fee_ccy, raw)
+                VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    ts, ts,
+                    raw.get("symbol") or raw.get("symbolNormalized") or "UNKNOWN",
+                    (raw.get("side") or "buy").lower(),
+                    state,
+                    order_id,
+                    coid,
+                    filled_qty,
+                    avg_price,
+                    fee_amt,
+                    fee_ccy,
+                    json.dumps(raw, ensure_ascii=False),
+                ),
+            )
+            self.conn.commit()
+            return
+
+        # обычный путь: апдейт существующей записи
+        self.conn.execute(
+            """
+            UPDATE trades
+               SET updated_ms = ?,
+                   state = COALESCE(?, state),
+                   filled_qty = COALESCE(?, filled_qty),
+                   avg_price = COALESCE(?, avg_price),
+                   fee_amt = COALESCE(?, fee_amt),
+                   fee_ccy = COALESCE(?, fee_ccy),
+                   client_order_id = COALESCE(?, client_order_id),
+                   raw = ?
+             WHERE exchange_order_id = ?;
+            """,
+            (
+                ts,
+                state,
+                filled_qty,
+                avg_price,
+                fee_amt,
+                fee_ccy,
+                coid,
+                json.dumps(raw, ensure_ascii=False),
+                order_id,
+            ),
+        )
+        self.conn.commit()
+
+    def get_by_exchange_order_id(self, order_id: str) -> Optional[Dict[str, Any]]:
+        cur = self.conn.execute(
+            "SELECT id, created_ms, updated_ms, symbol, side, state, exp_price, qty, "
+            "filled_qty, avg_price, fee_amt, fee_ccy, exchange_order_id, client_order_id, raw "
+            "FROM trades WHERE exchange_order_id = ? LIMIT 1;",
+            (order_id,),
         )
         row = cur.fetchone()
         if not row:
             return None
         cols = [d[0] for d in cur.description]
-        return dict(zip(cols, row))
+        return {c: row[i] for i, c in enumerate(cols)}
 
-    def find_pending_orders(self, symbol: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        q = ("SELECT id, ts, symbol, side, price, qty, order_id, state, exp_qty "
-             "FROM trades WHERE state IN ('pending','partial')")
-        p: List[Any] = []
-        if symbol:
-            q += " AND symbol=?"
-            p.append(symbol)
-        q += " ORDER BY ts ASC LIMIT ?"
-        p.append(max(1, int(limit)))
-        cur = self.con.execute(q, tuple(p))
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    # ------------------------------ internals --------------------------------
 
-    def list_by_symbol(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
-        limit = max(1, int(limit))
-        cur = self.con.execute(
-            "SELECT id, ts, symbol, side, price, qty, pnl, order_id, state, fee_amt, fee_ccy, exp_qty "
-            "FROM trades WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
-            (symbol, limit)
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    def _exists_by_exchange_order_id(self, order_id: str) -> bool:
+        cur = self.conn.execute("SELECT 1 FROM trades WHERE exchange_order_id = ? LIMIT 1;", (order_id,))
+        return cur.fetchone() is not None
 
-    def count_pending(self) -> int:
-        cur = self.con.execute("SELECT COUNT(1) FROM trades WHERE state IN ('pending','partial')")
-        (n,) = cur.fetchone() or (0,)
-        return int(n)
-
-    # ---------- FSM-транзишены ----------
-
-    def record_exchange_update(
-        self,
-        *,
-        order_id: str,
-        exchange_status: Optional[str],
-        filled: Optional[float],
-        average_price: Optional[float],
-        fee_amt: float = 0.0,
-        fee_ccy: str = "USDT"
-    ) -> str:
+    @staticmethod
+    def _parse_raw_state(raw: Dict[str, Any]) -> Tuple[Optional[str], Optional[float], Optional[float], Optional[float], Optional[str]]:
         """
-        Применяет апдейт с биржи и переводит состояние согласно правилам.
-        Возвращает новое состояние: 'pending'|'partial'|'filled'|'canceled'|'rejected'
+        Преобразует CCXT/Gate структуру в внутреннее состояние.
+        Возвращает: (state, filled_qty, avg_price, fee_amt, fee_ccy)
         """
-        now = int(time.time())
-        row = self.get_by_order_id(order_id)
-        if not row:
-            # защита от гонок: создадим запись best-effort
-            with self.con:
-                self.con.execute(
-                    "INSERT OR IGNORE INTO trades(ts, symbol, side, price, qty, pnl, order_id, state, exp_qty, last_exchange_status, last_update_ts) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (now, "UNKNOWN/UNKNOWN", "buy", float(average_price or 0.0), float(filled or 0.0), 0.0,
-                     order_id, "pending", float(filled or 0.0), str(exchange_status or ""), now)
-                )
-            row = self.get_by_order_id(order_id)
+        # filled / amount
+        filled = raw.get("filled")
+        amount = raw.get("amount")
+        filled_qty = float(filled) if filled is not None else None
 
-        cur_state = (row.get("state") or "pending").lower()
-        if cur_state in _TERMINAL:
-            return cur_state
+        # средняя цена
+        avg = raw.get("average")
+        price = raw.get("price")
+        avg_price = float(avg if avg is not None else (price if price is not None else 0)) or None
 
-        exp_qty = float(row.get("exp_qty") or 0.0)
-        have_filled = max(0.0, float(filled or 0.0))
-        avg_px = float(average_price or row.get("price") or 0.0)
-
-        # нормализуем биржевой статус
-        st = (exchange_status or "").strip().lower()
-        is_canceled = st in {"canceled", "cancelled"}
-        is_rejected = st in {"rejected"}
-        is_filled   = st in {"closed", "filled", "done", "ok"} or (exp_qty > 0 and have_filled >= exp_qty)
-        is_partial  = not is_filled and not is_canceled and not is_rejected and have_filled > 0.0
-
-        new_state = cur_state
-        if is_rejected:
-            new_state = "rejected"
-        elif is_canceled:
-            new_state = "canceled"
-        elif is_filled:
-            new_state = "filled"
-        elif is_partial:
-            new_state = "partial"
+        # статус
+        status = (raw.get("status") or raw.get("state") or "").lower()
+        if status in {"closed", "filled"}:
+            state = "filled"
+        elif status in {"canceled", "cancelled", "expired"}:
+            state = "canceled"
+        elif status in {"open", "partial"}:
+            # если знаем filled/amount — различим partial
+            if filled is not None and amount is not None:
+                try:
+                    state = "partial" if float(filled) < float(amount) else "filled"
+                except Exception:
+                    state = "open"
+            else:
+                state = "open"
         else:
-            new_state = "pending"
+            state = None  # не менять
 
-        with self.con:
-            # qty — это «исполнено на текущий момент»
-            self.con.execute(
-                "UPDATE trades SET state=?, qty=?, price=?, fee_amt=?, fee_ccy=?, last_exchange_status=?, last_update_ts=? "
-                "WHERE order_id=?",
-                (new_state, have_filled, avg_px, float(fee_amt or 0.0), fee_ccy, st or None, now, order_id)
-            )
-        return new_state
+        # комиссия
+        fee_amt = None
+        fee_ccy = None
+        fee = raw.get("fee")
+        if isinstance(fee, dict):
+            v = fee.get("cost")
+            c = fee.get("currency")
+            try:
+                fee_amt = float(v) if v is not None else None
+                fee_ccy = str(c) if c is not None else None
+            except Exception:
+                pass
 
-    # ---------- Прежние точечные операции (оставлены для совместимости) ----------
-
-    def update_order_state(self, *, order_id: str, state: str) -> None:
-        if state not in {"pending","partial","filled","canceled","rejected"}:
-            state = "pending"
-        with self.con:
-            self.con.execute("UPDATE trades SET state=? WHERE order_id=?", (state, order_id,))
-
-    def fill_order(self, *, order_id: str, executed_price: float, executed_qty: float, fee_amt: float = 0.0, fee_ccy: str = "USDT") -> None:
-        with self.con:
-            self.con.execute(
-                "UPDATE trades SET state='filled', price=?, qty=?, fee_amt=?, fee_ccy=?, last_exchange_status='filled', last_update_ts=? WHERE order_id=?",
-                (float(executed_price), float(execut_qty), float(fee_amt), fee_ccy, int(time.time()), order_id)
-            )
-
-    def cancel_order(self, *, order_id: str) -> None:
-        with self.con:
-            self.con.execute(
-                "UPDATE trades SET state='canceled', last_exchange_status='canceled', last_update_ts=? WHERE order_id=?",
-                (int(time.time()), order_id)
-            )
-
-    def reject_order(self, *, order_id: str) -> None:
-        with self.con:
-            self.con.execute(
-                "UPDATE trades SET state='rejected', last_exchange_status='rejected', last_update_ts=? WHERE order_id=?",
-                (int(time.time()), order_id)
-            )
-
-    # ---------- NEW: агрегаты PnL по закрытым сделкам (FIFO) ----------
-
-    def realized_pnl_summary(self, symbol: Optional[str] = None) -> Dict[str, float]:
-        """
-        Реализованный PnL по закрытым сделкам (FIFO), в котируемой валюте (обычно USDT).
-
-        Параметры:
-            symbol: если указан — фильтруем по символу
-
-        Возвращает dict:
-            {
-              'closed_trades': float,   # количество закрывающих продаж, учтённых в PnL
-              'wins': float,            # число положительных сделок
-              'losses': float,          # число отрицательных сделок
-              'pnl_abs': float,         # суммарный реализованный PnL (в котируемой валюте)
-              'pnl_pct': float          # относительный PnL к суммарной себестоимости закрытых лотов, %
-            }
-        """
-        # 1) забираем только исполненные сделки
-        q = ("SELECT ts, symbol, side, price, qty, fee_amt, fee_ccy "
-             "FROM trades WHERE state='filled'")
-        params: List[Any] = []
-        if symbol:
-            q += " AND symbol=?"
-            params.append(symbol)
-        q += " ORDER BY ts ASC"
-        cur = self.con.execute(q, tuple(params))
-        cols = [d[0] for d in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-
-        # 2) FIFO учёт: накапливаем покупки, при продаже списываем себестоимость в порядке поступления
-        buys: List[Dict[str, float]] = []     # каждый лот: {'qty': float, 'cost': float}
-        realized: List[float] = []            # pnl по каждой продаже
-        cost_bases: List[float] = []          # себестоимость закрытых объёмов (для %-метрики)
-
-        for r in rows:
-            side = (r.get("side") or "").lower()
-            px = float(r.get("price") or 0.0)
-            qty = max(0.0, float(r.get("qty") or 0.0))
-            fee = max(0.0, float(r.get("fee_amt") or 0.0))  # предполагаем, что fee в котируемой валюте
-            if qty <= 0 or px <= 0:
-                continue
-
-            if side == "buy":
-                # себестоимость покупки = цена*кол-во + комиссия
-                buys.append({"qty": qty, "cost": px * qty + fee})
-            elif side == "sell":
-                remain = qty
-                revenue = px * qty - fee            # выручка от продажи минус комиссия продажи
-                cost_taken = 0.0
-
-                while remain > 0 and buys:
-                    lot = buys[0]
-                    take = min(remain, lot["qty"])
-                    if lot["qty"] <= 1e-12:
-                        buys.pop(0)
-                        continue
-                    unit_cost = lot["cost"] / lot["qty"]  # средняя себестоимость единицы в лоте
-                    cost_for_take = unit_cost * take
-
-                    # скорректировать лот
-                    lot["qty"] -= take
-                    lot["cost"] -= cost_for_take
-                    if lot["qty"] <= 1e-12:
-                        buys.pop(0)
-
-                    cost_taken += cost_for_take
-                    remain -= take
-
-                if cost_taken > 0:
-                    realized.append(revenue - cost_taken)
-                    cost_bases.append(cost_taken)
-
-        closed = len(realized)
-        pnl_abs = float(sum(realized))
-        wins = float(sum(1 for x in realized if x > 0))
-        losses = float(sum(1 for x in realized if x < 0))
-        base = float(sum(cost_bases)) if cost_bases else 1.0
-        pnl_pct = (pnl_abs / base) * 100.0
-
-        return {
-            "closed_trades": float(closed),
-            "wins": wins,
-            "losses": losses,
-            "pnl_abs": pnl_abs,
-            "pnl_pct": float(pnl_pct),
-        }
+        return state, filled_qty, avg_price, fee_amt, fee_ccy
