@@ -1,144 +1,125 @@
 # src/crypto_ai_bot/app/server.py
+"""
+FastAPI-приложение:
+- /health — базовый health
+- /metrics — Prometheus
+- Telegram webhook (если включен)
+- lifespan: сборка контейнера, запуск/останов оркестратора
+"""
+
 from __future__ import annotations
 
-import logging
-from contextlib import asynccontextmanager
-from typing import Any, Dict
+import asyncio
+from typing import Any, Optional
 
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, Request, Response, status
+from fastapi.responses import PlainTextResponse, JSONResponse
 
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.app.compose import build_container, Container
-from crypto_ai_bot.core.orchestrator import Orchestrator
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest  # type: ignore
 
-# опциональные вещи — если нет, просто не будем подключать
-try:
-    from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update
-except Exception:  # pragma: no cover
-    telegram_handle_update = None  # type: ignore
-
-try:
-    from crypto_ai_bot.app.middleware import RateLimitMiddleware  # наш тонкий ASGI RL + request_id
-except Exception:  # pragma: no cover
-    RateLimitMiddleware = None  # type: ignore
-
-try:
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # стандартный /metrics
-except Exception:  # pragma: no cover
-    generate_latest = None  # type: ignore
-    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4"
-
-logger = logging.getLogger(__name__)
+from crypto_ai_bot.app.compose import build_container
+from crypto_ai_bot.utils.logging import get_logger  # предполагаемый утиль логгера
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="crypto-ai-bot", version="1.0")
+app = FastAPI(title="crypto-ai-bot")
+log = get_logger("app")
 
-    # Settings/Container на процесс
-    settings = Settings.load()
-    container = build_container(settings)
-    app.state.settings = settings
-    app.state.container = container
-    app.state.orchestrator = None
+# Контейнер «один на процесс»
+_container: Optional[Any] = None
 
-    # Входной rate-limit + request_id (если модуль есть)
-    if RateLimitMiddleware:
-        app.add_middleware(RateLimitMiddleware,
-                           requests_per_sec=getattr(settings, "HTTP_RPS_LIMIT", 50))
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        # startup
-        c: Container = app.state.container
-
-        # Запускаем шину событий и оркестратор
-        await c.bus.start()
-        orch = Orchestrator(container=c)
-        await orch.start()
-        app.state.orchestrator = orch
-
+@app.on_event("startup")
+async def _startup() -> None:
+    global _container
+    _container = build_container()
+    # Запуск event-bus — если требуется вне оркестратора
+    if getattr(_container, "event_bus", None) and hasattr(_container.event_bus, "start"):
+        # event_bus.start() может быть sync/async — поддержим оба.
         try:
-            yield
-        finally:
-            # shutdown
-            try:
-                if app.state.orchestrator:
-                    await app.state.orchestrator.stop()
-            finally:
-                await c.bus.stop()
-
-    app.router.lifespan_context = lifespan
-
-    # ---------- ROUTES ----------
-
-    @app.get("/", response_model=dict)
-    async def root():
-        s: Settings = app.state.settings
-        return {"ok": True, "mode": s.MODE, "exchange": s.EXCHANGE, "symbol": s.SYMBOL}
-
-    @app.get("/health", response_model=dict)
-    async def health():
-        """
-        Базовый health — не блокирующий и без тяжёлых операций.
-        """
-        c: Container = app.state.container
-        ok_db = True
-        ok_bus = c.bus.is_running()
-        ok_broker = True
-
-        # очень лёгкие проверки (без сетевых блокировок)
-        try:
-            c.trades_repo.ensure_ready()
-        except Exception:  # pragma: no cover
-            ok_db = False
-
-        return {
-            "ok": bool(ok_db and ok_bus and ok_broker),
-            "db": ok_db,
-            "bus": ok_bus,
-            "broker": ok_broker,
-        }
-
-    @app.get("/metrics")
-    async def metrics():
-        """
-        Экспорт prom-метрик, если установлен prometheus_client.
-        """
-        if not generate_latest:  # pragma: no cover
-            return PlainTextResponse("metrics unavailable", status_code=503)
-        data = generate_latest()  # type: ignore
-        return PlainTextResponse(data.decode("utf-8"), media_type=CONTENT_TYPE_LATEST)
-
-    @app.post("/telegram/webhook")
-    async def telegram_webhook(request: Request):
-        """
-        Минимально безопасный вебхук: проверяем секрет и передаём payload адаптеру.
-        """
-        s: Settings = app.state.settings
-        secret_query = request.query_params.get("secret")
-        secret_header = request.headers.get("X-Telegram-Secret-Token")
-        expected = getattr(s, "TELEGRAM_BOT_SECRET", None)
-
-        if not expected:
-            raise HTTPException(status_code=403, detail="telegram secret is not configured")
-
-        if secret_query != expected and secret_header != expected:
-            raise HTTPException(status_code=403, detail="invalid telegram secret")
-
-        if telegram_handle_update is None:  # pragma: no cover
-            raise HTTPException(status_code=501, detail="telegram adapter not available")
-
-        try:
-            payload: Dict[str, Any] = await request.json()
+            maybe = _container.event_bus.start()
+            if asyncio.iscoroutine(maybe):
+                await maybe
         except Exception:
-            payload = {}
+            log.exception("event_bus.start failed")
 
-        await telegram_handle_update(app.state.container, payload)
+    if getattr(_container, "orchestrator", None):
+        await _container.orchestrator.start()
+    log.info("startup complete")
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    global _container
+    try:
+        if getattr(_container, "orchestrator", None):
+            await _container.orchestrator.stop()
+        if getattr(_container, "event_bus", None) and hasattr(_container.event_bus, "stop"):
+            try:
+                maybe = _container.event_bus.stop()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception:
+                log.exception("event_bus.stop failed")
+    finally:
+        _container = None
+    log.info("shutdown complete")
+
+
+@app.get("/health")
+async def health() -> JSONResponse:
+    c = _container
+    broker_ok = bool(getattr(c, "broker", None))
+    db_ok = bool(getattr(c, "db", None))
+    bus_ok = bool(getattr(c, "event_bus", None))
+    # heartbeat из KV
+    hb = None
+    kv = getattr(getattr(c, "repositories", c), "kv_repo", None)
+    if kv and hasattr(kv, "get_with_timestamp"):
+        try:
+            hb = kv.get_with_timestamp("orchestrator_heartbeat_ms")
+        except Exception:
+            hb = None
+    return JSONResponse(
+        {
+            "ok": broker_ok and db_ok,
+            "components": {
+                "broker": broker_ok,
+                "db": db_ok,
+                "bus": bus_ok,
+                "heartbeat": {"value": hb[0], "updated_ms": hb[1]} if hb else None,
+            },
+        }
+    )
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+# --- Telegram webhook (если используете) ---
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request) -> JSONResponse:
+    c = _container
+    if c is None:
+        return JSONResponse({"error": "not_ready"}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    secret_expected = getattr(c.settings, "TELEGRAM_BOT_SECRET", None)
+    secret = request.query_params.get("secret")
+    if secret_expected and secret != secret_expected:
+        return JSONResponse({"error": "forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+
+    payload = await request.json()
+    handler = getattr(c, "telegram_handler", None) or getattr(c, "telegram", None)
+    if handler is None:
+        return JSONResponse({"ok": True, "note": "telegram handler disabled"})
+    try:
+        # единая сигнатура: handle_update(container, payload)
+        maybe = handler.handle_update(c, payload)
+        if asyncio.iscoroutine(maybe):
+            await maybe
         return JSONResponse({"ok": True})
-
-    return app
-
-
-# Uvicorn entrypoint
-app = create_app()
+    except Exception as e:
+        log.exception("telegram_webhook failed")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)

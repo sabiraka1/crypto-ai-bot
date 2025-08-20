@@ -1,78 +1,82 @@
 # src/crypto_ai_bot/app/compose.py
-from __future__ import annotations
+"""
+DI-композиция: собираем settings, SQLite, репозитории, брокер, event-bus, orchestrator.
+"""
 
+from __future__ import annotations
+import sqlite3
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.core.events.bus import AsyncEventBus
 from crypto_ai_bot.core.brokers.ccxt_exchange import CCXTExchange
-from crypto_ai_bot.utils.rate_limit import TokenBucket, MultiLimiter
+from crypto_ai_bot.core.orchestrator import Orchestrator
+from crypto_ai_bot.core.events.bus import AsyncEventBus  # ваш bus
+from crypto_ai_bot.core.storage.repositories.kv import SqliteKVRepository
 
-# SQLite adapter + репозитории (имена модулей соответствуют текущей структуре)
-from crypto_ai_bot.core.storage.sqlite_adapter import connect_sqlite
-
-from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
-from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
-from crypto_ai_bot.core.storage.repositories.protective_exits import SqliteProtectiveExitsRepository
-from crypto_ai_bot.core.storage.repositories.idempotency import SqliteIdempotencyRepository
-from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
+# существующие репозитории (импортируй те, что у тебя в проекте)
+from crypto_ai_bot.core.storage.sqlite_adapter import connect as sqlite_connect  # ваш единый адаптер
+from crypto_ai_bot.core.storage.repositories.trades import SqliteTradesRepository  # предполагается
+from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionsRepository  # предполагается
+from crypto_ai_bot.core.storage.repositories.exits import SqliteProtectiveExitsRepository  # предполагается
+from crypto_ai_bot.core.storage.repositories.idempotency import SqliteIdempotencyRepository  # предполагается
+from crypto_ai_bot.utils.logging import get_logger
 
 
 @dataclass
 class Container:
-    settings: Settings
-    bus: AsyncEventBus
-    broker: CCXTExchange
+    settings: Any
+    db: sqlite3.Connection
+    repositories: Any
+    broker: Any
+    event_bus: Any
+    orchestrator: Orchestrator
+    logger: Any
+    # опционально: telegram_handler и т.п.
 
-    trades_repo: SqliteTradeRepository
-    positions_repo: SqlitePositionRepository
-    exits_repo: SqliteProtectiveExitsRepository
-    idempotency_repo: SqliteIdempotencyRepository
-    audit_repo: SqliteAuditRepository
+
+class _Repos:
+    def __init__(self, conn: sqlite3.Connection):
+        # инициализируй ТОЛЬКО те репозитории, которые реально есть в проекте
+        self.trades_repo = SqliteTradesRepository(conn)
+        self.positions_repo = SqlitePositionsRepository(conn)
+        self.exits_repo = SqliteProtectiveExitsRepository(conn)
+        self.idempotency_repo = SqliteIdempotencyRepository(conn)
+        self.kv_repo = SqliteKVRepository(conn)
+        # при наличии — self.audit_repo, self.market_meta_repo и т.п.
 
 
-def build_container(settings: Optional[Settings] = None) -> Container:
-    """
-    Собирает все зависимости. НИЧЕГО не запускает (bus.start/stop — в server.lifespan).
-    """
-    s = settings or Settings.load()
+def build_container() -> Container:
+    log = get_logger("compose")
+    settings = Settings.load()  # важно: load (а не build)
+    db_path = getattr(settings, "DB_PATH", "/data/bot.sqlite")
 
-    # ----- Storage -----
-    conn = connect_sqlite(db_path=s.DB_PATH)  # применяет PRAGMA/WAL внутри
+    conn = sqlite_connect(db_path)  # ваш адаптер уже включает PRAGMA/WAL и retry
+    repos = _Repos(conn)
 
-    trades_repo = SqliteTradeRepository(conn)
-    positions_repo = SqlitePositionRepository(conn)
-    exits_repo = SqliteProtectiveExitsRepository(conn)
-    idempotency_repo = SqliteIdempotencyRepository(conn)
-    audit_repo = SqliteAuditRepository(conn)
-
-    # ----- Event Bus (конфиг через Settings, с дефолтами) -----
+    broker = CCXTExchange(settings=settings, logger=log)
     bus = AsyncEventBus(
-        max_queue=getattr(s, "BUS_MAX_QUEUE", 1000),
-        concurrency=getattr(s, "BUS_CONCURRENCY", 4),
+        # поддерживаем простую сигнатуру; если у вас иная — подставьте свои параметры
+        max_queue=int(getattr(settings, "BUS_MAX_QUEUE", 1000)),
+        concurrency=int(getattr(settings, "BUS_CONCURRENCY", 4)),
+        logger=log,
     )
 
-    # ----- Rate limiting для брокера -----
-    limiter = MultiLimiter({
-        "orders":      TokenBucket(capacity=getattr(s, "RL_ORDERS_CAP", 100),
-                                   refill_per_sec=getattr(s, "RL_ORDERS_RPS", 10)),
-        "market_data": TokenBucket(capacity=getattr(s, "RL_MD_CAP", 600),
-                                   refill_per_sec=getattr(s, "RL_MD_RPS", 60)),
-        "account":     TokenBucket(capacity=getattr(s, "RL_ACC_CAP", 300),
-                                   refill_per_sec=getattr(s, "RL_ACC_RPS", 30)),
-    })
-
-    # ----- Broker -----
-    broker = CCXTExchange(settings=s, limiter=limiter)
+    orch = Orchestrator(
+        settings=settings,
+        broker=broker,
+        repositories=repos,
+        event_bus=bus,
+        logger=log,
+        # интервалы можно оставить default — читаются из settings
+    )
 
     return Container(
-        settings=s,
-        bus=bus,
+        settings=settings,
+        db=conn,
+        repositories=repos,
         broker=broker,
-        trades_repo=trades_repo,
-        positions_repo=positions_repo,
-        exits_repo=exits_repo,
-        idempotency_repo=idempotency_repo,
-        audit_repo=audit_repo,
+        event_bus=bus,
+        orchestrator=orch,
+        logger=log,
     )

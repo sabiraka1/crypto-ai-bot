@@ -1,66 +1,225 @@
-# src/crypto_ai_bot/core/use_cases/place_order.py
+# src/crypto_ai_bot/core/orchestrator.py
+"""
+Orchestrator — координация фоновых циклов:
+- периодическая оценка стратегии и исполнение (evaluate → place_order)
+- проверка protective exits (если use-case подключён)
+- reconcile pending ордеров с биржей
+- heartbeat (KV), чтобы health/alerts видели «пульс»
+- graceful shutdown
+
+ВАЖНО: никаких прямых os.environ — все только через settings.
+"""
+
 from __future__ import annotations
-from typing import Any, Dict, Optional
-import math
-import logging
+import asyncio
+from typing import Any, Optional, Callable
+from datetime import datetime, timezone
 
-from crypto_ai_bot.utils.time import now_ms, monotonic_ms
-from crypto_ai_bot.utils.metrics import record_slippage_bps, record_order_latency_ms, inc
-from crypto_ai_bot.core.market_context import MarketContext  # ваш существующий
-# ВАЖНО: clientOrderId/text НЕ генерим здесь — только idempotency_key
-# Генерация clientOrderId происходит в brokers/ccxt_exchange.py
+from crypto_ai_bot.core.use_cases.evaluate import evaluate_and_maybe_execute
 
-logger = logging.getLogger(__name__)
 
-async def place_order(
-    *,
-    broker,
-    positions_repo,
-    trades_repo,
-    symbol: str,
-    side: str,                      # "buy" | "sell"
-    notional: Optional[float],      # для BUY (в quote, напр. USDT)
-    qty: Optional[float],           # для SELL (в base, напр. BTC)
-    expected_price: float,          # для оценки slippage ex-ante
-    fee_bps: float,
-    idempotency_key: str,           # ключ для нашего репо + для gate text (передаётся в params)
-    market_meta: Dict[str, Any],    # precision/limits
-) -> Dict[str, Any]:
-    t0 = monotonic_ms()
+def _now_ms() -> int:
+    return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
-    if side == "buy":
-        if notional is None or notional <= 0:
-            raise ValueError("BUY requires positive notional")
-        amount = float(notional)
-    else:
-        if qty is None or qty <= 0:
-            raise ValueError("SELL requires positive qty")
-        # округление количества по precision/limits (минимальные лоты)
-        prec = int(market_meta.get("precision", {}).get("amount", 8))
-        min_amt = float(market_meta.get("limits", {}).get("amount", {}).get("min", 0.0))
-        amount = float(math.floor(qty * (10 ** prec)) / (10 ** prec))
-        if amount < min_amt:
-            return {"ok": False, "error": "amount_below_min", "min": min_amt}
 
-    # отправляем ордер — clientOrderId/text сформирует брокер, здесь передаем только idempotency_key
-    order = await broker.create_order(
-        symbol=symbol,
-        type="market",
-        side=side,
-        amount=amount,
-        price=None,
-        params={"idempotency_key": idempotency_key},
-    )
+class Orchestrator:
+    def __init__(
+        self,
+        *,
+        settings: Any,
+        broker: Any,
+        repositories: Any,
+        event_bus: Optional[Any] = None,
+        logger: Optional[Any] = None,
+        # интервалы (сек) — берем из settings, но оставляем параметры для тестов
+        eval_interval_sec: Optional[float] = None,
+        exits_interval_sec: Optional[float] = None,
+        reconcile_interval_sec: Optional[float] = None,
+        heartbeat_interval_sec: Optional[float] = None,
+    ) -> None:
+        self.settings = settings
+        self.broker = broker
+        self.repos = repositories
+        self.bus = event_bus
+        self.log = logger or getattr(settings, "logger", None)
 
-    # метрики
-    t1 = monotonic_ms()
-    record_order_latency_ms(symbol, side, t1 - t0)
+        # интервалы
+        s = settings
+        self.eval_interval = float(eval_interval_sec or getattr(s, "EVAL_INTERVAL_SEC", 60.0))
+        self.exits_interval = float(exits_interval_sec or getattr(s, "EXITS_INTERVAL_SEC", 5.0))
+        self.reconcile_interval = float(reconcile_interval_sec or getattr(s, "RECONCILE_INTERVAL_SEC", 60.0))
+        self.heartbeat_interval = float(heartbeat_interval_sec or getattr(s, "HEARTBEAT_INTERVAL_SEC", 15.0))
 
-    # если есть executed price — посчитаем фактический slippage
-    executed_price = float(order.get("average") or order.get("price") or 0.0)
-    if executed_price > 0 and expected_price > 0:
-        bps = abs(executed_price - expected_price) / expected_price * 10000.0
-        record_slippage_bps(symbol, side, bps)
+        self._tasks: list[asyncio.Task] = []
+        self._stopping = asyncio.Event()
 
-    inc("orders_placed_total", {"symbol": symbol, "side": side})
-    return {"ok": True, "order": order}
+    # ------------------ ПУБЛИЧНЫЙ API ------------------
+
+    async def start(self) -> None:
+        """
+        Запуск фоновых циклов.
+        1) Одноразовый reconcile на старте — снижает шанс «дубля» после рестарта.
+        2) Параллельно: evaluate, exits, reconcile, heartbeat.
+        """
+        if self.log:
+            self.log.info("orchestrator.start: begin")
+
+        # single-shot reconcile
+        try:
+            await self._reconcile_once()
+        except Exception:  # не валим старт, просто логируем
+            if self.log:
+                self.log.exception("orchestrator.start: initial reconcile failed")
+
+        loop = asyncio.get_running_loop()
+        self._tasks = [
+            loop.create_task(self._tick_eval(), name="tick_eval"),
+            loop.create_task(self._tick_exits(), name="tick_exits"),
+            loop.create_task(self._tick_reconcile(), name="tick_reconcile"),
+            loop.create_task(self._tick_heartbeat(), name="tick_heartbeat"),
+        ]
+
+        if self.log:
+            self.log.info("orchestrator.start: started %d tasks", len(self._tasks))
+
+    async def stop(self) -> None:
+        """
+        Корректная остановка: даём таскам выйти из своих циклов, ждём завершения.
+        """
+        if self.log:
+            self.log.info("orchestrator.stop: stopping...")
+        self._stopping.set()
+        for t in self._tasks:
+            t.cancel()  # «мягкая» отмена; в циклах есть проверка self._stopping
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        if self.log:
+            self.log.info("orchestrator.stop: stopped")
+
+    # ------------------ ВНУТРЕННИЕ ЦИКЛЫ ------------------
+
+    async def _tick_eval(self) -> None:
+        """
+        Основной торговый цикл: evaluate → (если ok) → place_order. Один символ из settings.
+        """
+        sym = getattr(self.settings, "SYMBOL", "BTC/USDT")
+        cfg = self.settings
+        repos = self.repos
+        while not self._stopping.is_set():
+            try:
+                await evaluate_and_maybe_execute(
+                    symbol=sym,
+                    cfg=cfg,
+                    broker=self.broker,
+                    positions_repo=getattr(repos, "positions_repo", None),
+                    trades_repo=getattr(repos, "trades_repo", None),
+                    idempotency_repo=getattr(repos, "idempotency_repo", None),
+                    exits_repo=getattr(repos, "exits_repo", None),
+                    audit_repo=getattr(repos, "audit_repo", None),
+                    market_meta_repo=getattr(repos, "market_meta_repo", None),
+                    external=getattr(repos, "external", None),
+                    event_bus=self.bus,
+                )
+            except Exception:
+                if self.log:
+                    self.log.exception("orchestrator.tick_eval: evaluate_and_maybe_execute failed")
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.eval_interval)
+
+    async def _tick_exits(self) -> None:
+        """
+        Мониторинг/исполнение protective exits, если соответствующий use-case присутствует.
+        """
+        # допускаем разные раскладки (совместимость)
+        exits_fn: Optional[Callable[..., Any]] = None
+        for path in (
+            "crypto_ai_bot.core.use_cases.protective_exits.run_protective_exits_check",
+            "crypto_ai_bot.core.use_cases.exits.run_protective_exits_check",
+        ):
+            try:
+                module_path, fn_name = path.rsplit(".", 1)
+                mod = __import__(module_path, fromlist=[fn_name])
+                exits_fn = getattr(mod, fn_name, None)
+                if exits_fn:
+                    break
+            except Exception:
+                continue
+
+        if exits_fn is None and self.log:
+            self.log.info("orchestrator.tick_exits: no exits use-case found; skipping")
+
+        sym = getattr(self.settings, "SYMBOL", "BTC/USDT")
+        repos = self.repos
+        while not self._stopping.is_set():
+            if exits_fn:
+                try:
+                    await exits_fn(
+                        symbol=sym,
+                        broker=self.broker,
+                        exits_repo=getattr(repos, "exits_repo", None),
+                        trades_repo=getattr(repos, "trades_repo", None),
+                        positions_repo=getattr(repos, "positions_repo", None),
+                        event_bus=self.bus,
+                        settings=self.settings,
+                    )
+                except Exception:
+                    if self.log:
+                        self.log.exception("orchestrator.tick_exits: exits check failed")
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.exits_interval)
+
+    async def _reconcile_once(self) -> None:
+        """
+        Одноразовый reconcile (на старте). Если в repo есть специальный метод — используем его.
+        Иначе пытаемся «мягко» вызвать fetch_open_orders и обновить состояния через trades_repo, если он это умеет.
+        """
+        trades_repo = getattr(self.repos, "trades_repo", None)
+        if trades_repo is None:
+            return
+        # Специализированный метод?
+        if hasattr(trades_repo, "reconcile_pending_once"):
+            try:
+                await trades_repo.reconcile_pending_once(broker=self.broker)
+                return
+            except TypeError:
+                # может быть синхронным
+                try:
+                    trades_repo.reconcile_pending_once(broker=self.broker)
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                if self.log:
+                    self.log.exception("orchestrator.reconcile_once: repo.reconcile_pending_once failed")
+                return
+
+        # Универсальная «мягкая» попытка:
+        try:
+            open_orders = self.broker.fetch_open_orders(getattr(self.settings, "SYMBOL", "BTC/USDT"))
+            if hasattr(trades_repo, "record_exchange_snapshot"):
+                trades_repo.record_exchange_snapshot(open_orders)
+        except Exception:
+            if self.log:
+                self.log.exception("orchestrator.reconcile_once: generic snapshot failed")
+
+    async def _tick_reconcile(self) -> None:
+        while not self._stopping.is_set():
+            try:
+                await self._reconcile_once()
+            except Exception:
+                if self.log:
+                    self.log.exception("orchestrator.tick_reconcile: failed")
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.reconcile_interval)
+
+    async def _tick_heartbeat(self) -> None:
+        """
+        Записываем «пульс» в KV, если repo есть. Это очень помогает для health/alerts.
+        """
+        kv = getattr(self.repos, "kv_repo", None)
+        key = "orchestrator_heartbeat_ms"
+        while not self._stopping.is_set():
+            try:
+                if kv and hasattr(kv, "set"):
+                    kv.set(key, str(_now_ms()))
+            except Exception:
+                if self.log:
+                    self.log.exception("orchestrator.tick_heartbeat: kv.set failed")
+            await asyncio.wait_for(self._stopping.wait(), timeout=self.heartbeat_interval)
