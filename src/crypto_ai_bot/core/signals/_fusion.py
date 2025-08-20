@@ -67,8 +67,7 @@ def _sma(values: List[float], period: int) -> Optional[float]:
 
 def _rsi(values: List[float], period: int = 14) -> Optional[float]:
     """
-    Простейший RSI (без Wilder smoothing), достаточный для принятия решения.
-    Возвращает значение в диапазоне [0..100] или None если мало данных.
+    Простейший RSI (без Wilder smoothing). Возвращает [0..100] или None, если мало данных.
     """
     n = len(values)
     if n <= period:
@@ -127,6 +126,7 @@ def build(
         - "indicators": Dict[str, float]  # нормализованные индикаторы [-1..1]
         - "raw": Dict[str, Any]           # необязательные «сырые» значения для/отладки
         - "score": float                  # агрегированный скор [-1..1]
+        - "thresholds": Dict[str, float]
     """
 
     # Пороговые значения (приоритет — из cfg, иначе дефолты модуля)

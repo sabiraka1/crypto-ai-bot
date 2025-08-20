@@ -2,237 +2,155 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Mapping, Optional
+from typing import Optional
 
 
-def _to_bool(x: Any, default: bool = False) -> bool:
-    if isinstance(x, bool):
-        return x
-    if x is None:
+def _getenv_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
         return default
-    s = str(x).strip().lower()
-    return s in ("1", "true", "yes", "y", "on")
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-
-def _to_int(x: Any, default: int = 0) -> int:
+def _getenv_float(name: str, default: float) -> float:
     try:
-        return int(str(x).strip())
+        return float(os.getenv(name, default))
     except Exception:
-        return default
+        return float(default)
 
-
-def _to_float(x: Any, default: float = 0.0) -> float:
+def _getenv_int(name: str, default: int) -> int:
     try:
-        return float(str(x).strip())
+        return int(os.getenv(name, default))
     except Exception:
-        return default
+        return int(default)
 
 
 class Settings:
     """
-    Единый конфиг с поддержкой UPPER_CASE и snake_case алиасов.
-    build() — из os.environ; from_reader() — из dict-like (например, dotenv values).
+    Единый источник конфигурации. Читает только из ENV.
+    Никаких прямых os.environ за пределами этого модуля (см. архитектурные правила).
     """
 
-    # ---- дефолты (канонические имена) ----
-    MODE: str = "paper"                       # paper | live | backtest
-    EXCHANGE: str = "gateio"
+    # --- режимы и актив ---
+    MODE: str                         # "paper" | "live"
+    SYMBOL: str                       # например, "BTC/USDT"
+    TIMEFRAME: str                    # например, "15m"
+    EXCHANGE: str                     # "gateio" (по умолчанию), "binance" и т.п.
 
-    API_KEY: Optional[str] = None
-    API_SECRET: Optional[str] = None
-    CLIENT_ORDER_ID_PREFIX: str = "cai"       # префикс для Gate.io params["text"]
+    # --- торговая логика / фьюжн ---
+    BUY_TH: float
+    SELL_TH: float
+    RSI_PERIOD: int
+    MA_TREND_PERIOD: int
+    FUSION_W_RSI: float
+    FUSION_W_MOM: float
+    FUSION_W_TREND: float
 
-    SYMBOL: str = "BTC/USDT"
-    TIMEFRAME: str = "15m"
+    # --- исполнение / рынок ---
+    SLIPPAGE_BPS: float
+    MAX_SPREAD_BPS: float
 
-    POSITION_SIZE_USD: float = 10.0           # размер позиций в валюте котировки
-    FEE_TAKER_BPS: float = 10.0               # комиссия такер, bps
-    SLIPPAGE_BPS: float = 20.0                # бюджет слиппеджа, bps
-    STOP_LOSS_PCT: float = 0.02               # доля, 0.02 = 2%
-    TAKE_PROFIT_PCT: float = 0.03             # доля, 0.03 = 3%
+    # --- риски ---
+    MAX_POSITIONS: int
+    RISK_MAX_DRAWDOWN_PCT: float
+    RISK_MAX_LOSSES: int
+    RISK_HOURS_UTC: str  # строка с часами/днями (если используешь), иначе игнор
 
-    IDEMPOTENCY_BUCKET_MS: int = 5_000
-    IDEMPOTENCY_TTL_SEC: int = 300
+    # --- идемпотентность ---
+    IDEMPOTENCY_TTL_SEC: int
 
-    RL_EVALUATE_PER_MIN: int = 60
-    RL_ORDERS_PER_MIN: int = 10
+    # --- gate/ccxt / лимиты и CB ---
+    CCXT_ENABLE_RATE_LIMIT: bool
+    ORDERS_RPS: int
+    MARKET_DATA_RPS: int
+    ACCOUNT_RPS: int
 
-    MAX_TIME_DRIFT_MS: int = 2_500
-    TIME_DRIFT_URLS: str = "https://worldtimeapi.org/api/timezone/Etc/UTC,https://worldtimeapi.org/api/ip"
+    CB_FAIL_THRESHOLD: int
+    CB_OPEN_TIMEOUT_SEC: float
+    CB_HALF_OPEN_CALLS: int
+    CB_WINDOW_SEC: float
 
-    # Оркестратор / периодические тики
-    EVAL_INTERVAL_SEC: float = 60.0
-    EXITS_INTERVAL_SEC: float = 5.0
-    RECONCILE_INTERVAL_SEC: float = 60.0
-    BALANCE_CHECK_INTERVAL_SEC: float = 300.0
-    BALANCE_TOLERANCE: float = 1e-4
-    BUS_DLQ_RETRY_SEC: float = 10.0
+    # --- БД / файлы ---
+    DB_PATH: str  # для SQLite
+    DB_JOURNAL_MODE_WAL: bool
 
-    # Circuit breaker (для брокера)
-    CB_FAIL_THRESHOLD: int = 5
-    CB_OPEN_TIMEOUT_SEC: float = 30.0
-    CB_HALF_OPEN_CALLS: int = 1
-    CB_WINDOW_SEC: float = 60.0
+    # --- Telegram ---
+    TELEGRAM_BOT_TOKEN: Optional[str]
+    TELEGRAM_BOT_SECRET: Optional[str]          # секрет вебхука/подписи
+    TELEGRAM_ALERT_CHAT_ID: Optional[str]       # целевой чат для алёртов (int строкой)
 
-    # Логи/прочее
-    LOG_LEVEL: str = "INFO"
-    LOG_JSON: bool = False
-    DB_PATH: str = "./data/trades.db"
-    PUBLIC_BASE_URL: str = "http://localhost:8000"
-    TZ: str = "Europe/Istanbul"
+    # --- прочее ---
+    ENABLE_TRADING: bool
 
-    # Telegram
-    TELEGRAM_BOT_TOKEN: Optional[str] = None
-    TELEGRAM_BOT_SECRET: Optional[str] = None
+    def __init__(self) -> None:
+        # режим/актив
+        self.MODE = os.getenv("MODE", "paper")
+        self.SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
+        self.TIMEFRAME = os.getenv("TIMEFRAME", "15m")
+        self.EXCHANGE = os.getenv("EXCHANGE", "gateio").lower()
 
-    # здесь в рантайме можно положить limiter/risk_manager и пр.
-    limiter: Any = None
-    risk_manager: Any = None
+        # фьюжн/пороговые
+        self.BUY_TH = _getenv_float("BUY_TH", 0.60)
+        self.SELL_TH = _getenv_float("SELL_TH", -0.60)
+        self.RSI_PERIOD = _getenv_int("RSI_PERIOD", 14)
+        self.MA_TREND_PERIOD = _getenv_int("MA_TREND_PERIOD", 20)
+        self.FUSION_W_RSI = _getenv_float("FUSION_W_RSI", 0.30)
+        self.FUSION_W_MOM = _getenv_float("FUSION_W_MOM", 0.50)
+        self.FUSION_W_TREND = _getenv_float("FUSION_W_TREND", 0.20)
 
-    # ---- алиасы (поддержка старых/альтернативных имён) ----
-    _ALIASES: Dict[str, str] = {
-        # размеры позиции/комиссии
-        "position_size": "POSITION_SIZE_USD",
-        "position_size_usd": "POSITION_SIZE_USD",
-        "fee_bps": "FEE_TAKER_BPS",
+        # исполнение
+        self.SLIPPAGE_BPS = _getenv_float("SLIPPAGE_BPS", 20.0)   # 0.20%
+        self.MAX_SPREAD_BPS = _getenv_float("MAX_SPREAD_BPS", 50.0)
 
-        # telegram
-        "telegram_webhook_secret": "TELEGRAM_BOT_SECRET",
+        # риски
+        self.MAX_POSITIONS = _getenv_int("MAX_POSITIONS", 1)
+        self.RISK_MAX_DRAWDOWN_PCT = _getenv_float("RISK_MAX_DRAWDOWN_PCT", 10.0)
+        self.RISK_MAX_LOSSES = _getenv_int("RISK_MAX_LOSSES", 3)
+        self.RISK_HOURS_UTC = os.getenv("RISK_HOURS_UTC", "")  # пусто = 24/7
 
-        # таймдрейф
-        "time_drift_limit_ms": "MAX_TIME_DRIFT_MS",
+        # идемпотентность
+        self.IDEMPOTENCY_TTL_SEC = _getenv_int("IDEMPOTENCY_TTL_SEC", 60)
 
-        # для обратной совместимости snake_case → UPPER_CASE
-        "mode": "MODE",
-        "exchange": "EXCHANGE",
-        "api_key": "API_KEY",
-        "api_secret": "API_SECRET",
-        "client_order_id_prefix": "CLIENT_ORDER_ID_PREFIX",
-        "symbol": "SYMBOL",
-        "timeframe": "TIMEFRAME",
-        "fee_taker_bps": "FEE_TAKER_BPS",
-        "slippage_bps": "SLIPPAGE_BPS",
-        "stop_loss_pct": "STOP_LOSS_PCT",
-        "take_profit_pct": "TAKE_PROFIT_PCT",
-        "idempotency_bucket_ms": "IDEMPOTENCY_BUCKET_MS",
-        "idempotency_ttl_sec": "IDEMPOTENCY_TTL_SEC",
-        "rl_evaluate_per_min": "RL_EVALUATE_PER_MIN",
-        "rl_orders_per_min": "RL_ORDERS_PER_MIN",
-        "max_time_drift_ms": "MAX_TIME_DRIFT_MS",
-        "time_drift_urls": "TIME_DRIFT_URLS",
-        "eval_interval_sec": "EVAL_INTERVAL_SEC",
-        "exits_interval_sec": "EXITS_INTERVAL_SEC",
-        "reconcile_interval_sec": "RECONCILE_INTERVAL_SEC",
-        "balance_check_interval_sec": "BALANCE_CHECK_INTERVAL_SEC",
-        "balance_tolerance": "BALANCE_TOLERANCE",
-        "bus_dlq_retry_sec": "BUS_DLQ_RETRY_SEC",
-        "cb_fail_threshold": "CB_FAIL_THRESHOLD",
-        "cb_open_timeout_sec": "CB_OPEN_TIMEOUT_SEC",
-        "cb_half_open_calls": "CB_HALF_OPEN_CALLS",
-        "cb_window_sec": "CB_WINDOW_SEC",
-        "log_level": "LOG_LEVEL",
-        "log_json": "LOG_JSON",
-        "db_path": "DB_PATH",
-        "public_base_url": "PUBLIC_BASE_URL",
-        "tz": "TZ",
-        "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
-        "telegram_bot_secret": "TELEGRAM_BOT_SECRET",
-    }
+        # лимиты/CB
+        self.CCXT_ENABLE_RATE_LIMIT = _getenv_bool("CCXT_ENABLE_RATE_LIMIT", True)
+        self.ORDERS_RPS = _getenv_int("ORDERS_RPS", 10)
+        self.MARKET_DATA_RPS = _getenv_int("MARKET_DATA_RPS", 60)
+        self.ACCOUNT_RPS = _getenv_int("ACCOUNT_RPS", 30)
 
-    # ---- конструкторы ----
+        self.CB_FAIL_THRESHOLD = _getenv_int("CB_FAIL_THRESHOLD", 5)
+        self.CB_OPEN_TIMEOUT_SEC = _getenv_float("CB_OPEN_TIMEOUT_SEC", 30.0)
+        self.CB_HALF_OPEN_CALLS = _getenv_int("CB_HALF_OPEN_CALLS", 1)
+        self.CB_WINDOW_SEC = _getenv_float("CB_WINDOW_SEC", 60.0)
 
+        # БД
+        self.DB_PATH = os.getenv("DB_PATH", "/data/bot.sqlite")
+        self.DB_JOURNAL_MODE_WAL = _getenv_bool("DB_JOURNAL_MODE_WAL", True)
+
+        # Telegram
+        self.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or None
+        self.TELEGRAM_BOT_SECRET = os.getenv("TELEGRAM_BOT_SECRET") or None
+        self.TELEGRAM_ALERT_CHAT_ID = os.getenv("TELEGRAM_ALERT_CHAT_ID") or None
+
+        # прочее
+        self.ENABLE_TRADING = _getenv_bool("ENABLE_TRADING", True)
+
+        self._validate()
+
+    # --- базовая валидация доменных инвариантов ---
+    def _validate(self) -> None:
+        if self.MAX_POSITIONS <= 0:
+            raise ValueError("MAX_POSITIONS must be positive")
+        if not isinstance(self.SYMBOL, str) or "/" not in self.SYMBOL:
+            raise ValueError("SYMBOL must look like 'BASE/QUOTE', e.g. 'BTC/USDT'")
+        if not (-1.0 <= self.SELL_TH < self.BUY_TH <= 1.0):
+            raise ValueError("SELL_TH < BUY_TH must hold, both in [-1..1]")
+        if not (0.0 < self.SLIPPAGE_BPS < 500.0):
+            raise ValueError("SLIPPAGE_BPS looks invalid (0..500 expected)")
+        if not (0.0 < self.MAX_SPREAD_BPS < 1000.0):
+            raise ValueError("MAX_SPREAD_BPS looks invalid (0..1000 expected)")
+        if self.MODE not in {"paper", "live"}:
+            raise ValueError("MODE must be 'paper' or 'live'")
+
+    # удобный фабричный метод
     @classmethod
-    def build(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
-        e = dict(os.environ if env is None else env)
-
-        def get(key: str, default: Any = None) -> Any:
-            if key in e:
-                return e[key]
-            # поддержка алиасов (и в upper, и в lower регистрах)
-            for cand in (key.lower(), key.upper()):
-                if cand in cls._ALIASES:
-                    alias = cls._ALIASES[cand]
-                    if alias in e:
-                        return e[alias]
-            return default
-
-        s = cls()
-
-        # базовые
-        s.MODE = str(get("MODE", s.MODE))
-        s.EXCHANGE = str(get("EXCHANGE", s.EXCHANGE))
-
-        s.API_KEY = get("API_KEY", s.API_KEY)
-        s.API_SECRET = get("API_SECRET", s.API_SECRET)
-        s.CLIENT_ORDER_ID_PREFIX = str(get("CLIENT_ORDER_ID_PREFIX", s.CLIENT_ORDER_ID_PREFIX))
-
-        s.SYMBOL = str(get("SYMBOL", s.SYMBOL))
-        s.TIMEFRAME = str(get("TIMEFRAME", s.TIMEFRAME))
-
-        # торговые параметры
-        s.POSITION_SIZE_USD = _to_float(get("POSITION_SIZE_USD", get("POSITION_SIZE", s.POSITION_SIZE_USD)), s.POSITION_SIZE_USD)
-        s.FEE_TAKER_BPS = _to_float(get("FEE_TAKER_BPS", get("FEE_BPS", s.FEE_TAKER_BPS)), s.FEE_TAKER_BPS)
-        s.SLIPPAGE_BPS = _to_float(get("SLIPPAGE_BPS", s.SLIPPAGE_BPS), s.SLIPPAGE_BPS)
-        s.STOP_LOSS_PCT = _to_float(get("STOP_LOSS_PCT", s.STOP_LOSS_PCT), s.STOP_LOSS_PCT)
-        s.TAKE_PROFIT_PCT = _to_float(get("TAKE_PROFIT_PCT", s.TAKE_PROFIT_PCT), s.TAKE_PROFIT_PCT)
-
-        # идемпотентность / rate limit
-        s.IDEMPOTENCY_BUCKET_MS = _to_int(get("IDEMPOTENCY_BUCKET_MS", s.IDEMPOTENCY_BUCKET_MS), s.IDEMPOTENCY_BUCKET_MS)
-        s.IDEMPOTENCY_TTL_SEC = _to_int(get("IDEMPOTENCY_TTL_SEC", s.IDEMPOTENCY_TTL_SEC), s.IDEMPOTENCY_TTL_SEC)
-        s.RL_EVALUATE_PER_MIN = _to_int(get("RL_EVALUATE_PER_MIN", s.RL_EVALUATE_PER_MIN), s.RL_EVALUATE_PER_MIN)
-        s.RL_ORDERS_PER_MIN = _to_int(get("RL_ORDERS_PER_MIN", s.RL_ORDERS_PER_MIN), s.RL_ORDERS_PER_MIN)
-
-        # дрейф времени
-        s.MAX_TIME_DRIFT_MS = _to_int(get("MAX_TIME_DRIFT_MS", get("TIME_DRIFT_LIMIT_MS", s.MAX_TIME_DRIFT_MS)), s.MAX_TIME_DRIFT_MS)
-        s.TIME_DRIFT_URLS = str(get("TIME_DRIFT_URLS", s.TIME_DRIFT_URLS))
-
-        # интервалы тиков
-        s.EVAL_INTERVAL_SEC = _to_float(get("EVAL_INTERVAL_SEC", s.EVAL_INTERVAL_SEC), s.EVAL_INTERVAL_SEC)
-        s.EXITS_INTERVAL_SEC = _to_float(get("EXITS_INTERVAL_SEC", s.EXITS_INTERVAL_SEC), s.EXITS_INTERVAL_SEC)
-        s.RECONCILE_INTERVAL_SEC = _to_float(get("RECONCILE_INTERVAL_SEC", s.RECONCILE_INTERVAL_SEC), s.RECONCILE_INTERVAL_SEC)
-        s.BALANCE_CHECK_INTERVAL_SEC = _to_float(get("BALANCE_CHECK_INTERVAL_SEC", s.BALANCE_CHECK_INTERVAL_SEC), s.BALANCE_CHECK_INTERVAL_SEC)
-        s.BALANCE_TOLERANCE = _to_float(get("BALANCE_TOLERANCE", s.BALANCE_TOLERANCE), s.BALANCE_TOLERANCE)
-        s.BUS_DLQ_RETRY_SEC = _to_float(get("BUS_DLQ_RETRY_SEC", s.BUS_DLQ_RETRY_SEC), s.BUS_DLQ_RETRY_SEC)
-
-        # circuit breaker
-        s.CB_FAIL_THRESHOLD = _to_int(get("CB_FAIL_THRESHOLD", s.CB_FAIL_THRESHOLD), s.CB_FAIL_THRESHOLD)
-        s.CB_OPEN_TIMEOUT_SEC = _to_float(get("CB_OPEN_TIMEOUT_SEC", s.CB_OPEN_TIMEOUT_SEC), s.CB_OPEN_TIMEOUT_SEC)
-        s.CB_HALF_OPEN_CALLS = _to_int(get("CB_HALF_OPEN_CALLS", s.CB_HALF_OPEN_CALLS), s.CB_HALF_OPEN_CALLS)
-        s.CB_WINDOW_SEC = _to_float(get("CB_WINDOW_SEC", s.CB_WINDOW_SEC), s.CB_WINDOW_SEC)
-
-        # телеграм/логи
-        s.TELEGRAM_BOT_TOKEN = get("TELEGRAM_BOT_TOKEN", s.TELEGRAM_BOT_TOKEN)
-        s.TELEGRAM_BOT_SECRET = get("TELEGRAM_BOT_SECRET", get("TELEGRAM_WEBHOOK_SECRET", s.TELEGRAM_BOT_SECRET))
-        s.LOG_LEVEL = str(get("LOG_LEVEL", s.LOG_LEVEL))
-        s.LOG_JSON = _to_bool(get("LOG_JSON", s.LOG_JSON), s.LOG_JSON)
-        s.DB_PATH = str(get("DB_PATH", s.DB_PATH))
-        s.PUBLIC_BASE_URL = str(get("PUBLIC_BASE_URL", s.PUBLIC_BASE_URL))
-        s.TZ = str(get("TZ", s.TZ))
-
-        return s
-
-    @classmethod
-    def from_reader(cls, reader: Mapping[str, Any]) -> "Settings":
-        # совместимость: можно прокинуть словарь из dotenv
-        return cls.build(reader)
-
-    # ---- алиасы для getattr ----
-    @classmethod
-    def _canon_key(cls, name: str) -> str:
-        k = name
-        if k in cls.__dict__:
-            return k
-        if k in cls._ALIASES:
-            return cls._ALIASES[k]
-        if k.upper() in cls._ALIASES.values():
-            return k.upper()
-        return k
-
-    def __getattr__(self, name: str) -> Any:
-        # поддерживаем snake_case алиасы
-        if name in self._ALIASES:
-            return getattr(self, self._ALIASES[name], None)
-        raise AttributeError(name)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+    def load(cls) -> "Settings":
+        return cls()
