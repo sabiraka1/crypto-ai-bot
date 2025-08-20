@@ -1,49 +1,53 @@
 # src/crypto_ai_bot/utils/metrics.py
 from __future__ import annotations
+from typing import Dict, Iterable, Optional, Tuple
 
-import time
-from contextlib import contextmanager
-from typing import Dict, Optional
+try:
+    from prometheus_client import Counter, Gauge, Histogram
+    PROM = True
+except Exception:
+    PROM = False
 
-from prometheus_client import Counter, Histogram
-
-# Глобальные реестры (простые и стабильные имена метрик)
-_COUNTERS: Dict[str, Counter] = {}
-_HIST: Dict[str, Histogram] = {}
+_REG_C: Dict[str, object] = {}
+_REG_G: Dict[str, object] = {}
+_REG_H: Dict[str, object] = {}
 
 def _labels(labels: Optional[Dict[str, str]]) -> Dict[str, str]:
-    # Prometheus требует строковые метки
     if not labels:
         return {}
+    # force str->str for Prom
     return {str(k): str(v) for k, v in labels.items()}
 
-def inc(name: str, labels: Optional[Dict[str, str]] = None, amount: float = 1.0) -> None:
-    key = name
-    if key not in _COUNTERS:
-        _COUNTERS[key] = Counter(key, f"counter:{key}", labelnames=sorted(_labels(labels).keys()))
-    c = _COUNTERS[key]
-    if labels:
-        c.labels(**_labels(labels)).inc(amount)
-    else:
-        c.inc(amount)
+def inc(name: str, labels: Optional[Dict[str, str]] = None, help: str = "") -> None:
+    if not PROM:
+        return
+    key = (name, tuple(sorted((labels or {}).items())))
+    if name not in _REG_C:
+        _REG_C[name] = Counter(name, help or name, list((labels or {}).keys()))
+    c: Counter = _REG_C[name]  # type: ignore
+    c.labels(**_labels(labels)).inc()
 
-def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None,
-                      buckets: Optional[list[float]] = None) -> None:
-    key = name
-    if key not in _HIST:
-        # разумные дефолтные бакеты, если не указаны
-        b = buckets or [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
-        _HIST[key] = Histogram(key, f"histogram:{key}", buckets=b, labelnames=sorted(_labels(labels).keys()))
-    h = _HIST[key]
-    if labels:
-        h.labels(**_labels(labels)).observe(value)
-    else:
-        h.observe(value)
+def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None, help: str = "") -> None:
+    if not PROM:
+        return
+    if name not in _REG_G:
+        _REG_G[name] = Gauge(name, help or name, list((labels or {}).keys()))
+    g: Gauge = _REG_G[name]  # type: ignore
+    g.labels(**_labels(labels)).set(value)
 
-@contextmanager
-def timer(name: str, labels: Optional[Dict[str, str]] = None):
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        observe_histogram(name, time.perf_counter() - start, labels=labels)
+def observe_histogram(
+    name: str,
+    value: float,
+    labels: Optional[Dict[str, str]] = None,
+    buckets: Optional[Iterable[float]] = None,
+    help: str = "",
+) -> None:
+    if not PROM:
+        return
+    if name not in _REG_H:
+        if buckets is None:
+            _REG_H[name] = Histogram(name, help or name, list((labels or {}).keys()))
+        else:
+            _REG_H[name] = Histogram(name, help or name, list((labels or {}).keys()), buckets=buckets)
+    h: Histogram = _REG_H[name]  # type: ignore
+    h.labels(**_labels(labels)).observe(value)
