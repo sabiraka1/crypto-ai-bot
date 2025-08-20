@@ -1,65 +1,35 @@
 # src/crypto_ai_bot/app/middleware.py
 from __future__ import annotations
 
-import json
-import time
 import uuid
 from typing import Callable, Awaitable
 
-from starlette.types import ASGIApp, Receive, Scope, Send, Message
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils.rate_limit import MultiLimiter
+from crypto_ai_bot.utils.rate_limit import TokenBucket
 
 
-class RateLimitMiddleware:
-    """
-    Входной rate-limit для HTTP (ASGI). Единый источник истины — utils.rate_limit.MultiLimiter.
-    Также добавляет X-Request-ID в ответ и прокидывает request_id в логи через контекст.
-    """
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Глобальный входной rate-limit на процесс (ASGI-уровень)."""
 
-    def __init__(self, app: ASGIApp, settings: Settings | None = None) -> None:
-        self.app = app
-        self.settings = settings or Settings.load()
-        # Один глобальный бакет для HTTP. Если нужно — можно добавить по-роутовый ключ
-        http_rps = int(getattr(self.settings, "HTTP_RPS", 20))
-        self.limiter = MultiLimiter(global_rps=http_rps)
+    def __init__(self, app, settings: Settings) -> None:
+        super().__init__(app)
+        cap = int(getattr(settings, "HTTP_RL_CAPACITY", 60))
+        window = float(getattr(settings, "HTTP_RL_WINDOW_SEC", 1.0))
+        refill = cap / max(0.001, window)
+        self.bucket = TokenBucket(capacity=cap, refill_per_sec=refill)
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        # request_id для корреляции логов
+        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = req_id
 
-        request_id = str(uuid.uuid4())
-        start_ts = time.time()
+        if not self.bucket.try_acquire(1.0):
+            # 429 Too Many Requests
+            return Response(status_code=429, content="rate limited")
 
-        # Берём токен из единого лимитера
-        if not self.limiter.try_acquire("http", 1):
-            body = json.dumps({"error": "rate_limited"}).encode("utf-8")
-
-            async def _send(msg: Message) -> None:
-                if msg["type"] == "http.response.start":
-                    headers = [(b"content-type", b"application/json"),
-                               (b"x-request-id", request_id.encode("utf-8"))]
-                    msg = {**msg, "status": 429, "headers": headers}
-                elif msg["type"] == "http.response.body":
-                    msg = {**msg, "body": body}
-                await send(msg)
-
-            await _send({"type": "http.response.start"})
-            await _send({"type": "http.response.body"})
-            return
-
-        # Оборачиваем send, чтобы добавить X-Request-Id
-        async def send_with_header(msg: Message) -> None:
-            if msg["type"] == "http.response.start":
-                headers = msg.get("headers") or []
-                headers = list(headers) + [(b"x-request-id", request_id.encode("utf-8"))]
-                msg = {**msg, "headers": headers}
-            await send(msg)
-
-        try:
-            await self.app(scope, receive, send_with_header)
-        finally:
-            # здесь можно наблюдать latency через utils.metrics, если нужно
-            _ = time.time() - start_ts
+        resp = await call_next(request)
+        resp.headers["X-Request-ID"] = req_id
+        return resp

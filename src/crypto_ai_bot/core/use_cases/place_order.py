@@ -1,88 +1,101 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
 
-import logging
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.idempotency import build_key, validate_key
-from crypto_ai_bot.utils.metrics import inc, observe_histogram
+from crypto_ai_bot.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# TypedDict-и вы уже добавляли ранее; оставлю минимальные type hints через Dict[str, Any]
+OrderResult = Dict[str, Any]
 
 
-def place_order(
+def _buy_quote_budget(notional_usd: Decimal, fee_bps: int) -> Decimal:
+    # вычитаем комиссию, чтобы хватало на market buy (Gate.io)
+    fee = (notional_usd * Decimal(fee_bps)) / Decimal(10_000)
+    return notional_usd - fee
+
+
+async def place_order(
     *,
     broker,
-    settings,
     trades_repo,
     positions_repo,
     idempotency_repo,
+    audit_repo,
+    settings,
     symbol: str,
-    side: str,                # "buy" | "sell"
-    notional_usd: Optional[float] = None,  # для BUY
-    sell_qty_base: Optional[float] = None, # для SELL
-) -> Dict[str, Any]:
+    side: str,               # "buy" | "sell"
+    notional_usd: Optional[Decimal] = None,  # для BUY
+    qty: Optional[Decimal] = None,           # для SELL
+    expected_price: Optional[Decimal] = None,
+    idempotency_key: str,
+) -> OrderResult:
     """
-    Синхронный use-case. clientOrderId генерируется внутри брокера (ccxt_exchange) — тут НЕ делаем.
-    Idempotency: ключ резервируется ДО запроса в биржу, и коммитится после успешного исполнения.
+    Единая точка исполнения:
+      - бронь идемпотентности (TTL внутри репозитория)
+      - market BUY: сумма в котируемой валюте (Gate.io), с учётом комиссии
+      - market SELL: реальный объём позиции, округлённый по лимитам (ожидается вне — в use-case перед вызовом)
+      - create_order вызывает БРОКЕР; именно он генерит clientOrderId (CID) по idempotency_key
+      - коммит идемпотентности после успешного возврата брокера
     """
-    ts_ms = now_ms()
-    side = side.lower().strip()
-    if side not in ("buy", "sell"):
-        return {"ok": False, "error": "invalid_side"}
-
-    # 1) Идемпотентный ключ (без завязки на core.*)
-    bucket_ms = (ts_ms // 60_000) * 60_000  # минута
-    idem_key = build_key("order", symbol, side, str(bucket_ms))
-    if not validate_key(idem_key):
-        return {"ok": False, "error": "bad_idempotency_key"}
-
-    if not idempotency_repo.check_and_store(idem_key, ttl_ms=int(getattr(settings, "IDEMPOTENCY_TTL_MS", 120_000))):
-        inc("orders_duplicate_total", {"symbol": symbol, "side": side})
-        return {"ok": False, "error": "duplicate_request"}
+    # 1) бронь идемпотентности
+    if not idempotency_repo.check_and_store(idempotency_key):
+        logger.info("place_order duplicate blocked: %s", idempotency_key)
+        return {"status": "duplicate", "idem_key": idempotency_key}
 
     try:
-        # 2) Размер / баланс / защита от продажи «в минус»
-        if side == "sell":
-            pos = positions_repo.get(symbol)
-            pos_qty = float(pos["qty"]) if pos and "qty" in pos else 0.0
-            if pos_qty <= 0.0:
-                return {"ok": False, "error": "no_long_position"}
-            qty = float(sell_qty_base or pos_qty)
-            if qty <= 0.0:
-                return {"ok": False, "error": "invalid_sell_qty"}
-            # создаём ордер на продажу по рынку количеством base
-            result = broker.create_market_sell(symbol=symbol, amount_base=qty)
-
+        if side == "buy":
+            if notional_usd is None:
+                raise ValueError("notional_usd is required for BUY")
+            fee_bps = int(getattr(settings, "FEE_BPS", 20))
+            quote_cost = _buy_quote_budget(notional_usd, fee_bps)
+            res = await broker.create_order(
+                symbol=symbol,
+                type="market",
+                side="buy",
+                amount=float(quote_cost),  # Gate.io: сумма в quote
+                price=None,
+                params={},
+                idempotency_key=idempotency_key,  # CID делает брокер
+            )
+        elif side == "sell":
+            if qty is None:
+                raise ValueError("qty is required for SELL")
+            res = await broker.create_order(
+                symbol=symbol,
+                type="market",
+                side="sell",
+                amount=float(qty),
+                price=None,
+                params={},
+                idempotency_key=idempotency_key,  # CID делает брокер
+            )
         else:
-            # BUY: тратим notional в котируемой валюте (с учётом комиссии брокер уже скорректирует/проверит)
-            notional = float(notional_usd or 0.0)
-            if notional <= 0.0:
-                return {"ok": False, "error": "invalid_notional"}
-            result = broker.create_market_buy(symbol=symbol, notional_quote=notional)
+            raise ValueError(f"unsupported side: {side}")
 
-        # 3) Записываем сделку и фиксируем ключ
-        trades_repo.record_exchange_update(
-            order_id=result["id"],
-            state=result.get("status") or "filled",
-            raw=result,
+        # 2) запись pending → done / обновления в trades_repo обычно делают выше по стеку (reconcile)
+        #     здесь зафиксируем аудит
+        audit_repo.log(
+            kind="order_submitted",
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "expected_price": str(expected_price) if expected_price is not None else None,
+                "idem_key": idempotency_key,
+                "exchange_order": res,
+            },
         )
-        idempotency_repo.commit(idem_key)
 
-        # 4) Метрики
-        exp = float(result.get("expected_price") or 0.0)
-        got = float(result.get("average") or result.get("price") or 0.0)
-        if exp > 0.0 and got > 0.0:
-            slippage_bps = abs(got - exp) / exp * 10_000
-            observe_histogram("trade_slippage_bps", slippage_bps, {"symbol": symbol, "side": side})
+        # 3) коммит идемпотентности — защита от повторов после успеха
+        idempotency_repo.commit(idempotency_key)
 
-        inc("orders_success_total", {"symbol": symbol, "side": side})
-        return {"ok": True, "order": result}
+        return {"status": "submitted", "order": res, "idem_key": idempotency_key}
 
     except Exception as e:
-        logger.exception("place_order failed: %s", e, extra={"symbol": symbol, "side": side})
-        inc("orders_fail_total", {"symbol": symbol, "side": side})
-        # ключ сам протухнет по TTL; намеренно не коммитим при ошибке
-        return {"ok": False, "error": "exchange_error"}
+        logger.exception("place_order failed: %s", e)
+        # при ошибке — можно пометить ключ как failed или оставить с TTL, чтобы повторить позже
+        return {"status": "error", "error": str(e), "idem_key": idempotency_key}
