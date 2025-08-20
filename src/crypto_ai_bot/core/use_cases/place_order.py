@@ -1,138 +1,70 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
-"""
-Сценарий размещения торговых ордеров (spot, long-only, Gate.io friendly).
-
-Изменения:
-- Генерация clientOrderId (Gate.io params["text"]) УДАЛЕНА из use-case.
-- Теперь мы передаем ТОЛЬКО params["idempotency_key"] в брокер;
-  уникальный clientOrderId формируется внутри ccxt_exchange.py.
-
-— End-to-end идемпотентность:
-    • приложенческая (idempotency_repo)
-    • биржевая (Gate.io client order id через брокер)
-— MARKET BUY на Gate.io принимает КОТИРОВАЛЬНУЮ сумму (quote-cost), поэтому:
-    • передаём params["createMarketBuyOrderRequiresPrice"] = False
-    • amount = quote_cost (USDT) с учётом комиссии
-— MARKET SELL принимает базовый объём: продаём фактический открытый qty, если доступен
-— Спред-гард и квантование объёмов по precision/минимумам
-— Метрики: trade_attempts_total / trade_fills_total / trade_slippage_bps (гистограмма)
-"""
 from __future__ import annotations
 
-import logging
 import time
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
-from typing import Any, Dict, Optional, TypedDict, NotRequired
+from typing import Any, Dict, Optional
 
-from crypto_ai_bot.core.brokers.symbols import normalize_symbol
-from crypto_ai_bot.core.use_cases.protective_exits import ensure_protective_exits
-from crypto_ai_bot.utils.idempotency import build_key
-from crypto_ai_bot.utils.metrics import inc, observe_histogram  # ⇦ метрики
-
-logger = logging.getLogger("use_cases.place_order")
-
-
-class Order(TypedDict, total=False):
-    id: str
-    symbol: str
-    side: str        # "buy" | "sell"
-    qty: str
-    price: float
-    status: str      # "executed" | "rejected" | "failed"
-    reason: NotRequired[str]
+Number = float  # hint alias
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _last_ticker(broker: Any, symbol: str) -> Dict[str, float]:
-    t = broker.fetch_ticker(symbol) or {}
-    return {
-        "last": float(t.get("last") or t.get("close") or 0.0),
-        "bid": float(t.get("bid") or 0.0),
-        "ask": float(t.get("ask") or 0.0),
-    }
-
-
-def _calc_spread_bps(tkr: Dict[str, float]) -> float:
-    bid = tkr.get("bid", 0.0)
-    ask = tkr.get("ask", 0.0)
-    if bid > 0.0 and ask > 0.0:
-        mid = 0.5 * (bid + ask)
-        return float((ask - bid) / mid * 10_000.0)
+def _spread_bps(ticker: Dict[str, Any]) -> float:
+    bid = float(ticker.get("bid") or 0) or 0.0
+    ask = float(ticker.get("ask") or 0) or 0.0
+    if bid > 0 and ask > 0 and ask >= bid:
+        mid = (ask + bid) / 2.0
+        return ((ask - bid) / mid) * 10_000.0
     return 0.0
 
 
-def _get_market_meta(broker: Any, symbol: str) -> Dict[str, Any]:
-    """
-    precision/limits из ccxt.markets, если доступны
-    """
-    try:
-        ex = getattr(broker, "ccxt", None) or broker
-        markets = getattr(ex, "markets", None)
-        if markets and symbol in markets:
-            m = markets[symbol] or {}
-            prec = (m.get("precision") or {})
-            lims = (m.get("limits") or {})
-            amt_limits = lims.get("amount") or {}
-            return {
-                "amount_precision": prec.get("amount"),
-                "price_precision": prec.get("price"),
-                "amount_min": amt_limits.get("min"),
-                "amount_max": amt_limits.get("max"),
-                "spot": bool(m.get("spot") is True or str(m.get("type") or "").lower() == "spot"),
-            }
-    except Exception:
-        pass
-    return {"amount_precision": None, "price_precision": None, "amount_min": None, "amount_max": None, "spot": True}
+def _last_price(ticker: Dict[str, Any]) -> float:
+    last = ticker.get("last")
+    if last is None:
+        bid = ticker.get("bid") or 0
+        ask = ticker.get("ask") or 0
+        if bid and ask:
+            return (float(bid) + float(ask)) / 2.0
+        return float(ticker.get("close") or 0) or float(ticker.get("ask") or 0) or float(ticker.get("bid") or 0) or 0.0
+    return float(last)
 
 
-def _quantize_amount(side: str, amount: float, amount_precision: Optional[int], amount_min: Optional[float]) -> float:
-    out = float(amount or 0.0)
-    if amount_precision is not None:
-        q = Decimal(1).scaleb(-int(amount_precision))
-        dec = Decimal(str(out))
-        out = float(dec.quantize(q, rounding=ROUND_DOWN if side == "buy" else ROUND_UP))
-    if amount_min is not None and out < float(amount_min or 0.0):
-        out = float(amount_min) if side == "buy" else 0.0
-    return max(0.0, out)
+def _effective_price(last_px: Number, slippage_bps: Number) -> float:
+    return float(last_px) * (1.0 + float(slippage_bps) / 10_000.0)
 
 
-# ---------- sizing helpers (slippage & fee aware) ----------
-
-def _effective_price(last_price: float, slippage_bps: float) -> float:
-    return float(last_price) * (1.0 + float(slippage_bps) / 10_000.0)
-
-
-def _buy_quote_budget(notional_quote: float, fee_bps: float) -> float:
-    """
-    Gate spot market BUY: amount = QUOTE cost.
-    Чтобы не упереться в недостаток средств из-за комиссии, уменьшаем бюджет на fee.
-    """
-    fee_part = float(notional_quote) * (float(fee_bps) / 10_000.0)
-    return max(0.0, float(notional_quote) - fee_part)
+def _quote_after_fee(notional_quote: Number, fee_bps: Number) -> float:
+    """Reduce BUY notional by taker fee so gate.io market BUY passes."""
+    fee = float(fee_bps) / 10_000.0
+    return max(0.0, float(notional_quote) * (1.0 - fee))
 
 
-def _sell_base_qty_from_positions(positions_repo: Any, symbol: str) -> float:
-    """
-    Из репозитория позиций достаём фактический открытый qty для SELL.
-    Если нет — вернём 0.0 (лучше не продавать «с потолка»).
-    """
-    try:
-        if hasattr(positions_repo, "get_open"):
-            rows = positions_repo.get_open() or []
-            for r in rows:
-                if str(r.get("symbol")) == symbol:
-                    return float(r.get("qty") or 0.0)
-        if hasattr(positions_repo, "get_qty"):
-            return float(positions_repo.get_qty(symbol) or 0.0)
-    except Exception:
-        pass
+def _make_idem_key(symbol: str, side: str, ttl_sec: int) -> str:
+    bucket = _now_ms() // max(1, int(ttl_sec)) // 1000  # seconds bucket
+    return f"order:{symbol}:{side}:{bucket}"
+
+
+def _positions_qty(positions_repo: Any, symbol: str) -> float:
+    """Best-effort read of current position qty from repository."""
+    if positions_repo is None:
+        return 0.0
+    # try common APIs
+    if hasattr(positions_repo, "get"):
+        row = positions_repo.get(symbol)
+        if row:
+            q = row.get("qty") or row.get("quantity")
+            if q is not None:
+                return float(q)
+    if hasattr(positions_repo, "get_qty"):
+        try:
+            return float(positions_repo.get_qty(symbol))
+        except Exception:
+            pass
+    # fallback
     return 0.0
 
-
-# ---------- main ----------
 
 def place_order(
     *,
@@ -140,180 +72,156 @@ def place_order(
     broker: Any,
     trades_repo: Any,
     positions_repo: Any,
-    exits_repo: Optional[Any],
+    exits_repo: Any,
     symbol: str,
-    side: str,  # 'buy' | 'sell'
-    idempotency_repo: Optional[Any] = None,
-    now_ms: Optional[int] = None,
+    side: str,
+    idempotency_repo: Any,
     bus: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    Возврат:
-      {'accepted': bool, 'error': Optional[str], 'executed_price': float, 'executed_qty': float, 'idempotency_key': Optional[str]}
+    Single entry point to place a SPOT **market** order.
+
+    - Long-only: side ∈ {"buy","sell"}; SELL uses current position qty.
+    - Idempotency (app level): key reserved in idempotency_repo (TTL bucket).
+    - Idempotency (exchange level): key is forwarded to broker via params["idempotency_key"];
+      broker will derive clientOrderId / Gate.io `text` from it.
+    - Spread guard & fee/slippage-aware sizing.
     """
-    ts = int(now_ms or _now_ms())
-    sym = normalize_symbol(symbol or getattr(cfg, "SYMBOL", "BTC/USDT"))
-    side = str(side or "buy").lower()
+    sym = str(symbol)
+    side = str(side).lower().strip()
+    assert side in {"buy", "sell"}, f"unsupported side: {side}"
 
-    if side not in ("buy", "sell"):
-        return {"accepted": False, "error": "unsupported_side", "executed_price": 0.0, "executed_qty": 0.0}
+    if not getattr(cfg, "ENABLE_TRADING", True):
+        return {"accepted": False, "code": "trading_disabled"}
 
-    # spot only
-    meta = _get_market_meta(broker, sym)
-    if not bool(meta.get("spot", True)):
-        return {"accepted": False, "error": "spot_only", "executed_price": 0.0, "executed_qty": 0.0}
+    # ---- app-level idempotency
+    ttl_sec = int(getattr(cfg, "IDEMPOTENCY_TTL_SEC", 60))
+    idem_key = _make_idem_key(sym, side, ttl_sec=ttl_sec)
+    if idempotency_repo is not None and hasattr(idempotency_repo, "check_and_store"):
+        ok = bool(idempotency_repo.check_and_store(idem_key, ttl_sec=ttl_sec))
+        if not ok:
+            return {"accepted": False, "code": "duplicate_request", "idempotency_key": idem_key}
 
-    # ордер SELL — только при наличии позиции
-    if side == "sell":
-        pos_qty = _sell_base_qty_from_positions(positions_repo, sym)
-        if pos_qty <= 0.0:
-            return {"accepted": False, "error": "no_long_position", "executed_price": 0.0, "executed_qty": 0.0}
-
-    # идемпотентность приложения
-    idem_key = None
-    if idempotency_repo is not None:
-        try:
-            bucket_ms = int(getattr(cfg, "IDEMPOTENCY_BUCKET_MS", 5_000))
-            idem_key = build_key(symbol=sym, side=side, bucket_ms=bucket_ms, source="order")
-            ok = idempotency_repo.check_and_store(idem_key, ttl_seconds=int(getattr(cfg, "IDEMPOTENCY_TTL_SEC", 300)))
-            if not ok:
-                inc("orders_duplicate_total")
-                return {"accepted": False, "error": "duplicate_request", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
-        except Exception as e:
-            logger.exception("idempotency claim failed: %s", e)
-
-    # котировки + спред-guard
-    tkr = _last_ticker(broker, sym)
-    last = float(tkr["last"])
-    if last <= 0.0:
-        return {"accepted": False, "error": "no_price", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
-    spread_bps = _calc_spread_bps(tkr)
-    max_spread = float(getattr(cfg, "MAX_SPREAD_BPS", 50.0))
-    if spread_bps > max_spread:
-        return {"accepted": False, "error": "spread_too_wide", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
-
-    # параметры слиппеджа/комиссий
-    slippage_bps = float(getattr(cfg, "SLIPPAGE_BPS", 20.0))
-    fee_bps = float(getattr(cfg, "TAKER_FEE_BPS", getattr(cfg, "FEE_TAKER_BPS", 10.0)))
-    eff_price = _effective_price(last, slippage_bps)
-
-    # метрика попытки
-    inc("trade_attempts_total", {"symbol": sym, "side": side})
-
-    executed_price = 0.0
-    executed_qty = 0.0
-    od: Dict[str, Any] = {}
-
+    # ---- market data
+    ticker = {}
     try:
-        # ⬇️ ТОЛЬКО передаём идемпотентный ключ; clientOrderId сгенерит брокер
-        params: Dict[str, Any] = {"idempotency_key": idem_key}
-
-        # Per-endpoint rate limit (опционально): если у брокера есть локальный лимитер — уважаем
-        limiter = getattr(broker, "limiter", None) or getattr(broker, "_limiter", None)
-        if limiter is not None and hasattr(limiter, "try_acquire"):
-            try:
-                ok = limiter.try_acquire("orders")  # type: ignore[attr-defined]
-                if not ok:
-                    return {"accepted": False, "error": "rate_limited", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
-            except Exception:
-                # не критично — продолжаем (на брокере всё равно есть защита)
-                pass
-
-        if side == "buy":
-            # Gate spot market buy: amount = QUOTE (USDT) with createMarketBuyOrderRequiresPrice=False
-            params["createMarketBuyOrderRequiresPrice"] = False
-            notional = float(getattr(cfg, "POSITION_SIZE_USD", getattr(cfg, "POSITION_SIZE", 0.0)) or 0.0)
-            if notional <= 0.0:
-                return {"accepted": False, "error": "zero_notional", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
-            quote_cost = _buy_quote_budget(notional, fee_bps)
-            od = broker.create_order(symbol=sym, type="market", side="buy", amount=float(quote_cost), price=None, params=params)
-
-        else:
-            # SELL: продаём фактический объём позиции (base qty)
-            base_qty = _sell_base_qty_from_positions(positions_repo, sym)
-            base_qty = _quantize_amount("sell", base_qty, meta.get("amount_precision"), meta.get("amount_min"))
-            if base_qty <= 0.0:
-                return {"accepted": False, "error": "zero_amount", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
-            od = broker.create_order(symbol=sym, type="market", side="sell", amount=float(base_qty), price=None, params=params)
-
-        executed_price = float(od.get("price") or last or 0.0)
-        executed_qty = float(od.get("amount") or od.get("filled") or 0.0)
-
+        ticker = broker.fetch_ticker(sym) or {}
     except Exception as e:
-        inc("orders_fail_total")
-        logger.exception("broker.create_order failed: %s", e)
-        if idempotency_repo is not None and idem_key:
+        return {"accepted": False, "code": "ticker_failed", "error": str(e)}
+
+    # spread guard
+    max_spread_bps = float(getattr(cfg, "MAX_SPREAD_BPS", 50.0))
+    spr = _spread_bps(ticker)
+    if spr > max_spread_bps:
+        return {"accepted": False, "code": "spread_too_wide", "spread_bps": spr}
+
+    last_px = _last_price(ticker)
+    if last_px <= 0:
+        return {"accepted": False, "code": "bad_last_price"}
+
+    # sizing params
+    fee_bps = float(getattr(cfg, "FEE_BPS", 20.0))              # 0.20% by default
+    slippage_bps = float(getattr(cfg, "SLIPPAGE_BPS", 20.0))    # 0.20% assumed
+    eff_px = _effective_price(last_px, slippage_bps)
+
+    params: Dict[str, Any] = {
+        "idempotency_key": idem_key,
+        # Gate-specific helper for market BUY without price in CCXT:
+        "createMarketBuyOrderRequiresPrice": False,
+    }
+
+    # ---- determine amount
+    if side == "buy":
+        # budget (quote) -> amount for gate is *quote cost*, net of fee
+        notional = float(getattr(cfg, "POSITION_SIZE_USD", getattr(cfg, "NOTIONAL_USDT", 50.0)))
+        quote_cost = _quote_after_fee(notional, fee_bps)
+        amount = max(0.0, quote_cost)  # amount is QUOTE
+    else:
+        # SELL available position (floored to precision by broker)
+        pos_qty = _positions_qty(positions_repo, sym)
+        if pos_qty <= 0:
+            return {"accepted": False, "code": "no_long_position"}
+        amount = float(pos_qty)  # amount is BASE
+
+    # ---- optimistic record in trades repo (if API available)
+    trade_row_id = None
+    ts = _now_ms()
+    if trades_repo is not None:
+        if hasattr(trades_repo, "create_pending_order"):
             try:
-                idempotency_repo.rollback(idem_key)
+                trade_row_id = trades_repo.create_pending_order(
+                    symbol=sym,
+                    side=side,
+                    price=float(last_px),
+                    exp_qty=float(amount if side == "sell" else (amount / eff_px if eff_px > 0 else 0.0)),
+                    idempotency_key=idem_key,
+                )
+            except Exception:
+                trade_row_id = None
+
+    # ---- optional pre-check rate limit (soft)
+    if hasattr(broker, "limiter") and hasattr(broker.limiter, "try_acquire"):
+        bucket = "orders"
+        if not broker.limiter.try_acquire(bucket):
+            return {"accepted": False, "code": "rate_limited_local"}
+
+    # ---- send order
+    try:
+        od = broker.create_order(
+            symbol=sym,
+            type="market",
+            side=side,
+            amount=float(amount),
+            price=None,
+            params=params,
+        ) or {}
+    except Exception as e:
+        # rollback idempotency key if we created a pending trade and want re-try
+        return {"accepted": False, "code": "order_failed", "error": str(e), "idempotency_key": idem_key}
+
+    # ---- persist exchange response if repo has proper API
+    order_id = str(od.get("id") or od.get("order_id") or "")
+    avg_px = float(od.get("average") or od.get("price") or 0.0) or eff_px
+    filled = float(od.get("filled") or od.get("amount") or 0.0)
+
+    executed_price = float(avg_px or eff_px)
+    executed_qty = float(filled if side == "sell" else (filled or (amount / eff_px if eff_px > 0 else 0.0)))
+
+    if trades_repo is not None:
+        if hasattr(trades_repo, "record_exchange_update"):
+            try:
+                trades_repo.record_exchange_update(
+                    order_id=order_id,
+                    state=str(od.get("status") or "filled"),
+                    raw=od,
+                )
             except Exception:
                 pass
-        if bus is not None and hasattr(bus, "publish"):
-            import asyncio
-            asyncio.create_task(bus.publish({
+        elif hasattr(trades_repo, "mark_filled") and trade_row_id is not None:
+            try:
+                trades_repo.mark_filled(trade_row_id, price=executed_price, qty=executed_qty, order_id=order_id)
+            except Exception:
+                pass
+
+    # ---- publish event (best-effort)
+    if bus is not None and hasattr(bus, "publish"):
+        try:
+            bus.publish({
                 "type": "OrderExecuted",
                 "symbol": sym,
-                "order_id": "",
+                "order_id": order_id,
                 "side": side,
-                "qty": "0",
-                "price": 0.0,
+                "qty": executed_qty,
+                "price": executed_price,
                 "ts_ms": ts,
-                "error": "broker_error",
-            }))
-        return {"accepted": False, "error": "broker_error", "idempotency_key": idem_key, "executed_price": 0.0, "executed_qty": 0.0}
+            })
+        except Exception:
+            pass
 
-    # запись сделки (best-effort), сохраняем ожидания/идемпотентность
-    try:
-        payload = {
-            "ts": ts,
-            "symbol": sym,
-            "side": side,
-            "price": executed_price,
-            "qty": executed_qty,
-            "info": {
-                "idempotency_key": idem_key,
-                "expected_price": eff_price,  # ⇦ для аудита ожиданий
-                "exchange_order": od,
-            },
-        }
-        for meth in ("record", "insert", "add", "create"):
-            if hasattr(trades_repo, meth):
-                getattr(trades_repo, meth)(payload)
-                break
-    except Exception as e:
-        logger.debug("trade persistence failed (non-fatal): %r", e)
-
-    # commit идемпотентности
-    if idempotency_repo is not None and idem_key:
-        try:
-            idempotency_repo.commit(idem_key)
-        except Exception as e:
-            logger.debug("idempotency commit failed (non-fatal): %r", e)
-
-    # ✅ единый источник SL/TP: use-case ensure_protective_exits
-    try:
-        if exits_repo and side == "buy":
-            ensure_protective_exits(cfg, exits_repo, positions_repo, symbol=sym, entry_price=executed_price, position_id=None)
-    except Exception as e:
-        logger.debug("ensure_protective_exits failed (non-fatal): %r", e)
-
-    # метрики исполнения и фактического слиппеджа
-    inc("orders_success_total")
-    inc("trade_fills_total", {"symbol": sym, "side": side})
-    if executed_price > 0.0 and last > 0.0:
-        slippage_bps_actual = abs(executed_price - last) / last * 10_000.0
-        observe_histogram("trade_slippage_bps", slippage_bps_actual, {"symbol": sym, "side": side})
-
-    # событие
-    if bus is not None and hasattr(bus, "publish"):
-        import asyncio
-        asyncio.create_task(bus.publish({
-            "type": "OrderExecuted",
-            "symbol": sym,
-            "order_id": str(od.get("id") or ""),
-            "side": side,
-            "qty": str(executed_qty),
-            "price": float(executed_price),
-            "ts_ms": ts,
-        }))
-
-    return {"accepted": True, "executed_price": executed_price, "executed_qty": executed_qty, "idempotency_key": idem_key}
+    return {
+        "accepted": True,
+        "order": od,
+        "executed_price": executed_price,
+        "executed_qty": executed_qty,
+        "idempotency_key": idem_key,
+    }
