@@ -2,126 +2,130 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from contextlib import asynccontextmanager
 from typing import Any, Dict
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from crypto_ai_bot.app.compose import build_container
-from crypto_ai_bot.core.orchestrator import Orchestrator
+from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update
+from crypto_ai_bot.utils.time import monotonic_ms, now_ms
 
-try:
-    from crypto_ai_bot.app.adapters.telegram import handle_update as tg_handle_legacy
-except Exception:
-    tg_handle_legacy = None
+logger = logging.getLogger(__name__)
+app = FastAPI()
 
-logger = logging.getLogger("app.server")
+# ----------------------------- lifecycle -------------------------------------
 
+_container = None
+_orchestrator = None
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+@app.on_event("startup")
+async def _startup() -> None:
+    global _container, _orchestrator
+    _container = build_container()
+    _orchestrator = _container.orchestrator
+    await _orchestrator.start()
+    logger.info("server_started")
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
     try:
-        # build DI
-        container = build_container()
-        if container is None:
-            raise RuntimeError("Failed to build container")
-            
-        app.state.container = container
-        
-        # EventBus
-        if hasattr(container, "bus") and hasattr(container.bus, "start"):
-            await container.bus.start()
-        
-        # Orchestrator
-        orch = Orchestrator(
-            settings=container.settings,
-            broker=container.broker,
-            trades_repo=container.trades_repo,
-            positions_repo=container.positions_repo,
-            exits_repo=container.exits_repo,
-            idempotency_repo=container.idempotency_repo,
-            bus=container.bus,
-            risk_manager=None
-        )
-        app.state.orchestrator = orch
-        await orch.start()
-        
-        yield
-        
-    except Exception as e:
-        logger.error(f"Startup failed: {e}", exc_info=True)
-        raise
-        
+        if _orchestrator:
+            await _orchestrator.stop()
     finally:
-        # graceful shutdown
-        try:
-            if hasattr(app.state, "orchestrator"):
-                await app.state.orchestrator.stop()
-        except Exception:
-            pass
-        try:
-            if hasattr(app.state.container, "bus") and hasattr(app.state.container.bus, "stop"):
-                await app.state.container.bus.stop()
-        except Exception:
-            pass
-        # закрываем репозитории/соединения
-        if hasattr(app.state, "container"):
-            container = app.state.container
-            for name in ("trades_repo", "positions_repo", "exits_repo", "idempotency_repo", "con"):
-                try:
-                    obj = getattr(container, name, None)
-                    if obj and hasattr(obj, "close"):
-                        obj.close()
-                except Exception:
-                    pass
+        logger.info("server_stopped")
 
+# -------------------------------- health -------------------------------------
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="crypto-ai-bot", version="1.0", lifespan=lifespan)
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    return {"ok": True, "ts": now_ms()}
 
-    @app.get("/health", tags=["infra"])
-    async def health():
-        c = app.state.container
-        # базовый health + пару показателей
-        broker_ok = True
-        latency = 0.0
-        try:
-            # не блокируем loop
-            t0 = time.time()
-            tk = await asyncio.to_thread(c.broker.fetch_ticker, getattr(c.settings, "SYMBOL", "BTC/USDT"))
-            latency = (time.time() - t0) * 1000  # в миллисекундах
-            broker_ok = bool(tk)
-        except Exception:
-            broker_ok = False
+@app.get("/health/extended")
+async def health_extended() -> Dict[str, Any]:
+    c = _container
+    ok = True
+    checks: Dict[str, Any] = {}
+    # broker latency
+    t0 = monotonic_ms()
+    try:
+        sym = (getattr(c.settings, "SYMBOLS", None) or [getattr(c.settings, "SYMBOL", "BTC/USDT")])[0]
+        # быстрая проверка доступности данных
+        _ = await c.broker.fetch_ticker(sym)
+        checks["exchange_latency_ms"] = monotonic_ms() - t0
+        checks["broker_ok"] = True
+    except Exception as e:
+        checks["broker_ok"] = False
+        checks["broker_error"] = repr(e)
+        ok = False
 
-        return JSONResponse({
-            "ok": broker_ok,
-            "exchange_latency_ms": latency,
-            "mode": getattr(c.settings, "MODE", "unknown"),
-        })
+    # db ok (пробуем простой kv.get или trades ping)
+    try:
+        hb = getattr(c.repos.kv, "get", lambda *_: None)("orchestrator_heartbeat_ms")
+        checks["heartbeat_ms"] = hb
+        checks["db_ok"] = True
+    except Exception as e:
+        checks["db_ok"] = False
+        checks["db_error"] = repr(e)
+        ok = False
 
-    @app.get("/metrics", tags=["infra"])
-    async def metrics():
-        try:
-            from crypto_ai_bot.utils.metrics import export_prometheus
-            payload = export_prometheus()
-            return PlainTextResponse(payload)
-        except Exception:
-            return PlainTextResponse("# no metrics exporter wired\n")
+    # positions / exits size (best-effort)
+    try:
+        pos_count = 0
+        get_all = getattr(c.repos.positions, "get_all", None)
+        if callable(get_all):
+            pos = await get_all() if asyncio.iscoroutinefunction(get_all) else get_all()
+            pos_count = len(pos) if pos is not None else 0
+        checks["positions_open"] = pos_count
+    except Exception:
+        checks["positions_open"] = "n/a"
 
-    @app.post("/telegram", tags=["adapters"])  # Изменено с /telegram/webhook
-    async def telegram_webhook(request: Request):
-        body = await request.body()
-        c = app.state.container
-        
-        if tg_handle_legacy:
-            return await tg_handle_legacy(app, body, c)
-        return JSONResponse({"ok": False, "error": "telegram_handler_not_configured"}, status_code=500)
+    try:
+        exits_count = 0
+        count_active = getattr(c.repos.exits, "count_active", None)
+        if callable(count_active):
+            exits_count = await count_active() if asyncio.iscoroutinefunction(count_active) else count_active()
+        checks["exits_active"] = exits_count
+    except Exception:
+        checks["exits_active"] = "n/a"
 
-    return app
+    return {"ok": ok, "ts": now_ms(), "checks": checks}
 
+# ------------------------------ telegram -------------------------------------
 
-app = create_app()
+def _check_secret(container, request: Request, payload: Dict[str, Any]) -> bool:
+    configured = getattr(container.settings, "TELEGRAM_BOT_SECRET", None)
+    if not configured:
+        return True  # секрет не настроен — пропускаем (dev)
+    # в query (?secret=...), в заголовке X-Telegram-Secret, либо внутри payload["secret"]
+    qsec = request.query_params.get("secret")
+    hsec = request.headers.get("X-Telegram-Secret")
+    psec = payload.get("secret")
+    return configured in (qsec, hsec, psec)
+
+@app.get("/telegram")
+async def telegram_get(request: Request) -> Response:
+    # удобно дергать из браузера для проверки: /telegram?secret=...
+    return JSONResponse({"ok": True, "msg": "POST update to /telegram or /telegram/webhook"})
+
+@app.post("/telegram")
+async def telegram_post(request: Request) -> Response:
+    c = _container
+    body = await request.json()
+    if not _check_secret(c, request, body):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+    await telegram_handle_update(c, body)
+    return JSONResponse({"ok": True})
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request) -> Response:
+    # дублируем POST /telegram для совместимости
+    c = _container
+    body = await request.json()
+    if not _check_secret(c, request, body):
+        return JSONResponse({"ok": False, "error": "forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+    await telegram_handle_update(c, body)
+    return JSONResponse({"ok": True})
