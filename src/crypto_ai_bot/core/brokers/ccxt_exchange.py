@@ -1,31 +1,57 @@
 # src/crypto_ai_bot/core/brokers/ccxt_exchange.py
 from __future__ import annotations
 
+import time
+import zlib
+import random
 import asyncio
-import binascii
-from decimal import Decimal
 from typing import Any, Dict, Optional
 
-import ccxt  # type: ignore
-
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils.rate_limit import build_gateio_limiter_from_settings, MultiLimiter
-from crypto_ai_bot.utils.time import now_ms
+import ccxt  # синхронный; оборачиваем в to_thread
+from crypto_ai_bot.utils.rate_limit import GateIOLimiter
+from crypto_ai_bot.utils.metrics import inc, observe_histogram
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker, CircuitOpenError
+from crypto_ai_bot.utils.retry import retry_async
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 
 logger = get_logger(__name__)
 
 
+def _crc32(s: str) -> str:
+    return format(zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF, "08x")
+
+
+def _gateio_text_from(ikey: str) -> str:
+    """
+    Gate.io clientOrderId -> поле `text`, должно начинаться с 't-' и быть <= 28 байт.
+    Инкапсулируем в одном месте.
+    """
+    base = f"t-{_crc32(ikey)}-{int(time.time())}"
+    return base[:28]
+
+
 class CCXTExchange:
-    """Тонкая обёртка над CCXT с лимитами, CB и clientOrderId для Gate.io."""
-
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, *, settings, loop: Optional[asyncio.AbstractEventLoop] = None):
         self.settings = settings
-        self.ccxt = self._build_ccxt(settings)
-        self.limiter: MultiLimiter = build_gateio_limiter_from_settings(settings)
+        self.loop = loop or asyncio.get_event_loop()
+        self.exchange_id = getattr(settings, "EXCHANGE", "gateio")
 
-        # Circuit Breaker с обязательным name
+        # CCXT client (sync)
+        exchange_cls = getattr(ccxt, self.exchange_id)
+        self.ccxt = exchange_cls(
+            {
+                "apiKey": getattr(settings, "API_KEY", None),
+                "secret": getattr(settings, "API_SECRET", None),
+                "enableRateLimit": True,
+                "options": {
+                    "defaultType": "spot",
+                    # важно для market buy без price
+                    "createMarketBuyOrderRequiresPrice": False,
+                },
+            }
+        )
+
+        # Circuit Breaker
         self.cb = CircuitBreaker(
             name="ccxt_broker",
             fail_threshold=int(getattr(settings, "CB_FAIL_THRESHOLD", 5)),
@@ -34,103 +60,135 @@ class CCXTExchange:
             window_sec=float(getattr(settings, "CB_WINDOW_SEC", 60.0)),
         )
 
-    # ---------- CCXT init ----------
-    def _build_ccxt(self, settings: Settings):
-        exchange_id = getattr(settings, "EXCHANGE", "gateio")
-        api_key = getattr(settings, "API_KEY", "")
-        api_secret = getattr(settings, "API_SECRET", "")
+        # Per-endpoint limiter
+        self.limiter = GateIOLimiter(settings)
 
-        klass = getattr(ccxt, exchange_id)
-        inst = klass({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "enableRateLimit": True,
-            "options": {
-                # market buy без price
-                "createMarketBuyOrderRequiresPrice": False,
-            },
-        })
-        return inst
-
-    # ---------- Helpers ----------
-    def _gateio_text_from(self, idem_key: str) -> Optional[str]:
-        """Стабильный clientOrderId для Gate.io в параметре `text` (28 байт, [A-Za-z0-9._-], префикс 't-')."""
+    # --------- helpers ---------
+    def _rl(self, bucket: str) -> bool:
         try:
-            crc = binascii.crc32(idem_key.encode("utf-8")) & 0xFFFFFFFF
-            # t- + 8 hex + epoch-ms tail (до лимита длины)
-            tail = hex(crc)[2:]
-            base = f"t-{tail}"
-            # безопасность длины
-            return base[:28]
+            return self.limiter.try_acquire(bucket)
         except Exception:
-            return None
+            # лимитер никогда не должен валить поток; fallback допускаем
+            return True
 
-    async def _rl(self, bucket: str) -> None:
-        # блокирующая попытка на очень короткое окно; если не вышло — лёгкий backoff
-        if not self.limiter.try_acquire(bucket):
-            await asyncio.sleep(0.05)
+    async def _to_thread(self, fn, *args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
 
-    async def _with_retries(self, bucket: str, fn, *a, **kw):
-        # circuit breaker
+    async def _with_retries(self, bucket: str, fn, *args, **kwargs):
         if not self.cb.allow():
-            raise CircuitOpenError("circuit is open")
+            inc("broker_circuit_open_total", {"exchange": self.exchange_id})
+            raise RuntimeError("circuit_open")
 
-        attempt = 0
-        last_exc = None
-        while attempt < int(getattr(self.settings, "HTTP_MAX_ATTEMPTS", 4)):
-            attempt += 1
+        # простая защита от «заливки» при полном исчерпании бакета
+        for _ in range(5):
+            if self._rl(bucket):
+                break
+            await asyncio.sleep(0.05 + random.random() * 0.05)
+
+        async def _call():
             try:
-                await self._rl(bucket)
-                return await asyncio.get_event_loop().run_in_executor(None, fn, *a, **kw)
-            except ccxt.RateLimitExceeded as e:
-                last_exc = e
-                self.cb.record_error("rate_limit", e)
-                await asyncio.sleep(min(1.0 * attempt, 3.0))
-            except (ccxt.NetworkError, ccxt.ExchangeError) as e:
-                last_exc = e
+                return await self._to_thread(fn, *args, **kwargs)
+            except ccxt.NetworkError as e:
                 self.cb.record_error("network", e)
-                await asyncio.sleep(min(0.5 * attempt, 2.0))
-            except Exception as e:
-                # логические ошибки — не ретраим
-                self.cb.record_error("fatal", e)
                 raise
-        # истощили попытки
-        raise last_exc or RuntimeError("max attempts exceeded")
+            except ccxt.RateLimitExceeded as e:
+                self.cb.record_error("rate_limit", e)
+                raise
+            except ccxt.DDoSProtection as e:
+                self.cb.record_error("ddos", e)
+                raise
+            except ccxt.ExchangeNotAvailable as e:
+                self.cb.record_error("unavailable", e)
+                raise
 
-    # ---------- Public API ----------
+        @retry_async(
+            attempts=int(getattr(self.settings, "BROKER_RETRY_ATTEMPTS", 4)),
+            backoff_base=float(getattr(self.settings, "BROKER_RETRY_BASE_SEC", 0.2)),
+            backoff_factor=float(getattr(self.settings, "BROKER_RETRY_FACTOR", 2.0)),
+            jitter=True,
+            retry_exceptions=(ccxt.NetworkError, ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.ExchangeNotAvailable),
+        )
+        async def _retryable():
+            return await _call()
+
+        res = await _retryable()
+        self.cb.record_success()
+        return res
+
+    # --------- public API ----------
     async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        return await self._with_retries("market_data", self.ccxt.fetch_ticker, symbol)
+        t0 = time.perf_counter()
+        res = await self._with_retries("market_data", self.ccxt.fetch_ticker, symbol)
+        observe_histogram("broker_fetch_ticker_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id})
+        return res
 
     async def fetch_balance(self) -> Dict[str, Any]:
-        return await self._with_retries("account", self.ccxt.fetch_balance)
+        t0 = time.perf_counter()
+        res = await self._with_retries("account", self.ccxt.fetch_balance)
+        observe_histogram("broker_fetch_balance_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id})
+        return res
 
-    async def fetch_order(self, order_id: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+    async def fetch_open_orders(self, symbol: Optional[str] = None):
+        bucket = "orders"
+        t0 = time.perf_counter()
         if symbol:
-            return await self._with_retries("orders", self.ccxt.fetch_order, order_id, symbol)
-        return await self._with_retries("orders", self.ccxt.fetch_order, order_id)
+            res = await self._with_retries(bucket, self.ccxt.fetch_open_orders, symbol)
+        else:
+            res = await self._with_retries(bucket, self.ccxt.fetch_open_orders)
+        observe_histogram("broker_fetch_open_orders_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id})
+        return res
 
-    async def fetch_open_orders(self, symbol: Optional[str] = None) -> Any:
+    async def fetch_order(self, order_id: str, symbol: Optional[str] = None):
+        t0 = time.perf_counter()
         if symbol:
-            return await self._with_retries("orders", self.ccxt.fetch_open_orders, symbol)
-        return await self._with_retries("orders", self.ccxt.fetch_open_orders)
+            res = await self._with_retries("orders", self.ccxt.fetch_order, order_id, symbol)
+        else:
+            res = await self._with_retries("orders", self.ccxt.fetch_order, order_id)
+        observe_histogram("broker_fetch_order_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id})
+        return res
 
-    async def create_order(
-        self,
-        *,
-        symbol: str,
-        type: str,
-        side: str,
-        amount: Optional[float] = None,
-        price: Optional[float] = None,
-        params: Optional[Dict[str, Any]] = None,
-        idempotency_key: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Маркет/лимит — CID генерируем тут (единая точка), place_order никаких CID не делает."""
-        p = dict(params or {})
-        if getattr(self.settings, "EXCHANGE", "gateio") == "gateio":
-            txt = self._gateio_text_from(idempotency_key or f"{symbol}:{side}:{now_ms()}")
-            if txt:
-                p["text"] = txt
+    async def create_market_buy_quote(self, *, symbol: str, quote_amount: float, idempotency_key: str):
+        """
+        Gate.io: рыночная покупка указывается в КОТИРУЕМОЙ валюте (USDT).
+        """
+        client_text = _gateio_text_from(idempotency_key)
+        params = {"text": client_text}
+        t0 = time.perf_counter()
+        res = await self._with_retries(
+            "orders",
+            self.ccxt.create_order,
+            symbol,
+            "market",
+            "buy",
+            quote_amount,  # для Gate/ccxt это notional в QUOTE
+            None,
+            params,
+        )
+        observe_histogram("broker_create_order_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id, "side": "buy"})
+        return res
 
-        fn = self.ccxt.create_order
-        return await self._with_retries("orders", fn, symbol, type, side, amount, price, p)
+    async def create_market_sell_base(self, *, symbol: str, base_amount: float, idempotency_key: str):
+        client_text = _gateio_text_from(idempotency_key)
+        params = {"text": client_text}
+        t0 = time.perf_counter()
+        res = await self._with_retries(
+            "orders",
+            self.ccxt.create_order,
+            symbol,
+            "market",
+            "sell",
+            base_amount,  # для sell указываем количество BASE
+            None,
+            params,
+        )
+        observe_histogram("broker_create_order_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id, "side": "sell"})
+        return res
+
+    async def cancel_order(self, order_id: str, symbol: Optional[str] = None):
+        t0 = time.perf_counter()
+        if symbol:
+            res = await self._with_retries("orders", self.ccxt.cancel_order, order_id, symbol)
+        else:
+            res = await self._with_retries("orders", self.ccxt.cancel_order, order_id)
+        observe_histogram("broker_cancel_order_latency_sec", time.perf_counter() - t0, {"exchange": self.exchange_id})
+        return res

@@ -3,33 +3,51 @@ from __future__ import annotations
 
 import uuid
 from typing import Callable, Awaitable
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
-
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.utils.rate_limit import TokenBucket
+from crypto_ai_bot.utils.rate_limit import MultiLimiter, TokenBucket
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Глобальный входной rate-limit на процесс (ASGI-уровень)."""
+class RateLimitMiddleware:
+    """
+    Очень лёгкий входной лимитер для HTTP (ASGI).
+    Не душим /metrics и /health.
+    """
+    def __init__(self, app: ASGIApp, *, rps: int = 20):
+        self.app = app
+        # глобальный http-бакет — можно вынести в настройки
+        self.limiter = MultiLimiter({"http": TokenBucket(rps, 1.0)})
 
-    def __init__(self, app, settings: Settings) -> None:
-        super().__init__(app)
-        cap = int(getattr(settings, "HTTP_RL_CAPACITY", 60))
-        window = float(getattr(settings, "HTTP_RL_WINDOW_SEC", 1.0))
-        refill = cap / max(0.001, window)
-        self.bucket = TokenBucket(capacity=cap, refill_per_sec=refill)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        # request_id для корреляции логов
-        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-        request.state.request_id = req_id
+        path = scope.get("path", "")
+        if path.startswith("/metrics") or path.startswith("/health"):
+            await self.app(scope, receive, send)
+            return
 
-        if not self.bucket.try_acquire(1.0):
-            # 429 Too Many Requests
-            return Response(status_code=429, content="rate limited")
+        if not self.limiter.try_acquire("http", 1.0):
+            await self._too_many(scope, send)
+            return
 
-        resp = await call_next(request)
-        resp.headers["X-Request-ID"] = req_id
-        return resp
+        # request id в заголовок ответа — удобно для трассировки
+        req_id = str(uuid.uuid4())
+        async def send_with_req_id(message):
+            if message["type"] == "http.response.start":
+                headers = message.setdefault("headers", [])
+                headers.append((b"x-request-id", req_id.encode()))
+            await send(message)
+
+        await self.app(scope, receive, send_with_req_id)
+
+    async def _too_many(self, scope: Scope, send: Send):
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"Too Many Requests"})
