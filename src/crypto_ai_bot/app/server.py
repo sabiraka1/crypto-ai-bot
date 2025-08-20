@@ -1,119 +1,101 @@
 # src/crypto_ai_bot/app/server.py
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 
-from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.app.middleware import RateLimitMiddleware
-from crypto_ai_bot.app.compose import build_container
-from crypto_ai_bot.app.adapters.telegram import handle_update as telegram_handle_update
-from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.app.compose import build_container, Container
+from crypto_ai_bot.core.orchestrator import Orchestrator
 
-logger = get_logger(__name__)
-
-# Загружаем единый инстанс настроек один раз (без прямого os.environ вне Settings)
-_SETTINGS = Settings.load()
+# Если у вас есть middleware с request_id/rate-limit — подключите его здесь
+# from crypto_ai_bot.app.middleware import RequestIDMiddleware, RateLimitMiddleware
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Сборка DI-контейнера
-    container = build_container(settings=_SETTINGS)
-    app.state.settings = _SETTINGS
+    # Сборка контейнера
+    container: Container = build_container()
     app.state.container = container
 
-    # Старт инфраструктуры
+    # Старт EventBus
+    await container.bus.start()
+
+    # Старт Оркестратора
+    orchestrator = Orchestrator(container)
+    app.state.orchestrator = orchestrator
+    await orchestrator.start()
+
     try:
-        bus = getattr(container, "bus", None)
-        if bus and hasattr(bus, "start"):
-            await bus.start()
-
-        orchestrator = getattr(container, "orchestrator", None)
-        if orchestrator and hasattr(orchestrator, "start"):
-            await orchestrator.start()
-
-        yield
-
-    except Exception as e:
-        logger.exception("lifespan startup error: %s", e)
-        # Если ошибка на старте — корректно дойдём до shutdown-блока
         yield
     finally:
-        # Graceful shutdown
+        # Остановка оркестратора
         try:
-            orchestrator = getattr(app.state.container, "orchestrator", None)
-            if orchestrator and hasattr(orchestrator, "stop"):
-                await orchestrator.stop()
+            await orchestrator.stop()
         except Exception:
-            logger.exception("orchestrator stop failed")
-
+            pass
+        # Остановка шины событий
         try:
-            bus = getattr(app.state.container, "bus", None)
-            if bus and hasattr(bus, "stop"):
-                await bus.stop()
+            await container.bus.stop()
         except Exception:
-            logger.exception("event bus stop failed")
+            pass
+        # Закрытие соединения с БД
+        try:
+            container.con.close()
+        except Exception:
+            pass
 
 
-app = FastAPI(title="crypto-ai-bot", version="1.0.0", lifespan=lifespan)
+app = FastAPI(lifespan=lifespan)
 
-# Глобальный входной rate-limit (ASGI)
-app.add_middleware(RateLimitMiddleware, settings=_SETTINGS)
+# Подключение middleware (если используются)
+# app.add_middleware(RequestIDMiddleware)
+# app.add_middleware(RateLimitMiddleware)
 
 
 @app.get("/health")
-async def health() -> Dict[str, Any]:
-    c = app.state.container
-    s: Settings = app.state.settings
-    # Лёгкий health: без запросов к бирже/БД — это liveness
+async def health():
+    c: Container = app.state.container
+    # Базовый health; дополняйте проверками брокера/БД/очередей
     return {
         "ok": True,
-        "mode": getattr(s, "MODE", "paper"),
-        "exchange": getattr(s, "EXCHANGE", "gateio"),
-        "telegram": bool(getattr(s, "TELEGRAM_BOT_TOKEN", "")),
-        "orchestrator": bool(getattr(c, "orchestrator", None)),
-        "bus": bool(getattr(c, "bus", None)),
+        "mode": getattr(c.settings, "MODE", "paper"),
+        "bus_queue": getattr(c.bus, "qsize", lambda: None)(),
     }
 
 
-@app.get("/telegram")
-async def telegram_probe() -> Dict[str, Any]:
-    # не вебхук — просто быстрый пробник, чтобы 405 не светился в логах
-    return {"ok": True, "hint": "use POST /telegram for webhook"}
-
-
-@app.post("/telegram")
-async def telegram_webhook(request: Request) -> Response:
+@app.post("/telegram/webhook")
+async def telegram_webhook(req: Request):
     """
-    Telegram webhook:
-      - проверяем секрет (заголовок X-Telegram-Bot-Api-Secret-Token или query ?secret=)
-      - проксируем апдейт в адаптер handle_update(container, payload)
+    Простой вебхук: сверяем секрет и передаём payload адаптеру.
     """
-    s: Settings = app.state.settings
-    cont = app.state.container
-
-    # секьюрная проверка секрета
-    provided = (
-        request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-        or request.query_params.get("secret")
-        or ""
-    )
-    expected = getattr(s, "TELEGRAM_BOT_SECRET", "") or ""
-    if expected and provided != expected:
-        return Response(status_code=status.HTTP_401_UNAUTHORIZED, content="invalid secret")
+    c: Container = app.state.container
+    secret_expected = getattr(c.settings, "TELEGRAM_BOT_SECRET", None)
+    secret_got = req.query_params.get("secret")
+    if secret_expected and secret_got != secret_expected:
+        raise HTTPException(status_code=401, detail="invalid secret")
 
     try:
-        payload = await request.json()
+        payload: Any = await req.json()
     except Exception:
-        logger.warning("telegram webhook: invalid JSON")
-        return Response(status_code=status.HTTP_400_BAD_REQUEST, content="invalid json")
+        payload = {}
+
+    # Импорт локально, чтобы не тянуть адаптер при старте, если он не нужен
+    from crypto_ai_bot.app.adapters.telegram import handle_update as tg_handle_update
 
     try:
-        await telegram_handle_update(cont, payload)
-        return Response(status_code=status.HTTP_200_OK, content="ok")
+        await tg_handle_update(c, payload)
     except Exception as e:
-        logger.exception("telegram handler failed: %s", e)
-        return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content="handler error")
+        # не валим вебхук 500-кой, логика адаптера сама логирует ошибки
+        return JSONResponse(status_code=200, content={"ok": False, "error": str(e)})
+
+    return {"ok": True}
+
+
+# Опционально: корневой роут
+@app.get("/")
+async def root():
+    return {"name": "crypto-ai-bot", "status": "running"}

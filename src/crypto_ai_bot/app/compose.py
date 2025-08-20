@@ -5,65 +5,79 @@ import os
 from dataclasses import dataclass
 
 from crypto_ai_bot.core.settings import Settings
-from crypto_ai_bot.core.orchestrator import Orchestrator
-from crypto_ai_bot.core.brokers.ccxt_exchange import CCXTExchange
-from crypto_ai_bot.core.storage.sqlite_adapter import connect as sqlite_connect
-from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.core.events.bus import AsyncEventBus
+from crypto_ai_bot.core.brokers.base import create_broker
+from crypto_ai_bot.core.storage.sqlite_adapter import connect, apply_connection_pragmas
+from crypto_ai_bot.core.storage.migrations.runner import apply_all
 
-logger = get_logger(__name__)
+# Репозитории
+from crypto_ai_bot.core.storage.repositories.trades import SqliteTradeRepository
+from crypto_ai_bot.core.storage.repositories.positions import SqlitePositionRepository
+from crypto_ai_bot.core.storage.repositories.protective_exits import SqliteProtectiveExitsRepository
+from crypto_ai_bot.core.storage.repositories.idempotency import IdempotencyRepository
+from crypto_ai_bot.core.storage.repositories.audit import SqliteAuditRepository
+
 
 @dataclass
 class Container:
     settings: Settings
-    broker: CCXTExchange
-    db
-    repos: object  # ваш уже существующий holder (trades, positions, exits, idempotency, audit, ...)
-    bus: object
-    orchestrator: Orchestrator
+    con: "sqlite3.Connection"
+    bus: AsyncEventBus
+    broker: object
 
-def _ensure_db_dir(db_path: str) -> None:
-    d = os.path.dirname(db_path)
-    if d:
-        os.makedirs(d, exist_ok=True)
+    trades_repo: SqliteTradeRepository
+    positions_repo: SqlitePositionRepository
+    exits_repo: SqliteProtectiveExitsRepository
+    idempotency_repo: IdempotencyRepository
+    audit_repo: SqliteAuditRepository
+
 
 def build_container() -> Container:
-    # ВАЖНО: Settings.load вместо несуществующего Settings.build
-    settings = Settings.load()
+    """
+    Сборка DI-контейнера приложения.
+    ВАЖНО:
+      - Settings загружаем через Settings.load() (никаких .build()).
+      - Директорию БД создаём заранее.
+      - PRAGMA применяем из sqlite_adapter (никаких sqlite_maint).
+      - bus.start() тут НЕ вызываем: запуск шины делает сервер (lifespan/on_startup).
+    """
+    # 1) Настройки
+    cfg = Settings.load()
 
-    # Гарантируем каталог под БД
-    _ensure_db_dir(settings.DB_PATH)
+    # 2) Директория БД (если путь файловый)
+    db_path = cfg.DB_PATH
+    db_dir = os.path.dirname(db_path) if db_path else ""
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
 
-    # Подключение БД (один источник правды)
-    db = sqlite_connect(settings.DB_PATH)
+    # 3) Подключение к БД + PRAGMA + миграции
+    con = connect(db_path)
+    apply_connection_pragmas(con)
+    apply_all(con)
 
-    # Репозитории (сохраняю ваш существующий конструктор/комбайнер — поменяйте
-    # на реальный, если у вас иной модуль для сборки репозиториев)
-    from crypto_ai_bot.core.storage.repositories import build_repositories  # noqa
-    repos = build_repositories(db)
+    # 4) Репозитории
+    trades = SqliteTradeRepository(con)
+    positions = SqlitePositionRepository(con)
+    exits = SqliteProtectiveExitsRepository(con)
+    idem = IdempotencyRepository(con)
+    audit = SqliteAuditRepository(con)
 
-    # Event bus (как раньше)
-    from crypto_ai_bot.core.events.bus import AsyncEventBus  # noqa
-    bus = AsyncEventBus(
-        max_queue=getattr(settings, "EVENTBUS_MAX_QUEUE", 1024),
-        concurrency=getattr(settings, "EVENTBUS_CONCURRENCY", 4),
-    )
+    # 5) Event Bus (параметры берём из Settings, с дефолтами)
+    max_queue = int(getattr(cfg, "BUS_MAX_QUEUE", 2048))
+    concurrency = int(getattr(cfg, "BUS_CONCURRENCY", 4))
+    bus = AsyncEventBus(max_queue=max_queue, concurrency=concurrency)
 
-    # Брокер (ccxt) с лимитами/брейкером
-    broker = CCXTExchange.from_settings(settings)
+    # 6) Брокер
+    broker = create_broker(cfg, bus=bus)
 
-    orch = Orchestrator(
-        settings=settings,
-        broker=broker,
-        repos=repos,
+    return Container(
+        settings=cfg,
+        con=con,
         bus=bus,
-    )
-
-    container = Container(
-        settings=settings,
         broker=broker,
-        db=db,
-        repos=repos,
-        bus=bus,
-        orchestrator=orch,
+        trades_repo=trades,
+        positions_repo=positions,
+        exits_repo=exits,
+        idempotency_repo=idem,
+        audit_repo=audit,
     )
-    return container

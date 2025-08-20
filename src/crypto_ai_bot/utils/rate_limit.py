@@ -1,96 +1,76 @@
 # src/crypto_ai_bot/utils/rate_limit.py
 from __future__ import annotations
 
+"""
+Единая реализация токен-бакета для всего проекта.
+Используется и в брокере (пер-эндпоинт лимиты), и в ASGI-middleware.
+
+Пример:
+    limiter = GateIOLimiter()
+    if not limiter.try_acquire("orders"):
+        raise RateLimitExceeded("orders throttled")
+"""
+
 import time
 import threading
-from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 
 class TokenBucket:
     """
-    Простой thread-safe токен-бакет.
-    - capacity: максимальное число токенов в бакете
-    - refill_per_sec: скорость пополнения токенов в сек (tokens/sec)
+    Простой thread-safe токен-бакет: capacity, refill_rate_per_sec.
     """
-    __slots__ = ("capacity", "refill_per_sec", "_tokens", "_ts", "_lock")
 
-    def __init__(self, capacity: int, window_sec: float):
-        if capacity <= 0 or window_sec <= 0:
-            raise ValueError("TokenBucket: capacity and window_sec must be positive")
-        self.capacity = float(capacity)
-        self.refill_per_sec = self.capacity / float(window_sec)
-        self._tokens = self.capacity
-        self._ts = time.monotonic()
+    def __init__(self, capacity: int, refill_per_sec: float) -> None:
+        self.capacity = max(1, int(capacity))
+        self.refill_per_sec = float(refill_per_sec)
+        self.tokens = float(self.capacity)
         self._lock = threading.Lock()
+        self._last = time.monotonic()
 
-    def try_acquire(self, tokens: float = 1.0) -> bool:
+    def try_acquire(self, amount: int = 1) -> bool:
         now = time.monotonic()
         with self._lock:
-            # пополнить
-            elapsed = now - self._ts
-            if elapsed > 0:
-                self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_per_sec)
-                self._ts = now
-            # списать
-            if self._tokens >= tokens:
-                self._tokens -= tokens
+            elapsed = max(0.0, now - self._last)
+            self._last = now
+            # пополняем
+            if self.refill_per_sec > 0:
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_sec)
+            if self.tokens >= amount:
+                self.tokens -= amount
                 return True
             return False
 
 
-@dataclass(frozen=True)
-class _LimiterCfg:
-    capacity: int
-    window_sec: float
-
-
 class MultiLimiter:
     """
-    Набор именованных бакетов (например: orders / market_data / account / http).
+    Набор именованных бакетов. По умолчанию используем "default".
     """
-    def __init__(self, buckets: Dict[str, TokenBucket]):
+
+    def __init__(self, buckets: Dict[str, TokenBucket]) -> None:
         self._buckets = dict(buckets)
 
-    def try_acquire(self, bucket: str, tokens: float = 1.0) -> bool:
-        b = self._buckets.get(bucket)
-        if b is None:
-            # если бакет не определён — разрешаем (не блокируем неожиданно прод)
-            return True
-        return b.try_acquire(tokens)
+    def try_acquire(self, which: str = "default", amount: int = 1) -> bool:
+        bucket = self._buckets.get(which) or self._buckets.get("default")
+        if not bucket:
+            return True  # если не настроен — пропускаем
+        return bucket.try_acquire(amount)
 
 
 class GateIOLimiter(MultiLimiter):
     """
-    Per-endpoint limiter для Gate.io.
-    По умолчанию (согласно документации Gate) ставим консервативные лимиты,
-    но позволяем переопределить из Settings.
+    Эмпирические лимиты (примерные), скорректируйте под ваш кейс/план.
+      - orders: 100 вызовов / 10 сек (~10 rps)
+      - market_data: 600 / 10 сек (~60 rps)
+      - account: 300 / 10 сек (~30 rps)
     """
-    def __init__(self, settings: Optional[object] = None):
-        # defaults (tokens per WINDOW)
-        orders = _LimiterCfg(capacity=100, window_sec=10.0)
-        market = _LimiterCfg(capacity=600, window_sec=10.0)
-        account = _LimiterCfg(capacity=300, window_sec=10.0)
 
-        if settings is not None:
-            orders = _LimiterCfg(
-                capacity=int(getattr(settings, "RL_ORDERS_CAP", orders.capacity)),
-                window_sec=float(getattr(settings, "RL_ORDERS_WINDOW_SEC", orders.window_sec)),
-            )
-            market = _LimiterCfg(
-                capacity=int(getattr(settings, "RL_MARKET_DATA_CAP", market.capacity)),
-                window_sec=float(getattr(settings, "RL_MARKET_DATA_WINDOW_SEC", market.window_sec)),
-            )
-            account = _LimiterCfg(
-                capacity=int(getattr(settings, "RL_ACCOUNT_CAP", account.capacity)),
-                window_sec=float(getattr(settings, "RL_ACCOUNT_WINDOW_SEC", account.window_sec)),
-            )
-
+    def __init__(self) -> None:
         super().__init__(
             buckets={
-                "orders": TokenBucket(orders.capacity, orders.window_sec),
-                "market_data": TokenBucket(market.capacity, market.window_sec),
-                "account": TokenBucket(account.capacity, account.window_sec),
-                # можно добавить "http" для входящего трафика
+                "default": TokenBucket(capacity=100, refill_per_sec=10.0),
+                "orders": TokenBucket(capacity=100, refill_per_sec=10.0),
+                "market_data": TokenBucket(capacity=600, refill_per_sec=60.0),
+                "account": TokenBucket(capacity=300, refill_per_sec=30.0),
             }
         )
