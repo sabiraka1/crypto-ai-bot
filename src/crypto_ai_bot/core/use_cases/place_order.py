@@ -1,150 +1,136 @@
 # src/crypto_ai_bot/core/use_cases/place_order.py
 from __future__ import annotations
-
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from typing import Any, Dict, Optional
 
-from crypto_ai_bot.core._time import now_ms
-from crypto_ai_bot.core.risk.manager import RiskManager
-from crypto_ai_bot.core.brokers.symbols import normalize_symbol
-from crypto_ai_bot.utils.idempotency import make_order_key, quantize_bucket_ms
-from crypto_ai_bot.utils.metrics import inc, observe_histogram
+import asyncio
+
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.time import now_ms
 
 logger = get_logger(__name__)
 
 
-def _quantize_amount(amount: float, precision: int, *, side: str) -> float:
-    """
-    Кол-во округляем в соответствии с требуемой точностью биржи.
-    Для buy обычно указываем notional (у Gate/CCXT), для sell — количество BASE.
-    """
-    if precision < 0:
-        precision = 0
-    q = Decimal(str(amount)).quantize(
-        Decimal("1." + "0" * precision),
-        rounding=ROUND_DOWN if side == "buy" else ROUND_UP,
-    )
-    return float(q)
+def _quantize(qty: Decimal, step: Decimal, *, mode: str) -> Decimal:
+    if step <= 0:
+        return qty
+    rounding = ROUND_UP if mode == "sell" else ROUND_DOWN
+    return (qty / step).to_integral_value(rounding=rounding) * step
 
 
-def _buy_quote_budget(notional: float, fee_bps: float) -> float:
-    """
-    Учитываем комиссию при рыночной покупке так, чтобы хватило средств.
-    net = notional - fee(notional), где fee = notional * fee_bps/10000.
-    """
-    fee = notional * (fee_bps / 10000.0)
-    net = max(0.0, notional - fee)
-    return net
+async def _get_spread_bps(broker, symbol: str) -> float:
+    t = await asyncio.to_thread(broker.fetch_ticker, symbol)
+    bid = t.get("bid") or 0
+    ask = t.get("ask") or 0
+    if bid and ask and bid > 0:
+        mid = (bid + ask) / 2.0
+        return float((ask - bid) / mid * 10000.0)
+    return 0.0
+
+
+def _buy_quote_budget(notional_usd: float, fee_bps: float) -> float:
+    # уменьшить бюджет на комиссию, чтобы маркет BUY прошёл у Gate
+    fee = notional_usd * (fee_bps / 10000.0)
+    return max(0.0, notional_usd - fee)
 
 
 async def place_order(
     *,
+    cfg: Any,
+    broker: Any,
+    trades_repo: Any,
+    positions_repo: Any,
     symbol: str,
-    side: str,  # "buy" | "sell"
-    notional_usd: float,
-    settings,
-    broker,
-    trades_repo,
-    positions_repo,
-    idempotency_repo,
-    market_meta_repo=None,
-    risk_manager: Optional[RiskManager] = None,
+    side: str,  # "buy" / "sell"
+    notional_usd: Optional[float] = None,
+    qty: Optional[Decimal] = None,  # для sell
+    idempotency_repo: Any,
+    idempotency_key: str,
+    limiter: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    ЕДИНАЯ точка входа для открытия/закрытия позиции по рынку (long-only).
-    ВАЖНО:
-      - idempotency-ключ строим здесь (приложение) через utils.idempotency
-      - clientOrderId (Gate 'text') генерится ТОЛЬКО в брокере (ccxt_exchange.py)
-      - время — единое now_ms() из core/_time.py
+    Единая точка исполнения. CID генерирует брокер (ccxt_exchange), здесь только idempotency_key.
     """
-    t0 = now_ms()
-    symbol = str(symbol)
+    # 1) idempotency guard
+    if not idempotency_repo.check_and_store(idempotency_key):
+        inc("orders_duplicate_total", {"symbol": symbol, "side": side})
+        return {"ok": False, "error": "duplicate_request"}
 
-    # ---- Idempotency guard (минутный бакет) ---------------------------------
-    bucket_ms = quantize_bucket_ms(t0, int(getattr(settings, "IDEMPOTENCY_BUCKET_MS", 60_000)))
-    exchange_id = getattr(broker, "exchange_id", None)
+    # 2) spread/slippage guard
+    max_spread_bps = float(getattr(cfg, "MAX_SPREAD_BPS", 50.0))
+    slippage_bps = float(getattr(cfg, "SLIPPAGE_BPS", 20.0))
+    spread_bps = await _get_spread_bps(broker, symbol)
+    if spread_bps > max_spread_bps:
+        inc("orders_spread_blocked_total", {"symbol": symbol, "side": side})
+        return {"ok": False, "error": f"spread_too_wide:{spread_bps:.1f}bps"}
 
-    # нормализацию символа делаем в доменном слое (core), а utils остаётся "слепым"
-    norm_symbol = normalize_symbol(exchange_id, symbol)
+    # 3) получить market meta (precision/limits)
+    meta = broker.get_market_meta(symbol)  # должен вернуть dict c step/min_amount
+    amount_step = Decimal(str(meta.get("amount_step", "0")))
+    min_amount = Decimal(str(meta.get("min_amount", "0")))
 
-    idem_key = make_order_key(
-        raw_symbol=norm_symbol,  # уже нормализованный символ
-        side=side,
-        bucket_ms=bucket_ms,
-        exchange=exchange_id,
-    )
-    if not idempotency_repo.check_and_store(idem_key, ttl_ms=int(getattr(settings, "IDEMPOTENCY_TTL_MS", 120_000))):
-        inc("orders_duplicate_total", {"symbol": norm_symbol, "side": side})
-        return {"ok": False, "error": "duplicate_request", "idem_key": idem_key}
-
-    # ---- Risk checks ---------------------------------------------------------
-    if risk_manager is None:
-        risk_manager = RiskManager(settings=settings, broker=broker, trades_repo=trades_repo, positions_repo=positions_repo)
-
-    risk = await risk_manager.evaluate(symbol=norm_symbol, side=side, notional_usd=notional_usd)
-    if not risk.get("ok", False):
-        inc("orders_blocked_by_risk_total", {"symbol": norm_symbol, "side": side, "reason": risk.get("reason", "unknown")})
-        return {"ok": False, "error": "risk_blocked", "risk": risk, "idem_key": idem_key}
-
-    # ---- Market meta (precision/limits) -------------------------------------
-    fee_bps = float(getattr(settings, "FEE_TAKER_BPS", 20.0))
-    meta = None
-    if market_meta_repo is not None:
-        meta = market_meta_repo.get(norm_symbol)  # dict с precision/min_amount и т.п. (если есть)
-
-    # ---- BUY: notional-based (Gate: quote amount) ----------------------------
+    # 4) исполнение
+    order: Dict[str, Any]
     if side == "buy":
+        if notional_usd is None or notional_usd <= 0:
+            return {"ok": False, "error": "invalid_notional"}
+        fee_bps = float(getattr(cfg, "FEE_BPS", 20.0))
         quote_cost = _buy_quote_budget(notional_usd, fee_bps)
-        # брокер сам позаботится о clientOrderId (Gate 'text') и rate limits
-        ex_order = await broker.create_order(symbol=norm_symbol, type="market", side="buy", amount=quote_cost, params={})
-        coid = ex_order.get("clientOrderId") or ex_order.get("text") or None
-        order_id = ex_order.get("id") or ex_order.get("orderId") or "unknown"
+        # лимитер по типу endpoint
+        if limiter and not limiter.try_acquire("orders"):
+            inc("orders_rate_limited_total", {"symbol": symbol, "side": side})
+            return {"ok": False, "error": "rate_limited"}
+        # брокер сам добавит clientOrderId (Gate.io text) и ретраи
+        order = await asyncio.to_thread(
+            broker.create_order,
+            symbol=symbol,
+            type="market",
+            side="buy",
+            amount=quote_cost,  # для Gate market BUY — сумма в quote
+            params={},
+        )
+    elif side == "sell":
+        if qty is None or qty <= 0:
+            # возьмём текущую позицию из repo
+            pos = positions_repo.get(symbol)
+            if not pos or Decimal(str(pos.get("qty", "0"))) <= 0:
+                return {"ok": False, "error": "no_long_position"}
+            qty = Decimal(str(pos["qty"]))
+        # округление под шаг
+        qty = _quantize(Decimal(qty), amount_step, mode="sell")
+        if qty <= 0 or (min_amount > 0 and qty < min_amount):
+            return {"ok": False, "error": "too_small_qty"}
+        if limiter and not limiter.try_acquire("orders"):
+            inc("orders_rate_limited_total", {"symbol": symbol, "side": side})
+            return {"ok": False, "error": "rate_limited"}
+        order = await asyncio.to_thread(
+            broker.create_order,
+            symbol=symbol,
+            type="market",
+            side="sell",
+            amount=float(qty),
+            params={},
+        )
+    else:
+        return {"ok": False, "error": "invalid_side"}
 
-        trades_repo.create_pending_order(symbol=norm_symbol, side="buy", exp_price=float(ex_order.get("price") or 0.0), qty=0.0, order_id=order_id)
-        if coid:
-            try:
-                trades_repo.update_client_order_id(order_id=order_id, client_order_id=str(coid))
-            except Exception:
-                pass
-
-        try:
-            trades_repo.record_exchange_update(order_id=order_id, raw=ex_order)
-        except Exception:
-            pass
-
-        dt_ms = now_ms() - t0
-        observe_histogram("latency_order_submit_ms", float(dt_ms), {"symbol": norm_symbol, "side": "buy"})
-        inc("orders_submitted_total", {"symbol": norm_symbol, "side": "buy"})
-        return {"ok": True, "order": {"order_id": order_id, "client_order_id": coid}, "idem_key": idem_key}
-
-    # ---- SELL: qty-based -----------------------------------------------------
-    pos = positions_repo.get(norm_symbol)
-    pos_qty = float(pos["qty"]) if pos else 0.0
-    if pos_qty <= 0.0:
-        return {"ok": False, "error": "no_long_position", "idem_key": idem_key}
-
-    precision = int(meta.get("amount_precision", 6)) if meta else 6
-    sell_qty = _quantize_amount(pos_qty, precision, side="sell")
-    if sell_qty <= 0.0:
-        return {"ok": False, "error": "min_amount_violation", "idem_key": idem_key}
-
-    ex_order = await broker.create_order(symbol=norm_symbol, type="market", side="sell", amount=sell_qty, params={})
-    coid = ex_order.get("clientOrderId") or ex_order.get("text") or None
-    order_id = ex_order.get("id") or ex_order.get("orderId") or "unknown"
-
-    trades_repo.create_pending_order(symbol=norm_symbol, side="sell", exp_price=float(ex_order.get("price") or 0.0), qty=sell_qty, order_id=order_id)
-    if coid:
-        try:
-            trades_repo.update_client_order_id(order_id=order_id, client_order_id=str(coid))
-        except Exception:
-            pass
+    # 5) запись pending/exec в trades_repo
     try:
-        trades_repo.record_exchange_update(order_id=order_id, raw=ex_order)
-    except Exception:
-        pass
+        ex_id = order.get("id")
+        coid = order.get("clientOrderId") or order.get("text")
+        trades_repo.create_pending_order(
+            order_id=ex_id,
+            client_order_id=coid,
+            symbol=symbol,
+            side=side,
+            requested_ts_ms=now_ms(),
+            payload=order,
+            slippage_bps=slippage_bps,
+        )
+    except Exception as e:
+        # не критично для биржи, но важно для нашей учётки
+        logger.warning("failed to record pending order", extra={"symbol": symbol, "error": str(e)})
 
-    dt_ms = now_ms() - t0
-    observe_histogram("latency_order_submit_ms", float(dt_ms), {"symbol": norm_symbol, "side": "sell"})
-    inc("orders_submitted_total", {"symbol": norm_symbol, "side": "sell"})
-    return {"ok": True, "order": {"order_id": order_id, "client_order_id": coid}, "idem_key": idem_key}
+    inc("orders_submitted_total", {"symbol": symbol, "side": side})
+    return {"ok": True, "order": order}

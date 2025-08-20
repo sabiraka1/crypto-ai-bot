@@ -2,98 +2,44 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Iterable, Optional, Sequence, Tuple, Dict
+from typing import Optional, Iterable
 
-# -------------------------
-# PRAGMAS / CONNECT
-# -------------------------
+DB_TIMEOUT_SEC = 30.0
 
-def apply_connection_pragmas(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """
-    Безопасные/полезные PRAGMA для прод-процесса бота.
-    Можно вызывать сразу после connect().
-    """
-    cur = conn.cursor()
-    try:
-        cur.execute("PRAGMA journal_mode=WAL;")
-        cur.execute("PRAGMA synchronous=NORMAL;")
-        cur.execute("PRAGMA temp_store=MEMORY;")
-        cur.execute("PRAGMA mmap_size=268435456;")  # 256 MiB
-        cur.execute("PRAGMA busy_timeout=5000;")
-        cur.execute("PRAGMA foreign_keys=ON;")
-    finally:
-        cur.close()
-    return conn
+PRAGMAS = [
+    ("journal_mode", "WAL"),
+    ("synchronous", "NORMAL"),
+    ("temp_store", "MEMORY"),
+    ("mmap_size", str(64 * 1024 * 1024)),
+    ("cache_size", str(-64 * 1024)),  # ~64MB
+]
 
+INDICES: Iterable[str] = (
+    "CREATE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id);",
+    "CREATE INDEX IF NOT EXISTS idx_trades_client_order_id ON trades(client_order_id);",
+    "CREATE INDEX IF NOT EXISTS idx_idempotency_key ON idempotency(key);",
+    "CREATE INDEX IF NOT EXISTS idx_idempotency_exp ON idempotency(expires_ms);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);",
+)
 
 def connect(path: str) -> sqlite3.Connection:
-    # Ensure directory exists
-    import os
-    db_dir = os.path.dirname(path)
-    if db_dir and db_dir != '.':
-        os.makedirs(db_dir, exist_ok=True)
-    
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    conn = sqlite3.connect(path, timeout=DB_TIMEOUT_SEC, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    return apply_connection_pragmas(conn)
+    _apply_pragmas(conn)
+    return conn
 
-# -------------------------
-# EXEC HELPERS
-# -------------------------
-
-def execute(conn: sqlite3.Connection, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+def _apply_pragmas(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
-    try:
-        cur.execute(sql, params)
-        return cur
-    except sqlite3.OperationalError:
-        # лёгкий повтор при «database is locked»
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
-        cur.execute(sql, params)
-        return cur
-    finally:
-        # не закрываем cur — отдаём его вызывающему, он сам .close()
-        ...
+    for k, v in PRAGMAS:
+        cur.execute(f"PRAGMA {k}={v}")
+    cur.close()
 
-def executemany(conn: sqlite3.Connection, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> sqlite3.Cursor:
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    # здесь оставь свои CREATE TABLE IF NOT EXISTS ...
+    pass  # предполагается, что у тебя уже есть миграции
+
+def ensure_indices(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
-    try:
-        cur.executemany(sql, seq_of_params)
-        return cur
-    except sqlite3.OperationalError:
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
-        cur.executemany(sql, seq_of_params)
-        return cur
-    finally:
-        ...
-
-# -------------------------
-# METRICS SNAPSHOT
-# -------------------------
-
-def snapshot_metrics(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """
-    Используется maintenance/health для быстрой телеметрии БД.
-    """
-    cur = conn.cursor()
-    try:
-        cur.execute("PRAGMA page_count;")
-        page_count = cur.fetchone()[0]
-        cur.execute("PRAGMA page_size;")
-        page_size = cur.fetchone()[0]
-        cur.execute("PRAGMA freelist_count;")
-        freelist_count = cur.fetchone()[0]
-        try:
-            cur.execute("PRAGMA wal_checkpoint(PASSIVE);")
-            wal = cur.fetchall()
-        except Exception:
-            wal = None
-    finally:
-        cur.close()
-    return {
-        "page_count": page_count,
-        "page_size": page_size,
-        "freelist_count": freelist_count,
-        "db_size_bytes": page_count * page_size,
-        "wal": wal,
-    }
+    for sql in INDICES:
+        cur.execute(sql)
+    cur.close()
