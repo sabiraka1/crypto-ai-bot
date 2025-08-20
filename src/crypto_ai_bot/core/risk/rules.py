@@ -1,219 +1,129 @@
+# src/crypto_ai_bot/core/risk/rules.py
 from __future__ import annotations
-
-import math
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Sequence, Tuple
-
+from typing import Any, Dict, Optional
+from crypto_ai_bot.core._time import now_ms
 
 Result = Dict[str, Any]
 
+def ok(**extra) -> Result:
+    r = {"ok": True}
+    r.update(extra)
+    return r
 
-def _ok() -> Result:
-    return {"ok": True, "code": "ok", "details": {}}
+def blocked(code: str, **extra) -> Result:
+    r = {"ok": False, "code": code}
+    r.update(extra)
+    return r
 
+# ---- Вспомогательные безопасные геттеры
 
-def _fail(code: str, **details) -> Result:
-    return {"ok": False, "code": code, "details": details}
+def _cfg(cfg: Any, name: str, default: Any) -> Any:
+    return getattr(cfg, name, default)
 
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-# -----------------------
-# 1) ВРЕМЯ / СИНХРОНИЗАЦИЯ
-# -----------------------
-
-def check_time_sync(settings: Any, *, broker: Any = None, max_drift_ms: Optional[int] = None) -> Result:
-    """
-    Проверка рассинхронизации часов:
-      - Если биржа поддерживает fetch_time → сверяемся по ней
-      - Иначе — пропускаем (ok)
-    """
-    drift_limit = int(max_drift_ms if max_drift_ms is not None else getattr(settings, "MAX_TIME_DRIFT_MS", 15_000))
+def _float(v: Any, default: float) -> float:
     try:
-        if broker and hasattr(getattr(broker, "ccxt", broker), "fetch_time"):
-            ex_now = broker.ccxt.fetch_time()  # ms (не всеми биржами поддерживается)
-            if ex_now:
-                drift = abs(_now_ms() - int(ex_now))
-                if drift > drift_limit:
-                    return _fail("time_drift", drift_ms=int(drift), limit_ms=drift_limit)
-        return _ok()
+        return float(v)
+    except Exception:
+        return float(default)
+
+# ---- Правила
+
+def check_time_sync(*, cfg: Any, external: Optional[Any] = None, **_ignored) -> Result:
+    """Проверка дрейфа времени (если есть внешний источник). Иначе — ок."""
+    max_drift_ms = int(_cfg(cfg, "MAX_TIME_DRIFT_MS", 15_000))
+    if not external or not hasattr(external, "time_ms"):
+        return ok(skip="no_external_time")
+    try:
+        ext = int(external.time_ms())
+    except Exception:
+        return ok(skip="ext_time_failed")
+    drift = abs(now_ms() - ext)
+    if drift > max_drift_ms:
+        return blocked("time_drift", drift_ms=drift, max_ms=max_drift_ms)
+    return ok(drift_ms=drift)
+
+def check_hours(*, cfg: Any, **_ignored) -> Result:
+    """Окно торговли по UTC-часам. Если не задано — всегда ок."""
+    hours = getattr(cfg, "RISK_HOURS_UTC", None)
+    if not hours:
+        return ok(skip="no_hours")
+    try:
+        start, end = hours  # (int, int)
+    except Exception:
+        return ok(skip="bad_hours_cfg")
+    import datetime as _dt, time as _t
+    hour_utc = _dt.datetime.utcfromtimestamp(_t.time()).hour
+    if start <= end:
+        allowed = (start <= hour_utc < end)
+    else:
+        allowed = not (end <= hour_utc < start)
+    if not allowed:
+        return blocked("outside_hours", hour=hour_utc, window=hours)
+    return ok(hour=hour_utc)
+
+def check_spread(*, cfg: Any, broker: Any, symbol: str, **_ignored) -> Result:
+    """Ширина спреда не выше порога."""
+    max_spread_bps = _float(_cfg(cfg, "MAX_SPREAD_BPS", 50.0), 50.0)
+    try:
+        tkr = broker.fetch_ticker(symbol) or {}
     except Exception as e:
-        # Неподдерживаемо/временный сбой — не блокируем торговлю
-        return _ok()
+        return blocked("ticker_failed", error=str(e))
+    bid = _float(tkr.get("bid"), 0.0)
+    ask = _float(tkr.get("ask"), 0.0)
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return blocked("bad_quote")
+    mid = (ask + bid) / 2.0
+    spread_bps = ((ask - bid) / mid) * 10_000.0
+    if spread_bps > max_spread_bps:
+        return blocked("spread_too_wide", spread_bps=spread_bps, max_spread_bps=max_spread_bps)
+    return ok(spread_bps=spread_bps)
 
-
-# -----------------------
-# 2) ЧАСЫ ТОРГОВ (UTC)
-# -----------------------
-
-def _parse_hours(text: str) -> Sequence[Tuple[int, int]]:
-    """
-    "00:00-23:59" | "09:30-16:00,18:00-20:00"
-    Возвращает список пар (start_minutes, end_minutes)
-    """
-    spans = []
-    for part in (text or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
+def check_max_exposure(*, cfg: Any, positions_repo: Any, symbol: str, **_ignored) -> Result:
+    """Ограничение на число одновременных лонгов и повтор на тот же символ."""
+    max_positions = int(_cfg(cfg, "MAX_POSITIONS", 1))
+    if hasattr(positions_repo, "count"):
         try:
-            a, b = part.split("-", 1)
-            h1, m1 = [int(x) for x in a.split(":")]
-            h2, m2 = [int(x) for x in b.split(":")]
-            spans.append((h1 * 60 + m1, h2 * 60 + m2))
+            total = int(positions_repo.count() or 0)
         except Exception:
-            continue
-    return spans or [(0, 24 * 60 - 1)]
+            total = 0
+    else:
+        total = 0
+    if total >= max_positions:
+        return blocked("max_positions", current=total, limit=max_positions)
 
+    # блокировать повторный вход в тот же символ, если уже лонг
+    if hasattr(positions_repo, "get"):
+        row = positions_repo.get(symbol)
+        if row:
+            qty = _float(row.get("qty"), 0.0)
+            if qty > 0:
+                return blocked("symbol_already_long", qty=qty)
+    return ok(total=total)
 
-def check_hours(settings: Any) -> Result:
-    """
-    Разрешённые торги по UTC окнам.
-    ENV: RISK_HOURS_UTC="00:00-23:59" (по умолчанию — 24/7)
-    """
-    cfg = str(getattr(settings, "RISK_HOURS_UTC", "00:00-23:59"))
-    spans = _parse_hours(cfg)
-    now = datetime.now(timezone.utc)
-    minutes = now.hour * 60 + now.minute
-    for a, b in spans:
-        if a <= minutes <= b:
-            return _ok()
-    return _fail("trading_closed_utc", now_utc=now.isoformat(), allowed=cfg)
-
-
-# -----------------------
-# 3) СПРЕД
-# -----------------------
-
-def check_spread(settings: Any, *, broker: Any, symbol: str) -> Result:
-    """
-    Проверка ширины спреда в bps.
-    ENV: MAX_SPREAD_BPS (по умолчанию 25)
-    """
-    limit_bps = float(getattr(settings, "MAX_SPREAD_BPS", 25))
+def check_drawdown(*, cfg: Any, trades_repo: Any, lookback_ms: Optional[int] = None, **_ignored) -> Result:
+    """Макс. просадка по реализованному PnL за окно."""
+    max_dd = _float(_cfg(cfg, "RISK_MAX_DRAWDOWN_PCT", 10.0), 10.0)
+    window = int(lookback_ms or _cfg(cfg, "RISK_DRAWDOWN_LOOKBACK_MS", 7 * 86_400_000))
+    since = now_ms() - window
+    if not hasattr(trades_repo, "realized_pnl_since_ms"):
+        return ok(skip="no_pnl_fn")
     try:
-        t = broker.fetch_ticker(symbol) or {}
-        bid = float(t.get("bid") or 0.0)
-        ask = float(t.get("ask") or 0.0)
-        if bid > 0 and ask > 0:
-            mid = (bid + ask) / 2.0
-            spread_bps = abs(ask - bid) / mid * 10_000
-            if spread_bps > limit_bps:
-                return _fail("spread_too_wide", spread_bps=spread_bps, limit_bps=limit_bps)
-        return _ok()
-    except Exception as e:
-        # Если нет тиков — безопаснее не торговать
-        return _fail("no_ticker")
-
-
-# -----------------------
-# 4) ЛИМИТЫ ПОЗИЦИЙ / ЭКСПОЗИЦИЯ
-# -----------------------
-
-def check_max_exposure(
-    settings: Any,
-    *,
-    positions_repo: Any,
-    symbol: Optional[str] = None
-) -> Result:
-    """
-    Проверяет:
-      - нет ли открытого лонга по symbol (для long-only)
-      - глобальный лимит количества одновременных позиций
-    """
-    max_positions = int(getattr(settings, "RISK_MAX_POSITIONS", 1))
-    try:
-        opens = positions_repo.get_open() or []
-        if symbol:
-            for r in opens:
-                if str(r.get("symbol")) == symbol and float(r.get("qty") or 0.0) > 0:
-                    return _fail("concurrent_position_blocked", symbol=symbol)
-        if len(opens) >= max_positions:
-            return _fail("max_positions_exceeded", open=len(opens), limit=max_positions)
-        return _ok()
-    except Exception as e:
-        # если не можем проверить — блокируем
-        return _fail("positions_check_failed")
-
-
-# -----------------------
-# 5) DRAWDOWN
-# -----------------------
-
-def _realized_pnl_pct_since(
-    trades_repo: Any,
-    *,
-    since_ms: int
-) -> float:
-    """
-    Находит реализованный PnL % с момента since_ms.
-    Ожидает от трейд-репо метод realized_pnl_since_ms(since_ms) → (pnl_abs, basis_abs)
-    где basis_abs — суммарная база (например, затраты в quote).
-    Если basis_abs==0 — возвращаем 0.
-    """
-    try:
-        pnl_abs, basis_abs = trades_repo.realized_pnl_since_ms(since_ms)
-        if basis_abs and abs(basis_abs) > 1e-9:
-            return float(pnl_abs) / float(basis_abs) * 100.0
-        return 0.0
+        pnl_pct = _float(trades_repo.realized_pnl_since_ms(since_ms=since).get("pnl_pct"), 0.0)
     except Exception:
-        return 0.0
+        return ok(skip="pnl_calc_failed")
+    if pnl_pct <= -max_dd:
+        return blocked("drawdown_limit", pnl_pct=pnl_pct, max_dd=max_dd)
+    return ok(pnl_pct=pnl_pct)
 
-
-def check_drawdown(
-    settings: Any,
-    *,
-    trades_repo: Any,
-    lookback_days: Optional[int] = None
-) -> Result:
-    """
-    Блокировка торгов при превышении реализованной просадки за окно.
-    ENV:
-      RISK_DRAWDOWN_LOOKBACK_DAYS (по умолчанию 7)
-      RISK_MAX_DRAWDOWN_PCT      (по умолчанию 10.0)
-    """
-    days = int(lookback_days if lookback_days is not None else getattr(settings, "RISK_DRAWDOWN_LOOKBACK_DAYS", 7))
-    limit_pct = float(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", 10.0))
-    since_ms = _now_ms() - days * 24 * 3600 * 1000
-    pnl_pct = _realized_pnl_pct_since(trades_repo, since_ms=since_ms)
-    # drawdown — когда pnl_pct отрицателен по модулю больше лимита
-    if pnl_pct < 0 and abs(pnl_pct) >= limit_pct:
-        return _fail("drawdown_limit", pnl_pct=float(pnl_pct), limit_pct=limit_pct, days=days)
-    return _ok()
-
-
-# -----------------------
-# 6) ПОСЛЕДОВАТЕЛЬНЫЕ УБЫТКИ
-# -----------------------
-
-def check_sequence_losses(
-    settings: Any,
-    *,
-    trades_repo: Any,
-    max_losses: Optional[int] = None
-) -> Result:
-    """
-    Не даёт торговать, если подряд было N убыточных сделок.
-    ENV: RISK_MAX_LOSSES (по умолчанию 3)
-    trades_repo должен уметь вернуть последние закрытые сделки с PnL.
-    """
-    limit = int(max_losses if max_losses is not None else getattr(settings, "RISK_MAX_LOSSES", 3))
-    if limit <= 0:
-        return _ok()
+def check_sequence_losses(*, cfg: Any, trades_repo: Any, **_ignored) -> Result:
+    """Серия подряд убыточных сделок."""
+    max_losses = int(_cfg(cfg, "RISK_MAX_LOSSES", 3))
+    if max_losses <= 0 or not hasattr(trades_repo, "consecutive_losses"):
+        return ok(skip="no_seq_fn")
     try:
-        rows = (trades_repo.get_last_closed(n=limit) or [])[:limit]
-        if len(rows) < limit:
-            return _ok()
-        # считаем лузером сделку с pnl < 0
-        for r in rows:
-            pnl = float(r.get("pnl") or 0.0)
-            if pnl >= 0:
-                return _ok()
-        # все limit подряд — лузеры
-        return _fail("loss_streak", losses=limit)
+        seq = int(trades_repo.consecutive_losses() or 0)
     except Exception:
-        # не можем проверить — лучше блокировать
-        return _fail("loss_streak_check_failed")
+        return ok(skip="seq_calc_failed")
+    if seq >= max_losses:
+        return blocked("loss_streak", streak=seq, limit=max_losses)
+    return ok(streak=seq)

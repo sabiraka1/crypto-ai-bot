@@ -1,33 +1,16 @@
 # src/crypto_ai_bot/utils/idempotency.py
 from __future__ import annotations
-import re
-import time
-from typing import Literal
+import hashlib
+import zlib
+from typing import Dict
 
-from crypto_ai_bot.core.brokers.symbols import normalize_symbol
+def stable_crc32(s: str) -> str:
+    return format(zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF, "08x")
 
-# Единый формат: source:BASE-QUOTE:side:epoch_ms_bucket_start
-# Примеры: "order:BTC-USDT:buy:1723987200000", "eval:ETH-USDT:sell:1723987200000"
-_KEY_RE = re.compile(r"^(order|eval):[A-Z0-9\-]+:(buy|sell):\d{13}$")
+def sha1_12(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
 
-def build_key(
-    *,
-    symbol: str,
-    side: Literal["buy", "sell"],
-    bucket_ms: int,
-    source: Literal["order", "eval"] = "order",
-) -> str:
-    """
-    Генерация ключа идемпотентности.
-    - symbol нормализуется (BASE/QUOTE -> BASE-QUOTE в верхнем регистре)
-    - time bucket округляется вниз к началу "ведра"
-    """
-    sym_u = normalize_symbol(symbol).upper().replace("/", "-")
-    now_ms = int(time.time() * 1000)
-    b = int(max(1, bucket_ms))
-    bucket_start = (now_ms // b) * b
-    return f"{source}:{sym_u}:{side}:{bucket_start}"
-
-def validate_key(key: str) -> bool:
-    """Проверка, что ключ соответствует формату."""
-    return bool(_KEY_RE.match(key))
+def make_order_key(*, symbol: str, side: str, bucket_sec: int) -> str:
+    """Не нормализует symbol и не импортирует core — чистая утилита."""
+    base = f"{symbol}:{side}:{bucket_sec}"
+    return f"order:{stable_crc32(base)}:{sha1_12(base)}"
