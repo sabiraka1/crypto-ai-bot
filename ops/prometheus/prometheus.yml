@@ -1,0 +1,20 @@
+# НОВЫЙ ФАЙЛ: ops/prometheus/prometheus.yml
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - "alerts.yml"  # Ваш существующий файл
+
+scrape_configs:
+  - job_name: 'crypto-ai-bot'
+    static_configs:
+      - targets: ['host.docker.internal:8000']  # Для Docker Desktop
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
