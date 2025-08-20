@@ -1,99 +1,50 @@
 # src/crypto_ai_bot/utils/metrics.py
 from __future__ import annotations
 
-import time
-from contextlib import contextmanager
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional
+from prometheus_client import Counter, Histogram, Gauge
 
-try:
-    from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
-    _PROM = True
-    _REG = CollectorRegistry(auto_describe=True)
-except Exception:  # pragma: no cover
-    Counter = Gauge = Histogram = None  # type: ignore
-    _PROM = False
-    _REG = None
+# Примеры реестров метрик (вы свои уже используете — оставляю совместимую форму)
+_METRIC_COUNTERS: Dict[str, Counter] = {}
+_METRIC_HISTOS: Dict[str, Histogram] = {}
+_METRIC_GAUGES: Dict[str, Gauge] = {}
 
-# Кэши регистраций, чтобы не плодить одинаковые метрики
-_COUNTERS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Any] = {}
-_GAUGES: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Any] = {}
-_HISTS: Dict[Tuple[str, Tuple[Tuple[str, str], ...], Tuple[float, ...]], Any] = {}
-
-_DEFAULT_BUCKETS_MS = (10, 25, 50, 100, 200, 500, 1000, 2000, 5000, 10000)
-
-def _labels_tuple(labels: Optional[Dict[str, str]]) -> Tuple[Tuple[str, str], ...]:
+def _labels(labels: Optional[dict] = None) -> dict[str, str]:
     if not labels:
-        return tuple()
-    # prometheus требует str-строки, сортируем для стабильности ключа
-    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
+        return {}
+    # Жёстко приводим к str:str и игнорируем нестандарт
+    out: dict[str, str] = {}
+    for k, v in labels.items():
+        out[str(k)] = str(v)
+    return out
 
-def inc(name: str, labels: Optional[Dict[str, str]] = None, amount: float = 1.0) -> None:
-    if not _PROM:
-        return
-    key = (name, _labels_tuple(labels))
-    c = _COUNTERS.get(key)
-    if c is None:
-        # имена лейблов — из ключей labels
-        lbls = [kv[0] for kv in key[1]]
-        c = Counter(name, f"{name} counter", labelnames=lbls, registry=_REG)
-        _COUNTERS[key] = c
-    if key[1]:
-        c.labels(**{k: v for k, v in key[1]}).inc(amount)
+def inc(name: str, labels: Optional[dict] = None, doc: str = "counter") -> None:
+    if name not in _METRIC_COUNTERS:
+        _METRIC_COUNTERS[name] = Counter(name, doc, list((_labels(labels) or {}).keys()))
+    c = _METRIC_COUNTERS[name]
+    if labels:
+        c.labels(**_labels(labels)).inc()
     else:
-        c.inc(amount)
+        c.inc()
 
-def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
-    if not _PROM:
-        return
-    key = (name, _labels_tuple(labels))
-    g = _GAUGES.get(key)
-    if g is None:
-        lbls = [kv[0] for kv in key[1]]
-        g = Gauge(name, f"{name} gauge", labelnames=lbls, registry=_REG)
-        _GAUGES[key] = g
-    if key[1]:
-        g.labels(**{k: v for k, v in key[1]}).set(value)
+def observe_histogram(name: str, value: float, labels: Optional[dict] = None,
+                      buckets: Optional[list[float]] = None,
+                      doc: str = "histogram") -> None:
+    if name not in _METRIC_HISTOS:
+        _METRIC_HISTOS[name] = Histogram(name, doc, list((_labels(labels) or {}).keys()),
+                                         buckets=buckets) if buckets else Histogram(name, doc, list((_labels(labels) or {}).keys()))
+    h = _METRIC_HISTOS[name]
+    if labels:
+        h.labels(**_labels(labels)).observe(value)
+    else:
+        h.observe(value)
+
+def observe_gauge(name: str, value: float, labels: Optional[dict] = None,
+                  doc: str = "gauge") -> None:
+    if name not in _METRIC_GAUGES:
+        _METRIC_GAUGES[name] = Gauge(name, doc, list((_labels(labels) or {}).keys()))
+    g = _METRIC_GAUGES[name]
+    if labels:
+        g.labels(**_labels(labels)).set(value)
     else:
         g.set(value)
-
-def observe_histogram(
-    name: str,
-    value_ms: float,
-    labels: Optional[Dict[str, str]] = None,
-    buckets_ms: Tuple[float, ...] = _DEFAULT_BUCKETS_MS,
-) -> None:
-    if not _PROM:
-        return
-    key = (name, _labels_tuple(labels), buckets_ms)
-    h = _HISTS.get(key)
-    if h is None:
-        lbls = [kv[0] for kv in key[1]]
-        h = Histogram(name, f"{name} histogram (ms)", labelnames=lbls, registry=_REG, buckets=buckets_ms)  # type: ignore[arg-type]
-        _HISTS[key] = h
-    if key[1]:
-        h.labels(**{k: v for k, v in key[1]}).observe(float(value_ms))
-    else:
-        h.observe(float(value_ms))
-
-@contextmanager
-def timer(name: str, labels: Optional[Dict[str, str]] = None) -> Any:
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-        observe_histogram(name, dt_ms, labels=labels)
-
-# --------- /metrics экспорт (без зависимости на FastAPI) ---------
-
-def prometheus_app(environ, start_response):  # type: ignore
-    """
-    WSGI-совместимый экспорт метрик. Можно повесить на /metrics в FastAPI.
-    """
-    if not _PROM:
-        body = b"# no prometheus_client installed\n"
-        start_response("200 OK", [("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", str(len(body)))])
-        return [body]
-    output = generate_latest(_REG)  # type: ignore
-    start_response("200 OK", [("Content-Type", CONTENT_TYPE_LATEST), ("Content-Length", str(len(output)))])  # type: ignore
-    return [output]
