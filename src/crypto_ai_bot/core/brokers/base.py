@@ -1,31 +1,31 @@
-# src/crypto_ai_bot/core/brokers/base.py
 from __future__ import annotations
-from typing import Any, Protocol, List, Optional, Dict
+
+"""
+Единая точка времени:
+- now_ms()          — UNIX time в миллисекундах
+- monotonic_ms()    — монотонное время (для измерений)
+- check_sync()      — (опц.) проверка дрейфа часов, сейчас заглушка под расширение
+"""
+
+import time
+from typing import Optional
 
 
-class ExchangeInterface(Protocol):
-    def fetch_ticker(self, symbol: str) -> Dict[str, Any]: ...
-    def fetch_balance(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
-    def create_order(
-        self, symbol: str, type: str, side: str, amount: float,
-        price: Optional[float] = None, params: Optional[Dict[str, Any]] = None, **kwargs: Any
-    ) -> Dict[str, Any]: ...
-    def cancel_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
-    def fetch_order(self, id: str, symbol: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]: ...
-    def fetch_open_orders(
-        self, symbol: Optional[str] = None, since: Optional[int] = None,
-        limit: Optional[int] = None, params: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]: ...
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
-def create_broker(settings: Any, bus: Any = None) -> ExchangeInterface:
-    mode = str(getattr(settings, "MODE", "paper")).lower()
-    exch = getattr(settings, "EXCHANGE", "binance")
+def monotonic_ms() -> int:
+    return int(time.perf_counter() * 1000)
 
-    if mode == "backtest":
-        from .backtest_exchange import BacktestExchange
-        # единая сигнатура: settings+bus+exchange_name
-        return BacktestExchange(settings=settings, bus=bus, exchange_name="backtest")
 
-    from .ccxt_exchange import CCXTExchange
-    return CCXTExchange(settings=settings, bus=bus, exchange_name=exch)
+def check_sync(exchange: object | None = None) -> Optional[int]:
+    """
+    Возвратите дрейф часов в мс (если есть внешний источник), иначе None.
+    Заглушка: не делает внешних запросов, расширяется позже.
+    """
+    try:
+        # место под реализацию: запрос времени у биржи/тайм-сервиса
+        return None
+    except Exception:
+        return None

@@ -1,13 +1,31 @@
-# src/crypto_ai_bot/utils/time.py
 from __future__ import annotations
-import time
 
-__all__ = ["now_ms", "mono_ms"]
+"""
+Единая точка времени:
+- now_ms()          — UNIX time в миллисекундах
+- monotonic_ms()    — монотонное время (для измерений)
+- check_sync()      — (опц.) проверка дрейфа часов, сейчас заглушка под расширение
+"""
+
+import time
+from typing import Optional
+
 
 def now_ms() -> int:
-    """UTC now in milliseconds."""
     return int(time.time() * 1000)
 
-def mono_ms() -> int:
-    """Monotonic time in milliseconds (для измерения латентностей)."""
-    return int(time.monotonic() * 1000)
+
+def monotonic_ms() -> int:
+    return int(time.perf_counter() * 1000)
+
+
+def check_sync(exchange: object | None = None) -> Optional[int]:
+    """
+    Возвратите дрейф часов в мс (если есть внешний источник), иначе None.
+    Заглушка: не делает внешних запросов, расширяется позже.
+    """
+    try:
+        # место под реализацию: запрос времени у биржи/тайм-сервиса
+        return None
+    except Exception:
+        return None
