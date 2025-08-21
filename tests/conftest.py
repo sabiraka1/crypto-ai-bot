@@ -1,5 +1,6 @@
-import os, tempfile, asyncio, pytest
+import os, tempfile, pytest, asyncio, inspect
 from crypto_ai_bot.app.compose import build_container
+
 @pytest.fixture(scope="session", autouse=True)
 def _configure_env():
     os.environ.setdefault("MODE", "paper")
@@ -11,16 +12,41 @@ def _configure_env():
     yield
     try: os.remove(path)
     except OSError: pass
+
 @pytest.fixture
-async def container():
+def container():
     c = build_container()
     yield c
-    await c.bus.close()
+    # --- teardown: закрываем аккуратно в синхронной фикстуре
     try:
-        if hasattr(c.broker, "close"):
-            maybe = c.broker.close()
-            if getattr(maybe, "__await__", None):
-                await maybe
-    except Exception:
-        pass
-    c.storage.conn.close()
+        # берём текущий цикл или создаём новый
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # bus.close()
+        try:
+            loop.run_until_complete(c.bus.close())
+        except Exception:
+            pass
+
+        # broker.close() если он async
+        try:
+            if hasattr(c.broker, "close"):
+                res = c.broker.close()
+                if inspect.isawaitable(res):
+                    loop.run_until_complete(res)
+        except Exception:
+            pass
+    finally:
+        try:
+            c.storage.conn.close()
+        except Exception:
+            pass
+
+# Ограничим anyio только asyncio-бэкендом (чтобы не тянуть trio)
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"

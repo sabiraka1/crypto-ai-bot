@@ -1,59 +1,59 @@
-## `utils/metrics.py`
 from __future__ import annotations
+import time
 from contextlib import contextmanager
 from typing import Dict, Optional, Tuple
+
 try:
-    from prometheus_client import Counter, Histogram
-except Exception:  # pragma: no cover - soft dependency fallback
+    from prometheus_client import Counter, Histogram  # type: ignore
+except Exception:  # модуль может отсутствовать
     Counter = None  # type: ignore
     Histogram = None  # type: ignore
-from .time import monotonic_ms
-__all__ = [
-    "inc",
-    "observe",
-    "timer",
-]
+
+# Кэш по (name, labelnames_tuple_sorted) -> Metric
 _COUNTERS: Dict[Tuple[str, Tuple[str, ...]], object] = {}
-_HISTOS: Dict[Tuple[str, Tuple[str, ...]], object] = {}
-def _labels_tuple(labels: Optional[Dict[str, str]]) -> Tuple[str, ...]:
+_HISTS: Dict[Tuple[str, Tuple[str, ...]], object] = {}
+
+def _labels_tuple(labels: Optional[Dict[str, str]]) -> Tuple[Tuple[str, str], ...]:
     if not labels:
         return tuple()
-    return tuple(f"{k}={labels[k]}" for k in sorted(labels))
+    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
+
+def _labelnames(labels: Optional[Dict[str, str]]) -> Tuple[str, ...]:
+    if not labels:
+        return tuple()
+    return tuple(sorted(str(k) for k in labels))
+
 def inc(name: str, labels: Optional[Dict[str, str]] = None, amount: float = 1.0) -> None:
-    """Increment a counter metric. No-op if prometheus_client is not installed."""
-    key = (name, _labels_tuple(labels))
     if Counter is None:
-        return  # graceful no-op
+        return
+    ln = _labelnames(labels)
+    key = (name, ln)
     if key not in _COUNTERS:
-        label_keys = [kv.split("=", 1)[0] for kv in key[1]]
-        _COUNTERS[key] = Counter(name, name, labelkeys=label_keys)  # type: ignore[arg-type]
+        _COUNTERS[key] = Counter(name, name, labelnames=list(ln))  # type: ignore[arg-type]
     c = _COUNTERS[key]
-    if labels:
-        c.labels(**{k: v for k, v in (kv.split("=", 1) for kv in key[1])}).inc(amount)  # type: ignore[attr-defined]
+    if ln:
+        c.labels(*[labels[k] for k in ln]).inc(amount)  # type: ignore[call-arg]
     else:
-        c.inc(amount)  # type: ignore[attr-defined]
-def observe(name: str, value: float, labels: Optional[Dict[str, str]] = None, buckets: Optional[Tuple[float, ...]] = None) -> None:
-    """Observe a value in a histogram metric. No-op if prometheus_client is missing."""
-    key = (name, _labels_tuple(labels))
+        c.inc(amount)  # type: ignore[call-arg]
+
+def observe(name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
     if Histogram is None:
         return
-    if key not in _HISTOS:
-        label_keys = [kv.split("=", 1)[0] for kv in key[1]]
-        if buckets:
-            _HISTOS[key] = Histogram(name, name, labelkeys=label_keys, buckets=buckets)  # type: ignore[arg-type]
-        else:
-            _HISTOS[key] = Histogram(name, name, labelkeys=label_keys)  # type: ignore[arg-type]
-    h = _HISTOS[key]
-    if labels:
-        h.labels(**{k: v for k, v in (kv.split("=", 1) for kv in key[1])}).observe(value)  # type: ignore[attr-defined]
+    ln = _labelnames(labels)
+    key = (name, ln)
+    if key not in _HISTS:
+        _HISTS[key] = Histogram(name, name, labelnames=list(ln))  # type: ignore[arg-type]
+    h = _HISTS[key]
+    if ln:
+        h.labels(*[labels[k] for k in ln]).observe(value)  # type: ignore[call-arg]
     else:
-        h.observe(value)  # type: ignore[attr-defined]
+        h.observe(value)  # type: ignore[call-arg]
+
 @contextmanager
 def timer(name: str, labels: Optional[Dict[str, str]] = None):
-    """Context manager that measures elapsed time (ms) and observes it in a histogram."""
-    start = monotonic_ms()
+    t0 = time.perf_counter()
     try:
         yield
     finally:
-        dur_ms = monotonic_ms() - start
-        observe(name, dur_ms, labels)
+        dt = time.perf_counter() - t0
+        observe(name, dt, labels=labels)
