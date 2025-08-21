@@ -1,290 +1,220 @@
-markdown# crypto-ai-bot — Production-Ready Trading System
+# CRYPTO-AI-BOT — фундаментальная архитектура торгового бота
 
-🚀 **Enterprise-grade** крипто-торговая система на **FastAPI** с полной интеграцией **Gate.io**, protective exits, reconciliation и production monitoring.
-
-> **Статус:** Production-Ready | **Обновлено:** 2025-08-19 | **Аудит:** ✅ Пройден
+Production-grade фундамент (ядро) для будущего функционала: строгие интерфейсы, событийная шина с порядком по ключу, идемпотентность, метрики/health, чистый DI и изолированные слои. Репозиторий уже покрыт тестами (**23 passed**).
 
 ---
 
-## 🎯 **КЛЮЧЕВЫЕ ОСОБЕННОСТИ**
+## 🚀 Ключевые возможности
 
-### **💎 Production Features**
-- ✅ **Full Order Reconciliation** — автосверка с биржей каждые 60 сек
-- ✅ **Protective Exits** — автоматический SL/TP с мониторингом  
-- ✅ **Circuit Breakers** — защита от API сбоев с auto-recovery
-- ✅ **Graceful Shutdown** — корректное завершение всех операций
-- ✅ **Comprehensive Monitoring** — 50+ метрик для production
-
-### **🛡️ Risk Management**
-- ✅ **Position Limits** — MAX_POSITIONS enforcement
-- ✅ **Drawdown Protection** — автостоп при превышении лимитов
-- ✅ **Sequential Loss Limits** — защита от серий убытков
-- ✅ **Time-based Trading** — торговые часы и временные ограничения
-
-### **🔧 Gate.io Integration**
-- ✅ **Native Symbol Format** — BTC_USDT для Gate.io
-- ✅ **Precision Handling** — минимальные лоты и точность
-- ✅ **Rate Limit Management** — 300 calls/10sec соблюдение
-- ✅ **Status Mapping** — полная обработка Gate.io статусов
+- **Чёткая семантика ордеров (без двусмысленности):**
+  - `create_market_buy_quote(symbol, quote_amount)` → сумма **в котируемой валюте** (например, USDT).
+  - `create_market_sell_base(symbol, base_amount)` → количество **в базовой валюте** (например, BTC).
+- **Событийная шина (EventBus):**
+  - Per-key ordering (строгий порядок внутри `(topic, key)`), параллелизм между ключами.
+  - Ленивый старт воркеров (надёжно работает в синхронном DI/тестах).
+  - DLQ с метаданными и отдельными подписчиками.
+  - Ретраи на временные ошибки с экспоненциальным бэк-оффом.
+- **Идемпотентность операций:** стабильные ключи с бакетизацией по времени, TTL.
+- **Риск-менеджмент и защитные выходы:** cooldown, спред-фильтр, `ProtectiveExits` (TP/SL-план).
+- **Сигналы:** базовые фичи (SMA/EMA/спред), политика `buy/sell/hold`.
+- **Хранилище:** SQLite + миграции, фасад репозиториев (trades, positions, market_data, audit, idempotency).
+- **Мониторинг:** `/health` агрегирует DB/миграции/брокер/EventBus, `/metrics` — Prometheus или JSON fallback.
+- **DI и сервер:** FastAPI (`/live`, `/ready`, `/health`, `/status`, `/metrics`, `/telegram/webhook`).
+- **Тесты:** unit + integration, быстрый смок-скрипт.
 
 ---
 
-## 🏗️ **АРХИТЕКТУРА**
-crypto-ai-bot/
-├─ requirements.txt
-├─ .env.example
-├─ ops/prometheus/          # 🔥 Production alerts
-│  └─ alerts.yml           # 20+ production-ready rules
-├─ scripts/
-│  ├─ reconciler.py        # 🔥 Order reconciliation service
-│  ├─ protective_exits.py  # 🔥 SL/TP execution service
-│  └─ health_monitor.py    # 🔥 System health monitoring
-└─ src/crypto_ai_bot/
+## 🧱 Структура проекта
+
+src/crypto_ai_bot/
 ├─ app/
-│  ├─ server.py         # FastAPI + comprehensive health checks
-│  ├─ compose.py        # 🔥 Production DI container
-│  └─ adapters/
-│     └─ telegram.py    # Full command set: /eval, /why
+│ ├─ compose.py # DI-контейнер, lifecycle (startup/shutdown)
+│ ├─ server.py # FastAPI эндпоинты
+│ └─ adapters/telegram.py # парсер /eval, /buy <USDT>, /sell [BASE]
 ├─ core/
-│  ├─ settings.py       # 🔥 Production configuration
-│  ├─ orchestrator.py   # 🔥 Full lifecycle management
-│  ├─ use_cases/        # evaluate / eval_and_execute / place_order
-│  ├─ signals/
-│  │  ├─ _build.py
-│  │  ├─ _fusion.py     # 🔥 Signal fusion logic
-│  │  └─ policy.py
-│  ├─ brokers/
-│  │  ├─ base.py
-│  │  ├─ ccxt_impl.py   # 🔥 Renamed from ccxt_exchange.py
-│  │  └─ gateio_config.py # 🔥 Gate.io specific configuration
-│  ├─ risk/
-│  │  ├─ manager.py     # 🔥 Enhanced risk rules
-│  │  └─ protective_exits.py # 🔥 SL/TP execution engine
-│  └─ storage/
-│     ├─ reconciler.py  # 🔥 Order reconciliation
-│     └─ repositories/  # trades, positions, exits, audit
-└─ utils/
-├─ retry.py          # 🔥 Centralized retry logic
-├─ circuit_breaker.py # 🔥 Enhanced with auto-recovery
-└─ graceful_shutdown.py # 🔥 Production shutdown handler
+│ ├─ events/
+│ │ └─ bus.py # AsyncEventBus: per-key order, DLQ, lazy start
+│ ├─ brokers/
+│ │ ├─ backtest_exchange.py
+│ │ └─ ccxt_exchange.py # live-режим (например, Gate.io)
+│ ├─ storage/
+│ │ ├─ sqlite_adapter.py
+│ │ ├─ migrations/
+│ │ │ ├─ runner.py
+│ │ │ └─ 0001_init.sql # чистый SQL (без markdown-фенсов)
+│ │ └─ repositories/ # idempotency, trades, positions, market_data, audit
+│ ├─ use_cases/ # evaluate, place_order, execute_trade, reconcile, eval_and_execute
+│ ├─ risk/ # RiskManager, ProtectiveExits
+│ ├─ signals/ # _build (SMA/EMA/спред), policy
+│ ├─ monitoring/ # HealthChecker
+│ └─ analytics/ # PnL/метрики отчёта
+└─ utils/ # time, ids, logging, metrics, retry, circuit_breaker, exceptions
+
+makefile
+Копировать
+Редактировать
+
+Тесты:
+tests/
+├─ unit/
+├─ integration/
+└─ conftest.py
+
+yaml
+Копировать
+Редактировать
 
 ---
 
-## ⚡ **БЫСТРЫЙ СТАРТ**
+## 🧩 Технологии
 
-### **1. Установка**
+- Python **3.12+** (совместимо с 3.13)
+- FastAPI, httpx, pydantic (в составе FastAPI), sqlite3
+- (опц.) prometheus_client — текстовый `/metrics`
+- ccxt — для live-бирж (в dev не обязателен)
+- pytest, anyio/pytest-asyncio — тестирование
+
+---
+
+## ⚙️ Установка
+
 ```bash
-# Development setup
+# 1) Клонирование
+git clone <your-repo-url>
+cd crypto-ai-bot
+
+# 2) Виртуальное окружение (рекомендуется)
 python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .\.venv\Scripts\Activate.ps1  # Windows
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
 
+# 3) Зависимости
 pip install -r requirements.txt
-# pip install -e .[dev]  # С development tools
-2. Конфигурация
-bashcp .env.example .env
-# Настройте .env файл с вашими API ключами
-3. Запуск Development
-bashexport PYTHONPATH=src
-uvicorn crypto_ai_bot.app.server:app --reload --host 0.0.0.0 --port 8000
-4. Проверка работоспособности
-bash# Health check
-curl http://localhost:8000/health
+pip install -r requirements-dev.txt
+Windows с пробелами в пути — используйте кавычки:
 
-# Metrics
-curl http://localhost:8000/metrics
+bat
+Копировать
+Редактировать
+cd "C:\Users\<USERNAME>\Documents\GitHub\crypto-ai-bot"
+🔧 Конфигурация (ENV)
+Основные переменные окружения (см. core/settings.py):
 
-# Telegram test (если настроен)
-# Отправьте /status в Telegram бот
-🚀 PRODUCTION DEPLOYMENT
-Railway.app (Рекомендуется)
+ENV	Назначение	Пример
+MODE	paper | live	paper
+EXCHANGE	имя биржи для live (ccxt)	gateio
+SYMBOL	торговая пара	BTC/USDT
+DB_PATH	путь к SQLite БД	./crypto_ai_bot.db
+FIXED_AMOUNT	дефолтная сумма покупки (quote)	10
+IDEMPOTENCY_BUCKET_MS	ширина бакета для ключей	60000
+IDEMPOTENCY_TTL_SEC	TTL ключей идемпотентности	60
+API_KEY / API_SECRET	ключи для live-режима	...
+TELEGRAM_ENABLED	1 включает обработчик вебхука	0
+
+Settings.load() — единственная точка чтения ENV; валидация — в core/validators/settings.py.
+
+▶️ Запуск сервера
+bash
+Копировать
+Редактировать
+uvicorn crypto_ai_bot.app.server:app --reload
+# Открой:
+# GET /live   → {"ok": true}
+# GET /ready  → 200/503 (DB & миграции)
+# GET /health → агрегированный отчёт (DB/миграции/брокер/EventBus)
+# GET /metrics → Prometheus-текст или JSON fallback (PnL-отчёт)
+# GET /status  → краткий статус/счётчики
+Telegram webhook:
+
+Включить: TELEGRAM_ENABLED=1
+
+POST /telegram/webhook принимает стандартный update и поддерживает команды:
+
+/eval
+
+/buy <USDT> (сумма в котируемой валюте)
+
+/sell [BASE] (количество в базовой валюте; без аргумента — вся позиция)
+
+🧪 Тесты и смок-прогон
+bash
+Копировать
+Редактировать
+pytest -q
+# или по группам:
+pytest -q tests/unit
+pytest -q tests/integration
+Смок-скрипт:
 
 bash
 Копировать
 Редактировать
-# 1. Deploy
-railway login
-railway init
-railway up
+python -m crypto_ai_bot.app.dev_smoke
+# Выполнит BUY → SELL → выведет PnL и HEALTH
+pytest.ini содержит pythonpath = src, поэтому импорты пакета работают из корня репо.
 
-# 2. Environment Variables  
-railway variables set MODE=live
-railway variables set ENABLE_TRADING=true
-railway variables set DB_PATH=/data/bot.sqlite
-railway variables set EXCHANGE=gateio
-railway variables set SYMBOL="BTC/USDT"
-railway variables set TIMEFRAME=15m
+🧠 EventBus — гарантии и поведение
+Per-key ordering — порядок строгий внутри (topic, key).
 
-# 3. Volume для данных
-railway volume create --name trading-data --mount /data
+Параллелизм — разные ключи обрабатываются независимыми воркерами.
 
-# 4. Мониторинг
-railway logs --follow
-Docker (Alternative)
+Ленивый старт — воркеры создаются только при наличии активного event loop (устойчиво в DI/pytest).
 
-dockerfile
-Копировать
-Редактировать
-FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY src/ ./src/
-ENV PYTHONPATH=src
-EXPOSE 8000
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "crypto_ai_bot.app.server:app"]
-📊 MONITORING & OBSERVABILITY
-Ключевые метрики
+Ретраи — временные ошибки (TransientError, ConnectionError, TimeoutError, asyncio.TimeoutError) ретраятся с экспоненциальным бэк-оффом.
 
-yaml
-Копировать
-Редактировать
-# Trading Metrics
-- orders_success_total / orders_fail_total
-- position_sync_drift_seconds  
-- protective_exits_triggered_total
-- slippage_actual_bps vs slippage_expected_bps
-- pnl_calculated vs pnl_exchange_difference
+DLQ — при исчерпании попыток событие уходит в DLQ; подписки через subscribe_dlq().
 
-# System Metrics  
-- reconciliation_errors_total
-- circuit_breaker_state{name,state}
-- graceful_shutdown_duration_seconds
-- risk_blocks_total{rule}
+📊 Метрики и Health
+/metrics:
 
-# Performance Metrics
-- latency_decision_seconds (P95/P99)
-- latency_order_execution_seconds (P95/P99) 
-- performance_budget_exceeded_total{component}
-Alerts (Prometheus)
+Если установлен prometheus_client — отдаётся Prometheus-текст.
 
-yaml
-Копировать
-Редактировать
-# Critical Alerts
-- TradingSystemDown (1min)
-- OrderReconciliationFailed (2min)  
-- ProtectiveExitStuck (5min)
-- DrawdownLimitExceeded (1min)
+Иначе — JSON fallback (PnL-отчёт из core/analytics/metrics.py).
 
-# Warning Alerts
-- HighOrderLatency (5min)
-- CircuitBreakerOpen (1min)
-- PositionSyncLost (10min)
-🎮 TELEGRAM COMMANDS
-Основные команды
+HealthChecker проверяет:
 
-/help — список всех команд
+доступность БД и таблицы миграций,
 
-/status — состояние системы и позиций
+fetch_ticker брокера,
 
-/health — детальная диагностика системы
+loopback-публикацию EventBus (если есть шина),
 
-Trading операции
+clock drift (если передан замер).
 
-/eval [SYMBOL] [TF] [LIMIT] — 🔥 расчет сигнала без исполнения
+📚 Миграции (SQLite)
+Миграции читаются через importlib.resources из пакета core/storage/migrations.
+Важно: 0001_init.sql — чистый SQL, без markdown-фенсов и # комментариев (используйте --).
 
-/why [SYMBOL] [TF] [LIMIT] — 🔥 объяснение торгового решения
+Запуск миграций происходит в app/compose.py при построении контейнера.
 
-/profit [SYMBOL] — PnL статистика и график
+🔒 Live-режим (ccxt)
+Установите ccxt, задайте MODE=live, EXCHANGE, API_KEY, API_SECRET.
 
-/positions [SYMBOL] — открытые позиции
+BUY — сумма в quote; SELL — количество в base.
 
-Мониторинг
+Проверь precision/минимальные суммы конкретной биржи.
 
-/test — smoke test всех систем
+Рекомендуется безопасный dry-run на тестовой сети (если доступна).
 
-/metrics — ключевые метрики системы
+🧰 Makefile / CI / Линтинг
+Если присутствуют:
 
-/exits — статус protective exits
+Makefile — цели make test, make run, make fmt, make lint.
 
-⚙️ КОНФИГУРАЦИЯ
-Основные параметры
+GitHub Actions (.github/workflows/ci.yml) — линт/типы/тесты/coverage.
 
-env
-Копировать
-Редактировать
-# === TRADING SETUP ===
-MODE=live                    # paper/live
-ENABLE_TRADING=true         # Главный выключатель
-SYMBOL=BTC/USDT            # Торгуемая пара
-TIMEFRAME=15m              # Таймфрейм
+pyproject.toml — конфиги ruff, mypy, coverage.
 
-# === GATE.IO SETUP ===  
-EXCHANGE=gateio
-CCXT_ENABLE_RATE_LIMIT=true
-ORDERS_RPS=10
-ACCOUNT_RPS=30
+🆘 Troubleshooting
+unrecognized token: "#" при миграциях — в 0001_init.sql остались маркдаун-фенсы. Оставьте только чистый SQL и -- комментарии.
 
-# === RISK MANAGEMENT ===
-MAX_POSITIONS=3                 # 🔥 Максимум позиций
-RISK_MAX_LOSSES=3              # 🔥 Лимит подряд идущих убытков
-RISK_MAX_DRAWDOWN_PCT=10.0     # 🔥 Максимальная просадка
-RISK_HOURS_UTC=08:00-22:00     # 🔥 Торговые часы
-SLIPPAGE_BPS=20.0              # 🔥 Допустимое проскальзывание (bps)
-MAX_SPREAD_BPS=50.0            # 🔥 Макс. спред (bps)
+RuntimeError: no running event loop — в старых версиях шины воркеры создавались в __init__. В текущей версии EventBus — ленивый старт, проблема решена.
 
-# === RECONCILIATION ===
-IDEMPOTENCY_TTL_SEC=60      # 🔥 TTL идемпотентности (анти-дубли заявок)
-MARKET_DATA_RPS=60          # 🔥 Частота рыночных запросов (RPS)
+Windows пути с пробелами — используйте кавычки в cd "C:\Users\...".
 
-# === PERFORMANCE ===
-CB_FAIL_THRESHOLD=5                # 🔥 Ошибок до открытия (circuit breaker)
-CB_OPEN_TIMEOUT_SEC=30.0           # 🔥 Таймаут open-состояния
-CB_WINDOW_SEC=60.0                 # 🔥 Окно подсчёта ошибок
+SQLite lock — закрывайте ресурсы: await bus.close(), broker.close() (если async), conn.close().
 
-# Production секреты
-# === SECURITY ===
-TELEGRAM_BOT_TOKEN=bot123:secret
-TELEGRAM_BOT_SECRET=webhook_secret
-TELEGRAM_ALERT_CHAT_ID=-100123456  # 🔥 Для alerts
-
-# === STORAGE ===
-DB_PATH=/data/bot.sqlite          # Production path
-DB_JOURNAL_MODE_WAL=true          # 🔥 WAL для SQLite
-
-# === MONITORING ===
-LOG_LEVEL=INFO                    # DEBUG/INFO/WARNING/ERROR
-🧪 TESTING
-Test suites
-
-bash
-Копировать
-Редактировать
-# Unit tests
-pytest tests/unit/ -v
-
-# Integration tests  
-pytest tests/integration/ -v --timeout=30
-
-# Architecture compliance
-./scripts/check_architecture.sh
-
-# Performance tests
-pytest tests/performance/ -v -m "not slow"
-
-# Full test suite
-pytest -v --cov=crypto_ai_bot --cov-report=html
-Pre-deployment checklist
-
-bash
-Копировать
-Редактировать
-# 🔥 КРИТИЧНО перед production
-□ ./scripts/smoke_test.sh passes  
-□ All /health endpoints return healthy
-□ Reconciliation service connects to Gate.io
-□ Protective exits can be created and triggered
-□ Rate limits are properly configured
-□ Graceful shutdown works within 30 seconds
-□ All alerts fire correctly in test environment
-perl
-Копировать
-Редактировать
-
-Основано на переменных и дефолтах из актуального `core/settings.py` (MODE, SYMBOL, TIMEFRAME, EXCHANGE, risk-параметры, RPS и circuit breaker, БД и Telegram и пр.). :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1} :contentReference[oaicite:2]{index=2}
-
-Для сравнения, исходные места `README.md`, которые были затронуты (замена GATEIO_API_KEY/SECRET, POSITION_SIZE_USD, STOP/TAKE_PROFIT, RECONCILE_*, PERF_BUDGET_*, TELEGRAM_WEBHOOK_SECRET, DB_BACKUP_INTERVAL_HOURS, SENTRY_DSN), см. строки 107–113 и 183–223 оригинала. :contentReference[oaicite:3]{index=3} :contentReference[oaicite:4]{index=4}
-
-Если хочешь, сгенерирую такой же **минимальный diff** к `.env.example` строго в его исходном формате — пришли файл или дай доступ.
-::contentReference[oaicite:5]{index=5}
+📜 Лицензия
+© Выбор лицензии за владельцем репозитория.

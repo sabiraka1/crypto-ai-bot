@@ -1,13 +1,20 @@
-## `tests/unit/test_signals.py`
 from decimal import Decimal
 from crypto_ai_bot.core.brokers.base import TickerDTO
 from crypto_ai_bot.core.signals._build import build_features
 from crypto_ai_bot.core.signals._fusion import fuse_score
 from crypto_ai_bot.core.signals.policy import decide
+
 def test_build_and_decide(container):
     sym = container.settings.SYMBOL
+    # Наполняем несколько снапшотов
     for p in [Decimal("100"), Decimal("101"), Decimal("102")]:
-        t = TickerDTO(symbol=sym, last=p, bid=p - 0.1, ask=p + 0.1, timestamp=0)
+        t = TickerDTO(
+            symbol=sym,
+            last=p,
+            bid=p - Decimal("0.1"),
+            ask=p + Decimal("0.1"),
+            timestamp=0
+        )
         container.storage.market_data.store_ticker(t)
     feats = build_features(symbol=sym, storage=container.storage, n=3)
     assert float(feats["spread_pct"]) >= 0
