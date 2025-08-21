@@ -1,5 +1,3 @@
-## `core/storage/migrations/0001_init.sql`
-```sql
 -- Начальная схема: идемпотентность, сделки, тики, аудит
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
