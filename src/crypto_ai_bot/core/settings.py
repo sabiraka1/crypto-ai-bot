@@ -1,12 +1,15 @@
-## `core/settings.py`
 from __future__ import annotations
 import os
+import dataclasses as dc
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from .validators.settings import validate_settings
 from ..utils.exceptions import ValidationError
+
 _BOOL_TRUE = {"1", "true", "yes", "on", "y", "t"}
+
+
 def _get(name: str, default: Optional[str] = None) -> str:
     v = os.environ.get(name)
     if v is None:
@@ -14,38 +17,52 @@ def _get(name: str, default: Optional[str] = None) -> str:
             return ""
         return str(default)
     return v
+
+
 def _get_int(name: str, default: int) -> int:
     try:
         return int(_get(name, str(default)).strip())
     except Exception:
         return default
+
+
 def _get_bool(name: str, default: bool) -> bool:
     v = _get(name, str(int(default))).strip().lower()
     return v in _BOOL_TRUE
+
+
 def _get_decimal(name: str, default: Decimal) -> Decimal:
     raw = _get(name, str(default))
     try:
         return Decimal(raw)
     except (InvalidOperation, ValueError):
         return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Single source of truth for configuration. Only this module reads os.environ."""
+
     MODE: str = "paper"            # paper | live | backtest
     EXCHANGE: str = "gateio"
     SYMBOL: str = "BTC/USDT"
     FIXED_AMOUNT: Decimal = Decimal("10")  # default monetary/asset unit depending on strategy
+
     IDEMPOTENCY_TTL_SEC: int = 60
     IDEMPOTENCY_BUCKET_MS: int = 60_000
+
     DB_PATH: str = "crypto_ai_bot.db"  # SQLite file path
     SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
+
     METRICS_ENABLED: bool = True
     TELEGRAM_ENABLED: bool = False
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
+
     API_KEY: str = ""
     API_SECRET: str = ""
+
     @classmethod
     def load(cls) -> "Settings":
         """Load settings from environment and validate. Fail-fast on errors."""
@@ -68,9 +85,27 @@ class Settings:
         )
         errors = validate_settings(obj)
         if errors:
-            redacted = [e.replace(obj.API_KEY, "***").replace(obj.API_SECRET, "***") if obj.API_KEY or obj.API_SECRET else e for e in errors]
+            redacted = [
+                e.replace(obj.API_KEY, "***").replace(obj.API_SECRET, "***")
+                if obj.API_KEY or obj.API_SECRET else e
+                for e in errors
+            ]
             raise ValidationError("Invalid Settings: " + "; ".join(redacted))
         return obj
+
+    def migrate_live_keys(
+        self,
+        live_api_key: str,
+        live_api_secret: str,
+        fixed_quote: Decimal,
+    ) -> "Settings":
+        return dc.replace(
+            self,
+            API_KEY=live_api_key,
+            API_SECRET=live_api_secret,
+            FIXED_AMOUNT=fixed_quote,
+        )
+
     def as_dict(self) -> dict:
         return {
             "MODE": self.MODE,
