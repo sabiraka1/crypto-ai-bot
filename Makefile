@@ -1,11 +1,22 @@
 # ------- Config -------
-PY ?= python3
+PY ?= python
 UVICORN ?= uvicorn
 APP ?= crypto_ai_bot.app.server:app
 HOST ?= 0.0.0.0
 PORT ?= 8000
 
 export PYTHONPATH := src
+
+# ------- Install -------
+.PHONY: install
+install:
+	$(PY) -m pip install -U pip setuptools wheel
+	$(PY) -m pip install -r requirements.txt
+
+.PHONY: dev-install
+dev-install:
+	$(PY) -m pip install -U pip setuptools wheel
+	$(PY) -m pip install -r requirements.txt -r requirements-dev.txt
 
 # ------- Run -------
 .PHONY: run
@@ -19,7 +30,11 @@ dev:
 # ------- Tests & checks -------
 .PHONY: test
 test:
-	pytest -q
+	pytest -v --maxfail=1 --disable-warnings -q
+
+.PHONY: coverage
+coverage:
+	pytest --cov=src --cov-report=term-missing
 
 .PHONY: check-arch
 check-arch:
@@ -45,7 +60,7 @@ chart:
 	curl -s "http://127.0.0.1:$(PORT)/chart/profit" > equity.svg
 	@echo "Saved: price.svg, equity.svg"
 
-# ------- Format (опционально, если установлены) -------
+# ------- Format & Lint -------
 .PHONY: lint
 lint:
 	-ruff check src tests

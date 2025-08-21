@@ -13,14 +13,7 @@ requests>=2.31,<3
 prometheus-client>=0.20,<0.21
 
 # === PRODUCTION DEPENDENCIES ===
-# Раскомментировать для production scale:
-# psycopg2-binary>=2.9,<3    # PostgreSQL
-# redis>=5.0,<6              # Cache/queues
-# structlog>=24.1,<25        # Structured logging
-# sentry-sdk[fastapi]>=1.40,<2  # Error tracking
-
-# === DEVELOPMENT (remove in production) ===
-# pytest>=8.2,<9
-# pytest-asyncio>=0.23,<1
-# ruff>=0.6,<0.7
-# mypy>=1.8,<2
+# psycopg2-binary>=2.9,<3      # PostgreSQL (если нужна БД)
+# redis>=5.0,<6                # Cache/queues
+# structlog>=24.1,<25          # Structured logging
+# sentry-sdk[fastapi]>=1.40,<2 # Error tracking

@@ -1,0 +1,12 @@
+## `core/events/topics.py`
+DECISION_EVALUATED = "decision.evaluated"
+EVALUATION_STARTED = "eval.started"
+ORDER_SUBMITTED = "order.submitted"
+ORDER_EXECUTED = "order.executed"
+ORDER_FAILED = "order.failed"
+POSITION_CHANGED = "position.changed"
+PROTECTIVE_EXIT_TRIGGERED = "protective_exit.triggered"
+PROTECTIVE_EXIT_UPDATED = "protective_exit.updated"
+RISK_BLOCKED = "risk.blocked"
+RECONCILIATION_COMPLETED = "reconcile.completed"
+HEALTH_STATUS = "health.status"
