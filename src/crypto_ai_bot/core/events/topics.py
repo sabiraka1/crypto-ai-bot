@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-# Константы тем для шины событий (минимум, без привязки к реализации)
-ORDER_PLACED   = "order.placed"
-ORDER_FAILED   = "order.failed"
-EVAL_DECISION  = "eval.decision"
-RISK_BLOCKED   = "risk.blocked"
+
+class Topics:
+    """Список констант топиков событий (минимально достаточный)."""
+    DECISION_EVALUATED = "decision.evaluated"
+    ORDER_EXECUTED = "order.executed"
+    ORDER_FAILED = "order.failed"
+    POSITION_CHANGED = "position.changed"
+    RISK_BLOCKED = "risk.blocked"
+    PROTECTIVE_EXIT_TRIGGERED = "protective_exit.triggered" 

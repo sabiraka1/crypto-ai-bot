@@ -1,61 +1,88 @@
 from __future__ import annotations
-
-"""
-Простая асинхронная шина событий (in-memory), без внешних зависимостей.
-Совместима с ранее упоминавшимся AsyncEventBus: start/stop/publish/subscribe/qsize.
-"""
-
 import asyncio
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, DefaultDict
 from collections import defaultdict
-from typing import Awaitable, Callable, Dict, List, Any, Coroutine, Optional
+
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
 
 
-Handler = Callable[[str, dict], Awaitable[None]]
+EventHandler = Callable[['Event'], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class Event:
+    topic: str
+    key: str | None
+    payload: dict[str, Any]
+    ts_ms: int
+    correlation_id: str | None = None
 
 
 class AsyncEventBus:
-    def __init__(self, max_queue: int = 2048, concurrency: int = 4) -> None:
-        self._q: asyncio.Queue[tuple[str, dict]] = asyncio.Queue(maxsize=max_queue)
-        self._subs: Dict[str, List[Handler]] = defaultdict(list)
-        self._workers: List[asyncio.Task] = []
-        self._running = False
-        self._concurrency = concurrency
+    """Асинхронная шина событий: in-memory очередь, порядок по ключу (per-key ordering), DLQ."""
 
-    def qsize(self) -> int:
-        return self._q.qsize()
+    def __init__(self, *, max_retries: int = 3) -> None:
+        self._log = get_logger("event_bus")
+        self._handlers: DefaultDict[str, list[EventHandler]] = defaultdict(list)
+        self._queues: dict[tuple[str, str | None], asyncio.Queue[Event]] = {}
+        self._workers: dict[tuple[str, str | None], asyncio.Task[None]] = {}
+        self._dlq: list[Event] = []
+        self._max_retries = int(max_retries)
+        self._closed = False
 
-    def subscribe(self, topic: str, handler: Handler) -> None:
-        self._subs[topic].append(handler)
+    def subscribe(self, topic: str, handler: EventHandler) -> None:
+        """Подписка обработчика на топик. Порядок вызова = порядок подписки."""
+        self._handlers[topic].append(handler)
 
-    async def publish(self, topic: str, payload: dict) -> None:
-        await self._q.put((topic, payload))
+    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None, correlation_id: str | None = None) -> None:
+        """Публикация события: кладём в очередь, гарантируем порядок для одного key."""
+        if self._closed:
+            raise RuntimeError("EventBus is closed")
+        evt = Event(topic=topic, key=key, payload=payload, ts_ms=now_ms(), correlation_id=correlation_id)
+        qkey = (topic, key)
+        q = self._queues.get(qkey)
+        if q is None:
+            q = asyncio.Queue()
+            self._queues[qkey] = q
+            self._workers[qkey] = asyncio.create_task(self._worker(qkey))
+        await q.put(evt)
 
-    async def _worker(self) -> None:
-        while self._running:
-            try:
-                topic, payload = await self._q.get()
-                for h in self._subs.get(topic, []):
-                    try:
-                        await h(topic, payload)
-                    except Exception:
-                        # здесь можно инкрементить метрику ошибок
-                        pass
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+    def get_dlq(self) -> list[Event]:
+        return list(self._dlq)
 
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._workers = [asyncio.create_task(self._worker(), name=f"bus-{i}") for i in range(self._concurrency)]
-
-    async def stop(self) -> None:
-        if not self._running:
-            return
-        self._running = False
-        for t in self._workers:
-            t.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
+    async def close(self) -> None:
+        self._closed = True
+        # Останавливаем воркеры корректно
+        for q in self._queues.values():
+            await q.put(None)  # type: ignore[arg-type]
+        await asyncio.gather(*self._workers.values(), return_exceptions=True)
         self._workers.clear()
+        self._queues.clear()
+
+    async def _worker(self, qkey: tuple[str, str | None]) -> None:
+        topic, _ = qkey
+        q = self._queues[qkey]
+        while True:
+            evt = await q.get()
+            if evt is None:  # сигнал остановки
+                break
+            handlers = self._handlers.get(topic, [])
+            if not handlers:
+                # Никто не подписан — просто проглатываем
+                continue
+            for h in handlers:
+                ok = False
+                attempt = 0
+                while not ok and attempt < self._max_retries:
+                    attempt += 1
+                    try:
+                        await h(evt)
+                        ok = True
+                    except Exception as e:  # noqa: BLE001
+                        if attempt >= self._max_retries:
+                            self._log.error(f"Handler failed; to DLQ: {e}")
+                            self._dlq.append(evt)
+                        else:
+                            await asyncio.sleep(0.05 * attempt)

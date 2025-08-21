@@ -1,31 +1,43 @@
 from __future__ import annotations
-
-"""
-Единая точка времени:
-- now_ms()          — UNIX time в миллисекундах
-- monotonic_ms()    — монотонное время (для измерений)
-- check_sync()      — (опц.) проверка дрейфа часов, сейчас заглушка под расширение
-"""
-
-import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Protocol
 
 
-def now_ms() -> int:
-    return int(time.time() * 1000)
+@dataclass(slots=True)
+class TickerDTO:
+    """DTO тикера рынка (минимально необходимое)."""
+    symbol: str
+    last: float  # последняя цена
+    ts_ms: int | None = None
 
 
-def monotonic_ms() -> int:
-    return int(time.perf_counter() * 1000)
+@dataclass(slots=True)
+class BalanceDTO:
+    """DTO баланса. Совместимо с проверкой: balance['free'][base] < qty."""
+    free: dict[str, float]
+    total: dict[str, float]
 
 
-def check_sync(exchange: object | None = None) -> Optional[int]:
-    """
-    Возвратите дрейф часов в мс (если есть внешний источник), иначе None.
-    Заглушка: не делает внешних запросов, расширяется позже.
-    """
-    try:
-        # место под реализацию: запрос времени у биржи/тайм-сервиса
-        return None
-    except Exception:
-        return None
+@dataclass(slots=True)
+class OrderDTO:
+    """DTO ордера/сделки (результат размещения)."""
+    id: str
+    client_order_id: str
+    symbol: str
+    side: str        # "buy" | "sell"
+    type: str        # "market" | "limit" | ...
+    amount: float    # кол-во базовой валюты
+    price: float     # средняя/исполненная цена
+    status: str      # "open" | "closed" | "canceled"
+
+
+class IBroker(Protocol):
+    """Контракт брокера/биржи (асинхронный)."""
+
+    async def fetch_ticker(self, symbol: str) -> TickerDTO: ...
+
+    async def fetch_balance(self) -> BalanceDTO: ...
+
+    async def create_market_buy_quote(self, *, symbol: str, quote_amount: float, idempotency_key: str) -> OrderDTO: ...
+
+    async def create_market_sell_base(self, *, symbol: str, base_amount: float, idempotency_key: str) -> OrderDTO: ...
