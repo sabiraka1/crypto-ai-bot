@@ -157,9 +157,8 @@ def build_container() -> Container:
     risk_config = RiskConfig(
         cooldown_sec=30,
         max_spread_pct=0.3,
-        allow_pyramiding=True,
     )
-    risk = RiskManager(storage=storage, config=risk_config, bus=bus)  # ✅ исправлен порядок аргументов
+    risk = RiskManager(storage=storage, config=risk_config)  # ✅ исправлен порядок аргументов
     
     # 6. Создаем protective exits
     exit_policy = ExitPolicy(

@@ -56,11 +56,31 @@ async def status_endpoint():
 
 @app.get("/metrics")
 async def metrics():
+    # 🆕 УЛУЧШЕННЫЙ ENDPOINT: сначала пытаемся отдать Prometheus текст
     if generate_latest is not None:
-        out = generate_latest()  # type: ignore
-        return Response(content=out, media_type=CONTENT_TYPE_LATEST)
+        try:
+            out = generate_latest()  # type: ignore
+            return Response(content=out, media_type=CONTENT_TYPE_LATEST)
+        except Exception:
+            pass  # fallback to JSON
+    
+    # 🆕 ФОЛБЭК: JSON-снимок (никогда не 500)
     c: Container = app.state.container
-    return report_dict(c.storage, symbol=c.settings.SYMBOL)
+    try:
+        metrics_data = report_dict(c.storage, symbol=c.settings.SYMBOL)
+        return JSONResponse(metrics_data)
+    except Exception as exc:
+        # 🆕 ПОСЛЕДНИЙ ФОЛБЭК: базовые метрики
+        return JSONResponse({
+            "error": "metrics_unavailable",
+            "details": str(exc),
+            "basic_metrics": {
+                "app": "crypto_ai_bot",
+                "status": "running",
+                "mode": getattr(c.settings, "MODE", "unknown"),
+                "symbol": getattr(c.settings, "SYMBOL", "unknown"),
+            }
+        })
 
 
 # --- Orchestrator endpoints ---
