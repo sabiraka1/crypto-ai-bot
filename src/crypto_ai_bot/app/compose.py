@@ -1,4 +1,3 @@
-## `compose.py` - ИСПРАВЛЕННЫЙ С ПРАВИЛЬНЫМИ АРГУМЕНТАМИ
 from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
@@ -16,6 +15,7 @@ from ..core.storage.facade import Storage
 from ..core.monitoring.health_checker import HealthChecker
 from ..core.risk.manager import RiskManager, RiskConfig
 from ..core.risk.protective_exits import ProtectiveExits, ExitPolicy
+from ..core.orchestrator import Orchestrator
 from ..utils.logging import get_logger
 from ..utils.time import now_ms
 
@@ -31,6 +31,8 @@ class Container:
     health: HealthChecker
     risk: RiskManager
     exits: ProtectiveExits
+    orchestrator: Orchestrator
+
 
 def _mk_price_feed(storage: Storage, default: Decimal = Decimal("50000")) -> Callable[[], Decimal]:
     """Создаем price feed для BacktestExchange из данных в storage."""
@@ -42,6 +44,7 @@ def _mk_price_feed(storage: Storage, default: Decimal = Decimal("50000")) -> Cal
             return row.last
         return default
     return feed
+
 
 def _create_broker_for_mode(settings: Settings, storage: Storage) -> object:
     """🎯 СОЗДАНИЕ ПРАВИЛЬНОГО БРОКЕРА С ИСПРАВЛЕННЫМИ АРГУМЕНТАМИ."""
@@ -93,6 +96,7 @@ def _create_broker_for_mode(settings: Settings, storage: Storage) -> object:
             price_feed=_mk_price_feed(storage),        # ✅ правильно (Optional[Callable[[], Decimal]])
         )
 
+
 def _create_storage_for_mode(settings: Settings) -> Storage:
     """🎯 СОЗДАНИЕ STORAGE С ПРАВИЛЬНЫМИ ТАБЛИЦАМИ ПО РЕЖИМУ."""
     
@@ -122,6 +126,7 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
     })
     
     return storage
+
 
 def build_container() -> Container:
     """🎯 СБОРКА КОНТЕЙНЕРА С ПРАВИЛЬНЫМ ВЫБОРОМ КОМПОНЕНТОВ ПО РЕЖИМУ."""
@@ -165,8 +170,25 @@ def build_container() -> Container:
     
     # 7. Создаем health checker
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
+
+    # 8. Создаём orchestrator (добавлено)
+    orchestrator = Orchestrator(
+        symbol=settings.SYMBOL,
+        storage=storage,
+        broker=broker,
+        bus=bus,
+        risk=risk,
+        exits=exits,
+        health=health,
+        settings=settings,
+        # базовые интервалы
+        eval_interval_sec=1.0,
+        exits_interval_sec=2.0,
+        reconcile_interval_sec=5.0,
+        watchdog_interval_sec=2.0,
+    )
     
-    # 8. Собираем финальный контейнер
+    # 9. Собираем финальный контейнер
     container = Container(
         settings=settings,
         storage=storage,
@@ -175,14 +197,16 @@ def build_container() -> Container:
         health=health,
         risk=risk,
         exits=exits,
+        orchestrator=orchestrator,
     )
     
     _log.info("container_built", extra={
         "mode": settings.MODE,
-        "components": ["settings", "storage", "broker", "bus", "health", "risk", "exits"],
+        "components": ["settings", "storage", "broker", "bus", "health", "risk", "exits", "orchestrator"],
     })
     
     return container
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app):
@@ -231,6 +255,7 @@ async def lifespan(app):
         
         _log.info("lifespan_stopped")
 
+
 # 🎯 УДОБНЫЕ ФУНКЦИИ ДЛЯ ТЕСТИРОВАНИЯ
 
 def build_test_container(*, mode: str = "paper", symbol: str = "BTC/USDT") -> Container:
@@ -245,6 +270,7 @@ def build_test_container(*, mode: str = "paper", symbol: str = "BTC/USDT") -> Co
     })
     
     return build_container()
+
 
 def build_live_container_with_credentials(api_key: str, api_secret: str) -> Container:
     """Создать live контейнер с переданными креденшиалами."""
