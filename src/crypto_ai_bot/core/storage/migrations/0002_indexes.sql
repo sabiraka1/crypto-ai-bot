@@ -4,7 +4,7 @@ BEGIN;
 -- ускоряем выборки и агрегации
 CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts       ON trades(symbol, ts_ms);
 
--- гарантируем уникальность ключа идемпотентности
+-- уникальность ключа идемпотентности
 CREATE UNIQUE INDEX IF NOT EXISTS idx_idempotency_key ON idempotency(key);
 
 -- ускоряем очистку по времени
