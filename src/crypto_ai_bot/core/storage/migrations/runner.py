@@ -23,7 +23,7 @@ def _ensure_meta(conn: sqlite3.Connection) -> None:
 def _list_sql_files() -> List[Path]:
     d = Path(__file__).parent
     files = sorted([p for p in d.glob("*.sql")], key=lambda p: p.name)
-    # 0001_init.sql — всегда первой
+    # Гарантируем порядок: 0001_init.sql первой
     files.sort(key=lambda p: (p.name != "0001_init.sql", p.name))
     return files
 
@@ -46,7 +46,7 @@ def _applied_versions(conn: sqlite3.Connection) -> Set[str]:
 
 
 def _iter_statements(sql: str) -> List[str]:
-    # Делим по ';' и выкидываем транзакционные команды — мы их НЕ исполняем.
+    """Делим по ';' и выкидываем транзакционные директивы — мы их НЕ исполняем."""
     stmts: List[str] = []
     for part in sql.split(";"):
         s = part.strip()
@@ -60,7 +60,7 @@ def _iter_statements(sql: str) -> List[str]:
 
 
 def _extract_index_table(stmt_upper: str) -> Optional[str]:
-    # CREATE [UNIQUE] INDEX ... ON <table>(...
+    """Парсим CREATE [UNIQUE] INDEX ... ON <table>( ... ) → возвращаем имя таблицы (lower)."""
     try:
         on_pos = stmt_upper.index(" ON ")
         after = stmt_upper[on_pos + 4 :]
@@ -68,13 +68,13 @@ def _extract_index_table(stmt_upper: str) -> Optional[str]:
         table = after[:paren].strip()
         if "." in table:
             table = table.split(".")[-1]
-        return table
+        return table.lower()
     except Exception:
         return None
 
 
 def _extract_create_table(stmt_upper: str) -> Optional[str]:
-    # CREATE TABLE [IF NOT EXISTS] <table>(...
+    """Парсим CREATE TABLE [IF NOT EXISTS] <table>( ... ) → имя таблицы (lower)."""
     if not stmt_upper.startswith("CREATE TABLE"):
         return None
     try:
@@ -85,22 +85,26 @@ def _extract_create_table(stmt_upper: str) -> Optional[str]:
         table = after_kw[:paren].strip()
         if "." in table:
             table = table.split(".")[-1]
-        return table
+        return table.lower()
     except Exception:
         return None
 
 
+def _existing_tables(conn: sqlite3.Connection) -> Set[str]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    return {str(r[0]).lower() for r in rows}
+
+
 def _apply(conn: sqlite3.Connection, version: str, sql: str, now_ms: int) -> None:
     """
-    Исполняем команды по очереди БЕЗ ручного BEGIN/COMMIT.
-    - Игнорируем транзакционные директивы из файлов .sql.
-    - CREATE TABLE — затем обновляем список таблиц.
-    - CREATE INDEX — только если целевая таблица существует.
-    В конце — фиксируем запись о миграции одним commit().
+    Исполняем команды по очереди БЕЗ ручного BEGIN/COMMIT (никаких вложенных транзакций).
+    - CREATE TABLE → выполняем и добавляем таблицу в set.
+    - CREATE INDEX → выполняем ТОЛЬКО если целевая таблица существует (сравнение case-insensitive).
+    - Остальные команды → просто выполняем.
+    В конце помечаем миграцию применённой и делаем commit().
     """
     try:
-        # актуальные таблицы на момент миграции
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        tables = _existing_tables(conn)
 
         for stmt in _iter_statements(sql):
             u = stmt.upper()
@@ -120,7 +124,6 @@ def _apply(conn: sqlite3.Connection, version: str, sql: str, now_ms: int) -> Non
 
             conn.execute(stmt)
 
-        # помечаем миграцию применённой
         conn.execute(
             f"INSERT INTO {_MIGR_TABLE}(version, applied_at_ms) VALUES (?, ?)",
             (version, int(now_ms)),
@@ -135,7 +138,7 @@ def _apply(conn: sqlite3.Connection, version: str, sql: str, now_ms: int) -> Non
 
 def run_migrations(conn: sqlite3.Connection, *, now_ms: Optional[int] = None) -> None:
     """Применяет все *.sql миграции (0001_init → остальные).
-       Индексы к отсутствующим таблицам пропускаются безопасно.
+       Индексы на отсутствующие таблицы безопасно пропускаются (регистронезависимо).
     """
     _ensure_meta(conn)
     applied = _applied_versions(conn)
