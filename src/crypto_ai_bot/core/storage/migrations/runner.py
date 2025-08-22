@@ -23,7 +23,7 @@ def _ensure_meta(conn: sqlite3.Connection) -> None:
 def _list_sql_files() -> List[Path]:
     d = Path(__file__).parent
     files = sorted([p for p in d.glob("*.sql")], key=lambda p: p.name)
-    # Гарантируем порядок: 0001_init.sql первой
+    # гарантируем, что 0001_init.sql идёт первой
     files.sort(key=lambda p: (p.name != "0001_init.sql", p.name))
     return files
 
@@ -46,7 +46,7 @@ def _applied_versions(conn: sqlite3.Connection) -> Set[str]:
 
 
 def _iter_statements(sql: str) -> List[str]:
-    """Делим по ';' и выкидываем транзакционные директивы — мы их НЕ исполняем."""
+    """Разбиваем по ';' и выкидываем транзакционные директивы — их НЕ исполняем."""
     stmts: List[str] = []
     for part in sql.split(";"):
         s = part.strip()
@@ -60,7 +60,7 @@ def _iter_statements(sql: str) -> List[str]:
 
 
 def _extract_index_table(stmt_upper: str) -> Optional[str]:
-    """Парсим CREATE [UNIQUE] INDEX ... ON <table>( ... ) → возвращаем имя таблицы (lower)."""
+    """Парсим CREATE [UNIQUE] INDEX ... ON <table>(...) → имя таблицы (lower)."""
     try:
         on_pos = stmt_upper.index(" ON ")
         after = stmt_upper[on_pos + 4 :]
@@ -74,7 +74,7 @@ def _extract_index_table(stmt_upper: str) -> Optional[str]:
 
 
 def _extract_create_table(stmt_upper: str) -> Optional[str]:
-    """Парсим CREATE TABLE [IF NOT EXISTS] <table>( ... ) → имя таблицы (lower)."""
+    """Парсим CREATE TABLE [IF NOT EXISTS] <table>(...) → имя таблицы (lower)."""
     if not stmt_upper.startswith("CREATE TABLE"):
         return None
     try:
@@ -97,19 +97,24 @@ def _existing_tables(conn: sqlite3.Connection) -> Set[str]:
 
 def _apply(conn: sqlite3.Connection, version: str, sql: str, now_ms: int) -> None:
     """
-    Исполняем команды по очереди БЕЗ ручного BEGIN/COMMIT (никаких вложенных транзакций).
-    - CREATE TABLE → выполняем и добавляем таблицу в set.
-    - CREATE INDEX → выполняем ТОЛЬКО если целевая таблица существует (сравнение case-insensitive).
-    - Остальные команды → просто выполняем.
-    В конце помечаем миграцию применённой и делаем commit().
+    Выполняем команды последовательно БЕЗ ручного BEGIN/COMMIT.
+    - CREATE TABLE → выполняем сразу и добавляем в known tables.
+    - CREATE INDEX → сначала буферизуем, потом выполняем в конце миграции,
+                     только если целевая таблица существует (case-insensitive).
+                     При ошибке 'no such table' → логируем и пропускаем.
+    - Остальные команды → выполняем сразу.
     """
     try:
         tables = _existing_tables(conn)
+
+        immediate_stmts: List[str] = []
+        index_stmts: List[str] = []
 
         for stmt in _iter_statements(sql):
             u = stmt.upper()
 
             if u.startswith("CREATE TABLE"):
+                # создаём таблицу сразу
                 conn.execute(stmt)
                 tbl = _extract_create_table(u)
                 if tbl:
@@ -117,13 +122,33 @@ def _apply(conn: sqlite3.Connection, version: str, sql: str, now_ms: int) -> Non
                 continue
 
             if u.startswith("CREATE INDEX") or u.startswith("CREATE UNIQUE INDEX"):
-                table = _extract_index_table(u)
-                if table and table not in tables:
-                    _LOG.info("skip_index_missing_table", extra={"version": version, "table": table})
-                    continue
+                index_stmts.append(stmt)
+                continue
 
+            # прочие операторы (INSERT, UPDATE, ALTER и т.п.)
+            immediate_stmts.append(stmt)
+
+        # сначала выполним "прочие"
+        for stmt in immediate_stmts:
             conn.execute(stmt)
 
+        # затем индексы — только на существующие таблицы
+        for idx_stmt in index_stmts:
+            u = idx_stmt.upper()
+            target_table = _extract_index_table(u)
+            if target_table and target_table not in tables:
+                _LOG.info("skip_index_missing_table", extra={"version": version, "table": target_table})
+                continue
+            try:
+                conn.execute(idx_stmt)
+            except sqlite3.OperationalError as exc:
+                # если вдруг в ON указано имя несуществующей таблицы — безопасно пропускаем
+                if "no such table" in str(exc).lower():
+                    _LOG.info("skip_index_no_table", extra={"version": version, "error": str(exc)})
+                    continue
+                raise
+
+        # записываем факт применения миграции
         conn.execute(
             f"INSERT INTO {_MIGR_TABLE}(version, applied_at_ms) VALUES (?, ?)",
             (version, int(now_ms)),
@@ -139,6 +164,7 @@ def _apply(conn: sqlite3.Connection, version: str, sql: str, now_ms: int) -> Non
 def run_migrations(conn: sqlite3.Connection, *, now_ms: Optional[int] = None) -> None:
     """Применяет все *.sql миграции (0001_init → остальные).
        Индексы на отсутствующие таблицы безопасно пропускаются (регистронезависимо).
+       Индексы из миграции выполняются ПОСЛЕ всех CREATE TABLE в этой миграции.
     """
     _ensure_meta(conn)
     applied = _applied_versions(conn)
