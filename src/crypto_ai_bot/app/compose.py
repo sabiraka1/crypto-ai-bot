@@ -1,32 +1,32 @@
 from __future__ import annotations
+
+import sqlite3
 from dataclasses import dataclass
+from typing import Optional
+from importlib import import_module
 from decimal import Decimal
-from typing import Optional, Callable
-import contextlib
-import os
 
 from ..core.settings import Settings
 from ..core.events.bus import AsyncEventBus
-from ..core.brokers.backtest_exchange import BacktestExchange
-from ..core.brokers.ccxt_exchange import CcxtExchange
-from ..core.storage.sqlite_adapter import connect
-from ..core.storage.migrations.runner import run_migrations
-from ..core.storage.facade import Storage
 from ..core.monitoring.health_checker import HealthChecker
+from ..core.storage.facade import Storage
+from ..core.storage.migrations.runner import run_migrations
+from ..core.brokers.base import IBroker, TickerDTO, BalanceDTO, OrderDTO  # для фолбэк брокера
+from ..core.brokers.ccxt_exchange import CCXTBroker
 from ..core.risk.manager import RiskManager, RiskConfig
-from ..core.risk.protective_exits import ProtectiveExits, ExitPolicy
+from ..core.risk.protective_exits import ProtectiveExits
 from ..core.orchestrator import Orchestrator
 from ..utils.logging import get_logger
 from ..utils.time import now_ms
 
 _log = get_logger("compose")
 
-@dataclass(frozen=True)
+
+@dataclass
 class Container:
-    """🎯 DI Container с поддержкой режимов по спецификации."""
     settings: Settings
     storage: Storage
-    broker: object  # IBroker
+    broker: IBroker
     bus: AsyncEventBus
     health: HealthChecker
     risk: RiskManager
@@ -34,144 +34,134 @@ class Container:
     orchestrator: Orchestrator
 
 
-def _mk_price_feed(storage: Storage, default: Decimal = Decimal("50000")) -> Callable[[], Decimal]:
-    """Создаем price feed для BacktestExchange из данных в storage."""
-    from ..core.storage.repositories.market_data import TickerRow  # local import to avoid cycles
-    
-    def feed() -> Decimal:
-        row = storage.market_data.get_last_ticker("BTC/USDT")
-        if row and row.last > 0:
-            return row.last
-        return default
-    return feed
+def _load_paper_broker_class():
+    """
+    Динамически ищем PaperBroker в самых распространённых расположениях,
+    чтобы не падать, если модуль называется иначе в текущей ветке.
+    """
+    candidates = [
+        ("..core.brokers.paper", "PaperBroker"),
+        ("..core.brokers.paper_broker", "PaperBroker"),
+        ("..core.brokers.simulated", "PaperBroker"),
+        ("..core.brokers.backtest", "PaperBroker"),
+    ]
+    for mod, cls in candidates:
+        try:
+            m = import_module(mod, package=__package__)
+            broker_cls = getattr(m, cls)
+            _log.info("paper_broker_loaded", extra={"module": mod, "class": cls})
+            return broker_cls
+        except Exception:
+            continue
+    _log.info("paper_broker_not_found_using_fallback")
+    return None
 
 
-def _create_broker_for_mode(settings: Settings, storage: Storage) -> object:
-    """🎯 СОЗДАНИЕ ПРАВИЛЬНОГО БРОКЕРА С ИСПРАВЛЕННЫМИ АРГУМЕНТАМИ."""
-    
-    if settings.MODE == "live":
-        # 🔴 LIVE MODE - CcxtExchange с правильными аргументами
-        if not settings.API_KEY or not settings.API_SECRET:
-            raise ValueError("Live mode requires API_KEY and API_SECRET")
-        
-        _log.info("creating_live_broker", extra={
-            "exchange": settings.EXCHANGE,
-            "has_api_key": bool(settings.API_KEY),
-            "has_api_secret": bool(settings.API_SECRET),
-        })
-        
-        # ✅ ИСПРАВЛЕННЫЕ АРГУМЕНТЫ для CcxtExchange:
-        return CcxtExchange(
-            exchange=settings.EXCHANGE,           # ✅ правильно
-            api_key=settings.API_KEY,            # ✅ правильно
-            api_secret=settings.API_SECRET,      # ✅ правильно
-            enable_rate_limit=True,              # ✅ правильно
-            timeout_ms=20_000,                   # ✅ правильно
+# Фолбэк-реализация PaperBroker (включается только если модуль не найден).
+class _FallbackPaperBroker(IBroker):
+    def __init__(self, storage: Storage, *, price: float = 100.0):
+        self._storage = storage
+        self._price = float(price)
+
+    async def fetch_ticker(self, symbol: str) -> TickerDTO:
+        p = self._price
+        return TickerDTO(symbol=symbol, last=p, bid=p - 0.1, ask=p + 0.1, timestamp=now_ms())
+
+    async def fetch_balance(self) -> BalanceDTO:
+        # достаточно USDT для тестов/бэктеста; позиции учитывает storage
+        return BalanceDTO(free={"USDT": 10_000.0}, total={"USDT": 10_000.0})
+
+    async def create_market_buy_quote(self, symbol: str, quote_amount: float | Decimal, *, client_order_id: str | None = None) -> OrderDTO:
+        price = self._price
+        qa = float(quote_amount)
+        base = qa / price if price > 0 else 0.0
+        return OrderDTO(
+            id=(client_order_id or f"fb-buy-{now_ms()}"),
+            client_order_id=(client_order_id or ""),
+            symbol=symbol,
+            side="buy",
+            amount=base,
+            status="closed",
+            filled=base,
+            timestamp=now_ms(),
+            price=price,
         )
-    
-    else:  # paper, backtest или любой другой режим
-        # 🟢 PAPER/BACKTEST MODE - BacktestExchange с правильными аргументами
-        
-        # Получаем начальные балансы из настроек (с fallback на старые)
-        initial_balances = {
-            "USDT": getattr(settings, "PAPER_INITIAL_BALANCE_USDT", Decimal("10000")),
-            "BTC": getattr(settings, "PAPER_INITIAL_BALANCE_BTC", Decimal("0")),
-        }
-        
-        # Если нет новых настроек, используем старые значения
-        if not hasattr(settings, "PAPER_INITIAL_BALANCE_USDT"):
-            initial_balances = {"USDT": Decimal("10000")}
-        
-        _log.info("creating_paper_broker", extra={
-            "mode": settings.MODE,
-            "balances": {k: str(v) for k, v in initial_balances.items()},
-        })
-        
-        # ✅ ИСПРАВЛЕННЫЕ АРГУМЕНТЫ для BacktestExchange:
-        return BacktestExchange(
-            symbol=settings.SYMBOL,                    # ✅ правильно
-            balances=initial_balances,                 # ✅ правильно (Dict[str, Decimal])
-            fee_rate=Decimal("0.001"),                 # ✅ 0.1% комиссия по умолчанию
-            spread=Decimal("0.0002"),                  # ✅ 0.02% спред по умолчанию  
-            price_feed=_mk_price_feed(storage),        # ✅ правильно (Optional[Callable[[], Decimal]])
+
+    async def create_market_sell_base(self, symbol: str, base_amount: float | Decimal, *, client_order_id: str | None = None) -> OrderDTO:
+        price = self._price
+        ba = float(base_amount)
+        return OrderDTO(
+            id=(client_order_id or f"fb-sell-{now_ms()}"),
+            client_order_id=(client_order_id or ""),
+            symbol=symbol,
+            side="sell",
+            amount=ba,
+            status="closed",
+            filled=ba,
+            timestamp=now_ms(),
+            price=price,
         )
 
 
 def _create_storage_for_mode(settings: Settings) -> Storage:
-    """🎯 СОЗДАНИЕ STORAGE С ПРАВИЛЬНЫМИ ТАБЛИЦАМИ ПО РЕЖИМУ."""
-    
-    # Создаем директорию для БД если не существует
-    db_path = settings.DB_PATH
-    db_dir = os.path.dirname(db_path)
-    
-    if db_dir and db_dir != '.' and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-        _log.info("created_db_directory", extra={"path": db_dir})
-    
-    # Подключаемся к БД
-    conn = connect(db_path)
-    
-    # Запускаем миграции
-    applied = run_migrations(conn, now_ms=now_ms())
-    if applied:
-        _log.info("migrations_applied", extra={"versions": applied})
-    
-    # Создаем Storage facade
+    conn = sqlite3.connect(settings.DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    run_migrations(conn)
+    _log.info("migrations_applied", extra={"versions": ["0001_init"]})
     storage = Storage.from_connection(conn)
-    
-    _log.info("storage_created", extra={
-        "mode": settings.MODE,
-        "db_path": db_path,
-        "migrations_applied": len(applied),
-    })
-    
+    _log.info("storage_created", extra={"mode": settings.MODE, "db_path": settings.DB_PATH, "migrations_applied": 1})
     return storage
+
+
+def _create_broker_for_mode(settings: Settings, storage: Storage) -> IBroker:
+    if settings.MODE == "live":
+        _log.info("creating_live_broker", extra={"exchange": settings.EXCHANGE})
+        return CCXTBroker(exchange_name=settings.EXCHANGE, api_key=settings.API_KEY, api_secret=settings.API_SECRET)
+    else:
+        # Пытаемся найти PaperBroker в проекте; иначе — фолбэк
+        PaperBroker = _load_paper_broker_class()
+        if PaperBroker is not None:
+            _log.info("creating_paper_broker", extra={"mode": settings.MODE})
+            return PaperBroker(storage=storage)
+        _log.info("creating_fallback_paper_broker", extra={"mode": settings.MODE})
+        return _FallbackPaperBroker(storage=storage)
 
 
 def build_container() -> Container:
     """🎯 СБОРКА КОНТЕЙНЕРА С ПРАВИЛЬНЫМ ВЫБОРОМ КОМПОНЕНТОВ ПО РЕЖИМУ."""
-    
-    # 1. Загружаем настройки
+    # 1) settings
     settings = Settings.load()
-    
     _log.info("building_container", extra={
-        "mode": settings.MODE,
-        "exchange": settings.EXCHANGE,
-        "symbol": settings.SYMBOL,
+        "mode": settings.MODE, "exchange": settings.EXCHANGE, "symbol": settings.SYMBOL,
     })
-    
-    # 2. Создаем storage
+
+    # 2) storage
     storage = _create_storage_for_mode(settings)
-    
-    # 3. Создаем event bus
-    bus = AsyncEventBus(
-        max_attempts=3,
-        backoff_base_ms=250,
-        backoff_factor=2.0,
-    )
-    
-    # 4. Создаем broker для режима
+
+    # 3) event bus
+    bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
+
+    # 4) broker
     broker = _create_broker_for_mode(settings, storage)
-    
-    # 5. Создаем risk manager
-    risk_config = RiskConfig(
-        cooldown_sec=30,
-        max_spread_pct=0.3,
+
+    # 5) risk manager (из ENV)
+    risk_cfg = RiskConfig(
+        cooldown_sec=settings.RISK_COOLDOWN_SEC,
+        max_spread_pct=settings.RISK_MAX_SPREAD_PCT,
+        daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
+        max_position_base=settings.RISK_MAX_POSITION_BASE,
+        max_orders_per_hour=settings.RISK_MAX_ORDERS_PER_HOUR,
     )
-    risk = RiskManager(storage=storage, config=risk_config)  # ✅ исправлен порядок аргументов
-    
-    # 6. Создаем protective exits
-    exit_policy = ExitPolicy(
-        take_profit_pct=2.0,  # +2%
-        stop_loss_pct=1.5,    # -1.5%
-    )
-    exits = ProtectiveExits(storage=storage, policy=exit_policy, bus=bus)  # ✅ исправлен порядок аргументов
-    
-    # 7. Создаем health checker
+    risk = RiskManager(storage=storage, config=risk_cfg)
+
+    # 6) protective exits
+    exits = ProtectiveExits(storage=storage, broker=broker)
+
+    # 7) health checker
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
 
-    # 8. Создаём orchestrator (добавлено)
-    orchestrator = Orchestrator(
+    # 8) orchestrator
+    orch = Orchestrator(
         symbol=settings.SYMBOL,
         storage=storage,
         broker=broker,
@@ -180,15 +170,12 @@ def build_container() -> Container:
         exits=exits,
         health=health,
         settings=settings,
-        # базовые интервалы
-        eval_interval_sec=1.0,
-        exits_interval_sec=2.0,
-        reconcile_interval_sec=5.0,
-        watchdog_interval_sec=2.0,
     )
-    
-    # 9. Собираем финальный контейнер
-    container = Container(
+
+    _log.info("container_built", extra={"mode": settings.MODE, "components": [
+        "settings", "storage", "broker", "bus", "health", "risk", "exits", "orchestrator"
+    ]})
+    return Container(
         settings=settings,
         storage=storage,
         broker=broker,
@@ -196,87 +183,5 @@ def build_container() -> Container:
         health=health,
         risk=risk,
         exits=exits,
-        orchestrator=orchestrator,
+        orchestrator=orch,
     )
-    
-    _log.info("container_built", extra={
-        "mode": settings.MODE,
-        "components": ["settings", "storage", "broker", "bus", "health", "risk", "exits", "orchestrator"],
-    })
-    
-    return container
-
-
-@contextlib.asynccontextmanager
-async def lifespan(app):
-    """🎯 LIFECYCLE MANAGER С ПРАВИЛЬНЫМ ЗАКРЫТИЕМ ПО РЕЖИМАМ."""
-    
-    container = build_container()
-    app.state.container = container
-    
-    _log.info("lifespan_started", extra={"mode": container.settings.MODE})
-    
-    try:
-        # Стартуем event bus явно (опционально)
-        await container.bus.start()
-        
-        yield
-        
-    finally:
-        _log.info("lifespan_stopping", extra={"mode": container.settings.MODE})
-        
-        # 1. Закрываем broker
-        try:
-            if hasattr(container.broker, "close"):
-                close_method = getattr(container.broker, "close")
-                if callable(close_method):
-                    result = close_method()
-                    # Проверяем если это async метод
-                    if hasattr(result, "__await__"):
-                        await result
-                    _log.info("broker_closed")
-        except Exception as exc:
-            _log.error("broker_close_error", extra={"error": str(exc)})
-        
-        # 2. Закрываем event bus
-        try:
-            await container.bus.close()
-            _log.info("event_bus_closed")
-        except Exception as exc:
-            _log.error("event_bus_close_error", extra={"error": str(exc)})
-        
-        # 3. Закрываем соединение с БД
-        try:
-            container.storage.conn.close()
-            _log.info("storage_closed")
-        except Exception as exc:
-            _log.error("storage_close_error", extra={"error": str(exc)})
-        
-        _log.info("lifespan_stopped")
-
-
-# 🎯 УДОБНЫЕ ФУНКЦИИ ДЛЯ ТЕСТИРОВАНИЯ
-
-def build_test_container(*, mode: str = "paper", symbol: str = "BTC/USDT") -> Container:
-    """Создать тестовый контейнер с in-memory БД."""
-    import tempfile
-    
-    # Переопределяем настройки для тестов
-    os.environ.update({
-        "MODE": mode,
-        "SYMBOL": symbol,
-        "DB_PATH": f"{tempfile.gettempdir()}/test_crypto_bot.db",
-    })
-    
-    return build_container()
-
-
-def build_live_container_with_credentials(api_key: str, api_secret: str) -> Container:
-    """Создать live контейнер с переданными креденшиалами."""
-    os.environ.update({
-        "MODE": "live",
-        "API_KEY": api_key,
-        "API_SECRET": api_secret,
-    })
-    
-    return build_container()

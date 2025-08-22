@@ -1,126 +1,92 @@
 from __future__ import annotations
+
 import os
-import dataclasses as dc
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional
+from typing import Optional
+
 from .validators.settings import validate_settings
-from ..utils.exceptions import ValidationError
-
-_BOOL_TRUE = {"1", "true", "yes", "on", "y", "t"}
 
 
-def _get(name: str, default: Optional[str] = None) -> str:
+def _getenv_str(name: str, default: str) -> str:
+    v = os.environ.get(name, default)
+    return v if isinstance(v, str) else str(v)
+
+
+def _getenv_int(name: str, default: int) -> int:
     v = os.environ.get(name)
-    if v is None:
-        if default is None:
-            return ""
-        return str(default)
-    return v
-
-
-def _get_int(name: str, default: int) -> int:
+    if v is None or v == "":
+        return int(default)
     try:
-        return int(_get(name, str(default)).strip())
+        return int(v)
     except Exception:
-        return default
+        return int(default)
 
 
-def _get_bool(name: str, default: bool) -> bool:
-    v = _get(name, str(int(default))).strip().lower()
-    return v in _BOOL_TRUE
-
-
-def _get_decimal(name: str, default: Decimal) -> Decimal:
-    raw = _get(name, str(default))
+def _getenv_float(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return float(default)
     try:
-        return Decimal(raw)
-    except (InvalidOperation, ValueError):
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _getenv_decimal(name: str, default: Optional[Decimal]) -> Optional[Decimal]:
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return default
+    try:
+        return Decimal(str(v))
+    except (InvalidOperation, Exception):
         return default
 
 
-@dataclass(frozen=True)
+@dataclass
 class Settings:
-    """Single source of truth for configuration. Only this module reads os.environ."""
-
-    MODE: str = "paper"            # paper | live | backtest
+    # --- базовые ---
+    MODE: str = "paper"                  # paper | live
     EXCHANGE: str = "gateio"
     SYMBOL: str = "BTC/USDT"
-    FIXED_AMOUNT: Decimal = Decimal("10")  # default monetary/asset unit depending on strategy
-
-    IDEMPOTENCY_TTL_SEC: int = 60
-    IDEMPOTENCY_BUCKET_MS: int = 60_000
-
-    DB_PATH: str = "crypto_ai_bot.db"  # SQLite file path
-    SERVER_HOST: str = "0.0.0.0"
-    SERVER_PORT: int = 8000
-
-    METRICS_ENABLED: bool = True
-    TELEGRAM_ENABLED: bool = False
-    TELEGRAM_BOT_TOKEN: str = ""
-    TELEGRAM_CHAT_ID: str = ""
-
     API_KEY: str = ""
     API_SECRET: str = ""
+    FIXED_AMOUNT: Decimal = Decimal("10")            # сумма для BUY в QUOTE
+    IDEMPOTENCY_BUCKET_MS: int = 60_000              # окно бакета
+    IDEMPOTENCY_TTL_SEC: int = 60                    # TTL ключей
+    DB_PATH: str = ":memory:"                        # sqlite путь для paper/тестов
+
+    # --- риск-гардрейлы из ENV (новое) ---
+    RISK_COOLDOWN_SEC: int = 30                      # 0 = выкл
+    RISK_MAX_SPREAD_PCT: float = 0.3                 # 0 = выкл
+    RISK_MAX_POSITION_BASE: Optional[Decimal] = None
+    RISK_MAX_ORDERS_PER_HOUR: Optional[int] = None
+    RISK_DAILY_LOSS_LIMIT_QUOTE: Optional[Decimal] = None
 
     @classmethod
     def load(cls) -> "Settings":
-        """Load settings from environment and validate. Fail-fast on errors."""
-        obj = cls(
-            MODE=_get("MODE", cls.MODE),
-            EXCHANGE=_get("EXCHANGE", cls.EXCHANGE),
-            SYMBOL=_get("SYMBOL", cls.SYMBOL),
-            FIXED_AMOUNT=_get_decimal("FIXED_AMOUNT", cls.FIXED_AMOUNT),
-            IDEMPOTENCY_TTL_SEC=_get_int("IDEMPOTENCY_TTL_SEC", cls.IDEMPOTENCY_TTL_SEC),
-            IDEMPOTENCY_BUCKET_MS=_get_int("IDEMPOTENCY_BUCKET_MS", cls.IDEMPOTENCY_BUCKET_MS),
-            DB_PATH=_get("DB_PATH", cls.DB_PATH),
-            SERVER_HOST=_get("SERVER_HOST", cls.SERVER_HOST),
-            SERVER_PORT=_get_int("SERVER_PORT", cls.SERVER_PORT),
-            METRICS_ENABLED=_get_bool("METRICS_ENABLED", cls.METRICS_ENABLED),
-            TELEGRAM_ENABLED=_get_bool("TELEGRAM_ENABLED", cls.TELEGRAM_ENABLED),
-            TELEGRAM_BOT_TOKEN=_get("TELEGRAM_BOT_TOKEN", cls.TELEGRAM_BOT_TOKEN),
-            TELEGRAM_CHAT_ID=_get("TELEGRAM_CHAT_ID", cls.TELEGRAM_CHAT_ID),
-            API_KEY=_get("API_KEY", cls.API_KEY),
-            API_SECRET=_get("API_SECRET", cls.API_SECRET),
+        s = cls(
+            MODE=_getenv_str("MODE", "paper").lower(),
+            EXCHANGE=_getenv_str("EXCHANGE", "gateio"),
+            SYMBOL=_getenv_str("SYMBOL", "BTC/USDT"),
+            API_KEY=_getenv_str("API_KEY", ""),
+            API_SECRET=_getenv_str("API_SECRET", ""),
+            FIXED_AMOUNT=_getenv_decimal("FIXED_AMOUNT", Decimal("10")) or Decimal("10"),
+            IDEMPOTENCY_BUCKET_MS=_getenv_int("IDEMPOTENCY_BUCKET_MS", 60_000),
+            IDEMPOTENCY_TTL_SEC=_getenv_int("IDEMPOTENCY_TTL_SEC", 60),
+            DB_PATH=_getenv_str("DB_PATH", ":memory:"),
+
+            # риск-гардрейлы
+            RISK_COOLDOWN_SEC=_getenv_int("RISK_COOLDOWN_SEC", 30),
+            RISK_MAX_SPREAD_PCT=_getenv_float("RISK_MAX_SPREAD_PCT", 0.3),
+            RISK_MAX_POSITION_BASE=_getenv_decimal("RISK_MAX_POSITION_BASE", None),
+            RISK_MAX_ORDERS_PER_HOUR=_getenv_int("RISK_MAX_ORDERS_PER_HOUR", 0) or None,
+            RISK_DAILY_LOSS_LIMIT_QUOTE=_getenv_decimal("RISK_DAILY_LOSS_LIMIT_QUOTE", None),
         )
-        errors = validate_settings(obj)
+
+        # валидация (существующие проверки сохраняем)
+        errors = validate_settings(s)
         if errors:
-            redacted = [
-                e.replace(obj.API_KEY, "***").replace(obj.API_SECRET, "***")
-                if obj.API_KEY or obj.API_SECRET else e
-                for e in errors
-            ]
-            raise ValidationError("Invalid Settings: " + "; ".join(redacted))
-        return obj
-
-    def migrate_live_keys(
-        self,
-        live_api_key: str,
-        live_api_secret: str,
-        fixed_quote: Decimal,
-    ) -> "Settings":
-        return dc.replace(
-            self,
-            API_KEY=live_api_key,
-            API_SECRET=live_api_secret,
-            FIXED_AMOUNT=fixed_quote,
-        )
-
-    def as_dict(self) -> dict:
-        return {
-            "MODE": self.MODE,
-            "EXCHANGE": self.EXCHANGE,
-            "SYMBOL": self.SYMBOL,
-            "FIXED_AMOUNT": str(self.FIXED_AMOUNT),
-            "IDEMPOTENCY_TTL_SEC": self.IDEMPOTENCY_TTL_SEC,
-            "IDEMPOTENCY_BUCKET_MS": self.IDEMPOTENCY_BUCKET_MS,
-            "DB_PATH": self.DB_PATH,
-            "SERVER_HOST": self.SERVER_HOST,
-            "SERVER_PORT": self.SERVER_PORT,
-            "METRICS_ENABLED": self.METRICS_ENABLED,
-            "TELEGRAM_ENABLED": self.TELEGRAM_ENABLED,
-            "TELEGRAM_BOT_TOKEN": "***" if self.TELEGRAM_BOT_TOKEN else "",
-            "TELEGRAM_CHAT_ID": self.TELEGRAM_CHAT_ID,
-            "API_KEY": "***" if self.API_KEY else "",
-            "API_SECRET": "***" if self.API_SECRET else "",
-        }
+            # кидаем осмысленное исключение, как и раньше
+            raise ValueError("Invalid settings: " + "; ".join(errors))
+        return s

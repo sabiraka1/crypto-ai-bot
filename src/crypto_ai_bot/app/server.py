@@ -1,110 +1,103 @@
 from __future__ import annotations
-import json
-from typing import Any, Dict
-from fastapi import FastAPI, Response, status, Request, APIRouter
-from fastapi.responses import JSONResponse, PlainTextResponse
-from .compose import lifespan, Container
-from ..core.analytics.metrics import report_dict
 
-try:  # prometheus is optional
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # type: ignore
-except Exception:  # pragma: no cover
-    generate_latest = None  # type: ignore
-    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"  # type: ignore
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse, JSONResponse
 
-app = FastAPI(lifespan=lifespan, title="crypto_ai_bot")
+from ..core.settings import Settings
+from .compose import build_container
 
+# метрики: стараемся отдать Prometheus-текст, иначе JSON-фолбэк
+try:
+    from ..core.analytics.metrics import report_dict as metrics_report_dict
+except Exception:  # на случай если модуль недоступен
+    metrics_report_dict = None
 
-@app.get("/live")
-async def live():
-    return {"ok": True}
+from ..utils.metrics import prometheus_text, snapshot
 
-
-@app.get("/ready")
-async def ready():
-    c: Container = app.state.container
-    try:
-        c.storage.conn.execute("SELECT 1;")
-        ok = True
-    except Exception:
-        ok = False
-    return JSONResponse(
-        {"ok": ok},
-        status_code=(status.HTTP_200_OK if ok else status.HTTP_503_SERVICE_UNAVAILABLE),
-    )
+app = FastAPI(title="crypto-ai-bot")
+app.state.container = build_container()
 
 
 @app.get("/health")
-async def health():
-    c: Container = app.state.container
+async def health() -> dict:
+    c = app.state.container
     rep = await c.health.check(symbol=c.settings.SYMBOL)
-    code = status.HTTP_200_OK if rep.ok else status.HTTP_503_SERVICE_UNAVAILABLE
-    return JSONResponse(rep.as_dict(), status_code=code)
-
-
-@app.get("/status")
-async def status_endpoint():
-    c: Container = app.state.container
     return {
-        "settings": c.settings.as_dict(),
-        "counters": {
-            "trades": len(c.storage.trades.list_recent(limit=1_000_000)),
-            "audit": len(c.storage.audit.list_recent(limit=1_000)),
-        },
+        "ok": rep.ok,
+        "components": rep.components,
+        "ts_ms": rep.ts_ms,
     }
 
 
+@app.get("/ready")
+async def ready() -> dict:
+    # простая готовность: контейнер собран и брокер есть
+    c = app.state.container
+    return {"ok": c is not None and c.broker is not None}
+
+
 @app.get("/metrics")
-async def metrics():
-    # 🆕 УЛУЧШЕННЫЙ ENDPOINT: сначала пытаемся отдать Prometheus текст
-    if generate_latest is not None:
+async def metrics() -> Response:
+    # Пытаемся выдать Prom-текст (если метрики были инкрементированы)
+    text = prometheus_text()
+    if text.strip():
+        return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
+    # Иначе — JSON фолбэк (как раньше)
+    if metrics_report_dict:
         try:
-            out = generate_latest()  # type: ignore
-            return Response(content=out, media_type=CONTENT_TYPE_LATEST)
+            return JSONResponse(metrics_report_dict())
         except Exception:
-            pass  # fallback to JSON
-    
-    # 🆕 ФОЛБЭК: JSON-снимок (никогда не 500)
-    c: Container = app.state.container
-    try:
-        metrics_data = report_dict(c.storage, symbol=c.settings.SYMBOL)
-        return JSONResponse(metrics_data)
-    except Exception as exc:
-        # 🆕 ПОСЛЕДНИЙ ФОЛБЭК: базовые метрики
-        return JSONResponse({
-            "error": "metrics_unavailable",
-            "details": str(exc),
-            "basic_metrics": {
-                "app": "crypto_ai_bot",
-                "status": "running",
-                "mode": getattr(c.settings, "MODE", "unknown"),
-                "symbol": getattr(c.settings, "SYMBOL", "unknown"),
-            }
-        })
+            pass
+    return JSONResponse(snapshot())
 
 
-# --- Orchestrator endpoints ---
-router = APIRouter()
+# --- новый агрегатор статуса системы ---
+@app.get("/status")
+async def status() -> dict:
+    c = app.state.container
+    # базовые
+    s = c.settings
+    # bus
+    bus_q = c.bus.qsize()
+    # risk
+    rc = c.risk
+    cfg = rc._cfg  # dataclass RiskConfig
+    # orchestrator
+    orch = c.orchestrator.status()
 
-@router.post("/orchestrator/start")
-async def orchestrator_start(request: Request):
-    c = request.app.state.container
+    return {
+        "ok": True,
+        "mode": s.MODE,
+        "exchange": s.EXCHANGE,
+        "symbol": s.SYMBOL,
+        "risk": {
+            "cooldown_sec": cfg.cooldown_sec,
+            "max_spread_pct": cfg.max_spread_pct,
+            "max_position_base": str(cfg.max_position_base) if cfg.max_position_base is not None else None,
+            "max_orders_per_hour": cfg.max_orders_per_hour,
+            "daily_loss_limit_quote": str(cfg.daily_loss_limit_quote) if cfg.daily_loss_limit_quote is not None else None,
+        },
+        "bus": {"qsize": bus_q},
+        "orchestrator": orch,
+    }
+
+
+# --- ручки оркестратора (если уже были — оставляем без изменений) ---
+@app.post("/orchestrator/start")
+async def orchestrator_start() -> dict:
+    c = app.state.container
     c.orchestrator.start()
     return {"ok": True, "status": c.orchestrator.status()}
 
-@router.post("/orchestrator/stop")
-async def orchestrator_stop(request: Request):
-    c = request.app.state.container
+
+@app.post("/orchestrator/stop")
+async def orchestrator_stop() -> dict:
+    c = app.state.container
     await c.orchestrator.stop()
     return {"ok": True, "status": c.orchestrator.status()}
 
-@router.get("/orchestrator/status")
-async def orchestrator_status(request: Request):
-    c = request.app.state.container
+
+@app.get("/orchestrator/status")
+async def orchestrator_status() -> dict:
+    c = app.state.container
     return {"ok": True, "status": c.orchestrator.status()}
-
-
-from .adapters.telegram import router as telegram_router  # noqa: E402
-
-app.include_router(telegram_router, prefix="/telegram")
-app.include_router(router)
