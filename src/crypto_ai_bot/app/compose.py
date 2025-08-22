@@ -11,7 +11,7 @@ from ..core.events.bus import AsyncEventBus
 from ..core.monitoring.health_checker import HealthChecker
 from ..core.storage.facade import Storage
 from ..core.storage.migrations.runner import run_migrations
-from ..core.brokers.base import IBroker, TickerDTO, BalanceDTO, OrderDTO  # Ð´Ð»Ñ Ñ„Ð¾Ð»Ð±ÑÐº Ð±Ñ€Ð¾ÐºÐµÑ€Ð°
+from ..core.brokers.base import IBroker, TickerDTO, BalanceDTO, OrderDTO  # для фолбэк брокера
 from ..core.risk.manager import RiskManager, RiskConfig
 from ..core.risk.protective_exits import ProtectiveExits
 from ..core.orchestrator import Orchestrator
@@ -35,7 +35,7 @@ class Container:
 
 def _load_paper_broker_class():
     """
-    Ð"Ð¸Ð½Ð°Ð¼Ð¸Ñ‡ÐµÑÐºÐ¸ Ð¸Ñ‰ÐµÐ¼ PaperBroker Ð² ÑÐ°Ð¼Ñ‹Ñ… Ñ€Ð°ÑÐ¿Ñ€Ð¾ÑÑ‚Ñ€Ð°Ð½Ñ'Ð½Ð½Ñ‹Ñ… Ñ€Ð°ÑÐ¿Ð¾Ð»Ð¾Ð¶ÐµÐ½Ð¸ÑÑ….
+    Динамически ищем PaperBroker в самых распространённых расположениях.
     """
     candidates = [
         ("..core.brokers.paper", "PaperBroker"),
@@ -57,12 +57,12 @@ def _load_paper_broker_class():
 
 def _load_ccxt_broker_class():
     """
-    Ð›ÐµÐ½Ð¸Ð²Ð°Ñ Ð·Ð°Ð³Ñ€ÑƒÐ·ÐºÐ° CCXT Ð±Ñ€Ð¾ÐºÐµÑ€Ð°: Ð¸Ð¼Ð¿Ð¾Ñ€Ñ‚Ð¸Ñ€ÑƒÐµÐ¼ Ð¢ÐžÐ›Ð¬ÐšÐž ÐºÐ¾Ð³Ð´Ð° MODE=live.
-    Ð•ÑÐ»Ð¸ ÐºÐ»Ð°ÑÑ Ð½Ðµ Ð½Ð°Ð¹Ð´ÐµÐ½ â€" Ð²ÐµÑ€Ð½Ñ'Ð¼ None (Ð½Ð¸Ð¶Ðµ ÑÑ„Ð¾Ñ€Ð¼Ð¸Ñ€ÑƒÐµÐ¼ Ð¿Ð¾Ð½ÑÑ‚Ð½ÑƒÑŽ Ð¾ÑˆÐ¸Ð±ÐºÐ°).
+    Ленивая загрузка CCXT брокера: импортируем ТОЛЬКО когда MODE=live.
+    Если класс не найден — вернём None (ниже сформируем понятную ошибку).
     """
     candidates = [
-        ("..core.brokers.ccxt_exchange", "CCXTBroker"),
-        ("..core.brokers.ccxt", "CCXTBroker"),
+        ("..core.brokers.ccxt_exchange", "CcxtBroker"),
+        ("..core.brokers.ccxt", "CcxtBroker"),
     ]
     for mod, cls in candidates:
         try:
@@ -75,7 +75,7 @@ def _load_ccxt_broker_class():
     return None
 
 
-# Ð¤Ð¾Ð»Ð±ÑÐº PaperBroker (Ð²ÐºÐ»ÑŽÑ‡Ð°ÐµÑ‚ÑÑ Ñ‚Ð¾Ð»ÑŒÐºÐ¾ ÐµÑÐ»Ð¸ Ð¼Ð¾Ð´ÑƒÐ»ÑŒ Ð½Ðµ Ð½Ð°Ð¹Ð´ÐµÐ½).
+# Фолбэк PaperBroker (включается только если модуль не найден).
 class _FallbackPaperBroker(IBroker):
     def __init__(self, storage: Storage, *, price: float = 100.0):
         self._storage = storage
@@ -139,13 +139,13 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
 def _create_broker_for_mode(settings: Settings, storage: Storage) -> IBroker:
     if settings.MODE == "live":
         _log.info("creating_live_broker", extra={"exchange": settings.EXCHANGE})
-        CCXTBroker = _load_ccxt_broker_class()
-        if CCXTBroker is None:
+        CcxtBroker = _load_ccxt_broker_class()
+        if CcxtBroker is None:
             raise ImportError(
-                "CCXTBroker not found. Make sure core/brokers/ccxt_exchange.py defines CCXTBroker "
-                "Ð¸Ð»Ð¸ Ð¸ÑÐ¿Ð¾Ð»ÑŒÐ·ÑƒÐ¹Ñ‚Ðµ MODE=paper Ð´Ð»Ñ Ð»Ð¾ÐºÐ°Ð»ÑŒÐ½Ñ‹Ñ… Ñ‚ÐµÑÑ‚Ð¾Ð²."
+                "CcxtBroker not found. Make sure core/brokers/ccxt_exchange.py defines CcxtBroker "
+                "или используйте MODE=paper для локальных тестов."
             )
-        return CCXTBroker(exchange_name=settings.EXCHANGE, api_key=settings.API_KEY, api_secret=settings.API_SECRET)
+        return CcxtBroker(exchange_id=settings.EXCHANGE, api_key=settings.API_KEY, api_secret=settings.API_SECRET)
     else:
         PaperBroker = _load_paper_broker_class()
         if PaperBroker is not None:
@@ -156,7 +156,7 @@ def _create_broker_for_mode(settings: Settings, storage: Storage) -> IBroker:
 
 
 def build_container() -> Container:
-    """ðŸŽ¯ Ð¡Ð'ÐžÐ ÐšÐ ÐšÐžÐÐ¢Ð•Ð™ÐÐ•Ð Ð Ð¡ ÐŸÐ ÐÐ'Ð˜Ð›Ð¬ÐÐ«Ðœ Ð'Ð«Ð'ÐžÐ ÐžÐœ ÐšÐžÐœÐŸÐžÐÐ•ÐÐ¢ÐžÐ' ÐŸÐž Ð Ð•Ð–Ð˜ÐœÐ£."""
+    """🔨 СБОРКА КОНТЕЙНЕРА С ПОЛНЫМ НАБОРОМ КОМПОНЕНТОВ ПО РЕЖИМУ."""
     # 1) settings
     settings = Settings.load()
     _log.info("building_container", extra={
@@ -172,7 +172,7 @@ def build_container() -> Container:
     # 4) broker
     broker = _create_broker_for_mode(settings, storage)
 
-    # 5) risk manager (Ð¸Ð· ENV)
+    # 5) risk manager (из ENV)
     risk_cfg = RiskConfig(
         cooldown_sec=settings.RISK_COOLDOWN_SEC,
         max_spread_pct=settings.RISK_MAX_SPREAD_PCT,
@@ -182,8 +182,8 @@ def build_container() -> Container:
     )
     risk = RiskManager(storage=storage, config=risk_cfg)
 
-    # 6) protective exits
-    exits = ProtectiveExits(storage=storage, policy=None, bus=bus)
+    # 6) protective exits - ИСПРАВЛЕНО: убран параметр policy
+    exits = ProtectiveExits(storage=storage, bus=bus)
 
     # 7) health checker
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
