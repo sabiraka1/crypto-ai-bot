@@ -33,9 +33,12 @@ async def test_buy_quote_amount_rounding(monkeypatch):
     fake = _FakeClient()
     ex._client = fake  # type: ignore
 
-    od = await ex.create_market_buy_quote("BTC/USDT", 100.0, client_order_id="cid-1")
+    od = await ex.create_market_buy_quote("BTC/USDT", Decimal("100.0"), client_order_id="cid-1")
     # ask=50001 → base≈0.00199996 → округление вниз до 6 знаков = 0.001999
-    assert od.side == "buy" and pytest.approx(od.amount, rel=1e-9) == 0.001999
+    # Теперь base_step = 0.000001 (10^-6), поэтому ожидаем 0.001999
+    expected_amount = Decimal("0.001999")
+    assert od.side == "buy"
+    assert abs(float(od.amount) - float(expected_amount)) < 1e-9
 
 @pytest.mark.anyio
 async def test_sell_base_amount_rounding(monkeypatch):
@@ -43,9 +46,11 @@ async def test_sell_base_amount_rounding(monkeypatch):
     fake = _FakeClient()
     ex._client = fake  # type: ignore
 
-    od = await ex.create_market_sell_base("BTC/USDT", 0.001234567, client_order_id="cid-2")
-    # amount precision 6 → 0.001234
-    assert od.side == "sell" and pytest.approx(od.amount, rel=1e-9) == 0.001234
+    od = await ex.create_market_sell_base("BTC/USDT", Decimal("0.001234567"), client_order_id="cid-2")
+    # amount precision 6 → base_step = 0.000001 → округление до 0.001234
+    expected_amount = Decimal("0.001234")
+    assert od.side == "sell"
+    assert abs(float(od.amount) - float(expected_amount)) < 1e-9
 
 @pytest.mark.anyio
 async def test_min_limits(monkeypatch):
@@ -55,6 +60,6 @@ async def test_min_limits(monkeypatch):
 
     # cost min = 5 USDT, amount min = 0.0001 BTC
     with pytest.raises(Exception):
-        await ex.create_market_buy_quote("BTC/USDT", 1.0)
+        await ex.create_market_buy_quote("BTC/USDT", Decimal("1.0"))
     with pytest.raises(Exception):
-        await ex.create_market_sell_base("BTC/USDT", 0.00001)
+        await ex.create_market_sell_base("BTC/USDT", Decimal("0.00001"))

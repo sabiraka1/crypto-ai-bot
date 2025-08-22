@@ -38,3 +38,15 @@ class IdempotencyRepository:
         cutoff = now_ms() - int(age_sec) * 1000
         cur = self._c.execute("DELETE FROM idempotency_keys WHERE created_at_ms < ?", (cutoff,))
         return cur.rowcount or 0
+
+    def prune_older_than_ttl(self, ttl_sec: int) -> int:
+        """
+        Удаляет ключи старше now - ttl_sec.
+        Возвращает число удалённых строк.
+        """
+        cutoff_ms = now_ms() - int(ttl_sec) * 1000
+        cur = self._c.cursor()
+        cur.execute("DELETE FROM idempotency_keys WHERE created_at_ms < ?", (cutoff_ms,))
+        n = cur.rowcount or 0
+        self._c.commit()
+        return n

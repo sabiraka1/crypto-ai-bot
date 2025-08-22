@@ -34,3 +34,15 @@ class AuditRepository:
         cutoff = now_ms() - int(days) * 86400000  # 24*60*60*1000
         cur = self._c.execute("DELETE FROM audit_log WHERE ts_ms < ?", (cutoff,))
         return cur.rowcount or 0
+
+    def prune_older_than_days(self, days: int) -> int:
+        """
+        Удаляет записи старше now - days.
+        Возвращает число удалённых строк.
+        """
+        cutoff_ms = now_ms() - int(days) * 24 * 60 * 60 * 1000
+        cur = self._c.cursor()
+        cur.execute("DELETE FROM audit_log WHERE ts_ms < ?", (cutoff_ms,))
+        n = cur.rowcount or 0
+        self._c.commit()
+        return n

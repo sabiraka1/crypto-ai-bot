@@ -73,10 +73,26 @@ def market_info_from_ccxt(symbol: str, m: Dict[str, Any]) -> MarketInfo:
     L = m.get("limits", {}) or {}
     amount_min = _dec((L.get("amount") or {}).get("min") or 0)
     cost_min   = _dec((L.get("cost") or {}).get("min") or 0)     # ~ minNotional in quote
-    price_tick = _dec(p.get("price") or 0)
-    # шаг базового/квотируемого (если нет явного шага — подстрахуемся малым значением)
-    base_step  = _dec(p.get("amount") or "0.00000001")
+    
+    # ИСПРАВЛЕНИЕ: правильно обрабатываем precision
+    price_precision = p.get("price")
+    amount_precision = p.get("amount")
+    
+    # Если precision - это количество знаков после запятой (число)
+    if isinstance(price_precision, (int, float)) and price_precision >= 0:
+        price_tick = Decimal("0.1") ** int(price_precision)
+    else:
+        # Если это уже готовое значение шага
+        price_tick = _dec(price_precision or "0.00000001")
+    
+    if isinstance(amount_precision, (int, float)) and amount_precision >= 0:
+        base_step = Decimal("0.1") ** int(amount_precision)
+    else:
+        # Если это уже готовое значение шага
+        base_step = _dec(amount_precision or "0.00000001")
+    
     quote_step = _dec("0.00000001")
+    
     return MarketInfo(
         symbol=symbol,
         base=m.get("base") or symbol.split("/")[0],
