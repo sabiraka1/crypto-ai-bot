@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Request, Response
+import asyncio
+from fastapi import FastAPI, Response
 from fastapi.responses import PlainTextResponse, JSONResponse
 
 from ..core.settings import Settings
 from .compose import build_container
-from ..utils.time import now_ms  # ✅ Добавлен импорт
 
 # отчёт метрик (JSON fallback), если модуль есть
 try:
@@ -19,47 +19,88 @@ from ..utils import metrics as _metrics
 app = FastAPI(title="crypto-ai-bot")
 app.state.container = build_container()
 
-
-@app.get("/health")
-async def health() -> dict:
-    c = app.state.container
-    rep = await c.health.check(symbol=c.settings.SYMBOL)
-    # ✅ Используем now_ms() если ts_ms недоступен
-    ts = getattr(rep, 'ts_ms', now_ms())
-    # ✅ Возвращаем все поля HealthReport в корне
-    return {
-        "ok": rep.ok,
-        "db_ok": rep.db_ok,
-        "migrations_ok": rep.migrations_ok,
-        "broker_ok": rep.broker_ok,
-        "bus_ok": rep.bus_ok,
-        "clock_drift_ms": rep.clock_drift_ms,
-        "details": rep.details,
-        "ts_ms": ts
-    }
-
+# --- LIVENESS ожидается тестами ---
+@app.get("/live")
+async def live() -> dict:
+    return {"ok": True}
 
 @app.get("/ready")
 async def ready() -> dict:
     c = app.state.container
     return {"ok": c is not None and c.broker is not None}
 
-
-@app.get("/live")
-async def live() -> dict:
-    """Liveness probe endpoint - проверяет что приложение живо"""
+@app.get("/health")
+async def health() -> dict:
+    """
+    Возвращаем:
+      - ok: bool
+      - components: dict (минимум bus/broker/storage/db)
+      - ts_ms: int
+      - а также плоские *_ok флаги на верхнем уровне (напр. db_ok), т.к. этого ждут тесты.
+    """
     c = app.state.container
-    return {"ok": c is not None and c.broker is not None}
+    rep = await c.health.check(symbol=c.settings.SYMBOL)
 
+    # извлечь ok/ts_ms/components из объекта или dict
+    if isinstance(rep, dict):
+        ok = bool(rep.get("ok", True))
+        ts_ms = rep.get("ts_ms", 0)
+        components = rep.get("components")
+    else:
+        ok = getattr(rep, "ok", True)
+        ts_ms = getattr(rep, "ts_ms", 0)
+        components = getattr(rep, "components", None)
+
+    # если components отсутствуют — собрать минимум
+    if components is None:
+        components = {}
+        try:
+            src = rep if isinstance(rep, dict) else getattr(rep, "__dict__", {})
+            if isinstance(src, dict):
+                for k, v in src.items():
+                    if k.endswith("_ok") and isinstance(v, bool):
+                        components[k[:-3]] = v
+        except Exception:
+            pass
+        components.setdefault("bus", c.bus is not None)
+        components.setdefault("broker", c.broker is not None)
+        # пробуем разные ключи для БД
+        components.setdefault("db", getattr(c.storage, "conn", None) is not None or getattr(c.storage, "db", None) is not None)
+        components.setdefault("storage", c.storage is not None)
+
+    # дополнительный быстрый live-пинг брокера
+    live_ok = True
+    live_error = ""
+    if c.settings.MODE == "live":
+        try:
+            await asyncio.wait_for(c.broker.fetch_balance(), timeout=1.0)
+        except Exception as exc:
+            live_ok = False
+            live_error = str(exc)
+        ok = bool(ok and live_ok)
+        components["live_broker"] = live_ok
+
+    # формируем итог
+    res = {
+        "ok": bool(ok),
+        "components": components,
+        "ts_ms": int(ts_ms) if isinstance(ts_ms, (int, float)) else 0,
+    }
+    # плоские *_ok флаги на верхнем уровне (важно для тестов: нужен db_ok)
+    for name, val in components.items():
+        if isinstance(val, bool):
+            res[f"{name}_ok"] = val
+    if c.settings.MODE == "live" and not live_ok and live_error:
+        res["error"] = live_error
+    return res
 
 @app.get("/metrics")
 async def metrics() -> Response:
     """
-    1) Если есть функция prom-текста (prometheus_text|render_prometheus|export_prometheus) — используем её.
-    2) Иначе, если есть snapshot() — отдаём JSON снимок (in-memory).
+    1) Если есть функция prom-текста — используем её.
+    2) Иначе — JSON снимок in-memory.
     3) Иначе — core.analytics.metrics.report_dict(), если доступен.
     """
-    # Пытаемся найти подходящую функцию Prometheus-текста
     prom_fn = None
     for name in ("prometheus_text", "render_prometheus", "export_prometheus"):
         f = getattr(_metrics, name, None)
@@ -88,9 +129,7 @@ async def metrics() -> Response:
         except Exception:
             pass
 
-    # на самый крайний случай — пустой объект
     return JSONResponse({})
-
 
 @app.get("/status")
 async def status() -> dict:
@@ -115,20 +154,17 @@ async def status() -> dict:
         "orchestrator": orch,
     }
 
-
 @app.post("/orchestrator/start")
 async def orchestrator_start() -> dict:
     c = app.state.container
     c.orchestrator.start()
     return {"ok": True, "status": c.orchestrator.status()}
 
-
 @app.post("/orchestrator/stop")
 async def orchestrator_stop() -> dict:
     c = app.state.container
     await c.orchestrator.stop()
     return {"ok": True, "status": c.orchestrator.status()}
-
 
 @app.get("/orchestrator/status")
 async def orchestrator_status() -> dict:
