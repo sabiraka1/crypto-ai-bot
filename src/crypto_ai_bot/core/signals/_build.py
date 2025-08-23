@@ -1,49 +1,98 @@
-## `core/signals/_build.py`
 from __future__ import annotations
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List
+
+import math
+from collections import deque
+from decimal import Decimal, getcontext
+from typing import Any, Deque, Dict, Optional
+
+from ..brokers.base import IBroker, TickerDTO
 from ..storage.facade import Storage
-@dataclass(frozen=True)
-class BuiltFeatures:
-    last: Decimal
-    sma_n: Decimal
-    ema_n: Decimal
-    spread_pct: float
-def _ema(values: List[Decimal], alpha: Decimal) -> Decimal:
-    if not values:
+
+# Чуть повышаем точность Decimal для безопасной математики
+getcontext().prec = 28
+
+# Кольцевой буфер цен по символу (в пределах процесса) — без новых файлов/таблиц
+_PRICES: Dict[str, Deque[Decimal]] = {}
+_MAXLEN = 50  # глубина окна для SMA/волы (не выносим в ENV по твоему требованию)
+
+def _dec(x: Any) -> Decimal:
+    if x is None:
         return Decimal("0")
-    ema = values[0]
-    for v in values[1:]:
-        ema = alpha * v + (Decimal("1") - alpha) * ema
-    return ema
-def build_features(*, symbol: str, storage: Storage, n: int = 20) -> Dict[str, object]:
-    """Строит базовые признаки по последним N снапшотам из ticker_snapshots.
-    Возвращает dict, совместимый с evaluate().
+    if isinstance(x, Decimal):
+        return x
+    return Decimal(str(x))
+
+def _mid_from_ticker(t: TickerDTO) -> Decimal:
+    bid = _dec(t.bid)
+    ask = _dec(t.ask)
+    last = _dec(t.last)
+    if bid > 0 and ask > 0:
+        return (bid + ask) / Decimal("2")
+    return last if last > 0 else (bid or ask)
+
+def _spread_pct(t: TickerDTO, mid: Decimal) -> float:
+    bid = _dec(t.bid)
+    ask = _dec(t.ask)
+    if bid > 0 and ask > 0 and mid > 0:
+        return float(((ask - bid) / mid) * Decimal("100"))
+    return 0.0
+
+def _sma(prices: Deque[Decimal], n: int) -> Optional[Decimal]:
+    if len(prices) < n or n <= 0:
+        return None
+    s = sum(list(prices)[-n:], Decimal("0"))
+    return (s / Decimal(n))
+
+def _stdev_pct(prices: Deque[Decimal], mid: Decimal, n: int) -> float:
+    """Процентная волатильность: stdev(last_n) / mid * 100."""
+    if mid <= 0 or len(prices) < n or n <= 1:
+        return 0.0
+    window = list(prices)[-n:]
+    mean = sum(window, Decimal("0")) / Decimal(len(window))
+    var = sum((p - mean) * (p - mean) for p in window) / Decimal(len(window))
+    # sqrt только через float (внутри локально), дальше возвращаем float %
+    stdev = Decimal(str(math.sqrt(float(var))))
+    return float((stdev / mid) * Decimal("100"))
+
+async def build_market_context(
+    *,
+    symbol: str,
+    broker: IBroker,
+    storage: Storage,  # пока не используем здесь, но оставляем сигнатуру под будущее
+) -> Dict[str, Any]:
     """
-    rows = storage.market_data.get_last_ticker(symbol)
-    conn = storage.conn
-    cur = conn.execute(
-        "SELECT last, bid, ask FROM ticker_snapshots WHERE symbol=? ORDER BY ts_ms DESC LIMIT ?",
-        (symbol, n),
-    )
-    vals = cur.fetchall()
-    if not vals:
-        return {"last": "0", "sma": "0", "ema": "0", "spread_pct": 0.0}
-    lasts = [Decimal(str(v[0])) for v in reversed(vals)]
-    bids = [Decimal(str(v[1])) for v in reversed(vals)]
-    asks = [Decimal(str(v[2])) for v in reversed(vals)]
-    last = lasts[-1]
-    sma = (sum(lasts) / Decimal(len(lasts))).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
-    alpha = Decimal("2") / Decimal(n + 1)
-    ema = _ema(lasts, alpha).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
-    bid = bids[-1]
-    ask = asks[-1]
-    mid = (bid + ask) / Decimal("2") if (bid > 0 and ask > 0) else last
-    spread_pct = float(((ask - bid) / mid) * Decimal("100")) if mid > 0 else 0.0
+    Собирает рыночный контекст для принятия решения:
+      - ticker, mid, spread(%)
+      - SMA(5), SMA(20)
+      - volatility_pct (stdev_20 / mid * 100)
+    Без внешних зависимостей и без новых файлов.
+    """
+    t = await broker.fetch_ticker(symbol)
+    mid = _mid_from_ticker(t)
+    spread = _spread_pct(t, mid)
+
+    ring = _PRICES.get(symbol)
+    if ring is None:
+        ring = deque(maxlen=_MAXLEN)
+        _PRICES[symbol] = ring
+    if mid > 0:
+        ring.append(mid)
+
+    sma5 = _sma(ring, 5)
+    sma20 = _sma(ring, 20)
+    vol_pct = _stdev_pct(ring, mid, 20)
+
     return {
-        "last": str(last),
-        "sma": str(sma),
-        "ema": str(ema),
-        "spread_pct": spread_pct,
+        "ticker": {
+            "last": _dec(t.last),
+            "bid": _dec(t.bid),
+            "ask": _dec(t.ask),
+            "mid": mid,
+            "timestamp": t.timestamp,
+        },
+        "spread": spread,                 # float, в процентах
+        "sma_fast": sma5,                # Decimal | None
+        "sma_slow": sma20,               # Decimal | None
+        "volatility_pct": vol_pct,       # float
+        "samples": len(ring),
     }
