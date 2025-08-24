@@ -4,25 +4,25 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List
 
-from ..use_cases.eval_and_execute import eval_and_execute
-from ..events.bus import AsyncEventBus
-from ..risk.manager import RiskManager
-from ..risk.protective_exits import ProtectiveExits
-from ..monitoring.health_checker import HealthChecker
-from ..storage.facade import Storage
-from ..brokers.base import IBroker
-from ...utils.logging import get_logger
+from .use_cases.eval_and_execute import eval_and_execute
+from .events.bus import AsyncEventBus
+from .risk.manager import RiskManager
+from .risk.protective_exits import ProtectiveExits
+from .monitoring.health_checker import HealthChecker
+from .storage.facade import Storage
+from .brokers.base import IBroker
+from .brokers.symbols import parse_symbol
+from ..utils.logging import get_logger
 
-# новые импортируем мягко
+# опциональные зависимости (могут отсутствовать при ранних ветках)
 try:
-    from .reconciliation.orders import OrdersReconciler
-    from .reconciliation.positions import PositionsReconciler
-    from .reconciliation.balances import BalancesReconciler
+    from .reconciliation.base import IReconciler  # type: ignore
 except Exception:
-    OrdersReconciler = PositionsReconciler = BalancesReconciler = None  # type: ignore
+    class IReconciler:  # fallback протокол
+        async def run_once(self) -> None: ...
 
 try:
-    from .safety.dead_mans_switch import DeadMansSwitch
+    from .safety.dead_mans_switch import DeadMansSwitch  # type: ignore
 except Exception:
     DeadMansSwitch = None  # type: ignore
 
@@ -38,20 +38,21 @@ class Orchestrator:
     health: HealthChecker
     settings: "Settings"
 
+    # интеграции (опциональны)
+    dms: Optional["DeadMansSwitch"] = None
+    reconcilers: Optional[List[IReconciler]] = None
+
     eval_interval_sec: float = 1.0
     exits_interval_sec: float = 2.0
     reconcile_interval_sec: float = 5.0
     watchdog_interval_sec: float = 2.0
 
+    # для отладки: "buy"|"sell"|"hold"|None
     force_eval_action: Optional[str] = None
 
     _tasks: Dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
     _last_beat_ms: int = field(default=0, init=False)
-
-    # внутренние
-    _reconcilers: List[object] = field(default_factory=list, init=False)
-    _dms: Optional[DeadMansSwitch] = field(default=None, init=False)
 
     # --- lifecycle ---
     def start(self) -> None:
@@ -59,31 +60,6 @@ class Orchestrator:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
-
-        # ленивое создание DMS
-        if DeadMansSwitch and self._dms is None:
-            try:
-                self._dms = DeadMansSwitch(
-                    broker=self.broker,
-                    storage=self.storage,
-                    bus=self.bus,
-                    symbol=self.symbol,
-                    exchange=self.settings.EXCHANGE,
-                )
-            except Exception:
-                self._dms = None
-
-        # ленивое создание reconciler'ов
-        if not self._reconcilers and OrdersReconciler and PositionsReconciler and BalancesReconciler:
-            try:
-                self._reconcilers = [
-                    OrdersReconciler(self.storage, self.broker, self.symbol),
-                    PositionsReconciler(self.storage, self.symbol),
-                    BalancesReconciler(self.storage, self.broker, self.symbol),
-                ]
-            except Exception:
-                self._reconcilers = []
-
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
         self._tasks["exits"] = loop.create_task(self._exits_loop(), name="orc-exits")
         self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name="orc-reconcile")
@@ -110,7 +86,7 @@ class Orchestrator:
 
     # --- loops ---
     async def _eval_loop(self) -> None:
-        log = get_logger("orchestrator.eval")
+        lg = get_logger("orchestrator.eval")
         while not self._stopping:
             try:
                 await eval_and_execute(
@@ -127,71 +103,66 @@ class Orchestrator:
                     protective_exits=self.exits,
                 )
             except Exception as exc:
-                log.error("tick_failed", extra={"error": str(exc)})
+                lg.error("tick_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
-        log = get_logger("orchestrator.exits")
+        lg = get_logger("orchestrator.exits")
         while not self._stopping:
             try:
-                pos = getattr(self.storage.positions, "get_position", None)
-                if callable(pos):
-                    p = pos(self.symbol)
-                    base_qty = 0
-                    if p is not None:
-                        base_qty = getattr(p, "base_qty", getattr(p, "qty", 0))
-                    if base_qty and base_qty > 0:
-                        await self.exits.ensure(symbol=self.symbol)
+                pos = self.storage.positions.get_position(self.symbol)
+                if pos.base_qty and pos.base_qty > 0:
+                    await self.exits.ensure(symbol=self.symbol)
             except Exception as exc:
-                log.error("ensure_failed", extra={"error": str(exc)})
+                lg.error("ensure_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
-        log = get_logger("orchestrator.reconcile")
+        lg = get_logger("orchestrator.reconcile")
         while not self._stopping:
             try:
-                for r in self._reconcilers:
-                    try:
-                        rep = await r.reconcile()  # type: ignore
-                        if not rep.ok:
-                            # можно писать в reconciliation_log через storage.conn при желании
-                            pass
-                    except Exception as exc:
-                        log.error("reconciler_failed", extra={"cls": r.__class__.__name__, "error": str(exc)})
-
-                # мягкая чистка репозиториев, если методы есть
-                prune = getattr(self.storage.idempotency, "prune_older_than", None)
-                if callable(prune):
-                    try:
+                # 1) легкая тех. санитарка хранилища (если есть методы)
+                try:
+                    prune = getattr(self.storage.idempotency, "prune_older_than", None)
+                    if callable(prune):
                         prune(self.settings.IDEMPOTENCY_TTL_SEC * 10)
-                    except Exception:
-                        pass
-
-                prune_audit = getattr(self.storage.audit, "prune_older_than", None)
-                if callable(prune_audit):
-                    try:
+                except Exception:
+                    pass
+                try:
+                    prune_audit = getattr(self.storage.audit, "prune_older_than", None)
+                    if callable(prune_audit):
                         prune_audit(days=7)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
+                # 2) скелетные сверки (если передали)
+                if self.reconcilers:
+                    for r in self.reconcilers:
+                        try:
+                            await r.run_once()
+                        except Exception as exc:
+                            lg.error("reconciler_failed", extra={"cls": r.__class__.__name__, "error": str(exc)})
             except Exception as exc:
-                log.error("reconcile_failed", extra={"error": str(exc)})
-
+                lg.error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
-        log = get_logger("orchestrator.watchdog")
+        lg = get_logger("orchestrator.watchdog")
         while not self._stopping:
             try:
                 rep = await self.health.check(symbol=self.symbol)
-                # heartbeat DMS
-                if self._dms:
-                    self._dms.heartbeat()
-                    await self._dms.check_and_trigger()
-
-                # пульс в bus
-                await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": self.symbol}, key=self.symbol)
+                hb_key = parse_symbol(self.symbol).as_pair
+                await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb_key}, key=hb_key)
                 self._last_beat_ms = rep.ts_ms
+
+                # Dead Man's Switch интеграция (мягко)
+                if self.dms is not None:
+                    try:
+                        self.dms.beat()
+                        await self.dms.check_and_trigger(symbol=self.symbol)
+                    except Exception as exc:
+                        lg.error("dms_failed", extra={"error": str(exc)})
+
             except Exception as exc:
-                log.error("watchdog_failed", extra={"error": str(exc)})
+                lg.error("watchdog_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.watchdog_interval_sec)
