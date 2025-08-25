@@ -15,8 +15,10 @@ from ..brokers.symbols import parse_symbol
 from ..reconciliation.orders import OrdersReconciler
 from ..reconciliation.positions import PositionsReconciler
 from ..reconciliation.balances import BalancesReconciler
+from ..safety.dead_mans_switch import DeadMansSwitch
 from ...utils.logging import get_logger
 
+_log = get_logger("orchestrator")
 
 @dataclass
 class Orchestrator:
@@ -34,39 +36,21 @@ class Orchestrator:
     reconcile_interval_sec: float = 5.0
     watchdog_interval_sec: float = 2.0
 
-    # опционально для отладки/тестов — форсить действие в eval-цикле: "buy"|"sell"|"hold"|None
     force_eval_action: Optional[str] = None
-
-    # мягкие reconcile-компоненты (инициализируются при старте)
-    _orders_rec: Optional[OrdersReconciler] = field(default=None, init=False)
-    _positions_rec: Optional[PositionsReconciler] = field(default=None, init=False)
-    _balances_rec: Optional[BalancesReconciler] = field(default=None, init=False)
 
     _tasks: Dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
     _last_beat_ms: int = field(default=0, init=False)
 
-    # --- lifecycle ---
+    # внутренние помощники
+    _orders_rec: Optional[OrdersReconciler] = field(default=None, init=False)
+    _pos_rec: Optional[PositionsReconciler] = field(default=None, init=False)
+    _bal_rec: Optional[BalancesReconciler] = field(default=None, init=False)
+    _dms: Optional[DeadMansSwitch] = field(default=None, init=False)
+
     def start(self) -> None:
         if self._tasks:
             return
-        # лениво собираем reconcilers ровно один раз
-        if self._orders_rec is None:
-            self._orders_rec = OrdersReconciler(
-                broker=self.broker,
-                symbol=self.symbol,
-                bus=self.bus,
-                stale_ms=10 * 60 * 1000,  # 10 минут
-            )
-        if self._positions_rec is None:
-            self._positions_rec = PositionsReconciler(
-                storage=self.storage,
-                exits=self.exits,
-                symbol=self.symbol,
-            )
-        if self._balances_rec is None:
-            self._balances_rec = BalancesReconciler(broker=self.broker)
-
         loop = asyncio.get_running_loop()
         self._stopping = False
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
@@ -93,9 +77,7 @@ class Orchestrator:
             "last_beat_ms": self._last_beat_ms,
         }
 
-    # --- loops ---
     async def _eval_loop(self) -> None:
-        # простая петля: построить фичи → решить → исполнить (use-case уже внутри дергает риск/экзиты)
         while not self._stopping:
             try:
                 await eval_and_execute(
@@ -111,12 +93,11 @@ class Orchestrator:
                     risk_manager=self.risk,
                     protective_exits=self.exits,
                 )
-            except Exception as exc:  # не валим оркестратор из-за единичной ошибки
+            except Exception as exc:
                 get_logger("orchestrator.eval").error("tick_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
-        # периодически убеждаемся, что защитные выходы поставлены (если есть позиция)
         while not self._stopping:
             try:
                 pos = self.storage.positions.get_position(self.symbol)
@@ -127,18 +108,20 @@ class Orchestrator:
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
-        # мягкая сверка + лёгкая очистка — без побочных эффектов
+        # лениво создаём помощников, чтобы не менять compose
+        if self._orders_rec is None:
+            self._orders_rec = OrdersReconciler(self.storage, self.broker, self.bus, self.symbol)
+        if self._pos_rec is None:
+            self._pos_rec = PositionsReconciler(self.storage, self.broker, self.bus, self.symbol)
+        if self._bal_rec is None:
+            self._bal_rec = BalancesReconciler(self.storage, self.broker, self.bus)
+
         while not self._stopping:
             try:
-                # run_once каждой мягкой сверки (если сконфигурированы)
-                if self._orders_rec:
-                    await self._orders_rec.run_once()
-                if self._positions_rec:
-                    await self._positions_rec.run_once()
-                if self._balances_rec:
-                    await self._balances_rec.run_once()
-
-                # необязательная гигиена: зачистка старых ключей/аудита
+                await self._orders_rec.run_once()
+                await self._pos_rec.run_once()
+                await self._bal_rec.run_once()
+                # лёгкая гигиена: зачистка idempotency/audit если реализовано
                 try:
                     prune = getattr(self.storage.idempotency, "prune_older_than", None)
                     if callable(prune):
@@ -156,12 +139,19 @@ class Orchestrator:
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
+        if self._dms is None:
+            self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=120_000)
+
         while not self._stopping:
             try:
                 rep = await self.health.check(symbol=self.symbol)
                 hb = parse_symbol(self.symbol).as_pair
                 await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
                 self._last_beat_ms = rep.ts_ms
+
+                # фиксируем heartbeat для DMS и проверяем таймаут
+                self._dms.beat()
+                await self._dms.check_and_trigger()
             except Exception as exc:
                 get_logger("orchestrator.watchdog").error("watchdog_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.watchdog_interval_sec)

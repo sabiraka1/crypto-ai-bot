@@ -103,6 +103,47 @@ class CcxtBroker(IBroker):
         q = Decimal(10) ** (-prec)
         return (value // q) * q
 
+    def _to_order_dto(self, symbol: str, side: str, o: dict) -> OrderDTO:
+        """Конвертер ccxt-ордера в OrderDTO с полным заполнением всех полей."""
+        filled = Decimal(str(o.get("filled") or "0"))
+        amount = Decimal(str(o.get("amount") or filled))
+        remaining = Decimal(str(o.get("remaining") or (amount - filled)))
+        
+        # Обработка комиссии
+        fee_cost = None
+        fee_ccy = None
+        fee = o.get("fee")
+        if isinstance(fee, dict):
+            fee_cost = Decimal(str(fee.get("cost") or "0"))
+            fee_ccy = fee.get("currency")
+        
+        # Цена и стоимость
+        price = o.get("average") or o.get("price")
+        price = None if price is None else Decimal(str(price))
+        cost = o.get("cost")
+        cost = None if cost is None else Decimal(str(cost))
+        
+        # Определение статуса
+        status = str(o.get("status") or "open")
+        if status == "open" and filled > 0 and remaining > 0:
+            status = "partial"
+        
+        return OrderDTO(
+            id=str(o.get("id") or ""),
+            client_order_id=str(o.get("clientOrderId") or ""),
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            filled=filled,
+            status=status,
+            timestamp=int(o.get("timestamp") or now_ms()),
+            price=price,
+            cost=cost,
+            remaining=remaining,
+            fee=fee_cost,
+            fee_currency=fee_ccy,
+        )
+
     # ---------- IBroker ----------
 
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
@@ -186,27 +227,24 @@ class CcxtBroker(IBroker):
                 if client_order_id:
                     params["clientOrderId"] = client_order_id
                 o = await self._ex.create_order(ex_symbol, "market", "buy", float(base_amt), None, params)
-                filled = Decimal(str(o.get("filled") or base_amt))
-                oid = str(o.get("id") or "")
-                status = str(o.get("status") or "closed")
+                return self._to_order_dto(symbol, "buy", o)
             except Exception as exc:
                 raise TransientError(str(exc))
         else:
             # симуляция (тесты): считаем что исполнилось полностью
-            filled = base_amt
-            oid = client_order_id or f"sim-{now_ms()}"
-            status = "closed"
-
-        return OrderDTO(
-            id=oid,
-            client_order_id=client_order_id or oid,
-            symbol=symbol,
-            side="buy",
-            amount=base_amt,
-            status=status,
-            filled=filled,
-            timestamp=now_ms(),
-        )
+            return OrderDTO(
+                id=client_order_id or f"sim-{now_ms()}",
+                client_order_id=client_order_id or f"sim-{now_ms()}",
+                symbol=symbol,
+                side="buy",
+                amount=base_amt,
+                status="closed",
+                filled=base_amt,
+                timestamp=now_ms(),
+                remaining=Decimal("0"),
+                price=t.ask,
+                cost=quote_amount,
+            )
 
     async def create_market_sell_base(self, symbol: str, base_amount: Decimal, client_order_id: Optional[str] = None) -> OrderDTO:
         """
@@ -232,23 +270,22 @@ class CcxtBroker(IBroker):
                 if client_order_id:
                     params["clientOrderId"] = client_order_id
                 o = await self._ex.create_order(ex_symbol, "market", "sell", float(amt), None, params)
-                filled = Decimal(str(o.get("filled") or amt))
-                oid = str(o.get("id") or "")
-                status = str(o.get("status") or "closed")
+                return self._to_order_dto(symbol, "sell", o)
             except Exception as exc:
                 raise TransientError(str(exc))
         else:
-            filled = amt
-            oid = client_order_id or f"sim-{now_ms()}"
-            status = "closed"
-
-        return OrderDTO(
-            id=oid,
-            client_order_id=client_order_id or oid,
-            symbol=symbol,
-            side="sell",
-            amount=amt,
-            status=status,
-            filled=filled,
-            timestamp=now_ms(),
-        )
+            # симуляция (тесты): получаем bid для расчета
+            t = await self.fetch_ticker(symbol)
+            return OrderDTO(
+                id=client_order_id or f"sim-{now_ms()}",
+                client_order_id=client_order_id or f"sim-{now_ms()}",
+                symbol=symbol,
+                side="sell",
+                amount=amt,
+                status="closed",
+                filled=amt,
+                timestamp=now_ms(),
+                remaining=Decimal("0"),
+                price=t.bid if t.bid > 0 else t.last,
+                cost=amt * (t.bid if t.bid > 0 else t.last),
+            )

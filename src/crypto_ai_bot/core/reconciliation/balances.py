@@ -1,47 +1,57 @@
 from __future__ import annotations
-
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from decimal import Decimal
 
 from ..brokers.base import IBroker
+from ..storage.facade import Storage
+from ..events.bus import AsyncEventBus
 from ...utils.logging import get_logger
-from ...utils.metrics import inc, timer
 
-# для /status
-_last_status: Dict[str, Any] | None = None
+_log = get_logger("reconcile.balances")
 
-
-def get_last_status() -> Optional[Dict[str, Any]]:
-    return _last_status
-
-
+@dataclass
 class BalancesReconciler:
-    """
-    Мягкая сверка балансов:
-    - Если брокер не умеет fetch_balance — пропускаем
-    - Логируем наличие и несколько ключей, метрики — для мониторинга
-    """
-
-    def __init__(self, *, broker: IBroker) -> None:
-        self._log = get_logger("reconcile.balances")
-        self._broker = broker
+    storage: Storage
+    broker: IBroker
+    bus: AsyncEventBus
 
     async def run_once(self) -> None:
-        global _last_status
+        """
+        Базовая сверка балансов по котируемой валюте.
+        Если есть расхождения с локальными записями — только лог/событие.
+        """
+        try:
+            # локальное «ожидание» берем по сумме cost в аудите как приблизительный показатель (paper)
+            cur = self.storage.conn.execute("""
+                SELECT SUM(CASE WHEN json_extract(payload,'$.side')='buy'
+                                THEN CAST(json_extract(payload,'$.quote_amount') AS REAL)
+                                ELSE 0 END)
+                FROM audit
+                WHERE type='order_placed'
+            """)
+            expected_quote = Decimal(str(cur.fetchone()[0] or 0))
 
-        fetch_balance = getattr(self._broker, "fetch_balance", None)
-        if not callable(fetch_balance):
-            self._log.info("skip_no_fetch_balance")
-            _last_status = {"ok": True, "reason": "no_api"}
-            return
+            bal = await self.broker.fetch_balance()
+            quote_ccy = "USDT"
+            actual_quote = Decimal(str(bal.get(quote_ccy, "0")))
 
-        with timer("reconcile_balances_ms", {}):
-            try:
-                bal = await fetch_balance()  # type: ignore
-                keys = list(bal.keys())[:5] if isinstance(bal, dict) else []
-                inc("reconcile_balances", {"status": "ok"})
-                self._log.info("balance_ok", extra={"keys": keys})
-                _last_status = {"ok": True, "keys": keys}
-            except Exception as exc:
-                inc("reconcile_balances", {"status": "failed"})
-                self._log.error("fetch_balance_failed", extra={"error": str(exc)})
-                _last_status = {"ok": False, "error": str(exc)}
+            # допускаем большую «погрешность» для demo
+            if (expected_quote - actual_quote).copy_abs() > Decimal("0.01"):
+                _log.warning("balance_mismatch", extra={
+                    "quote": quote_ccy, "expected": str(expected_quote), "actual": str(actual_quote)
+                })
+                self.storage.audit.log("reconcile.balance_mismatch", {
+                    "quote": quote_ccy,
+                    "expected": str(expected_quote),
+                    "actual": str(actual_quote),
+                })
+                try:
+                    await self.bus.publish(
+                        "reconcile.balance.mismatch",
+                        {"quote": quote_ccy, "expected": str(expected_quote), "actual": str(actual_quote)},
+                        key="balances",
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            _log.error("balances_reconcile_failed", extra={"error": str(exc)})

@@ -3,35 +3,24 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass
+from decimal import Decimal
 
-from ..utils.logging import get_logger
-from ..utils.time import now_ms
 from ..core.settings import Settings
 from ..core.events.bus import AsyncEventBus
-from ..core.storage.facade import Storage
 from ..core.storage.migrations.runner import run_migrations
+from ..core.storage.facade import Storage
 from ..core.monitoring.health_checker import HealthChecker
 from ..core.risk.manager import RiskManager, RiskConfig
 from ..core.risk.protective_exits import ProtectiveExits
-from ..core.orchestrator import Orchestrator
 from ..core.brokers.base import IBroker
-from ..core.alerts.reconcile_stale import attach as attach_reconcile_alerts
-from ..core.monitoring.dlq_subscriber import attach as attach_dlq
-
-# брокеры
-from ..core.brokers.ccxt_exchange import CcxtBroker  # live
-from ..core.brokers.paper import PaperBroker         # paper
-
-# безопасность/устойчивость
+from ..core.brokers.paper_broker import PaperBroker
+from ..core.brokers.ccxt_exchange import CcxtBroker
+from ..core.orchestrator import Orchestrator
 from ..core.safety.instance_lock import InstanceLock
-from ..core.safety.dead_mans_switch import DeadMansSwitch
+from ..core.alerts import register_alerts
 
-# reconciliation-скелеты
-from ..core.reconciliation import (
-    PositionsReconciler,
-    OrdersReconciler,
-    BalancesReconciler,
-)
+from ..utils.time import now_ms
+from ..utils.logging import get_logger
 
 _log = get_logger("compose")
 
@@ -46,99 +35,89 @@ class Container:
     risk: RiskManager
     exits: ProtectiveExits
     orchestrator: Orchestrator
+    lock: InstanceLock  # DB-lock для single instance
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+# --- helpers ------------------------------------------------------------------
 
 def _create_storage_for_mode(settings: Settings) -> Storage:
-    conn = _connect(settings.DB_PATH)
-    # миграции (включая индексы) — пройдут повторно безопасно
+    db_path = settings.DB_PATH
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    # применяем миграции
     run_migrations(conn, now_ms=now_ms())
-    storage = Storage.from_connection(conn)
-    _log.info("storage_ready", extra={"db_path": settings.DB_PATH})
+
+    storage = Storage(conn)
+
+    _log.info("storage_created", extra={
+        "mode": settings.MODE,
+        "db_path": db_path,
+    })
     return storage
 
 
 def _create_broker_for_mode(settings: Settings, storage: Storage) -> IBroker:
-    if settings.MODE == "live":
-        _log.info("creating_live_broker", extra={"exchange": settings.EXCHANGE})
+    mode = settings.MODE.lower()
+    if mode == "paper":
+        # Пожирнее тестовый баланс — удобно для e2e/PnL
+        balances = {"USDT": str(Decimal("10000"))}
+        _log.info("creating_paper_broker", extra={"balances": balances})
+        return PaperBroker(balances=balances)
+    elif mode == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
             api_key=settings.API_KEY,
             api_secret=settings.API_SECRET,
+            enable_rate_limit=True,
         )
-    # paper
-    _log.info("creating_paper_broker", extra={"balances": {"USDT": "10000"}})
-    return PaperBroker(quote_balance_init="10000")  # безопасные дефолты
+    else:
+        raise ValueError(f"Unknown MODE={settings.MODE}")
 
+
+# --- public -------------------------------------------------------------------
 
 def build_container() -> Container:
-    """Сборка контейнера с безопасной интеграцией Lock/DMS/Reconcile."""
+    """Сборка контейнера с правильной инициализацией компонентов."""
+    # 1) Settings
     settings = Settings.load()
+    _log.info("building_container", extra={
+        "mode": settings.MODE,
+        "exchange": settings.EXCHANGE,
+        "symbol": settings.SYMBOL,
+    })
 
-    _log.info(
-        "building_container",
-        extra={"mode": settings.MODE, "exchange": settings.EXCHANGE, "symbol": settings.SYMBOL},
-    )
-
-    # storage + миграции
+    # 2) Storage (DB + миграции)
     storage = _create_storage_for_mode(settings)
 
-    # event bus
-    bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
-    
-    # Подключение подписчика на reconcile события
-    attach_reconcile_alerts(bus)
-    
-    # Подключение подписчика на DLQ события для мониторинга
-    attach_dlq(bus)
+    # 3) DB-lock (single instance)
+    lock_owner = os.getenv("POD_NAME", os.getenv("HOSTNAME", "local"))
+    lock = InstanceLock(storage=storage, app="crypto-ai-bot", owner=lock_owner)
+    if not lock.acquire(ttl_sec=300):
+        raise RuntimeError("Instance lock not acquired: another instance is running")
 
-    # broker
+    # 4) Event bus + алерты
+    bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
+    register_alerts(bus)  # подписчики алертов на reconcile-топики
+
+    # 5) Broker
     broker = _create_broker_for_mode(settings, storage)
 
-    # risk
-    risk = RiskManager(
-        storage=storage,
-        config=RiskConfig(
-            cooldown_sec=30,
-            max_spread_pct=0.3,
-            # Остальные поля RiskConfig читаются из дефолтов/ENV внутри RiskConfig при необходимости
-        ),
+    # 6) Risk + Exits
+    risk_config = RiskConfig(
+        cooldown_sec=settings.RISK_COOLDOWN_SEC,
+        max_spread_pct=settings.RISK_MAX_SPREAD_PCT,
+        max_position_base=settings.RISK_MAX_POSITION_BASE,
+        max_orders_per_hour=settings.RISK_MAX_ORDERS_PER_HOUR,
+        daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
     )
+    risk = RiskManager(storage=storage, config=risk_config)
+    exits = ProtectiveExits(broker=broker, storage=storage)
 
-    # exits
-    exits = ProtectiveExits(storage=storage, broker=broker, bus=bus)
-
-    # health
+    # 7) Health
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
 
-    # --- safety: lock (только для LIVE), тихо/без фаталов ---
-    if settings.MODE == "live":
-        try:
-            lock = InstanceLock(storage.conn, name="trading-bot")
-            if not lock.acquire(ttl_sec=300):
-                _log.error("instance_lock_not_acquired")
-            else:
-                _log.info("instance_lock_acquired")
-        except Exception as exc:
-            _log.error("instance_lock_error", extra={"error": str(exc)})
-
-    # Dead Man's Switch (и в paper, и в live — без побочных эффектов)
-    dms = DeadMansSwitch(storage=storage, broker=broker)
-
-    # Reconcilers (мягкие, без критичных действий)
-    reconcilers = [
-        PositionsReconciler(storage=storage, exits=exits, symbol=settings.SYMBOL),
-        OrdersReconciler(storage=storage, broker=broker, symbol=settings.SYMBOL),
-        BalancesReconciler(broker=broker),
-    ]
-
-    # orchestrator
-    orc = Orchestrator(
+    # 8) Orchestrator (как у тебя было)
+    orchestrator = Orchestrator(
         symbol=settings.SYMBOL,
         storage=storage,
         broker=broker,
@@ -147,14 +126,13 @@ def build_container() -> Container:
         exits=exits,
         health=health,
         settings=settings,
-        dms=dms,
-        reconcilers=reconcilers,
+        # интервалы оставляем дефолт, тесты их могут ускорять
     )
 
-    _log.info(
-        "container_built",
-        extra={"mode": settings.MODE, "components": ["settings", "storage", "broker", "bus", "health", "risk", "exits", "orchestrator"]},
-    )
+    _log.info("container_built", extra={
+        "mode": settings.MODE,
+        "components": ["settings", "storage", "broker", "bus", "health", "risk", "exits", "orchestrator", "lock"],
+    })
 
     return Container(
         settings=settings,
@@ -164,5 +142,6 @@ def build_container() -> Container:
         health=health,
         risk=risk,
         exits=exits,
-        orchestrator=orc,
+        orchestrator=orchestrator,
+        lock=lock,
     )

@@ -1,51 +1,55 @@
 from __future__ import annotations
-
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
 from decimal import Decimal
 
+from ..brokers.base import IBroker
 from ..storage.facade import Storage
-from ..risk.protective_exits import ProtectiveExits
+from ..events.bus import AsyncEventBus
 from ...utils.logging import get_logger
-from ...utils.metrics import inc, timer
 
-# для /status
-_last_status: Dict[str, Any] | None = None
+_log = get_logger("reconcile.positions")
 
-
-def get_last_status() -> Optional[Dict[str, Any]]:
-    return _last_status
-
-
+@dataclass
 class PositionsReconciler:
-    """
-    Мягкая сверка позиции:
-    - Если позиция > 0 — вызываем ProtectiveExits.ensure(symbol=...)
-    - Только лог/метрики, бизнес-логика не меняется
-    """
-
-    def __init__(self, *, storage: Storage, exits: ProtectiveExits, symbol: str) -> None:
-        self._log = get_logger("reconcile.positions")
-        self._storage = storage
-        self._exits = exits
-        self._symbol = symbol
+    storage: Storage
+    broker: IBroker
+    bus: AsyncEventBus
+    symbol: str
 
     async def run_once(self) -> None:
-        global _last_status
-
-        with timer("reconcile_positions_ms", {"symbol": self._symbol}):
+        """
+        Базовая сверка позиции: если расхождение между локальной базовой позицией и биржевой > epsilon,
+        логируем и публикуем событие. Исправление не выполняем — только сигнализация.
+        """
+        try:
+            local_base = self.storage.positions.get_base_qty(self.symbol) or Decimal("0")
             try:
-                pos = self._storage.positions.get_position(self._symbol)
-                base = Decimal(str(pos.base_qty or "0"))
-                if base > 0:
-                    await self._exits.ensure(symbol=self._symbol)
-                    inc("reconcile_positions", {"symbol": self._symbol, "has_pos": "1"})
-                    self._log.info("ensure_exits_done", extra={"symbol": self._symbol, "base_qty": str(base)})
-                    _last_status = {"ok": True, "has_pos": True, "base_qty": str(base)}
-                else:
-                    inc("reconcile_positions", {"symbol": self._symbol, "has_pos": "0"})
-                    self._log.info("no_position", extra={"symbol": self._symbol})
-                    _last_status = {"ok": True, "has_pos": False, "base_qty": "0"}
+                bal = await self.broker.fetch_balance()
+                # берём по base-валюте
+                base_ccy = self.symbol.split("/")[0]
+                remote_base = Decimal(str(bal.get(base_ccy, "0")))
             except Exception as exc:
-                inc("reconcile_positions", {"symbol": self._symbol, "status": "failed"})
-                self._log.error("positions_reconcile_failed", extra={"error": str(exc)})
-                _last_status = {"ok": False, "error": str(exc)}
+                _log.error("fetch_balance_failed", extra={"error": str(exc)})
+                return
+
+            diff = (local_base - remote_base).copy_abs()
+            epsilon = Decimal("0.00000001")
+            if diff > epsilon:
+                _log.warning("position_mismatch", extra={
+                    "symbol": self.symbol, "local": str(local_base), "remote": str(remote_base)
+                })
+                self.storage.audit.log("reconcile.position_mismatch", {
+                    "symbol": self.symbol,
+                    "local": str(local_base),
+                    "remote": str(remote_base),
+                })
+                try:
+                    await self.bus.publish(
+                        "reconcile.position.mismatch",
+                        {"symbol": self.symbol, "local": str(local_base), "remote": str(remote_base)},
+                        key=self.symbol.replace("/", "-").lower(),
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            _log.error("positions_reconcile_failed", extra={"error": str(exc)})
