@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Optional
 
-from ..events.bus import AsyncEventBus
 from ..brokers.base import IBroker, OrderDTO
-from ..brokers.symbols import parse_symbol
+from ..events.bus import AsyncEventBus
+from ..events import topics
 from ..storage.facade import Storage
-from ...utils.ids import make_idempotency_key, make_client_order_id
-from ...utils.time import now_ms
+from ...utils.ids import make_idempotency_key, make_client_order_id, short_hash
 from ...utils.logging import get_logger
-from ...utils.exceptions import ValidationError, TransientError, BrokerError
+from ...utils.time import now_ms
+from ...utils.exceptions import ValidationError, TransientError
 
 
 _log = get_logger("use_cases.place_order")
@@ -22,33 +22,12 @@ class PlaceOrderResult:
     order: Optional[OrderDTO]
     client_order_id: str
     idempotency_key: str
-    duplicate: bool
-
-
-async def _emit(bus: AsyncEventBus, topic: str, payload: Dict[str, Any], *, key: str) -> None:
-    try:
-        await bus.publish(topic, payload, key=key)
-    except Exception as exc:
-        # события — «best effort»: не валим юзкейс из-за шины
-        _log.error("event_publish_failed", extra={"topic": topic, "error": str(exc)})
-
-
-def _reserve_idempotency(storage: Storage, key: str, *, ttl_sec: int) -> bool:
-    """
-    Резервирует идемпотентность. Возвращает True, если это первый вызов за окно TTL,
-    и False, если ключ уже существует (дубликат).
-    """
-    try:
-        return storage.idempotency.check_and_store(key, ttl_sec=ttl_sec)
-    except Exception as exc:
-        # Лучше «fail closed» (запретить), но для paper/тестов — «fail open» с логом:
-        _log.error("idempotency_failed", extra={"key": key, "error": str(exc)})
-        return True
+    duplicate: bool = False
 
 
 async def place_market_buy_quote(
     symbol: str,
-    quote_amount: Decimal,
+    amount_quote: Decimal,
     *,
     exchange: str,
     storage: Storage,
@@ -58,64 +37,80 @@ async def place_market_buy_quote(
     idempotency_ttl_sec: int,
 ) -> PlaceOrderResult:
     """
-    Покупка на фиксированную сумму quote (USDT и т.п.).
-    Семантически однозначно: quote_amount — всегда валюта котировки.
+    BUY QUOTE c идемпотентностью и безопасной обработкой partial fills.
+    Семантика: amount_quote — размер в КОТИРУЕМОЙ валюте (USDT).
     """
-    pair = parse_symbol(symbol)
-    key_bucket = (now_ms() // idempotency_bucket_ms) * idempotency_bucket_ms
-    idem_key = make_idempotency_key(symbol, "buy", key_bucket)
-    client_oid = make_client_order_id(exchange, idem_key)
+    # idem key по «ведру»
+    idem_key = make_idempotency_key(symbol, "buy", idempotency_bucket_ms)
+    client_id = make_client_order_id(exchange, f"{symbol}:buy:{short_hash(str(amount_quote))}")
 
-    if not _reserve_idempotency(storage, idem_key, ttl_sec=idempotency_ttl_sec):
-        _log.info("duplicate_buy", extra={"symbol": symbol, "client_order_id": client_oid})
-        await _emit(bus, "order.duplicate", {"symbol": symbol, "side": "buy", "client_order_id": client_oid}, key=pair.as_pair)
-        return PlaceOrderResult(order=None, client_order_id=client_oid, idempotency_key=idem_key, duplicate=True)
+    # атомарная регистрация
+    if not storage.idempotency.try_store(key=idem_key, client_order_id=client_id, ttl_sec=idempotency_ttl_sec):
+        _log.info("duplicate_buy", extra={"symbol": symbol, "client_order_id": client_id})
+        await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "buy", "duplicate": True}, key=symbol)
+        return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
 
     try:
-        # некоторые брокеры не принимают client_order_id — поддержим оба варианта
+        order = await broker.create_market_buy_quote(symbol, amount_quote=amount_quote)
+
+        # Если частично исполнено — фиксируем факт, но не считаем ошибкой:
+        partial = order.filled < order.amount or order.status != "closed"
+        await bus.publish(
+            topics.ORDER_EXECUTED,
+            {
+                "symbol": symbol,
+                "side": "buy",
+                "client_order_id": client_id,
+                "order_id": order.id,
+                "filled": order.filled,
+                "amount": order.amount,
+                "status": order.status,
+                "partial": partial,
+                "ts_ms": order.timestamp,
+            },
+            key=symbol,
+        )
+
+        # Аудит (без жёсткой схемы стоимости — цену для учёта PnL берём в Risk/репортах)
         try:
-            order = await broker.create_market_buy_quote(symbol, quote_amount, client_order_id=client_oid)  # type: ignore[arg-type]
-        except TypeError:
-            order = await broker.create_market_buy_quote(symbol, quote_amount)  # type: ignore[misc]
+            storage.audit.append(
+                ts_ms=now_ms(),
+                action="buy_market",
+                symbol=symbol,
+                details={
+                    "client_order_id": client_id,
+                    "order_id": order.id,
+                    "filled": order.filled,
+                    "amount": order.amount,
+                    "status": order.status,
+                },
+            )
+        except Exception:
+            pass
 
-        storage.audit.log("order_placed", {
-            "symbol": symbol,
-            "side": "buy",
-            "quote_amount": str(quote_amount),
-            "client_order_id": client_oid,
-            "order_id": order.id,
-            "status": order.status,
-        })
+        return PlaceOrderResult(order=order, client_order_id=client_id, idempotency_key=idem_key, duplicate=False)
 
-        await _emit(bus, "order.executed", {
-            "symbol": symbol,
-            "side": "buy",
-            "amount": str(order.amount),
-            "filled": str(order.filled),
-            "status": order.status,
-            "client_order_id": order.client_order_id,
-            "order_id": order.id,
-        }, key=pair.as_pair)
-
-        return PlaceOrderResult(order=order, client_order_id=client_oid, idempotency_key=idem_key, duplicate=False)
-
-    except (ValidationError, BrokerError) as exc:
-        _log.error("buy_failed", extra={"symbol": symbol, "error": str(exc)})
-        await _emit(bus, "order.failed", {"symbol": symbol, "side": "buy", "error": str(exc)}, key=pair.as_pair)
+    except ValidationError:
+        # постоянная ошибка — публикуем failed без ретраев
+        await bus.publish(
+            topics.ORDER_FAILED,
+            {"symbol": symbol, "side": "buy", "client_order_id": client_id, "reason": "validation"},
+            key=symbol,
+        )
         raise
-    except TransientError as exc:
-        _log.error("buy_transient_error", extra={"symbol": symbol, "error": str(exc)})
-        await _emit(bus, "order.failed", {"symbol": symbol, "side": "buy", "error": "transient"}, key=pair.as_pair)
-        raise
-    except Exception as exc:
-        _log.error("buy_unexpected_error", extra={"symbol": symbol, "error": str(exc)})
-        await _emit(bus, "order.failed", {"symbol": symbol, "side": "buy", "error": "unexpected"}, key=pair.as_pair)
+    except TransientError:
+        # временная — можно настроить ретраи выше (retry decorator на use-case)
+        await bus.publish(
+            topics.ORDER_FAILED,
+            {"symbol": symbol, "side": "buy", "client_order_id": client_id, "reason": "transient"},
+            key=symbol,
+        )
         raise
 
 
 async def place_market_sell_base(
     symbol: str,
-    base_amount: Decimal,
+    amount_base: Decimal,
     *,
     exchange: str,
     storage: Storage,
@@ -125,54 +120,66 @@ async def place_market_sell_base(
     idempotency_ttl_sec: int,
 ) -> PlaceOrderResult:
     """
-    Продажа фиксированного количества базовой валюты (например, 0.001 BTC).
+    SELL BASE c идемпотентностью и частичными исполнениями.
+    Семантика: amount_base — количество БАЗОВОЙ валюты (BTC).
     """
-    pair = parse_symbol(symbol)
-    key_bucket = (now_ms() // idempotency_bucket_ms) * idempotency_bucket_ms
-    idem_key = make_idempotency_key(symbol, "sell", key_bucket)
-    client_oid = make_client_order_id(exchange, idem_key)
+    idem_key = make_idempotency_key(symbol, "sell", idempotency_bucket_ms)
+    client_id = make_client_order_id(exchange, f"{symbol}:sell:{short_hash(str(amount_base))}")
 
-    if not _reserve_idempotency(storage, idem_key, ttl_sec=idempotency_ttl_sec):
-        _log.info("duplicate_sell", extra={"symbol": symbol, "client_order_id": client_oid})
-        await _emit(bus, "order.duplicate", {"symbol": symbol, "side": "sell", "client_order_id": client_oid}, key=pair.as_pair)
-        return PlaceOrderResult(order=None, client_order_id=client_oid, idempotency_key=idem_key, duplicate=True)
+    if not storage.idempotency.try_store(key=idem_key, client_order_id=client_id, ttl_sec=idempotency_ttl_sec):
+        _log.info("duplicate_sell", extra={"symbol": symbol, "client_order_id": client_id})
+        await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "sell", "duplicate": True}, key=symbol)
+        return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
 
     try:
+        order = await broker.create_market_sell_base(symbol, amount_base=amount_base)
+        partial = order.filled < order.amount or order.status != "closed"
+
+        await bus.publish(
+            topics.ORDER_EXECUTED,
+            {
+                "symbol": symbol,
+                "side": "sell",
+                "client_order_id": client_id,
+                "order_id": order.id,
+                "filled": order.filled,
+                "amount": order.amount,
+                "status": order.status,
+                "partial": partial,
+                "ts_ms": order.timestamp,
+            },
+            key=symbol,
+        )
+
         try:
-            order = await broker.create_market_sell_base(symbol, base_amount, client_order_id=client_oid)  # type: ignore[arg-type]
-        except TypeError:
-            order = await broker.create_market_sell_base(symbol, base_amount)  # type: ignore[misc]
+            storage.audit.append(
+                ts_ms=now_ms(),
+                action="sell_market",
+                symbol=symbol,
+                details={
+                    "client_order_id": client_id,
+                    "order_id": order.id,
+                    "filled": order.filled,
+                    "amount": order.amount,
+                    "status": order.status,
+                },
+            )
+        except Exception:
+            pass
 
-        storage.audit.log("order_placed", {
-            "symbol": symbol,
-            "side": "sell",
-            "base_amount": str(base_amount),
-            "client_order_id": client_oid,
-            "order_id": order.id,
-            "status": order.status,
-        })
+        return PlaceOrderResult(order=order, client_order_id=client_id, idempotency_key=idem_key, duplicate=False)
 
-        await _emit(bus, "order.executed", {
-            "symbol": symbol,
-            "side": "sell",
-            "amount": str(order.amount),
-            "filled": str(order.filled),
-            "status": order.status,
-            "client_order_id": order.client_order_id,
-            "order_id": order.id,
-        }, key=pair.as_pair)
-
-        return PlaceOrderResult(order=order, client_order_id=client_oid, idempotency_key=idem_key, duplicate=False)
-
-    except (ValidationError, BrokerError) as exc:
-        _log.error("sell_failed", extra={"symbol": symbol, "error": str(exc)})
-        await _emit(bus, "order.failed", {"symbol": symbol, "side": "sell", "error": str(exc)}, key=pair.as_pair)
+    except ValidationError:
+        await bus.publish(
+            topics.ORDER_FAILED,
+            {"symbol": symbol, "side": "sell", "client_order_id": client_id, "reason": "validation"},
+            key=symbol,
+        )
         raise
-    except TransientError as exc:
-        _log.error("sell_transient_error", extra={"symbol": symbol, "error": str(exc)})
-        await _emit(bus, "order.failed", {"symbol": symbol, "side": "sell", "error": "transient"}, key=pair.as_pair)
-        raise
-    except Exception as exc:
-        _log.error("sell_unexpected_error", extra={"symbol": symbol, "error": str(exc)})
-        await _emit(bus, "order.failed", {"symbol": symbol, "side": "sell", "error": "unexpected"}, key=pair.as_pair)
+    except TransientError:
+        await bus.publish(
+            topics.ORDER_FAILED,
+            {"symbol": symbol, "side": "sell", "client_order_id": client_id, "reason": "transient"},
+            key=symbol,
+        )
         raise

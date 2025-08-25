@@ -1,57 +1,27 @@
 from __future__ import annotations
-from dataclasses import dataclass
+
 from decimal import Decimal
+from typing import Dict, Any
 
 from ..brokers.base import IBroker
-from ..storage.facade import Storage
-from ..events.bus import AsyncEventBus
 from ...utils.logging import get_logger
 
-_log = get_logger("reconcile.balances")
 
-@dataclass
 class BalancesReconciler:
-    storage: Storage
-    broker: IBroker
-    bus: AsyncEventBus
+    """Простая сверка балансов (диагностика): возвращаем срез по USDT/BTC и общее количество активов."""
 
-    async def run_once(self) -> None:
-        """
-        Базовая сверка балансов по котируемой валюте.
-        Если есть расхождения с локальными записями — только лог/событие.
-        """
+    def __init__(self, broker: IBroker) -> None:
+        self._broker = broker
+        self._log = get_logger("recon.balances")
+
+    async def run_once(self) -> Dict[str, Any]:
         try:
-            # локальное «ожидание» берем по сумме cost в аудите как приблизительный показатель (paper)
-            cur = self.storage.conn.execute("""
-                SELECT SUM(CASE WHEN json_extract(payload,'$.side')='buy'
-                                THEN CAST(json_extract(payload,'$.quote_amount') AS REAL)
-                                ELSE 0 END)
-                FROM audit
-                WHERE type='order_placed'
-            """)
-            expected_quote = Decimal(str(cur.fetchone()[0] or 0))
-
-            bal = await self.broker.fetch_balance()
-            quote_ccy = "USDT"
-            actual_quote = Decimal(str(bal.get(quote_ccy, "0")))
-
-            # допускаем большую «погрешность» для demo
-            if (expected_quote - actual_quote).copy_abs() > Decimal("0.01"):
-                _log.warning("balance_mismatch", extra={
-                    "quote": quote_ccy, "expected": str(expected_quote), "actual": str(actual_quote)
-                })
-                self.storage.audit.log("reconcile.balance_mismatch", {
-                    "quote": quote_ccy,
-                    "expected": str(expected_quote),
-                    "actual": str(actual_quote),
-                })
-                try:
-                    await self.bus.publish(
-                        "reconcile.balance.mismatch",
-                        {"quote": quote_ccy, "expected": str(expected_quote), "actual": str(actual_quote)},
-                        key="balances",
-                    )
-                except Exception:
-                    pass
+            b = await self._broker.fetch_balance()
         except Exception as exc:
-            _log.error("balances_reconcile_failed", extra={"error": str(exc)})
+            self._log.error("fetch_balance_failed", extra={"error": str(exc)})
+            return {"error": str(exc)}
+
+        # компактный срез, чтобы не тащить всё в логи
+        usdt = Decimal(str(b.get("USDT", 0)))
+        btc = Decimal(str(b.get("BTC", 0)))
+        return {"assets_count": len(b), "USDT": str(usdt), "BTC": str(btc)}

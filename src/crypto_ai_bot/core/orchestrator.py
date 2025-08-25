@@ -12,13 +12,13 @@ from ..monitoring.health_checker import HealthChecker
 from ..storage.facade import Storage
 from ..brokers.base import IBroker
 from ..brokers.symbols import parse_symbol
+from ..reconciliation.base import ReconcileContext
 from ..reconciliation.orders import OrdersReconciler
 from ..reconciliation.positions import PositionsReconciler
 from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
 from ...utils.logging import get_logger
 
-_log = get_logger("orchestrator")
 
 @dataclass
 class Orchestrator:
@@ -36,23 +36,36 @@ class Orchestrator:
     reconcile_interval_sec: float = 5.0
     watchdog_interval_sec: float = 2.0
 
+    # опционально для отладки/тестов — форсить действие в eval-цикле: "buy"|"sell"|"hold"|None
     force_eval_action: Optional[str] = None
+
+    # safety
+    dms_timeout_ms: int = 120_000
 
     _tasks: Dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
     _last_beat_ms: int = field(default=0, init=False)
 
-    # внутренние помощники
-    _orders_rec: Optional[OrdersReconciler] = field(default=None, init=False)
-    _pos_rec: Optional[PositionsReconciler] = field(default=None, init=False)
-    _bal_rec: Optional[BalancesReconciler] = field(default=None, init=False)
+    # внутренние компоненты
     _dms: Optional[DeadMansSwitch] = field(default=None, init=False)
+    _recon_orders: Optional[OrdersReconciler] = field(default=None, init=False)
+    _recon_pos: Optional[PositionsReconciler] = field(default=None, init=False)
+    _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
+    # --- lifecycle ---
     def start(self) -> None:
         if self._tasks:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
+
+        # инициализация safety/reconcile
+        self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
+        ctx = ReconcileContext(storage=self.storage, broker=self.broker, symbol=self.symbol)
+        self._recon_orders = OrdersReconciler(ctx)
+        self._recon_pos = PositionsReconciler(ctx)
+        self._recon_bal = BalancesReconciler(ctx)
+
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
         self._tasks["exits"] = loop.create_task(self._exits_loop(), name="orc-exits")
         self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name="orc-reconcile")
@@ -77,6 +90,7 @@ class Orchestrator:
             "last_beat_ms": self._last_beat_ms,
         }
 
+    # --- loops ---
     async def _eval_loop(self) -> None:
         while not self._stopping:
             try:
@@ -93,6 +107,9 @@ class Orchestrator:
                     risk_manager=self.risk,
                     protective_exits=self.exits,
                 )
+                # пульс для DMS
+                if self._dms:
+                    self._dms.beat()
             except Exception as exc:
                 get_logger("orchestrator.eval").error("tick_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.eval_interval_sec)
@@ -108,20 +125,9 @@ class Orchestrator:
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
-        # лениво создаём помощников, чтобы не менять compose
-        if self._orders_rec is None:
-            self._orders_rec = OrdersReconciler(self.storage, self.broker, self.bus, self.symbol)
-        if self._pos_rec is None:
-            self._pos_rec = PositionsReconciler(self.storage, self.broker, self.bus, self.symbol)
-        if self._bal_rec is None:
-            self._bal_rec = BalancesReconciler(self.storage, self.broker, self.bus)
-
         while not self._stopping:
             try:
-                await self._orders_rec.run_once()
-                await self._pos_rec.run_once()
-                await self._bal_rec.run_once()
-                # лёгкая гигиена: зачистка idempotency/audit если реализовано
+                # базовая зачистка idempotency/audit как было
                 try:
                     prune = getattr(self.storage.idempotency, "prune_older_than", None)
                     if callable(prune):
@@ -134,14 +140,20 @@ class Orchestrator:
                         prune_audit(days=7)
                 except Exception:
                     pass
+
+                # вызовы reconcile-классов (не падаем, если что-то не реализовано)
+                if self._recon_orders:
+                    await self._recon_orders.run()
+                if self._recon_pos:
+                    await self._recon_pos.run()
+                if self._recon_bal:
+                    await self._recon_bal.run()
+
             except Exception as exc:
                 get_logger("orchestrator.reconcile").error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
-        if self._dms is None:
-            self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=120_000)
-
         while not self._stopping:
             try:
                 rep = await self.health.check(symbol=self.symbol)
@@ -149,9 +161,10 @@ class Orchestrator:
                 await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
                 self._last_beat_ms = rep.ts_ms
 
-                # фиксируем heartbeat для DMS и проверяем таймаут
-                self._dms.beat()
-                await self._dms.check_and_trigger()
+                # проверка DMS
+                if self._dms:
+                    await self._dms.check_and_trigger()
+
             except Exception as exc:
                 get_logger("orchestrator.watchdog").error("watchdog_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.watchdog_interval_sec)
