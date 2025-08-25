@@ -1,37 +1,42 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
-from typing import Any
+from decimal import Decimal, InvalidOperation, getcontext
+from typing import Any, Optional
+
+# разумная точность для котировок/объёмов
+getcontext().prec = 28
 
 
-def to_decimal(x: Any) -> Decimal:
+def to_decimal(x: Any, *, default: Optional[Decimal] = Decimal("0")) -> Decimal:
     """
-    Унифицированная и безопасная конвертация в Decimal.
-    - Бережно обращается с типами (str/float/int/Decimal)
-    - Избегает двусмысленностей через Decimal(str(...))
-    - Явно валится на мусорных значениях
-
-    Пример:
-        to_decimal("1.23") -> Decimal("1.23")
-        to_decimal(1.23)   -> Decimal("1.23")   # через str, чтобы не тянуть бинарные артефакты
+    Безопасная конвертация значений (str|int|float|Decimal|None) в Decimal.
+    - None → default
+    - float → str(x) (чтобы избежать бинарных артефактов)
+    - пробелы/пустые строки → default
+    - InvalidOperation → default
     """
+    if x is None:
+        return default if default is not None else Decimal(0)
     if isinstance(x, Decimal):
         return x
+    if isinstance(x, (int,)):
+        return Decimal(x)
+    if isinstance(x, float):
+        # через строку, чтобы не тащить двоичную погрешность
+        try:
+            return Decimal(str(x))
+        except InvalidOperation:
+            return default if default is not None else Decimal(0)
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return default if default is not None else Decimal(0)
+        try:
+            return Decimal(s)
+        except InvalidOperation:
+            return default if default is not None else Decimal(0)
+    # всё остальное — пробуем как строку
     try:
         return Decimal(str(x))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError(f"cannot convert to Decimal: {x!r}") from exc
-
-
-def quantize_step(amount: Decimal, step: Decimal) -> Decimal:
-    """
-    Аккуратная нормализация количества к шагу (precision/lot).
-    Не завышает количество (используем floor), чтобы не улетать ниже min-лимитов биржи.
-
-    Пример:
-        quantize_step(Decimal("0.001234"), Decimal("0.0001")) -> Decimal("0.0012")
-    """
-    if step <= 0:
-        return amount
-    # floor до ближайшего шага
-    return (amount // step) * step
+    except Exception:
+        return default if default is not None else Decimal(0)
