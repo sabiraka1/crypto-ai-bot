@@ -1,83 +1,107 @@
+# ==========================================
+# CRYPTO-AI-BOT GITIGNORE v8.0
+# ==========================================
+
 # -----------------------------
 # Python
 # -----------------------------
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
+.Python
 
-# Virtualenv / venv
+# Virtual environments
 .venv/
 venv/
 ENV/
 env/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# C extensions
-*.so
+.env
 
 # -----------------------------
-# Packaging / Build
+# Environment & Secrets
 # -----------------------------
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+.env
+.env.*
+*.env
+!.env.example
+config/secrets/
+credentials.json
 
 # -----------------------------
-# Logs / Dumps
-# -----------------------------
-*.log
-*.out
-*.err
-logs/
-*.pid
-
-# -----------------------------
-# SQLite / Databases
-# -----------------------------
-*.db
-*.sqlite
-*.sqlite3
-*.sqlite-journal
-/data/backups/
-backups/
-
-# -----------------------------
-# IDE / Editors
+# IDE & Editors
 # -----------------------------
 .vscode/
 .idea/
-*.sublime-workspace
-*.sublime-project
+*.sublime-*
+*.swp
+*.swo
+*~
 
 # -----------------------------
-# OS files
+# OS Files
 # -----------------------------
 .DS_Store
 Thumbs.db
 desktop.ini
 
 # -----------------------------
-# Tests / Coverage
+# Project Data
 # -----------------------------
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+backups/
+logs/
+
+# -----------------------------
+# Testing & Coverage
+# -----------------------------
+.pytest_cache/
 .coverage
+.coverage.*
+htmlcov/
 .tox/
 .nox/
-.cache/
-.pytest_cache/
-htmlcov/
+*.cover
 coverage.xml
+*.log
+
+# -----------------------------
+# Build & Distribution
+# -----------------------------
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+pip-wheel-metadata/
+*.whl
+
+# -----------------------------
+# Documentation
+# -----------------------------
+docs/_build/
+site/
+
+# -----------------------------
+# Utils after moving to root
+# -----------------------------
+/utils/__pycache__/
+/utils/*.pyc
+
+# -----------------------------
+# Temporary files
+# -----------------------------
+*.tmp
+*.bak
+*.backup
+*.old
+.cache/
+tmp/
+temp/
