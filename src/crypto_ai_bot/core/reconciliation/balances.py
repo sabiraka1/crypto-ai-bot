@@ -8,20 +8,17 @@ from ...utils.logging import get_logger
 
 
 class BalancesReconciler:
-    """Простая сверка балансов (диагностика): возвращаем срез по USDT/BTC и общее количество активов."""
+    """Сверка балансов (диагностика) по заданному символу: показываем base/quote."""
 
-    def __init__(self, broker: IBroker) -> None:
+    def __init__(self, broker: IBroker, symbol: str) -> None:
         self._broker = broker
+        self._symbol = symbol
         self._log = get_logger("recon.balances")
 
     async def run_once(self) -> Dict[str, Any]:
         try:
-            b = await self._broker.fetch_balance()
+            b = await self._broker.fetch_balance(self._symbol)
         except Exception as exc:
             self._log.error("fetch_balance_failed", extra={"error": str(exc)})
             return {"error": str(exc)}
-
-        # компактный срез, чтобы не тащить всё в логи
-        usdt = Decimal(str(b.get("USDT", 0)))
-        btc = Decimal(str(b.get("BTC", 0)))
-        return {"assets_count": len(b), "USDT": str(usdt), "BTC": str(btc)}
+        return {"free_quote": str(b.free_quote), "free_base": str(b.free_base)}

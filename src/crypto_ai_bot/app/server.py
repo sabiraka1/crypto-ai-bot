@@ -8,6 +8,8 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 
 from ..utils.logging import get_logger
 from ..utils.time import now_ms
+from ..utils.metrics import render_prometheus  # ✅ экспортер
+from ..core.analytics.metrics import render_metrics_json  # fallback JSON-снимок
 from .compose import build_container
 
 log = get_logger("server")
@@ -77,8 +79,14 @@ async def status() -> Dict[str, Any]:
 
 @router.get("/metrics", response_class=PlainTextResponse)
 async def metrics() -> str:
-    # Тестам нужна только 200, содержимое — простое
-    return "# crypto-ai-bot metrics\nOK\n"
+    """Prometheus text exposition. Если что-то пойдёт не так — отдаём JSON снапшот."""
+    try:
+        return render_prometheus()
+    except Exception:
+        # fallback для отладки/совместимости
+        data = render_metrics_json()
+        # простой текстовый дамп
+        return "# metrics fallback\n" + str(data) + "\n"
 
 
 # --- orchestrator controls ----------------------------------------------------

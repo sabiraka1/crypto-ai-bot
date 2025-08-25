@@ -44,8 +44,8 @@ async def place_market_buy_quote(
     idem_key = make_idempotency_key(symbol, "buy", idempotency_bucket_ms)
     client_id = make_client_order_id(exchange, f"{symbol}:buy:{short_hash(str(amount_quote))}")
 
-    # атомарная регистрация
-    if not storage.idempotency.try_store(key=idem_key, client_order_id=client_id, ttl_sec=idempotency_ttl_sec):
+    # атомарная регистрация (IdempotencyRepository.check_and_store)
+    if not storage.idempotency.check_and_store(key=idem_key, ttl_sec=idempotency_ttl_sec):
         _log.info("duplicate_buy", extra={"symbol": symbol, "client_order_id": client_id})
         await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "buy", "duplicate": True}, key=symbol)
         return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
@@ -71,18 +71,18 @@ async def place_market_buy_quote(
             key=symbol,
         )
 
-        # Аудит (без жёсткой схемы стоимости — цену для учёта PnL берём в Risk/репортах)
+        # Аудит
         try:
-            storage.audit.append(
-                ts_ms=now_ms(),
+            storage.audit.log(
                 action="buy_market",
-                symbol=symbol,
-                details={
+                payload={
+                    "symbol": symbol,
                     "client_order_id": client_id,
                     "order_id": order.id,
                     "filled": order.filled,
                     "amount": order.amount,
                     "status": order.status,
+                    "ts_ms": now_ms(),
                 },
             )
         except Exception:
@@ -126,7 +126,7 @@ async def place_market_sell_base(
     idem_key = make_idempotency_key(symbol, "sell", idempotency_bucket_ms)
     client_id = make_client_order_id(exchange, f"{symbol}:sell:{short_hash(str(amount_base))}")
 
-    if not storage.idempotency.try_store(key=idem_key, client_order_id=client_id, ttl_sec=idempotency_ttl_sec):
+    if not storage.idempotency.check_and_store(key=idem_key, ttl_sec=idempotency_ttl_sec):
         _log.info("duplicate_sell", extra={"symbol": symbol, "client_order_id": client_id})
         await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "sell", "duplicate": True}, key=symbol)
         return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
@@ -152,16 +152,16 @@ async def place_market_sell_base(
         )
 
         try:
-            storage.audit.append(
-                ts_ms=now_ms(),
+            storage.audit.log(
                 action="sell_market",
-                symbol=symbol,
-                details={
+                payload={
+                    "symbol": symbol,
                     "client_order_id": client_id,
                     "order_id": order.id,
                     "filled": order.filled,
                     "amount": order.amount,
                     "status": order.status,
+                    "ts_ms": now_ms(),
                 },
             )
         except Exception:

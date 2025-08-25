@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from ..signals._build import build_market_context  # если у тебя иначе, замени на актуальный импорт
 from ..use_cases.evaluate import evaluate          # точка принятия решения
@@ -10,7 +10,7 @@ from ..use_cases.place_order import (
     place_market_sell_base,
 )
 from ..risk.manager import RiskManager
-from ..protective_exits import ProtectiveExits  # если путь другой — поправь
+from ..risk.protective_exits import ProtectiveExits  # ✅ правильный путь
 from ..events.bus import AsyncEventBus
 from ..brokers.base import IBroker
 from ..storage.facade import Storage
@@ -75,7 +75,7 @@ async def execute_trade(
                 idempotency_ttl_sec=idempotency_ttl_sec,
             )
         elif decision == "sell":
-            # продаём ВЕСЬ base (поведение как в тестовой логике); если у тебя селл-квант другой — замени
+            # продаём ВЕСЬ base; если у тебя селл-квант другой — замени
             base_qty = storage.positions.get_base_qty(symbol)
             if base_qty and base_qty > 0:
                 result = await place_market_sell_base(

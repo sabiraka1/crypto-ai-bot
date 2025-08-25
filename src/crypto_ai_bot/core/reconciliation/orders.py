@@ -7,19 +7,19 @@ from ...utils.logging import get_logger
 
 
 class OrdersReconciler:
-    """Сверка открытых ордеров: если брокер умеет fetch_open_orders(), возвращаем диагностику (count/ids)."""
+    """Сверка открытых ордеров по символу. Если брокер не поддерживает — просто диагностика."""
 
-    def __init__(self, broker: IBroker) -> None:
+    def __init__(self, broker: IBroker, symbol: str) -> None:
         self._broker = broker
+        self._symbol = symbol
         self._log = get_logger("recon.orders")
 
     async def run_once(self) -> Dict[str, Any]:
-        fetch: Optional[Callable[[], Awaitable[List[dict]]]] = getattr(self._broker, "fetch_open_orders", None)  # type: ignore[attr-defined]
+        fetch: Optional[Callable[[str], Awaitable[List[dict]]]] = getattr(self._broker, "fetch_open_orders", None)  # type: ignore[attr-defined]
         if not callable(fetch):
             return {"supported": False, "open_orders": 0}
-
         try:
-            orders = await fetch()  # type: ignore[misc]
+            orders = await fetch(self._symbol)  # type: ignore[misc]
             ids = [str(o.get("id")) for o in orders if isinstance(o, dict)]
             self._log.info("open_orders_checked", extra={"count": len(ids)})
             return {"supported": True, "open_orders": len(ids), "ids": ids[:50]}
