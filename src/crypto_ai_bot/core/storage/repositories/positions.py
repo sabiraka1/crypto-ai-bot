@@ -1,27 +1,41 @@
 from __future__ import annotations
+
 import sqlite3
-from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
-@dataclass(frozen=True)
+
+
 class Position:
-    symbol: str
-    base_qty: Decimal  # суммарное количество базовой валюты (BUY - SELL)
+    def __init__(self, symbol: str, base_qty: Decimal) -> None:
+        self.symbol = symbol
+        self.base_qty = base_qty
+
+
 class PositionsRepository:
-    """Позиции считаются на лету из таблицы trades (по закрытым сделкам)."""
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self._c = conn
-    def get_base_qty(self, symbol: str) -> Decimal:
-        cur = self._c.execute(
+        # Либо отдельная таблица, либо вычисляем из trades; тут — минимальная таблица
+        self._c.execute(
             """
-            SELECT COALESCE(SUM(CASE WHEN side='buy' THEN amount ELSE -amount END), 0)
-            FROM trades WHERE symbol = ? AND status = 'closed'
-            """,
-            (symbol,),
+            CREATE TABLE IF NOT EXISTS positions (
+                symbol TEXT PRIMARY KEY,
+                base_qty TEXT NOT NULL
+            )
+            """
         )
-        val = cur.fetchone()[0]
-        return Decimal(str(val or 0))
+
     def get_position(self, symbol: str) -> Position:
-        return Position(symbol=symbol, base_qty=self.get_base_qty(symbol))
-    def has_open_position(self, symbol: str) -> bool:
-        return self.get_base_qty(symbol) != Decimal("0")
+        cur = self._c.execute("SELECT base_qty FROM positions WHERE symbol=?", (symbol,))
+        row = cur.fetchone()
+        if not row:
+            return Position(symbol, Decimal("0"))
+        return Position(symbol, Decimal(str(row[0])))
+
+    def get_base_qty(self, symbol: str) -> Decimal:
+        return self.get_position(symbol).base_qty
+
+    def set_base_qty(self, symbol: str, base_qty: Decimal) -> None:
+        self._c.execute(
+            "INSERT INTO positions(symbol, base_qty) VALUES(?, ?)\n             ON CONFLICT(symbol) DO UPDATE SET base_qty=excluded.base_qty",
+            (symbol, str(base_qty)),
+        )

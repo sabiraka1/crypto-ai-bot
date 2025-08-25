@@ -1,28 +1,28 @@
-## `core/storage/facade.py`
 from __future__ import annotations
+
+import json
 import sqlite3
 from dataclasses import dataclass
-from .repositories.trades import TradesRepository
-from .repositories.positions import PositionsRepository
-from .repositories.market_data import MarketDataRepository
+from decimal import Decimal
+from typing import Optional
+
 from .repositories.audit import AuditRepository
 from .repositories.idempotency import IdempotencyRepository
-@dataclass(frozen=True)
+from .repositories.positions import PositionsRepository
+
+
+@dataclass
 class Storage:
-    """Единая точка доступа к репозиториям. Логики внутри нет."""
     conn: sqlite3.Connection
-    trades: TradesRepository
-    positions: PositionsRepository
-    market_data: MarketDataRepository
     audit: AuditRepository
     idempotency: IdempotencyRepository
+    positions: PositionsRepository
+
     @classmethod
     def from_connection(cls, conn: sqlite3.Connection) -> "Storage":
         return cls(
             conn=conn,
-            trades=TradesRepository(conn),
-            positions=PositionsRepository(conn),
-            market_data=MarketDataRepository(conn),
             audit=AuditRepository(conn),
             idempotency=IdempotencyRepository(conn),
+            positions=PositionsRepository(conn),
         )

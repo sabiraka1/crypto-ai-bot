@@ -1,52 +1,40 @@
 from __future__ import annotations
+
 import sqlite3
-from typing import Optional
-from ....utils.time import now_ms
+
 
 class IdempotencyRepository:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self._c = conn
+        self._c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                key TEXT PRIMARY KEY,
+                expire_at INTEGER NOT NULL
+            )
+            """
+        )
 
-    def check_and_store(self, key: str, *, ttl_sec: int) -> bool:
-        """Атомарно сохранить ключ идемпотентности.
-        Возвращает True, если ключ сохранён впервые; False, если уже существовал.
-        """
-        if not key:
-            raise ValueError("key must be non-empty")
-        now = now_ms()
-        # зачистка просроченных ключей (best-effort)
-        try:
-            self._c.execute("DELETE FROM idempotency_keys WHERE created_at_ms < ?", (now - ttl_sec * 1000,))
-        except Exception:
-            pass
-        try:
-            self._c.execute("INSERT INTO idempotency_keys(key, created_at_ms) VALUES (?, ?)", (key, now))
-            return True
-        except sqlite3.IntegrityError:
-            return False
+    def check_and_store(self, *, key: str, ttl_sec: int) -> bool:
+        """Вернёт True, если ключ не существовал/просрочен и теперь сохранён."""
+        self._c.execute(
+            "DELETE FROM idempotency_keys WHERE expire_at < strftime('%s','now')"
+        )
+        cur = self._c.execute(
+            """
+            INSERT INTO idempotency_keys(key, expire_at)
+            VALUES(?, strftime('%s','now') + ?)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (key, int(ttl_sec)),
+        )
+        # sqlite не возвращает affected rows на DO NOTHING; перепроверим
+        cur = self._c.execute("SELECT 1 FROM idempotency_keys WHERE key=?", (key,))
+        return bool(cur.fetchone())
 
-    def cleanup(self, *, before_ms: int) -> int:
-        """Удалить ключи, созданные до before_ms (UTC, ms). Возвращает кол-во удалённых записей."""
-        cur = self._c.execute("DELETE FROM idempotency_keys WHERE created_at_ms < ?", (before_ms,))
+    def prune_older_than(self, seconds: int = 604800) -> int:
+        cur = self._c.execute(
+            "DELETE FROM idempotency_keys WHERE expire_at < strftime('%s','now') - ?",
+            (int(seconds),),
+        )
         return cur.rowcount or 0
-
-    # ✅ новый метод для оркестратора: безопасный ретеншн по "возрасту" в секундах
-    def prune_older_than(self, age_sec: int) -> int:
-        """Удалить ключи старше age_sec секунд от текущего времени. Возвращает кол-во удалённых записей."""
-        if age_sec <= 0:
-            return 0
-        cutoff = now_ms() - int(age_sec) * 1000
-        cur = self._c.execute("DELETE FROM idempotency_keys WHERE created_at_ms < ?", (cutoff,))
-        return cur.rowcount or 0
-
-    def prune_older_than_ttl(self, ttl_sec: int) -> int:
-        """
-        Удаляет ключи старше now - ttl_sec.
-        Возвращает число удалённых строк.
-        """
-        cutoff_ms = now_ms() - int(ttl_sec) * 1000
-        cur = self._c.cursor()
-        cur.execute("DELETE FROM idempotency_keys WHERE created_at_ms < ?", (cutoff_ms,))
-        n = cur.rowcount or 0
-        self._c.commit()
-        return n

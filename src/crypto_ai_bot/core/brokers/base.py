@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol, Optional
+from typing import Optional
 
 
-@dataclass(frozen=True)
+@dataclass
 class TickerDTO:
     symbol: str
     last: Decimal
@@ -14,46 +15,35 @@ class TickerDTO:
     timestamp: int
 
 
-@dataclass(frozen=True)
+@dataclass
+class BalanceDTO:
+    free_quote: Decimal
+    free_base: Decimal
+
+
+@dataclass
 class OrderDTO:
     id: str
     client_order_id: str
     symbol: str
-    side: str                  # "buy" | "sell"
-    amount: Decimal            # сколько покупаем/продаём (base или эквивалент — зависит от метода)
-    status: str                # "open" | "closed" | "canceled" | "failed" | "partial"
-    filled: Decimal            # сколько исполнено (в base)
+    side: str
+    amount: Decimal
+    status: str
+    filled: Decimal
     timestamp: int
-
-    # ↓ чтобы не конфликтовать с backtest/бумагой и иметь больше контекста
-    price: Optional[Decimal] = None   # средняя цена исполнения (если есть)
-    cost: Optional[Decimal] = None    # суммарная стоимость (в quote), если известно
-    remaining: Optional[Decimal] = None
-    fee: Optional[Decimal] = None
-    fee_currency: Optional[str] = None
+    price: Optional[Decimal] = None
+    cost: Optional[Decimal] = None
 
 
-@dataclass(frozen=True)
-class BalanceDTO:
-    """
-    Нормализованный баланс под текущую пару:
-    - free_quote / free_base — свободные средства для торговли
-    - total_* опционально (если есть из источника)
-    """
-    free_quote: Decimal
-    free_base:  Decimal
-    total_quote: Optional[Decimal] = None
-    total_base:  Optional[Decimal] = None
-
-
-class IBroker(Protocol):
+class IBroker(ABC):
+    @abstractmethod
     async def fetch_ticker(self, symbol: str) -> TickerDTO: ...
+
+    @abstractmethod
     async def fetch_balance(self, symbol: str) -> BalanceDTO: ...
 
-    async def create_market_buy_quote(
-        self, *, symbol: str, quote_amount: Decimal, client_order_id: str
-    ) -> OrderDTO: ...
+    @abstractmethod
+    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO: ...
 
-    async def create_market_sell_base(
-        self, *, symbol: str, base_amount: Decimal, client_order_id: str
-    ) -> OrderDTO: ...
+    @abstractmethod
+    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO: ...
