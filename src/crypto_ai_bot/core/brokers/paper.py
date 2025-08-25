@@ -10,16 +10,8 @@ from .symbols import parse_symbol
 from ...utils.time import now_ms
 from ...utils.exceptions import ValidationError, BrokerError
 
-
 @dataclass
 class PaperBroker(IBroker):
-    """Простой in-memory брокер для paper/backtest режимов.
-    balances: стартовые балансы (например {"USDT": Decimal("10000")})
-    fee_rate: комиссия долей (0.001 = 0.1%)
-    spread: симметричный спред вокруг last
-    price_feed: функция, возвращающая текущую цену last
-    """
-
     symbol: str
     balances: Dict[str, Decimal]
     fee_rate: Decimal = Decimal("0.001")
@@ -64,7 +56,7 @@ class PaperBroker(IBroker):
             self._ensure_currency(p.quote)
             price = self._get_price()
             fee = quote_amount * self.fee_rate
-            total_cost = quote_amount + fee
+            total_cost = quote_amount + fee  # ✅ стоимость покупки учитывает комиссию
             if self.balances[p.quote] < total_cost:
                 raise BrokerError("insufficient_quote_balance")
             base_amount = (quote_amount / price).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
@@ -81,7 +73,7 @@ class PaperBroker(IBroker):
                 status="closed",
                 filled=base_amount,
                 price=price,
-                cost=quote_amount,
+                cost=total_cost,  # ✅ PnL будет корректным
                 timestamp=now_ms(),
             )
 
@@ -111,6 +103,6 @@ class PaperBroker(IBroker):
                 status="closed",
                 filled=base_amount,
                 price=price,
-                cost=net,
+                cost=net,  # уже после комиссии
                 timestamp=now_ms(),
             )

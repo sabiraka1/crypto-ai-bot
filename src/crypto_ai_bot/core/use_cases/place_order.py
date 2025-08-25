@@ -13,9 +13,7 @@ from ...utils.logging import get_logger
 from ...utils.time import now_ms
 from ...utils.exceptions import ValidationError, TransientError
 
-
 _log = get_logger("use_cases.place_order")
-
 
 @dataclass(frozen=True)
 class PlaceOrderResult:
@@ -23,7 +21,6 @@ class PlaceOrderResult:
     client_order_id: str
     idempotency_key: str
     duplicate: bool = False
-
 
 async def place_market_buy_quote(
     symbol: str,
@@ -36,24 +33,16 @@ async def place_market_buy_quote(
     idempotency_bucket_ms: int,
     idempotency_ttl_sec: int,
 ) -> PlaceOrderResult:
-    """
-    BUY QUOTE c идемпотентностью и безопасной обработкой partial fills.
-    Семантика: amount_quote — размер в КОТИРУЕМОЙ валюте (USDT).
-    """
-    # idem key по «ведру»
     idem_key = make_idempotency_key(symbol, "buy", idempotency_bucket_ms)
     client_id = make_client_order_id(exchange, f"{symbol}:buy:{short_hash(str(amount_quote))}")
 
-    # атомарная регистрация (IdempotencyRepository.check_and_store)
     if not storage.idempotency.check_and_store(key=idem_key, ttl_sec=idempotency_ttl_sec):
         _log.info("duplicate_buy", extra={"symbol": symbol, "client_order_id": client_id})
         await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "buy", "duplicate": True}, key=symbol)
         return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
 
     try:
-        order = await broker.create_market_buy_quote(symbol, amount_quote=amount_quote)
-
-        # Если частично исполнено — фиксируем факт, но не считаем ошибкой:
+        order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=amount_quote, client_order_id=client_id)
         partial = order.filled < order.amount or order.status != "closed"
         await bus.publish(
             topics.ORDER_EXECUTED,
@@ -70,8 +59,6 @@ async def place_market_buy_quote(
             },
             key=symbol,
         )
-
-        # Аудит
         try:
             storage.audit.log(
                 action="buy_market",
@@ -91,7 +78,6 @@ async def place_market_buy_quote(
         return PlaceOrderResult(order=order, client_order_id=client_id, idempotency_key=idem_key, duplicate=False)
 
     except ValidationError:
-        # постоянная ошибка — публикуем failed без ретраев
         await bus.publish(
             topics.ORDER_FAILED,
             {"symbol": symbol, "side": "buy", "client_order_id": client_id, "reason": "validation"},
@@ -99,14 +85,12 @@ async def place_market_buy_quote(
         )
         raise
     except TransientError:
-        # временная — можно настроить ретраи выше (retry decorator на use-case)
         await bus.publish(
             topics.ORDER_FAILED,
             {"symbol": symbol, "side": "buy", "client_order_id": client_id, "reason": "transient"},
             key=symbol,
         )
         raise
-
 
 async def place_market_sell_base(
     symbol: str,
@@ -119,10 +103,6 @@ async def place_market_sell_base(
     idempotency_bucket_ms: int,
     idempotency_ttl_sec: int,
 ) -> PlaceOrderResult:
-    """
-    SELL BASE c идемпотентностью и частичными исполнениями.
-    Семантика: amount_base — количество БАЗОВОЙ валюты (BTC).
-    """
     idem_key = make_idempotency_key(symbol, "sell", idempotency_bucket_ms)
     client_id = make_client_order_id(exchange, f"{symbol}:sell:{short_hash(str(amount_base))}")
 
@@ -132,7 +112,7 @@ async def place_market_sell_base(
         return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
 
     try:
-        order = await broker.create_market_sell_base(symbol, amount_base=amount_base)
+        order = await broker.create_market_sell_base(symbol=symbol, base_amount=amount_base, client_order_id=client_id)
         partial = order.filled < order.amount or order.status != "closed"
 
         await bus.publish(

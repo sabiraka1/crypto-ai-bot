@@ -18,7 +18,6 @@ from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
 from ...utils.logging import get_logger
 
-
 @dataclass
 class Orchestrator:
     symbol: str
@@ -30,10 +29,11 @@ class Orchestrator:
     health: HealthChecker
     settings: "Settings"
 
-    eval_interval_sec: float = 1.0
-    exits_interval_sec: float = 2.0
-    reconcile_interval_sec: float = 5.0
-    watchdog_interval_sec: float = 2.0
+    # значения по умолчанию будут перезаписаны из Settings в start()
+    eval_interval_sec: float = 60.0
+    exits_interval_sec: float = 5.0
+    reconcile_interval_sec: float = 60.0
+    watchdog_interval_sec: float = 15.0
 
     force_eval_action: Optional[str] = None
     dms_timeout_ms: int = 120_000
@@ -47,12 +47,20 @@ class Orchestrator:
     _recon_pos: Optional[PositionsReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
-    # --- lifecycle ---
     def start(self) -> None:
         if self._tasks:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
+
+        # подтягиваем интервалы из Settings (конфигурируемость)
+        try:
+            self.eval_interval_sec = float(self.settings.EVAL_INTERVAL_SEC)
+            self.exits_interval_sec = float(self.settings.EXITS_INTERVAL_SEC)
+            self.reconcile_interval_sec = float(self.settings.RECONCILE_INTERVAL_SEC)
+            self.watchdog_interval_sec = float(self.settings.WATCHDOG_INTERVAL_SEC)
+        except Exception:
+            pass
 
         # safety/reconcile
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
@@ -80,7 +88,6 @@ class Orchestrator:
     def status(self) -> dict:
         return {"running": bool(self._tasks), "tasks": {k: (not v.done()) for k, v in self._tasks.items()}, "last_beat_ms": self._last_beat_ms}
 
-    # --- loops ---
     async def _eval_loop(self) -> None:
         while not self._stopping:
             try:
@@ -116,7 +123,6 @@ class Orchestrator:
     async def _reconcile_loop(self) -> None:
         while not self._stopping:
             try:
-                # лёгкий house-keeping
                 try:
                     prune = getattr(self.storage.idempotency, "prune_older_than", None)
                     if callable(prune):
