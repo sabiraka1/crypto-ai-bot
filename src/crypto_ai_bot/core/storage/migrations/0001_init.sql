@@ -1,39 +1,34 @@
--- Начальная схема: идемпотентность, сделки, тики, аудит
-
-CREATE TABLE IF NOT EXISTS idempotency_keys (
-    key TEXT PRIMARY KEY,
-    created_at_ms INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_idem_created_at ON idempotency_keys(created_at_ms);
-
+-- Базовые таблицы
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    broker_order_id TEXT,
-    client_order_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
-    side TEXT NOT NULL,           -- 'buy' | 'sell'
-    amount NUMERIC NOT NULL,      -- base amount
-    price NUMERIC NOT NULL,       -- average execution price
-    cost NUMERIC NOT NULL,        -- quote spent/received
-    status TEXT NOT NULL,         -- 'open' | 'closed' | 'failed'
-    ts_ms INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS u_trades_client_oid ON trades(client_order_id);
-CREATE INDEX IF NOT EXISTS i_trades_symbol_ts ON trades(symbol, ts_ms);
-
-CREATE TABLE IF NOT EXISTS ticker_snapshots (
-    symbol TEXT NOT NULL,
-    last NUMERIC NOT NULL,
-    bid NUMERIC NOT NULL,
-    ask NUMERIC NOT NULL,
-    ts_ms INTEGER NOT NULL,
-    PRIMARY KEY(symbol, ts_ms)
-);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action TEXT NOT NULL,
-    payload TEXT NOT NULL,
+    side TEXT NOT NULL,               -- 'buy' | 'sell'
+    price REAL NOT NULL,
+    amount REAL NOT NULL,             -- base qty
+    cost REAL NOT NULL,               -- quote cost (с комиссией, если считаем)
+    fee REAL DEFAULT 0,
+    fee_currency TEXT DEFAULT 'USDT',
     ts_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+    symbol TEXT PRIMARY KEY,
+    base_qty REAL NOT NULL DEFAULT 0,
+    average_price REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bucket_ms INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms INTEGER NOT NULL,
+    topic TEXT NOT NULL,
+    level TEXT NOT NULL,
+    payload TEXT
 );
