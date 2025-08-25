@@ -15,6 +15,8 @@ from ..core.risk.manager import RiskManager, RiskConfig
 from ..core.risk.protective_exits import ProtectiveExits
 from ..core.orchestrator import Orchestrator
 from ..core.brokers.base import IBroker
+from ..core.alerts.reconcile_stale import attach as attach_reconcile_alerts
+from ..core.monitoring.dlq_subscriber import attach as attach_dlq
 
 # брокеры
 from ..core.brokers.ccxt_exchange import CcxtBroker  # live
@@ -88,6 +90,12 @@ def build_container() -> Container:
 
     # event bus
     bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
+    
+    # Подключение подписчика на reconcile события
+    attach_reconcile_alerts(bus)
+    
+    # Подключение подписчика на DLQ события для мониторинга
+    attach_dlq(bus)
 
     # broker
     broker = _create_broker_for_mode(settings, storage)
