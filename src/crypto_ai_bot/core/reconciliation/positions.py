@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from ..storage.facade import Storage
 from ..risk.protective_exits import ProtectiveExits
 from ...utils.logging import get_logger
+from ...utils.metrics import inc, timer
+
 
 class PositionsReconciler:
     """
-    Мягкая сверка позиции: если есть позиция — убеждаемся, что SL/TP установлены через ProtectiveExits.ensure().
-    Изменений в БД не делает (кроме того, что может поставить защитные ордера).
+    Мягкая сверка позиции:
+    - Если позиция > 0 — вызываем ProtectiveExits.ensure(symbol=...)
+    - Только лог/метрики, бизнес-логика не меняется
     """
 
     def __init__(self, *, storage: Storage, exits: ProtectiveExits, symbol: str) -> None:
@@ -17,12 +22,17 @@ class PositionsReconciler:
         self._symbol = symbol
 
     async def run_once(self) -> None:
-        try:
-            pos = self._storage.positions.get_position(self._symbol)
-            if pos.base_qty and pos.base_qty > 0:
-                await self._exits.ensure(symbol=self._symbol)
-                self._log.info("ensure_exits_done", extra={"symbol": self._symbol, "base_qty": str(pos.base_qty)})
-            else:
-                self._log.info("no_position", extra={"symbol": self._symbol})
-        except Exception as exc:
-            self._log.error("positions_reconcile_failed", extra={"error": str(exc)})
+        with timer("reconcile_positions_ms", {"symbol": self._symbol}):
+            try:
+                pos = self._storage.positions.get_position(self._symbol)
+                base = Decimal(str(pos.base_qty or "0"))
+                if base > 0:
+                    await self._exits.ensure(symbol=self._symbol)
+                    inc("reconcile_positions", {"symbol": self._symbol, "has_pos": "1"})
+                    self._log.info("ensure_exits_done", extra={"symbol": self._symbol, "base_qty": str(base)})
+                else:
+                    inc("reconcile_positions", {"symbol": self._symbol, "has_pos": "0"})
+                    self._log.info("no_position", extra={"symbol": self._symbol})
+            except Exception as exc:
+                inc("reconcile_positions", {"symbol": self._symbol, "status": "failed"})
+                self._log.error("positions_reconcile_failed", extra={"error": str(exc)})

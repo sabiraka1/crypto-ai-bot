@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import PlainTextResponse, JSONResponse
 
 from ..utils.logging import get_logger
+from ..utils.time import now_ms
 from .compose import build_container
 
 log = get_logger("server")
@@ -29,6 +30,20 @@ async def ready() -> JSONResponse:
     c = app.state.container
     try:
         rep = await c.health.check(symbol=c.settings.SYMBOL)
+        
+        # Проверка свежести пульса оркестратора
+        try:
+            st = c.orchestrator.status()
+            # если оркестр запущен, но давно не бился — считаем not ready
+            if st.get("running") and st.get("last_beat_ms", 0) > 0:
+                if now_ms() - int(st["last_beat_ms"]) > 15_000:  # 15 сек
+                    return JSONResponse(
+                        status_code=503,
+                        content={"ok": False, "reason": "stale_heartbeat", "status": st}
+                    )
+        except Exception:
+            pass
+        
         # 200 если ок, иначе 503
         return JSONResponse(status_code=(200 if rep.ok else 503), content={"ok": rep.ok, "ts_ms": rep.ts_ms})
     except Exception as exc:
