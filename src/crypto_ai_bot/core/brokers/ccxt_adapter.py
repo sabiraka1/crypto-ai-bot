@@ -5,8 +5,9 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any, List
 
 try:
-    import ccxt  # type: ignore
-except Exception:
+    # ВАЖНО: асинхронная версия CCXT
+    import ccxt.async_support as ccxt  # type: ignore
+except Exception:  # ccxt не обязателен для unit‑тестов
     ccxt = None  # noqa: N816
 
 from .base import IBroker, TickerDTO, OrderDTO, BalanceDTO
@@ -61,18 +62,17 @@ class CcxtBroker(IBroker):
             return
         if not self._markets_loaded:
             self._ensure_exchange()
-            self._ex.load_markets()
+            # async_support: допустим прямой await в местах вызова методов
+            # здесь загрузим синхронно, если реализация позволяет
+            try:
+                self._ex.load_markets()
+            except Exception:
+                pass
             self._markets_loaded = True
 
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
-        """Возвращает precision/limits. В dry‑run — более реалистичные дефолты для Gate.io."""
         self._ensure_markets()
         if self.dry_run:
-            if self.exchange_id.lower() in {"gateio", "gate-io", "gate"}:
-                return {
-                    "precision": {"amount": 6, "price": 2},
-                    "limits": {"amount": {"min": Decimal("0.00001")}, "cost": {"min": Decimal("1")}},
-                }
             return {
                 "precision": {"amount": 8, "price": 8},
                 "limits": {"amount": {"min": Decimal("0.00000001")}, "cost": {"min": Decimal("1")}},
@@ -121,7 +121,9 @@ class CcxtBroker(IBroker):
         except Exception as exc:
             raise TransientError(str(exc)) from exc
 
-    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO:
+    async def create_market_buy_quote(
+        self, *, symbol: str, quote_amount: Decimal, client_order_id: str
+    ) -> OrderDTO:
         if quote_amount <= 0:
             raise ValidationError("quote_amount must be > 0")
         t = await self.fetch_ticker(symbol)
@@ -142,12 +144,9 @@ class CcxtBroker(IBroker):
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}:buy")
         if self.dry_run:
             ts = now_ms()
-            # dry-run: считаем комиссию и кладём в DTO
-            fee_cost = (quote_amount * Decimal("0.002")).quantize(Decimal("0.00000001"))
             return OrderDTO(
                 id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="buy",
                 amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
-                price=ask, cost=quote_amount, fee_cost=fee_cost, fee_currency=parse_symbol(symbol).quote,
             )
         try:
             self._ensure_exchange()
@@ -160,7 +159,9 @@ class CcxtBroker(IBroker):
         except Exception as exc:
             raise TransientError(str(exc)) from exc
 
-    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
+    async def create_market_sell_base(
+        self, *, symbol: str, base_amount: Decimal, client_order_id: str
+    ) -> OrderDTO:
         if base_amount <= 0:
             raise ValidationError("base_amount must be > 0")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
@@ -173,15 +174,9 @@ class CcxtBroker(IBroker):
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}:sell")
         if self.dry_run:
             ts = now_ms()
-            # dry-run: комиссия на выручку 0.2%
-            # цену оценим по last из тикера для наглядности
-            t = await self.fetch_ticker(symbol)
-            proceeds = (amount_base_q * t.last)
-            fee_cost = (proceeds * Decimal("0.002")).quantize(Decimal("0.00000001"))
             return OrderDTO(
                 id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="sell",
                 amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
-                price=t.last, cost=proceeds - fee_cost, fee_cost=fee_cost, fee_currency=parse_symbol(symbol).quote,
             )
         try:
             self._ensure_exchange()
@@ -211,16 +206,6 @@ class CcxtBroker(IBroker):
         ts = int(o.get("timestamp") or now_ms())
         oid = str(o.get("id") or client_order_id)
         side = str(o.get("side") or "buy")
-        fee = o.get("fee") or {}
-        fee_cost = None
-        fee_ccy = None
-        try:
-            if fee:
-                fee_cost = Decimal(str(fee.get("cost") or 0))
-                fee_ccy = str(fee.get("currency") or "")
-        except Exception:
-            pass
-        # `cost` из CCXT обычно = amount*price, оставляем как есть; комиссия — в отдельных полях
         return OrderDTO(
             id=oid,
             client_order_id=client_order_id,
@@ -230,8 +215,4 @@ class CcxtBroker(IBroker):
             status=status,
             filled=filled,
             timestamp=ts,
-            price=Decimal(str(o.get("price") or 0)) if o.get("price") is not None else None,
-            cost=Decimal(str(o.get("cost") or 0)) if o.get("cost") is not None else None,
-            fee_cost=fee_cost,
-            fee_currency=fee_ccy,
         )
