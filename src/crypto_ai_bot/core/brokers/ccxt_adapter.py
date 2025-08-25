@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
-from typing import Optional, Dict, Any, List
+import asyncio
+from typing import Optional, Dict, Any, List, Callable, Awaitable
 
 try:
-    # ВАЖНО: асинхронная версия CCXT
-    import ccxt.async_support as ccxt  # type: ignore
-except Exception:  # ccxt не обязателен для unit‑тестов
-    ccxt = None  # noqa: N816
+    import ccxt.async_support as ccxt  # ВАЖНО: async‑версия
+except Exception:
+    ccxt = None  # noqa
 
 from .base import IBroker, TickerDTO, OrderDTO, BalanceDTO
 from .symbols import parse_symbol, to_exchange_symbol
@@ -16,11 +16,41 @@ from ...utils.logging import get_logger
 from ...utils.time import now_ms
 from ...utils.exceptions import ValidationError, TransientError
 from ...utils.ids import make_client_order_id
+from ...utils.metrics import inc, timer
 
 
 def _q_step(x: Decimal, step_pow10: int) -> Decimal:
     q = Decimal(10) ** -step_pow10
     return x.quantize(q, rounding=ROUND_DOWN)
+
+
+async def _retry(
+    op: str,
+    labels: Dict[str, str],
+    fn: Callable[[], Awaitable[Any]],
+    *,
+    attempts: int = 3,
+    base_delay_ms: int = 250,
+    factor: float = 2.0,
+) -> Any:
+    last_exc: Optional[BaseException] = None
+    for i in range(1, attempts + 1):
+        try:
+            with timer("broker_call_ms", {**labels, "op": op, "try": str(i)}):
+                return await fn()
+        except Exception as exc:  # классификация ошибок — мягкая
+            last_exc = exc
+            inc("broker_retries_total", {**labels, "op": op, "try": str(i)})
+            # Rate limits/сетевые — явно транзиентные, остальное — условно
+            is_transient = True
+            if hasattr(ccxt or object(), "RateLimitExceeded") and isinstance(exc, getattr(ccxt, "RateLimitExceeded")):  # type: ignore
+                is_transient = True
+            # последняя попытка — пробрасываем
+            if i == attempts or not is_transient:
+                break
+            await asyncio.sleep((base_delay_ms * (factor ** (i - 1))) / 1000.0)
+    # оборачиваем в TransientError для верхнего уровня
+    raise TransientError(str(last_exc) if last_exc else f"{op} failed")
 
 
 @dataclass
@@ -36,10 +66,8 @@ class CcxtBroker(IBroker):
     _markets_loaded: bool = False
     _log = get_logger("broker.ccxt")
 
-    def _ensure_exchange(self) -> None:
-        if self.dry_run:
-            return
-        if self._ex is not None:
+    async def _ensure_exchange(self) -> None:
+        if self.dry_run or self._ex is not None:
             return
         if ccxt is None:
             raise RuntimeError("ccxt is not installed")
@@ -52,26 +80,23 @@ class CcxtBroker(IBroker):
         })
         if self.sandbox and hasattr(self._ex, "set_sandbox_mode"):
             try:
-                self._ex.set_sandbox_mode(True)
+                await self._ex.set_sandbox_mode(True)  # async‑версия
             except Exception:
                 pass
 
-    def _ensure_markets(self) -> None:
+    async def _ensure_markets(self) -> None:
         if self.dry_run:
             self._markets_loaded = True
             return
         if not self._markets_loaded:
-            self._ensure_exchange()
-            # async_support: допустим прямой await в местах вызова методов
-            # здесь загрузим синхронно, если реализация позволяет
+            await self._ensure_exchange()
             try:
-                self._ex.load_markets()
+                await self._ex.load_markets()
             except Exception:
                 pass
             self._markets_loaded = True
 
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
-        self._ensure_markets()
         if self.dry_run:
             return {
                 "precision": {"amount": 8, "price": 8},
@@ -86,44 +111,36 @@ class CcxtBroker(IBroker):
         p_price = int(m.get("precision", {}).get("price", 8))
         return {"precision": {"amount": p_amount, "price": p_price}, "limits": {"amount": {"min": amount_min}, "cost": {"min": cost_min}}}
 
+    # --- interface -------------------------------------------------------------
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
         now = now_ms()
         if self.dry_run:
             p = Decimal("100")
             return TickerDTO(symbol=symbol, last=p, bid=p - Decimal("0.1"), ask=p + Decimal("0.1"), timestamp=now)
-        try:
-            self._ensure_exchange()
-            t = await self._ex.fetch_ticker(ex_symbol)
-            last = Decimal(str(t.get("last") or t.get("close") or 0))
-            bid = Decimal(str(t.get("bid") or last or 0))
-            ask = Decimal(str(t.get("ask") or last or 0))
-            ts = int(t.get("timestamp") or now)
-            return TickerDTO(symbol=symbol, last=last, bid=bid, ask=ask, timestamp=ts)
-        except getattr(ccxt, "RateLimitExceeded", Exception) as exc:  # type: ignore[attr-defined]
-            raise TransientError(str(exc)) from exc
-        except Exception as exc:
-            raise TransientError(str(exc)) from exc
+
+        labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
+        await self._ensure_markets()
+        t = await _retry("fetch_ticker", labels, lambda: self._ex.fetch_ticker(ex_symbol))
+        last = Decimal(str(t.get("last") or t.get("close") or 0))
+        bid = Decimal(str(t.get("bid") or last or 0))
+        ask = Decimal(str(t.get("ask") or last or 0))
+        ts = int(t.get("timestamp") or now)
+        return TickerDTO(symbol=symbol, last=last, bid=bid, ask=ask, timestamp=ts)
 
     async def fetch_balance(self, symbol: str) -> BalanceDTO:
         p = parse_symbol(symbol)
         if self.dry_run:
             return BalanceDTO(free_quote=Decimal("100000"), free_base=Decimal("0"))
-        try:
-            self._ensure_exchange()
-            b = await self._ex.fetch_balance()
-            free = (b or {}).get("free", {})
-            fq = Decimal(str(free.get(p.quote, 0)))
-            fb = Decimal(str(free.get(p.base, 0)))
-            return BalanceDTO(free_quote=fq, free_base=fb)
-        except getattr(ccxt, "RateLimitExceeded", Exception) as exc:  # type: ignore[attr-defined]
-            raise TransientError(str(exc)) from exc
-        except Exception as exc:
-            raise TransientError(str(exc)) from exc
+        labels = {"exchange": self.exchange_id, "symbol": symbol}
+        await self._ensure_markets()
+        b = await _retry("fetch_balance", labels, lambda: self._ex.fetch_balance())
+        free = (b or {}).get("free", {})
+        fq = Decimal(str(free.get(p.quote, 0)))
+        fb = Decimal(str(free.get(p.base, 0)))
+        return BalanceDTO(free_quote=fq, free_base=fb)
 
-    async def create_market_buy_quote(
-        self, *, symbol: str, quote_amount: Decimal, client_order_id: str
-    ) -> OrderDTO:
+    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO:
         if quote_amount <= 0:
             raise ValidationError("quote_amount must be > 0")
         t = await self.fetch_ticker(symbol)
@@ -131,6 +148,7 @@ class CcxtBroker(IBroker):
         if ask <= 0:
             raise TransientError("ticker ask is not available")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        await self._ensure_markets()
         info = self._market_info(ex_symbol)
         p_amount = int(info["precision"]["amount"])  # precision для amount
         raw_amount_base = quote_amount / ask
@@ -144,27 +162,21 @@ class CcxtBroker(IBroker):
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}:buy")
         if self.dry_run:
             ts = now_ms()
+            inc("orders_simulated_total", {"side": "buy"})
             return OrderDTO(
                 id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="buy",
                 amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
             )
-        try:
-            self._ensure_exchange()
-            order = await self._ex.create_order(ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id})
-            return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
-        except getattr(ccxt, "RateLimitExceeded", Exception) as exc:  # type: ignore[attr-defined]
-            raise TransientError(str(exc)) from exc
-        except getattr(ccxt, "InvalidOrder", Exception) as exc:  # type: ignore[attr-defined]
-            raise ValidationError(str(exc)) from exc
-        except Exception as exc:
-            raise TransientError(str(exc)) from exc
+        labels = {"exchange": self.exchange_id, "symbol": ex_symbol, "side": "buy"}
+        order = await _retry("create_order", labels, lambda: self._ex.create_order(ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id}))
+        inc("orders_sent_total", labels)
+        return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
-    async def create_market_sell_base(
-        self, *, symbol: str, base_amount: Decimal, client_order_id: str
-    ) -> OrderDTO:
+    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
         if base_amount <= 0:
             raise ValidationError("base_amount must be > 0")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        await self._ensure_markets()
         info = self._market_info(ex_symbol)
         p_amount = int(info["precision"]["amount"])  # precision для amount
         amount_base_q = _q_step(base_amount, p_amount)
@@ -174,30 +186,23 @@ class CcxtBroker(IBroker):
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}:sell")
         if self.dry_run:
             ts = now_ms()
+            inc("orders_simulated_total", {"side": "sell"})
             return OrderDTO(
                 id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="sell",
                 amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
             )
-        try:
-            self._ensure_exchange()
-            order = await self._ex.create_order(ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id})
-            return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
-        except getattr(ccxt, "RateLimitExceeded", Exception) as exc:  # type: ignore[attr-defined]
-            raise TransientError(str(exc)) from exc
-        except getattr(ccxt, "InvalidOrder", Exception) as exc:  # type: ignore[attr-defined]
-            raise ValidationError(str(exc)) from exc
-        except Exception as exc:
-            raise TransientError(str(exc)) from exc
+        labels = {"exchange": self.exchange_id, "symbol": ex_symbol, "side": "sell"}
+        order = await _retry("create_order", labels, lambda: self._ex.create_order(ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id}))
+        inc("orders_sent_total", labels)
+        return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def fetch_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
         if self.dry_run:
             return []
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
-        self._ensure_exchange()
-        try:
-            return await self._ex.fetch_open_orders(ex_symbol)
-        except Exception:
-            return []
+        await self._ensure_markets()
+        labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
+        return await _retry("fetch_open_orders", labels, lambda: self._ex.fetch_open_orders(ex_symbol))
 
     def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
         status = str(o.get("status") or "open")
