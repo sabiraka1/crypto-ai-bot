@@ -10,6 +10,7 @@ from .symbols import parse_symbol
 from ...utils.time import now_ms
 from ...utils.exceptions import ValidationError, BrokerError
 
+
 @dataclass
 class PaperBroker(IBroker):
     symbol: str
@@ -55,8 +56,8 @@ class PaperBroker(IBroker):
             self._ensure_currency(p.base)
             self._ensure_currency(p.quote)
             price = self._get_price()
-            fee = quote_amount * self.fee_rate
-            total_cost = quote_amount + fee  # ✅ стоимость покупки учитывает комиссию
+            fee = (quote_amount * self.fee_rate).quantize(Decimal("0.00000001"))
+            total_cost = quote_amount + fee
             if self.balances[p.quote] < total_cost:
                 raise BrokerError("insufficient_quote_balance")
             base_amount = (quote_amount / price).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
@@ -73,7 +74,9 @@ class PaperBroker(IBroker):
                 status="closed",
                 filled=base_amount,
                 price=price,
-                cost=total_cost,  # ✅ PnL будет корректным
+                cost=quote_amount,
+                fee_cost=fee,
+                fee_currency=p.quote,
                 timestamp=now_ms(),
             )
 
@@ -87,8 +90,8 @@ class PaperBroker(IBroker):
             if self.balances[p.base] < base_amount:
                 raise BrokerError("insufficient_base_balance")
             price = self._get_price()
-            proceeds = (base_amount * price)
-            fee = proceeds * self.fee_rate
+            proceeds = (base_amount * price).quantize(Decimal("0.00000001"))
+            fee = (proceeds * self.fee_rate).quantize(Decimal("0.00000001"))
             net = proceeds - fee
             self.balances[p.base] -= base_amount
             self.balances[p.quote] += net
@@ -103,6 +106,8 @@ class PaperBroker(IBroker):
                 status="closed",
                 filled=base_amount,
                 price=price,
-                cost=net,  # уже после комиссии
+                cost=net,
+                fee_cost=fee,
+                fee_currency=p.quote,
                 timestamp=now_ms(),
             )

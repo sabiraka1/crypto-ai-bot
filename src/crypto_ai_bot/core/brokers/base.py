@@ -33,6 +33,8 @@ class OrderDTO:
     timestamp: int
     price: Optional[Decimal] = None
     cost: Optional[Decimal] = None
+    fee_cost: Optional[Decimal] = None
+    fee_currency: Optional[str] = None
 
 
 class IBroker(ABC):

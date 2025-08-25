@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 
 from .validators.settings import validate_settings
 
+
 def _getenv_str(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
@@ -28,6 +29,7 @@ def _getenv_dec(name: str, default: str) -> Decimal:
     except Exception:
         return Decimal(default)
 
+
 @dataclass
 class Settings:
     MODE: str
@@ -41,24 +43,35 @@ class Settings:
     DB_PATH: str
     SERVER_PORT: int
 
-    # идемпотентность
     IDEMPOTENCY_BUCKET_MS: int
     IDEMPOTENCY_TTL_SEC: int
 
-    # интервалы оркестратора (по спека-дефолтам)
+    # интервалы оркестратора
     EVAL_INTERVAL_SEC: float
     EXITS_INTERVAL_SEC: float
     RECONCILE_INTERVAL_SEC: float
     WATCHDOG_INTERVAL_SEC: float
 
-    # risk (без изменений)
+    # risk
     RISK_COOLDOWN_SEC: int
     RISK_MAX_SPREAD_PCT: float
     RISK_MAX_POSITION_BASE: Decimal
     RISK_MAX_ORDERS_PER_HOUR: int
     RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal
 
-    # Telegram (опционально)
+    # paper/live расширения
+    PAPER_INITIAL_BALANCE_USDT: Decimal
+    PAPER_INITIAL_BALANCE_BASE: Decimal
+    PAPER_FEE_PCT: Decimal
+    PAPER_PRICE: Decimal
+
+    LIVE_MAX_QUOTE_AMOUNT: Decimal
+
+    # reconciler
+    RECON_CANCEL_TTL_SEC: int
+    RECON_WRITEBACK_POSITIONS: bool
+
+    # Telegram (опц.)
     TELEGRAM_ENABLED: bool
     TELEGRAM_BOT_TOKEN: str
     TELEGRAM_CHAT_ID: str
@@ -80,17 +93,26 @@ class Settings:
             IDEMPOTENCY_BUCKET_MS=_getenv_int("IDEMPOTENCY_BUCKET_MS", 60000),
             IDEMPOTENCY_TTL_SEC=_getenv_int("IDEMPOTENCY_TTL_SEC", 120),
 
-            # дефолты по твоей спецификации (не жёстко зашитые, а из ENV)
             EVAL_INTERVAL_SEC=float(os.getenv("EVAL_INTERVAL_SEC", "60")),
             EXITS_INTERVAL_SEC=float(os.getenv("EXITS_INTERVAL_SEC", "5")),
             RECONCILE_INTERVAL_SEC=float(os.getenv("RECONCILE_INTERVAL_SEC", "60")),
             WATCHDOG_INTERVAL_SEC=float(os.getenv("WATCHDOG_INTERVAL_SEC", "15")),
 
             RISK_COOLDOWN_SEC=_getenv_int("RISK_COOLDOWN_SEC", 60),
-            RISK_MAX_SPREAD_PCT=float(os.getenv("RISK_MAX_SPREAD_PCT", "0.002")),  # 0.2%
+            RISK_MAX_SPREAD_PCT=float(os.getenv("RISK_MAX_SPREAD_PCT", "0.002")),
             RISK_MAX_POSITION_BASE=_getenv_dec("RISK_MAX_POSITION_BASE", "10"),
             RISK_MAX_ORDERS_PER_HOUR=_getenv_int("RISK_MAX_ORDERS_PER_HOUR", 12),
             RISK_DAILY_LOSS_LIMIT_QUOTE=_getenv_dec("RISK_DAILY_LOSS_LIMIT_QUOTE", "100"),
+
+            PAPER_INITIAL_BALANCE_USDT=_getenv_dec("PAPER_INITIAL_BALANCE_USDT", "10000"),
+            PAPER_INITIAL_BALANCE_BASE=_getenv_dec("PAPER_INITIAL_BALANCE_BASE", "0"),
+            PAPER_FEE_PCT=_getenv_dec("PAPER_FEE_PCT", "0.001"),
+            PAPER_PRICE=_getenv_dec("PAPER_PRICE", "100"),
+
+            LIVE_MAX_QUOTE_AMOUNT=_getenv_dec("LIVE_MAX_QUOTE_AMOUNT", "100"),
+
+            RECON_CANCEL_TTL_SEC=_getenv_int("RECON_CANCEL_TTL_SEC", 600),
+            RECON_WRITEBACK_POSITIONS=_getenv_bool("RECON_WRITEBACK_POSITIONS", False),
 
             TELEGRAM_ENABLED=_getenv_bool("TELEGRAM_ENABLED", False),
             TELEGRAM_BOT_TOKEN=_getenv_str("TELEGRAM_BOT_TOKEN", ""),

@@ -15,7 +15,7 @@ from ..core.risk.manager import RiskManager, RiskConfig
 from ..core.risk.protective_exits import ProtectiveExits
 from ..core.brokers.base import IBroker
 from ..core.brokers.paper import PaperBroker
-from ..core.brokers.ccxt_adapter import CcxtBroker  # ✅ правильный импорт
+from ..core.brokers.ccxt_adapter import CcxtBroker
 from ..core.orchestrator import Orchestrator
 from ..core.safety.instance_lock import InstanceLock
 from ..utils.time import now_ms
@@ -37,8 +37,6 @@ class Container:
     lock: Optional[InstanceLock] = None
 
 
-# --- helpers ------------------------------------------------------------------
-
 def _create_storage_for_mode(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
     conn = sqlite3.connect(db_path)
@@ -52,8 +50,16 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
 def _create_broker_for_mode(settings: Settings) -> IBroker:
     mode = settings.MODE.lower()
     if mode == "paper":
-        balances = {"USDT": Decimal("10000")}
-        return PaperBroker(symbol=settings.SYMBOL, balances=balances)
+        balances = {
+            settings.SYMBOL.split("/")[1]: settings.PAPER_INITIAL_BALANCE_USDT,
+            settings.SYMBOL.split("/")[0]: settings.PAPER_INITIAL_BALANCE_BASE,
+        }
+        return PaperBroker(
+            symbol=settings.SYMBOL,
+            balances=balances,
+            fee_rate=settings.PAPER_FEE_PCT,
+            price_feed=lambda: settings.PAPER_PRICE,
+        )
     elif mode == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
@@ -66,8 +72,6 @@ def _create_broker_for_mode(settings: Settings) -> IBroker:
     else:
         raise ValueError(f"Unknown MODE={settings.MODE}")
 
-
-# --- public -------------------------------------------------------------------
 
 def build_container() -> Container:
     settings = Settings.load()

@@ -29,7 +29,7 @@ class Orchestrator:
     health: HealthChecker
     settings: "Settings"
 
-    # значения по умолчанию будут перезаписаны из Settings в start()
+    # Ð·Ð½Ð°Ñ‡ÐµÐ½Ð¸Ñ Ð¿Ð¾ ÑƒÐ¼Ð¾Ð»Ñ‡Ð°Ð½Ð¸ÑŽ Ð±ÑƒÐ´ÑƒÑ‚ Ð¿ÐµÑ€ÐµÐ·Ð°Ð¿Ð¸ÑÐ°Ð½Ñ‹ Ð¸Ð· Settings Ð² start()
     eval_interval_sec: float = 60.0
     exits_interval_sec: float = 5.0
     reconcile_interval_sec: float = 60.0
@@ -53,7 +53,7 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         self._stopping = False
 
-        # подтягиваем интервалы из Settings (конфигурируемость)
+        # интервалы из Settings
         try:
             self.eval_interval_sec = float(self.settings.EVAL_INTERVAL_SEC)
             self.exits_interval_sec = float(self.settings.EXITS_INTERVAL_SEC)
@@ -64,7 +64,7 @@ class Orchestrator:
 
         # safety/reconcile
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
-        self._recon_orders = OrdersReconciler(self.broker, self.symbol)
+        self._recon_orders = OrdersReconciler(self.broker, self.symbol, cancel_ttl_sec=int(self.settings.RECON_CANCEL_TTL_SEC) or None)
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
