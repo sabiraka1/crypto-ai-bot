@@ -1,8 +1,7 @@
-Long-only автотрейдинг криптовалют (основа: Gate.io; архитектура расширяема на другие биржи).  
-Единый пайплайн исполнения: **evaluate → risk → place_order → protective_exits → reconcile → watchdog**.  
-Слои: `utils → core → app`. Брокеры через общий интерфейс `IBroker`.
+# crypto-ai-bot
 
----
+Long-only автотрейдинг криптовалют (Gate.io, расширяемо на другие биржи).  
+Единый пайплайн: **evaluate → risk → place_order → protective_exits → reconcile → watchdog**.
 
 ## ⚡ Быстрый старт
 
@@ -11,256 +10,77 @@ Long-only автотрейдинг криптовалют (основа: Gate.io
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -U pip wheel
 pip install -e .
-2) Минимальная конфигурация .env
-env
-Копировать
-Редактировать
-# режим и биржа
-MODE=paper                 # paper | live
-SANDBOX=0                  # для live: 1=тестнет (если биржа поддерживает), 0=прод
+2) Конфигурация
+Скопируйте .env.example в .env и при необходимости измените переменные (режим, символ, лимиты, ключи для live).
 
-EXCHANGE=gateio
-SYMBOL=BTC/USDT
-FIXED_AMOUNT=50            # размер покупки в QUOTE за тик
-
-# база данных и идемпотентность
-DB_PATH=./data/trader.sqlite3
-IDEMPOTENCY_BUCKET_MS=60000
-IDEMPOTENCY_TTL_SEC=3600
-
-# риск-лимиты (примерные)
-RISK_COOLDOWN_SEC=60
-RISK_MAX_SPREAD_PCT=0.3
-RISK_MAX_POSITION_BASE=0.02
-RISK_MAX_ORDERS_PER_HOUR=6
-RISK_DAILY_LOSS_LIMIT_QUOTE=100
-
-# ключи нужны только для live
-API_KEY=
-API_SECRET=
-3) Smoke-проверки (безопасно)
+3) Запуск (безопасный)
 bash
 Копировать
 Редактировать
-# Комплексный health-check
+uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000
+4) Smoke-проверки
+bash
+Копировать
+Редактировать
+# health:
 python - <<'PY'
-from crypto_ai_bot.app.compose import build_container
 import asyncio
-c = build_container()
+from crypto_ai_bot.app.compose import build_container
 async def main():
+    c = build_container()
     rep = await c.health.check(symbol=c.settings.SYMBOL)
-    print("MODE=", c.settings.MODE, "SANDBOX=", c.settings.SANDBOX, "health_ok=", rep.ok, rep.details)
+    print("MODE=", c.settings.MODE, "SANDBOX=", c.settings.SANDBOX, "ok=", rep.ok, rep.components)
 asyncio.run(main())
 PY
+🎛️ Режимы (одна логика)
+PAPER: MODE=paper (симулятор, без реальных ордеров). Источник цены: PRICE_FEED=fixed|live.
 
-# Один форс-тик оркестратора в paper (без реальных денег)
-python - <<'PY'
-from crypto_ai_bot.app.compose import build_container
-import asyncio
-c = build_container()
-c.orchestrator.force_eval_action = "buy"
-async def main():
-    c.orchestrator.start()
-    await asyncio.sleep(1.0)
-    await c.orchestrator.stop()
-    print("done")
-asyncio.run(main())
-PY
-🎛️ Режимы работы (одна логика)
-Полностью безопасный тест (симулятор):
+LIVE-SANDBOX: MODE=live, SANDBOX=1 (если тестнет доступен в CCXT).
 
-env
-Копировать
-Редактировать
-MODE=paper
-SANDBOX=0
-Используется PaperBroker (встроенный симулятор). По умолчанию цена безопасная фиксированная; при необходимости можно подать «живой» фид цены (см. обсуждение в issues/PR).
+LIVE-PROD: MODE=live, SANDBOX=0 (боевые ключи). Включается InstanceLock, DMS.
 
-Тестнет биржи (если доступен в CCXT):
+🔐 Безопасность и риск-менеджмент
+Идемпотентность (bucket + TTL).
 
-env
-Копировать
-Редактировать
-MODE=live
-SANDBOX=1
-API_KEY=...   # тестовые ключи
-API_SECRET=...
-Тот же код, но запросы идут в песочницу биржи (деньги ненастоящие).
+Cooldown, спред-лимит, max position base, max orders/hour, дневной loss-limit.
 
-Боевой live:
+Dead Man’s Switch, Protective exits.
 
-env
-Копировать
-Редактировать
-MODE=live
-SANDBOX=0
-API_KEY=...   # прод-ключи (желательно с IP whitelist)
-API_SECRET=...
-Интервалы оркестратора (по спецификации и коду):
-eval=60s, exits=5s, reconcile=60s, watchdog=15s.
+Token-auth для mgmt API (API_TOKEN).
 
-Рекомендация: использовать разные файлы БД для разных сред (paper / live-sandbox / live-prod), чтобы не смешивать данные.
+🔄 Сверки
+Запускаются из оркестратора:
 
-🔐 Безопасность и управление рисками
-Идемпотентность ордеров (bucket + TTL) — защита от дублей при сетевых/повторных вызовах.
+OrdersReconciler — открытые ордера (если брокер поддерживает fetch_open_orders).
 
-Instance Lock — исключает двойной запуск в live.
+PositionsReconciler — локальная позиция vs биржевой баланс (BalanceDTO).
 
-Dead Man’s Switch — сторож: при отсутствии heartbeat закрывает позиции.
+BalancesReconciler — free-балансы.
 
-Protective Exits — защитные выходы, если позиция открыта и условия сработали.
-
-Риск-менеджер: кулдаун, лимит спреда, лимит размера позиции/частоты сделок, дневной loss-limit.
-
-🔄 Сверки / Reconciliation
-Компоненты сверок запускаются из оркестратора:
-
-OrdersReconciler — висящие/незакрытые ордера;
-
-PositionsReconciler — локальная позиция vs. биржевой баланс (через BalanceDTO);
-
-BalancesReconciler — диагностика free-балансов по символу.
-
-Ручной запуск (CLI):
+🗄️ База данных / миграции / бэкапы
+Миграции выполняются автоматически при старте. CLI:
 
 bash
 Копировать
 Редактировать
-python -m scripts.reconciler --format text
-python -m scripts.reconciler --check-only --format json
-🛠️ Утилиты (CLI)
-scripts/maintenance_cli.py — бэкапы/ротация/вакуум/интегрити:
+# миграция:
+PYTHONPATH=src python -m crypto_ai_bot.core.storage.migrations.cli migrate --db ./data/trader.sqlite3
 
-bash
-Копировать
-Редактировать
-python -m scripts.maintenance_cli backup-db --compress --retention-days 14
-python -m scripts.maintenance_cli prune-backups --retention-days 7
-python -m scripts.maintenance_cli cleanup --what idempotency --days 3
-python -m scripts.maintenance_cli vacuum
-python -m scripts.maintenance_cli stats
-python -m scripts.maintenance_cli integrity
-scripts/health_monitor.py — монитор /health + оповещения в Telegram:
+# бэкап:
+PYTHONPATH=src python -m crypto_ai_bot.core.storage.migrations.cli backup --db ./data/trader.sqlite3 --retention-days 30
+📊 Наблюдаемость
+GET /health — сводный health.
 
-bash
-Копировать
-Редактировать
-python -m scripts.health_monitor check --url http://localhost:8000/health
-python -m scripts.health_monitor watch --url http://localhost:8000/health --interval 30 \
-  --telegram-bot-token "$TELEGRAM_BOT_TOKEN" --telegram-chat-id "$TELEGRAM_ALERT_CHAT_ID"
-scripts/performance_report.py — FIFO-PnL, win-rate, max drawdown:
+GET /metrics — Prometheus (с JSON-фолбэком, если нет клиента).
 
-bash
-Копировать
-Редактировать
-python -m scripts.performance_report --symbol BTC/USDT --since 2025-01-01T00:00:00 --format json
-python -m scripts.performance_report --end-price 68000 --format text
-🧱 Архитектура (вкратце)
-core.brokers — IBroker, PaperBroker (симулятор), CcxtBroker (live/sandbox).
+⚙️ Переменные окружения (ключевые)
+См. .env.example. Важные: MODE, SANDBOX, EXCHANGE, SYMBOL|SYMBOLS, FIXED_AMOUNT,
+DB_PATH, IDEMPOTENCY_*, RISK_*, интервалы оркестратора, API_TOKEN, (для live) API_KEY|API_SECRET.
 
-core.use_cases — evaluate, eval_and_execute, place_order (идемпотентность).
-
-core.risk — RiskManager, ProtectiveExits.
-
-core.reconciliation — сверки Orders/Positions/Balances.
-
-core.monitoring — HealthChecker.
-
-core.storage — миграции, фасад, репозитории (SQLite).
-
-app.compose — сборка контейнера (DI), выбор брокера, запуск оркестратора.
-
-Мы не используем core/brokers/live.py (удалён как дублирующий CcxtBroker).
-
-📊 Наблюдаемость и бэкапы
-Health: общий чек состояния (БД, брокер, шина и т.д.).
-
-Метрики: счётчики решений/блокировок/времени операций (для экспорта в Prometheus — по желанию).
-
-Резервные копии БД и очистка: через maintenance_cli.py (см. выше).
-
-Если применяешь Prometheus/Grafana — держи в ops/ свой docker-compose.yml, prometheus.yml, алерты и т.п. (в проекте уже есть примеры файлов).
-
-⚙️ Переменные окружения (полный список)
-Var	Назначение	Пример	Примечание
-MODE	Режим	paper | live	
-SANDBOX	Тестнет	0/1	Только для live
-EXCHANGE	CCXT ID	gateio	
-SYMBOL	Торговая пара	BTC/USDT	
-FIXED_AMOUNT	Сумма покупки в QUOTE	50	На один тик buy
-DB_PATH	Путь к SQLite	./data/trader.sqlite3	Рекомендуется разделять по средам
-API_KEY, API_SECRET	Ключи биржи		Только для live
-RISK_COOLDOWN_SEC	Кулдаун	60	
-RISK_MAX_SPREAD_PCT	Макс. спред, %	0.3	
-RISK_MAX_POSITION_BASE	Макс. позиция (base)	0.02	
-RISK_MAX_ORDERS_PER_HOUR	Частота	6	
-RISK_DAILY_LOSS_LIMIT_QUOTE	Дневной лимит убытка	100	
-IDEMPOTENCY_BUCKET_MS	Окно идемпотентности	60000	
-IDEMPOTENCY_TTL_SEC	TTL ключей	3600	
-
-🚀 Railway: профили окружения (Variables)
-PAPER (полностью безопасно)
-
-ini
-Копировать
-Редактировать
-MODE=paper
-SANDBOX=0
-EXCHANGE=gateio
-SYMBOL=BTC/USDT
-FIXED_AMOUNT=50
-DB_PATH=./data/trader-paper.sqlite3
-IDEMPOTENCY_BUCKET_MS=60000
-IDEMPOTENCY_TTL_SEC=3600
-RISK_COOLDOWN_SEC=60
-RISK_MAX_SPREAD_PCT=0.3
-RISK_MAX_POSITION_BASE=0.02
-RISK_MAX_ORDERS_PER_HOUR=6
-RISK_DAILY_LOSS_LIMIT_QUOTE=100
-LIVE-SANDBOX (тестовые ключи, при наличии тестнета у биржи)
-
-ini
-Копировать
-Редактировать
-MODE=live
-SANDBOX=1
-EXCHANGE=gateio
-SYMBOL=BTC/USDT
-FIXED_AMOUNT=5
-DB_PATH=./data/trader-live-sandbox.sqlite3
-API_KEY=...
-API_SECRET=...
-# те же risk/idem значения, можно ужесточить
-LIVE-PROD (боевые ключи)
-
-ini
-Копировать
-Редактировать
-MODE=live
-SANDBOX=0
-EXCHANGE=gateio
-SYMBOL=BTC/USDT
-FIXED_AMOUNT=5
-DB_PATH=./data/trader-live.sqlite3
-API_KEY=...
-API_SECRET=...
-# рекомендую консервативные risk-параметры
-🧭 Карта функций (кто за что отвечает)
-core/use_cases/eval_and_execute.py — единый шаг исполения (evaluate → risk → place → exits → publish).
-
-core/brokers/paper.py — симулятор ордеров, комиссии, спред.
-
-core/brokers/ccxt_adapter.py — live/тестнет через CCXT (precision/limits/rounding, open_orders).
-
-core/risk/manager.py — кулдауны, лимиты частоты/спреда/размера, дневной loss-limit.
-
-core/risk/protective_exits.py — защитные выходы.
-
-core/reconciliation/* — сверки ордеров/позиций/балансов.
-
-core/monitoring/health_checker.py — комплексный health.
-
-scripts/* — обслуживание БД, сверки, мониторинг, перф-отчёты.
+🧱 Архитектура
+Слои: utils → core → app.
+Брокеры: PaperBroker (симулятор), CcxtBroker (live/sandbox).
+Все ENV читаются в core/settings.py. Импорты — только пакетные from crypto_ai_bot.utils....
 
 ⚠️ Дисклеймер
-Торговля криптовалютой связана с риском. Вы используете проект на свой страх и риск. Автор(ы) не несут ответственности за возможные финансовые потери.
+Торговля криптовалютой связана с риском. Используете на свой страх и риск.

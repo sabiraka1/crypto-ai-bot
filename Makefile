@@ -1,126 +1,62 @@
-# ==========================================
-# CRYPTO-AI-BOT MAKEFILE v8.0
-# ==========================================
+.PHONY: help install dev-install lock run run-paper run-live lint fmt type test \
+        migrate backup ci-smoke docker-build docker-run
 
-# ------- Config -------
-PY ?= python
-UVICORN ?= uvicorn
-APP ?= crypto_ai_bot.app.server:app
-HOST ?= 0.0.0.0
-PORT ?= 8000
+PYTHON      ?= python
+UVICORN     ?= uvicorn
+APP         ?= crypto_ai_bot.app.server:app
+PORT        ?= 8000
 
-# Updated for new structure with utils in root
-export PYTHONPATH := .:src
+help:
+	@echo "Targets: install | dev-install | run | run-paper | run-live | lint | fmt | type | test | migrate | backup | ci-smoke | docker-build | docker-run"
 
-# ------- Install -------
-.PHONY: install
 install:
-	$(PY) -m pip install -U pip setuptools wheel
-	$(PY) -m pip install -r requirements.txt
+	$(PYTHON) -m pip install -U pip wheel
+	$(PYTHON) -m pip install -e .
 
-.PHONY: dev-install
-dev-install:
-	$(PY) -m pip install -U pip setuptools wheel
-	$(PY) -m pip install -r requirements.txt -r requirements-dev.txt
+dev-install: install
+	$(PYTHON) -m pip install -e ".[dev]"
 
-# ------- Run -------
-.PHONY: run
 run:
-	$(UVICORN) $(APP) --host $(HOST) --port $(PORT)
+	$(UVICORN) $(APP) --host 0.0.0.0 --port $(PORT)
 
-.PHONY: dev
-dev:
-	$(UVICORN) $(APP) --host $(HOST) --port $(PORT) --reload
+run-paper:
+	MODE=paper SANDBOX=0 $(UVICORN) $(APP) --host 0.0.0.0 --port $(PORT)
 
-# ------- Orchestrator -------
-.PHONY: start-trading
-start-trading:
-	curl -X POST http://127.0.0.1:$(PORT)/orchestrator/start
+run-live:
+	MODE=live SANDBOX=0 $(UVICORN) $(APP) --host 0.0.0.0 --port $(PORT)
 
-.PHONY: stop-trading
-stop-trading:
-	curl -X POST http://127.0.0.1:$(PORT)/orchestrator/stop
-
-# ------- Tests -------
-.PHONY: test
-test:
-	pytest -v --maxfail=1 --disable-warnings -q
-
-.PHONY: test-unit
-test-unit:
-	pytest tests/unit -v
-
-.PHONY: test-integration
-test-integration:
-	pytest tests/integration -v
-
-.PHONY: coverage
-coverage:
-	pytest --cov=src --cov=utils --cov-report=term-missing
-
-# ------- Architecture -------
-.PHONY: check-arch
-check-arch:
-	$(PY) -m scripts.arch_check
-
-.PHONY: check-imports
-check-imports:
-	lint-imports -c importlinter.ini
-
-# ------- Migrations -------
-.PHONY: migrate
-migrate:
-	$(PY) -m scripts.smoke_migrations
-
-# ------- Maintenance -------
-.PHONY: backup-db
-backup-db:
-	$(PY) -m scripts.maintenance_cli backup-db
-
-.PHONY: cleanup
-cleanup:
-	$(PY) -m scripts.maintenance_cli cleanup-idempotency
-
-.PHONY: vacuum
-vacuum:
-	$(PY) -m scripts.maintenance_cli vacuum
-
-# ------- Monitoring -------
-.PHONY: monitoring-up
-monitoring-up:
-	cd ops/prometheus && docker-compose up -d
-
-.PHONY: monitoring-down
-monitoring-down:
-	cd ops/prometheus && docker-compose down
-
-# ------- Quick helpers -------
-.PHONY: health
-health:
-	curl -s http://127.0.0.1:$(PORT)/health | jq .
-
-.PHONY: status
-status:
-	curl -s http://127.0.0.1:$(PORT)/orchestrator/status | jq .
-
-.PHONY: metrics
-metrics:
-	curl -s http://127.0.0.1:$(PORT)/metrics | head -n 50
-
-# ------- Format & Lint -------
-.PHONY: lint
 lint:
-	ruff check src tests utils
+	ruff check .
 
-.PHONY: fmt
 fmt:
-	ruff check --select I --fix src tests utils
-	black src tests utils
+	ruff check --fix .
+	isort src tests || true
+	black src tests || true
 
-# ------- Clean -------
-.PHONY: clean
-clean:
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete
-	rm -rf .pytest_cache .coverage htmlcov
-	rm -rf *.egg-info dist build
+type:
+	mypy src
+
+test:
+	pytest -q
+
+migrate:
+	PYTHONPATH=src $(PYTHON) -m crypto_ai_bot.core.storage.migrations.cli migrate --db $${DB_PATH:-./data/trader.sqlite3}
+
+backup:
+	PYTHONPATH=src $(PYTHON) -m crypto_ai_bot.core.storage.migrations.cli backup --db $${DB_PATH:-./data/trader.sqlite3} --retention-days $${BACKUP_RETENTION_DAYS:-30}
+
+ci-smoke:
+	PYTHONPATH=src $(PYTHON) - <<'PY'
+import sqlite3
+from crypto_ai_bot.core.storage.migrations.runner import run_migrations
+from crypto_ai_bot.utils.time import now_ms
+conn = sqlite3.connect('data/ci-smoketest.sqlite3')
+conn.row_factory = sqlite3.Row
+print('version=', run_migrations(conn, now_ms=now_ms(), db_path='data/ci-smoketest.sqlite3', do_backup=False))
+PY
+
+docker-build:
+	docker build -t crypto-ai-bot:local .
+
+docker-run:
+	docker run --rm -p $(PORT):8000 --env-file .env crypto-ai-bot:local

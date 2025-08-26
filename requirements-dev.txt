@@ -1,44 +1,18 @@
-# ==========================================
-# CRYPTO-AI-BOT DEV REQUIREMENTS v8.0
-# ==========================================
-
-# Include all production dependencies
+# Include runtime deps
 -r requirements.txt
 
-# === TESTING FRAMEWORK ===
+# TEST
 pytest>=8.2,<9
 pytest-asyncio>=0.23,<1
-pytest-cov>=6.0,<7
-pytest-mock>=3.14,<4
-pytest-timeout>=2.2,<3
-pytest-xdist>=3.5,<4       # Parallel test execution
-hypothesis>=6.98,<7        # Property-based testing
+pytest-mock>=3.12,<4
+coverage>=7.4,<8
 
-# === CODE QUALITY ===
-ruff>=0.6,<0.7             # Fast Python linter
-mypy>=1.8,<2               # Static type checker
-black>=24.0,<25            # Code formatter
-isort>=5.13,<6             # Import sorter
-import-linter>=2.0,<3      # Architecture rules checker
+# LINT / STYLE / ARCH
+ruff>=0.6,<0.7
+mypy>=1.8,<2
+black>=24.0,<25
+isort>=5.13,<6
+import-linter>=2.0,<3
 
-# === SECURITY ===
-bandit>=1.7,<2             # Security linter
-safety>=3.0,<4             # Dependency vulnerability scanner
-
-# === DEVELOPMENT TOOLS ===
-ipython>=8.20,<9           # Enhanced Python shell
-ipdb>=0.13,<1              # IPython debugger
-rich>=13.7,<14             # Beautiful terminal output
-pre-commit>=3.6,<4         # Git hooks framework
-
-# === DOCUMENTATION ===
-mkdocs>=1.5,<2             # Documentation generator
-mkdocs-material>=9.5,<10   # Material theme for MkDocs
-
-# === ASYNC TESTING ===
-aiosqlite>=0.20,<1         # Async SQLite for tests
-aioresponses>=0.7,<1       # Mock async HTTP requests
-
-# === PERFORMANCE PROFILING ===
-memory-profiler>=0.61,<1   # Memory profiling
-line-profiler>=4.1,<5      # Line-by-line profiling
+# DEV
+pre-commit>=3.6,<4

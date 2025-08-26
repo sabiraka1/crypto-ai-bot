@@ -1,107 +1,43 @@
-# ==========================================
-# CRYPTO-AI-BOT GITIGNORE v8.0
-# ==========================================
-
-# -----------------------------
 # Python
-# -----------------------------
 __pycache__/
 *.py[cod]
-*$py.class
 *.pyo
 *.pyd
-.Python
+*.so
+*.egg-info/
+.build/
+build/
+dist/
 
-# Virtual environments
+# Venv
 .venv/
-venv/
-ENV/
 env/
-.env
+venv/
 
-# -----------------------------
-# Environment & Secrets
-# -----------------------------
-.env
-.env.*
-*.env
-!.env.example
-config/secrets/
-credentials.json
-
-# -----------------------------
-# IDE & Editors
-# -----------------------------
+# Editors / IDE
 .vscode/
 .idea/
-*.sublime-*
-*.swp
-*.swo
-*~
 
-# -----------------------------
-# OS Files
-# -----------------------------
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# -----------------------------
-# Project Data
-# -----------------------------
-/data/
-*.db
-*.sqlite
+# Data / DB
+data/
 *.sqlite3
-*.sqlite-journal
-*.sqlite-wal
-*.sqlite-shm
-backups/
-logs/
+*.db
 
-# -----------------------------
-# Testing & Coverage
-# -----------------------------
-.pytest_cache/
+# Logs / caches / coverage
+*.log
+logs/
 .coverage
 .coverage.*
 htmlcov/
-.tox/
-.nox/
-*.cover
-coverage.xml
-*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# -----------------------------
-# Build & Distribution
-# -----------------------------
-build/
-dist/
-*.egg-info/
-*.egg
-MANIFEST
-pip-wheel-metadata/
-*.whl
+# Env files
+.env
+.env.*
+!.env.example
 
-# -----------------------------
-# Documentation
-# -----------------------------
-docs/_build/
-site/
-
-# -----------------------------
-# Utils after moving to root
-# -----------------------------
-/utils/__pycache__/
-/utils/*.pyc
-
-# -----------------------------
-# Temporary files
-# -----------------------------
-*.tmp
-*.bak
-*.backup
-*.old
-.cache/
-tmp/
-temp/
+# OS
+.DS_Store
+Thumbs.db
