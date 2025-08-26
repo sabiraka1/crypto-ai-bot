@@ -19,12 +19,6 @@ def _to_bool(v: Optional[str], default: bool = False) -> bool:
 
 
 def _read_secret(name: str, file_name: str) -> str:
-    """
-    Безопасно читает секрет:
-    1) если установлен <NAME>_FILE и файл существует — читаем из файла;
-    2) иначе берём из <NAME>;
-    3) иначе ''.
-    """
     file_path = _env(file_name)
     if file_path:
         try:
@@ -68,11 +62,45 @@ class Settings:
     PRICE_FEED: str
     FIXED_PRICE: Decimal
 
-    # интервалы оркестратора (с дефолтами по спецификации)
     EVAL_INTERVAL_SEC: float
     EXITS_INTERVAL_SEC: float
     RECONCILE_INTERVAL_SEC: float
     WATCHDOG_INTERVAL_SEC: float
+
+    def __post_init__(self):
+        # Режим
+        m = self.MODE.lower()
+        if m not in ("paper", "live"):
+            raise ValueError("MODE must be 'paper' or 'live'")
+        # Символ
+        if "/" not in self.SYMBOL:
+            raise ValueError("SYMBOL must be in format BASE/QUOTE, e.g. BTC/USDT")
+        # Интервалы
+        if self.EVAL_INTERVAL_SEC < 1:
+            raise ValueError("EVAL_INTERVAL_SEC must be >= 1")
+        if self.EXITS_INTERVAL_SEC <= 0:
+            raise ValueError("EXITS_INTERVAL_SEC must be > 0")
+        if self.RECONCILE_INTERVAL_SEC <= 0:
+            raise ValueError("RECONCILE_INTERVAL_SEC must be > 0")
+        if self.WATCHDOG_INTERVAL_SEC <= 0:
+            raise ValueError("WATCHDOG_INTERVAL_SEC must be > 0")
+        # Live: ключи
+        if m == "live" and (not self.API_KEY or not self.API_SECRET):
+            raise ValueError("Live mode requires API_KEY and API_SECRET (or *_FILE)")
+        # Price feed
+        if self.PRICE_FEED not in ("fixed", "live"):
+            raise ValueError("PRICE_FEED must be 'fixed' or 'live'")
+        # Риски
+        if self.RISK_COOLDOWN_SEC < 0:
+            raise ValueError("RISK_COOLDOWN_SEC must be >= 0")
+        if self.RISK_MAX_SPREAD_PCT < 0:
+            raise ValueError("RISK_MAX_SPREAD_PCT must be >= 0")
+        if self.RISK_MAX_POSITION_BASE < 0:
+            raise ValueError("RISK_MAX_POSITION_BASE must be >= 0")
+        if self.RISK_MAX_ORDERS_PER_HOUR < 0:
+            raise ValueError("RISK_MAX_ORDERS_PER_HOUR must be >= 0")
+        if self.RISK_DAILY_LOSS_LIMIT_QUOTE < 0:
+            raise ValueError("RISK_DAILY_LOSS_LIMIT_QUOTE must be >= 0")
 
     @staticmethod
     def load() -> "Settings":
@@ -96,11 +124,10 @@ class Settings:
         risk_rate = int(_env("RISK_MAX_ORDERS_PER_HOUR", "6"))
         risk_daily_loss = float(_env("RISK_DAILY_LOSS_LIMIT_QUOTE", "100"))
 
-        # безопасное чтение секретов
         api_key = _read_secret("API_KEY", "API_KEY_FILE")
         api_secret = _read_secret("API_SECRET", "API_SECRET_FILE")
 
-        price_feed = (_env("PRICE_FEED", "fixed") or "fixed").lower()  # fixed | live
+        price_feed = (_env("PRICE_FEED", "fixed") or "fixed").lower()
         fixed_price = Decimal(str(_env("FIXED_PRICE", "100")))
 
         eval_iv = float(_env("EVAL_INTERVAL_SEC", "60.0"))

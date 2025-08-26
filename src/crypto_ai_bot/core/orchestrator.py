@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -19,10 +18,10 @@ from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
 from ...utils.logging import get_logger
 
-# Метрики — безопасно
+# Метрики — делаем необязательными
 try:
-    from ...utils.metrics import inc, timer  # type: ignore
-except Exception:  # pragma: no cover
+    from ...utils.metrics import inc, timer
+except Exception:
     def inc(*args, **kwargs):  # type: ignore
         return None
     from contextlib import contextmanager
@@ -59,18 +58,12 @@ class Orchestrator:
     _recon_pos: Optional[PositionsReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
-    # health/debug
-    _started_at: float = field(default=0.0, init=False)
-    _last_run: Dict[str, int] = field(default_factory=dict, init=False)          # loop -> ts_ms
-    _last_duration: Dict[str, float] = field(default_factory=dict, init=False)   # loop -> ms
-    _error_counts: Dict[str, int] = field(default_factory=dict, init=False)      # loop -> n
-
+    # --- lifecycle ---
     def start(self) -> None:
         if self._tasks:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
-        self._started_at = time.time()
 
         # safety/reconcile
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
@@ -96,55 +89,30 @@ class Orchestrator:
             self._tasks.clear()
 
     def status(self) -> dict:
-        return {
-            "running": bool(self._tasks),
-            "tasks": {k: (not v.done()) for k, v in self._tasks.items()},
-            "last_beat_ms": self._last_beat_ms,
-        }
+        return {"running": bool(self._tasks), "tasks": {k: (not v.done()) for k, v in self._tasks.items()}, "last_beat_ms": self._last_beat_ms}
 
-    def health_status(self) -> dict:
-        """Расширенный статус для /status (диагностика циклов)."""
-        uptime = (time.time() - self._started_at) if self._started_at else 0.0
-        return {
-            "running": bool(self._tasks),
-            "uptime_seconds": uptime,
-            "loops": {
-                name: {
-                    "running": not task.done(),
-                    "last_run_ms": self._last_run.get(name),
-                    "last_duration_ms": self._last_duration.get(name),
-                    "errors": self._error_counts.get(name, 0),
-                }
-                for name, task in self._tasks.items()
-            },
-        }
+    # --- helpers ---
+    async def _run_tick(self, fn, *, interval: float, loop_name: str, timeout_ratio: float = 0.9) -> None:
+        """Запуск тела цикла с контролем времени/таймаутом и ровным расписанием."""
+        started = asyncio.get_event_loop().time()
+        try:
+            with timer("orchestrator_cycle_ms", {"loop": loop_name}):
+                await asyncio.wait_for(fn(), timeout=max(0.1, interval * timeout_ratio))
+            inc("orchestrator_cycles_total", {"loop": loop_name, "status": "success"})
+        except asyncio.TimeoutError:
+            get_logger(f"orchestrator.{loop_name}").error("loop_timeout", extra={"interval": interval})
+            inc("orchestrator_cycles_total", {"loop": loop_name, "status": "timeout"})
+        except Exception as exc:
+            get_logger(f"orchestrator.{loop_name}").error("loop_failed", extra={"error": str(exc)})
+            inc("orchestrator_cycles_total", {"loop": loop_name, "status": "error"})
+        finally:
+            elapsed = asyncio.get_event_loop().time() - started
+            sleep_for = max(0.0, interval - elapsed)
+            await asyncio.sleep(sleep_for)
 
-    # ---------- loops with backpressure ----------
-
-    async def _loop_with_backpressure(self, name: str, interval: float, coro_factory: Callable[[], Awaitable[None]]) -> None:  # type: ignore[name-defined]
-        # Приватный helper, чтобы не дублировать код
-        while not self._stopping:
-            t0 = time.perf_counter()
-            try:
-                with timer("orchestrator_cycle_ms", {"loop": name}):
-                    await asyncio.wait_for(coro_factory(), timeout=interval * 0.9)
-                inc("orchestrator_cycles_total", {"loop": name, "status": "success"})
-            except asyncio.TimeoutError:
-                inc("orchestrator_cycles_total", {"loop": name, "status": "timeout"})
-                get_logger(f"orchestrator.{name}").warning("cycle_timeout", extra={"interval": interval})
-            except Exception as exc:  # noqa: BLE001
-                self._error_counts[name] = self._error_counts.get(name, 0) + 1
-                inc("orchestrator_cycles_total", {"loop": name, "status": "error"})
-                get_logger(f"orchestrator.{name}").error("cycle_failed", extra={"error": str(exc)})
-            finally:
-                elapsed = (time.perf_counter() - t0)
-                self._last_run[name] = int(time.time() * 1000)
-                self._last_duration[name] = round(elapsed * 1000.0, 3)
-                sleep_time = max(0.0, interval - elapsed)
-                await asyncio.sleep(sleep_time)
-
+    # --- loops ---
     async def _eval_loop(self) -> None:
-        async def body() -> None:
+        async def body():
             await eval_and_execute(
                 symbol=self.symbol,
                 storage=self.storage,
@@ -160,45 +128,48 @@ class Orchestrator:
             )
             if self._dms:
                 self._dms.beat()
-        await self._loop_with_backpressure("eval", self.eval_interval_sec, body)
+        while not self._stopping:
+            await self._run_tick(body, interval=self.eval_interval_sec, loop_name="eval")
 
     async def _exits_loop(self) -> None:
-        async def body() -> None:
+        async def body():
             pos = self.storage.positions.get_position(self.symbol)
             if pos.base_qty and pos.base_qty > 0:
                 await self.exits.ensure(symbol=self.symbol)
-        await self._loop_with_backpressure("exits", self.exits_interval_sec, body)
+        while not self._stopping:
+            await self._run_tick(body, interval=self.exits_interval_sec, loop_name="exits")
 
     async def _reconcile_loop(self) -> None:
-        async def body() -> None:
-            # housekeeping
-            try:
-                prune = getattr(self.storage.idempotency, "prune_older_than", None)
-                if callable(prune):
+        async def body():
+            # лёгкий house-keeping
+            prune = getattr(self.storage.idempotency, "prune_older_than", None)
+            if callable(prune):
+                try:
                     prune(self.settings.IDEMPOTENCY_TTL_SEC * 10)
-            except Exception:
-                pass
-            try:
-                prune_audit = getattr(self.storage.audit, "prune_older_than", None)
-                if callable(prune_audit):
+                except Exception:
+                    pass
+            prune_audit = getattr(self.storage.audit, "prune_older_than", None)
+            if callable(prune_audit):
+                try:
                     prune_audit(days=7)
-            except Exception:
-                pass
-
+                except Exception:
+                    pass
             if self._recon_orders:
                 await self._recon_orders.run_once()
             if self._recon_pos:
                 await self._recon_pos.run_once()
             if self._recon_bal:
                 await self._recon_bal.run_once()
-        await self._loop_with_backpressure("reconcile", self.reconcile_interval_sec, body)
+        while not self._stopping:
+            await self._run_tick(body, interval=self.reconcile_interval_sec, loop_name="reconcile")
 
     async def _watchdog_loop(self) -> None:
-        async def body() -> None:
+        async def body():
             rep = await self.health.check(symbol=self.symbol)
             hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
             await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
             self._last_beat_ms = rep.ts_ms
             if self._dms:
                 await self._dms.check_and_trigger()
-        await self._loop_with_backpressure("watchdog", self.watchdog_interval_sec, body)
+        while not self._stopping:
+            await self._run_tick(body, interval=self.watchdog_interval_sec, loop_name="watchdog")

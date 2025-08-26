@@ -2,113 +2,114 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 
-from ...utils.time import now_ms
 from ...utils.logging import get_logger
+from ...utils.time import now_ms
 
-# Метрики — делаем безопасно (no-op, если модуль урезан)
+# Метрики — делаем необязательными (no-op, если модуль недоступен)
 try:
-    from ...utils.metrics import inc, timer  # type: ignore
-except Exception:  # pragma: no cover
+    from ...utils.metrics import inc, timer
+except Exception:
     def inc(*args, **kwargs):  # type: ignore
         return None
-    from contextlib import contextmanager
     @contextmanager
     def timer(*args, **kwargs):  # type: ignore
         yield
 
-
 Handler = Callable[[Dict[str, Any]], Awaitable[None]]
+
+_log = get_logger("events.bus")
 
 
 @dataclass
 class AsyncEventBus:
-    """Асинхронная шина событий с гарантией порядка per-key, ретраями и DLQ."""
+    """Асинхронная событийная шина с:
+       - per-key ordering (очередь/воркер на ключ)
+       - retry + экспоненциальный backoff
+       - DLQ (dead-letter queue) c подписчиками
+    """
     max_attempts: int = 3
     backoff_base_ms: int = 250
     backoff_factor: float = 2.0
 
+    # topic -> [handlers]
     _subs: DefaultDict[str, List[Handler]] = field(default_factory=lambda: defaultdict(list))
+    # dlq subscribers
     _dlq_handlers: List[Handler] = field(default_factory=list)
     _dlq: List[Dict[str, Any]] = field(default_factory=list)
 
-    _queues: Dict[str, asyncio.Queue] = field(default_factory=dict)         # per-key очереди
-    _workers: Dict[str, asyncio.Task] = field(default_factory=dict)         # per-key воркеры
-
-    _log = get_logger("events.bus")
-
-    # -------------------- API --------------------
+    # per-key очереди и воркеры
+    _queues: Dict[str, asyncio.Queue] = field(default_factory=dict)
+    _workers: Dict[str, asyncio.Task] = field(default_factory=dict)
 
     def subscribe(self, topic: str, handler: Handler) -> None:
         self._subs[topic].append(handler)
 
     def subscribe_dlq(self, handler: Handler) -> None:
-        """Подписка на обработку событий, которые дошли до DLQ."""
+        """Подписка на DLQ события (не должна кидать исключений)."""
         self._dlq_handlers.append(handler)
 
     async def publish(self, topic: str, payload: Dict[str, Any], *, key: Optional[str] = None) -> None:
-        """Публикация с гарантией порядка для каждого ключа (topic:key)."""
-        inc("events_published_total", {"topic": topic})
-        qkey = f"{topic}:{key}" if key else topic
-        if qkey not in self._queues:
-            self._queues[qkey] = asyncio.Queue()
-            self._workers[qkey] = asyncio.create_task(self._process_queue(qkey, topic), name=f"bus-{qkey}")
-        await self._queues[qkey].put(payload)
+        """Публикация события. Для одинакового (topic, key) сохраняется порядок."""
+        inc("events_total", {"topic": topic})
+        queue_key = f"{topic}:{key}" if key else topic
 
-    async def shutdown(self) -> None:
-        """Останавливает внутренних воркеров (используй при graceful shutdown)."""
-        for t in list(self._workers.values()):
-            t.cancel()
-        await asyncio.gather(*self._workers.values(), return_exceptions=True)
-        self._workers.clear()
-        self._queues.clear()
+        if queue_key not in self._queues:
+            self._queues[queue_key] = asyncio.Queue()
+            self._workers[queue_key] = asyncio.create_task(self._process_queue(queue_key, topic))
 
-    def dlq_size(self) -> int:
-        return len(self._dlq)
+        await self._queues[queue_key].put(payload)
 
-    def get_dlq(self) -> List[Dict[str, Any]]:
-        return list(self._dlq)
-
-    # -------------------- internals --------------------
-
-    async def _process_queue(self, qkey: str, topic: str) -> None:
-        queue = self._queues[qkey]
+    async def _process_queue(self, queue_key: str, topic: str) -> None:
+        q = self._queues[queue_key]
         while True:
-            payload = await queue.get()
-            handlers = self._subs.get(topic, [])
-            if not handlers:
-                queue.task_done()
-                continue
+            payload = await q.get()
+            handlers = list(self._subs.get(topic, []))
             for h in handlers:
                 await self._invoke_with_retry(h, payload, topic)
-            queue.task_done()
 
     async def _invoke_with_retry(self, handler: Handler, payload: Dict[str, Any], topic: str) -> None:
         attempts = 0
+        backoff_ms = float(self.backoff_base_ms)
         while True:
             attempts += 1
             try:
                 with timer("event_handler_ms", {"topic": topic}):
                     await handler(payload)
-                inc("events_handled_total", {"topic": topic, "status": "success"})
+                inc("event_handler_total", {"topic": topic, "status": "success"})
                 return
-            except Exception as exc:  # noqa: BLE001 — хотим ловить любые
+            except Exception as exc:
+                inc("event_handler_total", {"topic": topic, "status": "error"})
                 if attempts >= self.max_attempts:
-                    await self._send_to_dlq(topic, payload, str(exc))
-                    inc("events_handled_total", {"topic": topic, "status": "dlq"})
-                    self._log.error("event_handler_failed_dlq", extra={"topic": topic, "error": str(exc)})
+                    _log.error("handler_failed", extra={"topic": topic, "error": str(exc)})
+                    await self._send_to_dlq(topic, payload, error=str(exc))
                     return
-                backoff = self.backoff_base_ms * (self.backoff_factor ** (attempts - 1))
-                await asyncio.sleep(backoff / 1000.0)
+                await asyncio.sleep(backoff_ms / 1000.0)
+                backoff_ms *= float(self.backoff_factor)
 
-    async def _send_to_dlq(self, topic: str, payload: Dict[str, Any], error: str) -> None:
-        evt = {"original_topic": topic, "payload": payload, "error": error, "timestamp": now_ms()}
+    async def _send_to_dlq(self, topic: str, payload: Dict[str, Any], *, error: str) -> None:
+        evt = {
+            "original_topic": topic,
+            "payload": payload,
+            "error": error,
+            "timestamp": now_ms(),
+        }
         self._dlq.append(evt)
-        for handler in list(self._dlq_handlers):
+        for h in list(self._dlq_handlers):
             try:
-                await handler(evt)
+                await h(evt)
             except Exception:
-                # обработчики DLQ не должны валить шину
+                # DLQ-хэндлер не должен падать систему
                 pass
+
+    async def close(self) -> None:
+        """Останавливает воркеры очередей (используется редко; шина обычно живёт весь процесс)."""
+        for t in list(self._workers.values()):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*self._workers.values(), return_exceptions=True)
+        self._workers.clear()
+        self._queues.clear()
