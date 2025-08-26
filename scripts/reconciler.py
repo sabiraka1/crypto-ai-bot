@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
+"""
+Manual reconciliation tool — детализированные сверки и sanity-check.
+"""
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
 from crypto_ai_bot.app.compose import build_container
 from crypto_ai_bot.core.reconciliation.orders import OrdersReconciler
 from crypto_ai_bot.core.reconciliation.positions import PositionsReconciler
 from crypto_ai_bot.core.reconciliation.balances import BalancesReconciler
-from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
 
 log = get_logger("reconciler")
 
 
 class ManualReconciler:
-    def __init__(self, container) -> None:
-        self.c = container
+    def __init__(self, container):
+        self.container = container
         self.symbol = container.settings.SYMBOL
 
-    async def run_full(self, auto_fix: bool = False) -> Dict[str, Any]:
+    async def run_full(self, auto_fix: bool) -> Dict[str, Any]:
         report: Dict[str, Any] = {
             "symbol": self.symbol,
             "timestamp": now_ms(),
@@ -36,203 +40,168 @@ class ManualReconciler:
 
         # 1) Orders
         try:
-            orders_rec = OrdersReconciler(self.c.broker, self.symbol)
-            report["orders"] = await orders_rec.run_once()
-            if report["orders"].get("open_orders", 0) > 0:
+            orders_rec = OrdersReconciler(self.container.broker, self.symbol)
+            rep = await orders_rec.run_once()
+            report["orders"] = rep
+            if rep.get("supported") and rep.get("open_orders", 0) > 0:
                 report["discrepancies"].append(
-                    {
-                        "type": "hanging_orders",
-                        "count": report["orders"]["open_orders"],
-                        "ids": report["orders"].get("ids", [])[:10],
-                    }
+                    {"type": "hanging_orders", "count": rep["open_orders"], "ids": rep.get("ids", [])[:10]}
                 )
-        except Exception as exc:
-            report["orders"] = {"error": str(exc)}
-            log.error("orders_reconciliation_failed", extra={"error": str(exc)})
+        except Exception as e:
+            log.error("orders_reconciliation_failed", extra={"error": str(e)})
+            report["orders"] = {"error": str(e)}
 
         # 2) Positions
         try:
-            pos_rec = PositionsReconciler(storage=self.c.storage, broker=self.c.broker, symbol=self.symbol)
-            report["positions"] = await pos_rec.run_once()
-
-            local = Decimal(str(report["positions"].get("local_base", "0")))
-            exchange = Decimal(str(report["positions"].get("exchange_base", "0")))
-            diff = abs(exchange - local)
-
-            if diff > Decimal("0.00000001"):
-                report["discrepancies"].append(
-                    {"type": "position_mismatch", "local": str(local), "exchange": str(exchange), "diff": str(diff)}
-                )
-                if auto_fix:
-                    # коррекция локальной позиции под биржу
-                    self.c.storage.positions.set_base_qty(self.symbol, exchange)
-                    report["actions_taken"].append({"action": "position_corrected", "old": str(local), "new": str(exchange)})
-        except Exception as exc:
-            report["positions"] = {"error": str(exc)}
-            log.error("positions_reconciliation_failed", extra={"error": str(exc)})
+            pos_rec = PositionsReconciler(storage=self.container.storage, broker=self.container.broker, symbol=self.symbol)
+            rep = await pos_rec.run_once()
+            report["positions"] = rep
+            if "error" not in rep:
+                local = Decimal(str(rep.get("local_base", "0")))
+                exchange = Decimal(str(rep.get("exchange_base", "0")))
+                diff = abs(local - exchange)
+                if diff > Decimal("0.00000001"):
+                    report["discrepancies"].append(
+                        {"type": "position_mismatch", "local": str(local), "exchange": str(exchange), "diff": str(diff)}
+                    )
+                    if auto_fix:
+                        setter = getattr(self.container.storage.positions, "set_base_qty", None)
+                        if callable(setter):
+                            setter(self.symbol, exchange)
+                            report["actions_taken"].append(
+                                {"action": "position_corrected", "old": str(local), "new": str(exchange)}
+                            )
+        except Exception as e:
+            log.error("positions_reconciliation_failed", extra={"error": str(e)})
+            report["positions"] = {"error": str(e)}
 
         # 3) Balances
         try:
-            bal_rec = BalancesReconciler(self.c.broker, self.symbol)
+            bal_rec = BalancesReconciler(self.container.broker, self.symbol)
             report["balances"] = await bal_rec.run_once()
-        except Exception as exc:
-            report["balances"] = {"error": str(exc)}
-            log.error("balances_reconciliation_failed", extra={"error": str(exc)})
+        except Exception as e:
+            log.error("balances_reconciliation_failed", extra={"error": str(e)})
+            report["balances"] = {"error": str(e)}
 
-        # 4) Consistency checks
-        try:
-            checks = await self._consistency_checks()
-            report["consistency"] = checks
-            # сигнализируем о критичных несоответствиях
-            if checks.get("duplicate_orders", []):
-                report["discrepancies"].append({"type": "duplicate_client_order_id", "count": len(checks["duplicate_orders"])})
-        except Exception as exc:
-            report["consistency_error"] = str(exc)
-
-        report["status"] = "OK" if not report["discrepancies"] else "DISCREPANCIES_FOUND"
-        report["requires_action"] = bool(report["discrepancies"])
+        # Итог
+        if report["discrepancies"]:
+            report["status"] = "DISCREPANCIES_FOUND"
+            report["requires_action"] = True
+        else:
+            report["requires_action"] = False
         return report
 
-    async def _consistency_checks(self) -> Dict[str, Any]:
-        conn = self.c.storage.conn
-        res: Dict[str, Any] = {}
+    async def check_only(self) -> Dict[str, Any]:
+        """Санити-проверки БД без общения с биржей."""
+        checks: Dict[str, Any] = {}
 
-        # 1) позиция как сумма сделок
+        # 1. Сумма trades = позиция (если есть таблица trades)
         try:
-            q = """
-            SELECT side, SUM(amount) AS total
-            FROM trades
-            WHERE symbol = ?
-            GROUP BY side
-            """
-            rows = conn.execute(q, (self.symbol,)).fetchall()
+            cur = self.container.storage.conn.execute(
+                "SELECT side, SUM(amount) as total FROM trades WHERE symbol = ? GROUP BY side",
+                (self.symbol,),
+            )
+            rows = cur.fetchall()
             buys = sum(float(r[1]) for r in rows if r[0] == "buy")
             sells = sum(float(r[1]) for r in rows if r[0] == "sell")
-            calc_pos = buys - sells
-            stored_pos = float(self.c.storage.positions.get_base_qty(self.symbol) or 0.0)
-            res["position_consistency"] = {
-                "calculated": calc_pos,
-                "stored": stored_pos,
-                "match": abs(calc_pos - stored_pos) < 1e-8,
+            calculated = buys - sells
+            stored = float(self.container.storage.positions.get_base_qty(self.symbol) or 0)
+            checks["position_consistency"] = {
+                "calculated": calculated,
+                "stored": stored,
+                "match": abs(calculated - stored) < 1e-8,
             }
         except Exception:
-            # таблицы может не быть в ранних версиях схемы
-            res["position_consistency"] = {"skipped": True}
+            # таблицы может не быть — не считаем это фатальной ошибкой
+            checks["position_consistency"] = {"skipped": True}
 
-        # 2) просроченные idempotency-ключи
+        # 2. Просроченные idempotency_keys
         try:
-            expired = conn.execute(
+            expired = self.container.storage.conn.execute(
                 "SELECT COUNT(*) FROM idempotency_keys WHERE expires_at_ms < ?",
                 (now_ms(),),
             ).fetchone()[0]
-            res["expired_idempotency_keys"] = int(expired)
+            checks["expired_idempotency_keys"] = int(expired)
         except Exception:
-            res["expired_idempotency_keys"] = 0
+            checks["expired_idempotency_keys"] = "unknown"
 
-        # 3) дубликаты client_order_id
+        # 3. Дубли client_order_id
         try:
-            rows = conn.execute(
-                """
-                SELECT client_order_id, COUNT(*) AS cnt
-                FROM trades
-                WHERE client_order_id IS NOT NULL
-                GROUP BY client_order_id
-                HAVING cnt > 1
-                """
-            ).fetchall()
-            res["duplicate_orders"] = [{"client_order_id": r[0], "count": int(r[1])} for r in rows]
+            cur = self.container.storage.conn.execute(
+                "SELECT client_order_id, COUNT(*) as cnt FROM trades GROUP BY client_order_id HAVING cnt > 1"
+            )
+            dups = [{"client_order_id": r[0], "count": r[1]} for r in cur.fetchall()]
+            checks["duplicate_orders"] = dups
         except Exception:
-            res["duplicate_orders"] = []
+            checks["duplicate_orders"] = "unknown"
 
-        return res
+        return checks
 
 
-async def _run(argv: Optional[list] = None) -> int:
-    ap = argparse.ArgumentParser(description="Manual reconciliation tool")
-    ap.add_argument("--symbol", help="Override symbol from settings")
-    ap.add_argument("--auto-fix", action="store_true", help="Auto-fix discrepancies (local position)")
-    ap.add_argument("--format", choices=["json", "text"], default="text")
-    ap.add_argument("--check-only", action="store_true", help="Only run consistency checks")
-    args = ap.parse_args(argv)
+async def _async_main() -> int:
+    parser = argparse.ArgumentParser(description="Manual reconciliation tool")
+    parser.add_argument("--symbol", help="Override symbol from env")
+    parser.add_argument("--auto-fix", action="store_true", help="Auto-correct local position if mismatch")
+    parser.add_argument("--format", choices=["json", "text"], default="text")
+    parser.add_argument("--check-only", action="store_true", help="Run consistency checks only (no broker calls)")
+    args = parser.parse_args()
 
     c = build_container()
     if args.symbol:
+        # не меняем storage, просто используем символ при вызовах
         c.settings.SYMBOL = args.symbol
 
-    rec = ManualReconciler(c)
-
+    mr = ManualReconciler(c)
     if args.check_only:
-        result = await rec._consistency_checks()
+        result = await mr.check_only()
     else:
-        result = await rec.run_full(auto_fix=args.auto_fix)
+        result = await mr.run_full(auto_fix=args.auto_fix)
 
     if args.format == "json":
         print(json.dumps(result, indent=2, default=str))
     else:
+        # лаконичный текстовый отчёт
         print("\n" + "=" * 60)
-        print(f"RECONCILIATION REPORT - {result.get('symbol', 'UNKNOWN')}")
+        print(f"RECONCILIATION REPORT — {result.get('symbol','UNKNOWN')}")
         print("=" * 60)
+        if "orders" in result:
+            o = result["orders"]
+            if isinstance(o, dict) and "error" in o:
+                print(f"📦 ORDERS: ❌ {o['error']}")
+            else:
+                print(f"📦 ORDERS: open={o.get('open_orders',0)}")
+        if "positions" in result:
+            p = result["positions"]
+            if isinstance(p, dict) and "error" in p:
+                print(f"📊 POSITIONS: ❌ {p['error']}")
+            else:
+                print(f"📊 POSITIONS: local={p.get('local_base')} exchange={p.get('exchange_base')} diff={p.get('diff')}")
+        if "balances" in result:
+            b = result["balances"]
+            if isinstance(b, dict) and "error" in b:
+                print(f"💰 BALANCES: ❌ {b['error']}")
+            else:
+                print(f"💰 BALANCES: quote={b.get('free_quote')} base={b.get('free_base')}")
 
-        # Orders
-        o = result.get("orders", {})
-        print("\n📦 ORDERS:")
-        if "error" in o:
-            print(f"   ❌ Error: {o['error']}")
-        else:
-            print(f"   Open orders: {o.get('open_orders', 0)}")
-            if o.get("ids"):
-                print(f"   IDs: {', '.join(o['ids'])}")
-
-        # Positions
-        p = result.get("positions", {})
-        print("\n📊 POSITIONS:")
-        if "error" in p:
-            print(f"   ❌ Error: {p['error']}")
-        else:
-            print(f"   Local:    {p.get('local_base', 'N/A')}")
-            print(f"   Exchange: {p.get('exchange_base', 'N/A')}")
-            print(f"   Diff:     {p.get('diff', 'N/A')}")
-
-        # Balances
-        b = result.get("balances", {})
-        print("\n💰 BALANCES:")
-        if "error" in b:
-            print(f"   ❌ Error: {b['error']}")
-        else:
-            print(f"   Free quote: {b.get('free_quote', 'N/A')}")
-            print(f"   Free base:  {b.get('free_base', 'N/A')}")
-
-        # Discrepancies
         if result.get("discrepancies"):
             print("\n⚠️  DISCREPANCIES:")
             for d in result["discrepancies"]:
-                print(f"   - {d['type']}: {d}")
+                print("  -", d)
+        if result.get("actions_taken"):
+            print("\n✅ ACTIONS:")
+            for a in result["actions_taken"]:
+                print("  -", a)
 
-        # Consistency
-        cc = result.get("consistency", {})
-        if cc:
-            print("\n🧪 CONSISTENCY:")
-            print(f"   Position calc vs stored: {cc.get('position_consistency')}")
-            print(f"   Expired idempotency keys: {cc.get('expired_idempotency_keys')}")
-            if cc.get("duplicate_orders"):
-                print(f"   Duplicates: {len(cc['duplicate_orders'])}")
-
-        # Final
         print("\n" + "=" * 60)
-        print(f"STATUS: {result.get('status', 'OK')}")
-        if result.get("requires_action"):
-            print("⚠️  MANUAL INTERVENTION REQUIRED")
-        else:
-            print("✅ All systems reconciled successfully")
+        print("STATUS:", result.get("status", "UNKNOWN"))
         print("=" * 60 + "\n")
 
-    # аккуратное закрытие коннекта
-    try:
-        c.storage.conn.close()
-    except Exception:
-        pass
     return 0
 
 
+def main() -> int:
+    return asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(_run()))
+    raise SystemExit(main())
