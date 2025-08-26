@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from decimal import Decimal
+from typing import Any, Dict, Optional, Tuple
 
-from ..signals._build import build_market_context  # контекст остаётся
-from ..use_cases.evaluate import evaluate          # возвращает EvaluationResult
+from ..signals._build import build_market_context
+from ..use_cases.evaluate import evaluate
 from ..use_cases.place_order import (
     place_market_buy_quote,
     place_market_sell_base,
@@ -21,6 +22,36 @@ from ...utils.logging import get_logger
 _log = get_logger("use_cases.execute_trade")
 
 
+def _normalize_risk_result(res: Any) -> Tuple[bool, str]:
+    """
+    Нормализуем ответ риск-менеджера к (allowed: bool, reason: str).
+    Поддерживаем:
+      • dict: {"ok": bool, "reason": str} | {"allowed": bool, ...}
+      • tuple/list: (bool, reason?) ; (bool,) ; [bool, ...]
+      • объект с атрибутами ok/reason
+      • просто bool
+    """
+    try:
+        if isinstance(res, dict):
+            if "ok" in res or "allowed" in res:
+                allowed = bool(res.get("ok", res.get("allowed")))
+                reason = str(res.get("reason", "")) if res.get("reason") is not None else ""
+                return allowed, reason
+        if isinstance(res, (tuple, list)):
+            if len(res) == 0:
+                return False, ""
+            if len(res) == 1:
+                return bool(res[0]), ""
+            return bool(res[0]), ("" if res[1] is None else str(res[1]))
+        if hasattr(res, "ok"):
+            allowed = bool(getattr(res, "ok"))
+            reason = "" if getattr(res, "reason", None) is None else str(getattr(res, "reason"))
+            return allowed, reason
+        return bool(res), ""
+    except Exception:
+        return False, "risk_result_unparseable"
+
+
 async def execute_trade(
     *,
     symbol: str,
@@ -35,7 +66,7 @@ async def execute_trade(
     protective_exits: Optional[ProtectiveExits] = None,
     external: Optional[Dict[str, Any]] = None,
     force_action: Optional[str] = None,
-    force_amount: Optional[Any] = None,  # совместимость с вызывающей стороной
+    force_amount: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Единый шаг: evaluate → risk.check → place_order → exits.ensure (+метрики)."""
 
@@ -44,16 +75,41 @@ async def execute_trade(
     # 1) Сбор контекста + решение
     with timer("trade_eval_ms", {"symbol": symbol}):
         ctx = await build_market_context(symbol=symbol, broker=broker, storage=storage)
-        # Приводим к фактической сигнатуре evaluate(): возвращает EvaluationResult
         eval_res = await evaluate(symbol, storage=storage, broker=broker, bus=bus)
-        decision = force_action or eval_res.decision
+        decision = (force_action or eval_res.decision) or "hold"
         explain = {**eval_res.features, "context": ctx}
     inc("trade_decisions_total", {"decision": decision})
 
     # 2) Риски (если передан менеджер)
     if risk_manager is not None:
         with timer("trade_risk_ms", {"symbol": symbol}):
-            allowed, reason = await risk_manager.check(symbol=symbol, action=decision, evaluation=explain)
+            # Приводим к фактическому интерфейсу RiskManager.allow_order/check:
+            #   side: 'buy' | 'sell' | 'hold'
+            #   quote_amount/base_amount/ticker — по ситуации
+            quote_amount: Optional[Decimal] = None
+            base_amount: Optional[Decimal] = None
+            if decision == "buy":
+                quote_amount = Decimal(str(fixed_quote_amount))
+            elif decision == "sell":
+                try:
+                    base_amount = storage.positions.get_base_qty(symbol)
+                except Exception:
+                    base_amount = None
+            # по возможности передадим тикер (для спреда и маржи)
+            try:
+                ticker = await broker.fetch_ticker(symbol)
+            except Exception:
+                ticker = None  # risk-менеджер умеет работать и без тикера
+
+            risk_raw = await risk_manager.check(
+                symbol=symbol,
+                side=decision,
+                quote_amount=quote_amount,
+                base_amount=base_amount,
+                ticker=ticker,  # type: ignore[arg-type]
+            )
+            allowed, reason = _normalize_risk_result(risk_raw)
+
         if not allowed:
             inc("trade_blocked_total", {"reason": reason or "unknown"})
             await bus.publish(topics.RISK_BLOCKED, {"symbol": symbol, "decision": decision, "reason": reason}, key=symbol)

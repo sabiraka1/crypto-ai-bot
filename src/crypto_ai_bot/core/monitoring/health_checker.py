@@ -1,6 +1,3 @@
-## 2) `src/crypto_ai_bot/core/monitoring/health_checker.py` — ЗАМЕНА 1×1
-
-```python
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +10,7 @@ from ..events.bus import AsyncEventBus
 from ...utils.time import now_ms
 from ...utils.logging import get_logger
 
+
 _log = get_logger("health")
 
 
@@ -24,9 +22,9 @@ class HealthReport:
 
 
 class HealthChecker:
-    """Композитная проверка готовности: БД + шина + брокер (с таймаутом).
-
-    Если одна из проверок падает — /ready возвращает 503.
+    """
+    Композитная проверка готовности: БД + шина + брокер (с таймаутом).
+    Если одна из проверок падает — /ready должно возвращать 503.
     """
 
     def __init__(self, *, storage: Storage, broker: IBroker, bus: AsyncEventBus, broker_timeout_sec: float = 3.0) -> None:
@@ -57,7 +55,7 @@ class HealthChecker:
             cur = self._storage.conn.execute("SELECT 1")
             _ = cur.fetchone()
             cur.close()
-            # schema_migrations must exist
+            # meta-таблица миграций должна существовать
             self._storage.conn.execute("SELECT 1 FROM schema_migrations LIMIT 1")
             return True, None
         except Exception as exc:
