@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import List
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -46,7 +47,8 @@ class Settings:
     # режимы
     MODE: str = _str("MODE", "paper")  # paper|live
     EXCHANGE: str = _str("EXCHANGE", "gateio")
-    SYMBOL: str = _str("SYMBOL", "BTC/USDT")
+    SYMBOL: str = _str("SYMBOL", "BTC/USDT")  # backward‑compat
+    SYMBOLS_CSV: str = _str("SYMBOLS", "")   # новый способ: CSV список
 
     # API
     API_KEY: str = _str("API_KEY", "")
@@ -75,13 +77,12 @@ class Settings:
     PAPER_FEE_PCT: Decimal = _dec("PAPER_FEE_PCT", "0.001")
     PAPER_PRICE: Decimal = _dec("PAPER_PRICE", "100.0")
 
-    # risk manager (существующее + расширения)
+    # risk manager
     RISK_COOLDOWN_SEC: int = _int("RISK_COOLDOWN_SEC", 10)
     RISK_MAX_SPREAD_PCT: float = _float("RISK_MAX_SPREAD_PCT", 0.002)
     RISK_MAX_POSITION_BASE: Decimal = _dec("RISK_MAX_POSITION_BASE", "1.0")
     RISK_MAX_ORDERS_PER_HOUR: int = _int("RISK_MAX_ORDERS_PER_HOUR", 30)
     RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal = _dec("RISK_DAILY_LOSS_LIMIT_QUOTE", "1000")
-    # новые оценочные поля (используются для safety‑margin)
     RISK_FEE_PCT_EST: Decimal = _dec("RISK_FEE_PCT_EST", "0.001")
     RISK_SLIPPAGE_PCT_EST: Decimal = _dec("RISK_SLIPPAGE_PCT_EST", "0.001")
 
@@ -112,3 +113,11 @@ class Settings:
         if s.FIXED_AMOUNT <= 0:
             raise RuntimeError("CONFIG: FIXED_AMOUNT must be > 0")
         return s
+
+    # helper для мультисимвольности (CSV из SYMBOLS, иначе fallback на SYMBOL)
+    def get_symbols(self) -> List[str]:
+        raw = (self.SYMBOLS_CSV or "").strip()
+        if raw:
+            out = [s.strip() for s in raw.split(",") if s.strip()]
+            return out or ([self.SYMBOL] if self.SYMBOL else [])
+        return [self.SYMBOL] if self.SYMBOL else []

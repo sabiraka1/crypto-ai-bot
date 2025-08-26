@@ -4,7 +4,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Dict, List
 
 from ..core.settings import Settings
 from ..core.events.bus import AsyncEventBus
@@ -33,7 +33,8 @@ class Container:
     health: HealthChecker
     risk: RiskManager
     exits: ProtectiveExits
-    orchestrator: Orchestrator
+    orchestrators: Dict[str, Orchestrator]
+    orchestrator: Orchestrator  # совместимость: первый
     lock: Optional[InstanceLock] = None
 
 
@@ -52,11 +53,8 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
 def _create_broker_for_mode(settings: Settings) -> IBroker:
     mode = settings.MODE.lower()
     if mode == "paper":
-        balances = {"USDT": Decimal(str(settings.PAPER_INITIAL_BALANCE_USDT or 10000)),
-                    settings.SYMBOL.split("/")[0]: Decimal(str(getattr(settings, "PAPER_INITIAL_BALANCE_BASE", 0)))}
-        # простой ценовой фид из .env (см. .env.example → PAPER_PRICE)
-        price_feed = lambda: Decimal(str(settings.PAPER_PRICE or 100))  # noqa: E731
-        return PaperBroker(symbol=settings.SYMBOL, balances=balances, fee_rate=Decimal(str(settings.PAPER_FEE_PCT or 0)), price_feed=price_feed)
+        balances = {"USDT": Decimal("10000")}
+        return PaperBroker(symbol=settings.SYMBOL, balances=balances)
     elif mode == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
@@ -87,6 +85,8 @@ def build_container() -> Container:
             max_position_base=settings.RISK_MAX_POSITION_BASE,
             max_orders_per_hour=settings.RISK_MAX_ORDERS_PER_HOUR,
             daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
+            fee_pct_est=settings.RISK_FEE_PCT_EST,
+            slippage_pct_est=settings.RISK_SLIPPAGE_PCT_EST,
         ),
     )
     exits = ProtectiveExits(storage=storage, bus=bus)
@@ -102,16 +102,29 @@ def build_container() -> Container:
         except Exception as exc:
             _log.error("lock_init_failed", extra={"error": str(exc)})
 
-    orchestrator = Orchestrator(
-        symbol=settings.SYMBOL,
-        storage=storage,
-        broker=broker,
-        bus=bus,
-        risk=risk,
-        exits=exits,
-        health=health,
-        settings=settings,
-    )
+    # --- мультисимвольность ---
+    symbols: List[str] = settings.get_symbols()
+    if not symbols:
+        raise RuntimeError("No symbols configured: set SYMBOL or SYMBOLS in env")
+
+    orchestrators: Dict[str, Orchestrator] = {}
+    for sym in symbols:
+        orchestrators[sym] = Orchestrator(
+            symbol=sym,
+            storage=storage,
+            broker=broker,
+            bus=bus,
+            risk=risk,
+            exits=exits,
+            health=health,
+            settings=settings,
+            eval_interval_sec=settings.EVAL_INTERVAL_SEC,
+            exits_interval_sec=settings.EXITS_INTERVAL_SEC,
+            reconcile_interval_sec=settings.RECONCILE_INTERVAL_SEC,
+            watchdog_interval_sec=settings.WATCHDOG_INTERVAL_SEC,
+        )
+
+    first = orchestrators[symbols[0]]
 
     return Container(
         settings=settings,
@@ -121,6 +134,7 @@ def build_container() -> Container:
         health=health,
         risk=risk,
         exits=exits,
-        orchestrator=orchestrator,
+        orchestrators=orchestrators,
+        orchestrator=first,
         lock=lock,
     )
