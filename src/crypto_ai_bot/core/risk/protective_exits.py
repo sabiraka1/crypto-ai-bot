@@ -4,15 +4,25 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, Optional
 
-from ..storage.facade import Storage
-from ..brokers.base import IBroker
-from ..events.bus import AsyncEventBus
+from ..brokers.base import IBroker, OrderDTO
 from ..brokers.symbols import parse_symbol
-from ...utils.time import now_ms
+from ..storage.facade import Storage
+from ..events.bus import AsyncEventBus
 from ...utils.logging import get_logger
 from ...utils.ids import make_client_order_id
+from ...utils.time import now_ms
+
 
 _log = get_logger("risk.exits")
+
+
+@dataclass
+class ExitsPlan:
+    symbol: str
+    entry_price: Decimal
+    sl_price: Decimal
+    tp_price: Optional[Decimal]
+    ts_ms: int
 
 
 @dataclass
@@ -22,6 +32,8 @@ class ProtectiveExits:
 
     # внутреннее состояние по символам (entry/peak/idemp)
     _state: Dict[str, Dict[str, Decimal]] = field(default_factory=dict, init=False)
+    # in-memory планов по символам (если у вас уже есть персист — это не мешает)
+    _plans: Dict[str, ExitsPlan] = field(default_factory=dict, init=False)
 
     async def ensure(self, *, symbol: str, broker: IBroker, settings: "Settings") -> Optional[dict]:
         """Следит за позициями и при выполнении условий триггерит `market sell`.
@@ -108,3 +120,38 @@ class ProtectiveExits:
         except Exception as exc:
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(exc)})
             return {"error": str(exc)}
+
+    async def check_and_execute(self, *, symbol: str, broker: IBroker) -> Optional[OrderDTO]:
+        """
+        Проверяет достижение SL/TP и исполняет рыночный SELL при наличии позиции.
+        Возвращает OrderDTO, если исполнение произошло, иначе None.
+        """
+        plan = self._plans.get(symbol)
+        if not plan:
+            return None
+
+        # позиция: продаём только если есть база
+        pos = self.storage.positions.get_position(symbol)
+        base_qty = pos.base_qty or Decimal("0")
+        if base_qty <= 0:
+            return None
+
+        # текущее состояние рынка
+        t = await broker.fetch_ticker(symbol)
+        last = t.last or t.bid or t.ask
+        if not last or last <= 0:
+            return None
+
+        # Stop Loss
+        if plan.sl_price and last <= plan.sl_price:
+            cid = make_client_order_id("sl", symbol)
+            _log.warning("stop_loss_triggered", extra={"symbol": symbol, "price": str(last), "sl": str(plan.sl_price), "qty": str(base_qty)})
+            return await broker.create_market_sell_base(symbol=symbol, base_amount=base_qty, client_order_id=cid)
+
+        # Take Profit
+        if plan.tp_price and last >= plan.tp_price:
+            cid = make_client_order_id("tp", symbol)
+            _log.info("take_profit_triggered", extra={"symbol": symbol, "price": str(last), "tp": str(plan.tp_price), "qty": str(base_qty)})
+            return await broker.create_market_sell_base(symbol=symbol, base_amount=base_qty, client_order_id=cid)
+
+        return None

@@ -2,112 +2,92 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from threading import RLock
-from typing import Any, Dict, Tuple, FrozenSet, List
+from typing import Dict, Tuple, Optional
 
-# Потокобезопасный агрегатор метрик с экспортом в формат Prometheus.
-# API совместим с тестами и текущим кодом: inc(), observe(), timer(), snapshot(), render_prometheus().
+# Простой in-proc реестр метрик без внешних зависимостей.
+# Поддерживаем:
+#   - inc(name, labels)            -> Counter
+#   - gauge_set(name, value, ...)  -> Gauge
+#   - timer(name, labels)          -> Summary ( *_ms_sum / *_ms_count )
+#   - render_prometheus()          -> текст в формате Prometheus
+#   - render_metrics_json()        -> JSON-дамп всех метрик
 
-_lock = RLock()
+# Внутренние структуры: ключ — (metric_name, frozenset(sorted(labels.items()))).
+_COUNTERS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
+_GAUGES:  Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
+_SUM_MS:  Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
+_CNT:     Dict[Tuple[str, Tuple[Tuple[str, str], ...]], int]    = {}
 
-# name -> { labels_frozenset -> value(int) }
-_counters: Dict[str, Dict[FrozenSet[Tuple[str, str]], int]] = {}
-
-# name -> { labels_frozenset -> (count:int, sum:float) }
-_summaries: Dict[str, Dict[FrozenSet[Tuple[str, str]], Tuple[int, float]]] = {}
-
-
-def _norm_labels(labels: Dict[str, Any] | None) -> FrozenSet[Tuple[str, str]]:
+def _lbls(labels: Optional[dict]) -> Tuple[Tuple[str, str], ...]:
     if not labels:
-        return frozenset()
-    # сортируем ключи для стабильности вывода
-    return frozenset((str(k), str(v)) for k, v in sorted(labels.items(), key=lambda x: x[0]))
+        return tuple()
+    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
 
+def _key(name: str, labels: Optional[dict]) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+    return (str(name), _lbls(labels))
 
-def inc(name: str, labels: Dict[str, Any] | None = None, amount: int = 1, **kwargs: Any) -> None:
-    """Инкремент счётчика. Поддерживаем синоним value= для совместимости тестов."""
-    if "value" in kwargs:
-        try:
-            amount = int(kwargs["value"])  # type: ignore[assignment]
-        except Exception:
-            amount = 1
-    lab = _norm_labels(labels)
-    with _lock:
-        bucket = _counters.setdefault(name, {})
-        bucket[lab] = bucket.get(lab, 0) + int(amount)
+def inc(name: str, labels: Optional[dict] = None, value: float = 1.0) -> None:
+    k = _key(name, labels)
+    _COUNTERS[k] = _COUNTERS.get(k, 0.0) + float(value)
 
-
-def observe(name: str, value: float, labels: Dict[str, Any] | None = None) -> None:
-    lab = _norm_labels(labels)
-    with _lock:
-        bucket = _summaries.setdefault(name, {})
-        cnt, s = bucket.get(lab, (0, 0.0))
-        bucket[lab] = (cnt + 1, s + float(value))
-
+def gauge_set(name: str, value: float, labels: Optional[dict] = None) -> None:
+    _GAUGES[_key(name, labels)] = float(value)
 
 @contextmanager
-def timer(name: str, labels: Dict[str, Any] | None = None):
-    """Измеряет время в секундах и пишет в summary (name)."""
+def timer(name: str, labels: Optional[dict] = None):
     t0 = time.perf_counter()
     try:
         yield
     finally:
-        dt = (time.perf_counter() - t0)
-        observe(name, dt, labels)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        k = _key(name, labels)
+        _SUM_MS[k] = _SUM_MS.get(k, 0.0) + dt_ms
+        _CNT[k] = _CNT.get(k, 0) + 1
 
+def _fmt_labels(labels: Tuple[Tuple[str, str], ...]) -> str:
+    if not labels:
+        return ""
+    inner = ",".join(f'{k}="{v}"' for k, v in labels)
+    return "{" + inner + "}"
 
-def snapshot() -> Dict[str, Any]:
-    """Снимок метрик для JSON/отладки. Формат стабилен для тестов."""
-    with _lock:
-        out: Dict[str, Any] = {"counters": {}, "histograms": {}}
-        # counters
-        for name, series in _counters.items():
-            items: List[Dict[str, Any]] = []
-            for lab, val in series.items():
-                items.append({
-                    "labels": {k: v for k, v in lab},
-                    "value": float(val),
-                })
-            out["counters"][name] = items
-        # summaries
-        for name, series in _summaries.items():
-            items = []
-            for lab, (cnt, s) in series.items():
-                items.append({
-                    "labels": {k: v for k, v in lab},
-                    "count": float(cnt),
-                    "sum": float(s),
-                })
-            out["histograms"][name] = items
-        return out
-
+def _sanitize(name: str) -> str:
+    # Prometheus: только [a-zA-Z0-9:_]
+    out = []
+    for ch in name:
+        out.append(ch if (ch.isalnum() or ch in [":", "_"]) else "_")
+    return "".join(out)
 
 def render_prometheus() -> str:
-    """Экспорт в text exposition format (Prometheus)."""
-    lines: list[str] = []
-
-    with _lock:
-        # counters
-        for name, series in _counters.items():
-            lines.append(f"# TYPE {name} counter")
-            for lab, val in series.items():
-                if lab:
-                    lab_s = ",".join(f'{k}="{v}"' for k, v in lab)
-                    lines.append(f'{name}{{{lab_s}}} {val}')
-                else:
-                    lines.append(f"{name} {val}")
-
-        # summaries (count & sum)
-        for name, series in _summaries.items():
-            lines.append(f"# TYPE {name} summary")
-            for lab, (cnt, s) in series.items():
-                if lab:
-                    lab_s = ",".join(f'{k}="{v}"' for k, v in lab)
-                    lines.append(f'{name}_count{{{lab_s}}} {cnt}')
-                    lines.append(f'{name}_sum{{{lab_s}}} {s}')
-                else:
-                    lines.append(f"{name}_count {cnt}")
-                    lines.append(f"{name}_sum {s}")
-
-    # Требуемый медиатип: text/plain; version=0.0.4
+    # Counters
+    lines = []
+    for (name, labels), val in _COUNTERS.items():
+        n = _sanitize(name)
+        lines.append(f"{n}{_fmt_labels(labels)} {val}")
+    # Gauges
+    for (name, labels), val in _GAUGES.items():
+        n = _sanitize(name)
+        lines.append(f"{n}{_fmt_labels(labels)} {val}")
+    # Timers -> *_ms_sum / *_ms_count
+    for (name, labels), s in _SUM_MS.items():
+        n = _sanitize(name)  # ожидаем имя вида "orchestrator_cycle_ms"
+        c = _CNT.get((name, labels), 0)
+        lines.append(f"{n}_sum{_fmt_labels(labels)} {s}")
+        lines.append(f"{n}_count{_fmt_labels(labels)} {c}")
     return "\n".join(lines) + "\n"
+
+def render_metrics_json() -> dict:
+    to_key = lambda pair: {k: v for k, v in pair}
+    return {
+        "counters": [
+            {"name": n, "labels": to_key(l), "value": v}
+            for (n, l), v in _COUNTERS.items()
+        ],
+        "gauges": [
+            {"name": n, "labels": to_key(l), "value": v}
+            for (n, l), v in _GAUGES.items()
+        ],
+        "timers": [
+            {"name": n, "labels": to_key(l), "sum_ms": _SUM_MS[(n, l)], "count": _CNT.get((n, l), 0)}
+            for (n, l) in _SUM_MS.keys()
+        ],
+    }
