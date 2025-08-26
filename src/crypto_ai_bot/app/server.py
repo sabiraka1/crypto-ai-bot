@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import time
+from decimal import Decimal
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, APIRouter, Request, Depends, HTTPException, Body
+from fastapi import FastAPI, APIRouter, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -21,10 +22,8 @@ app.state.container = build_container()
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
-# --- простейший rate-limit (in-memory per endpoint+ip) ------------------------
-_RL: Dict[str, List[float]] = {}  # key -> timestamps
-
-
+# ---- простой in-memory rate-limit (per endpoint+ip) -------------------------
+_RL: Dict[str, List[float]] = {}
 def rate_limit(key: str, max_calls: int, per_sec: float) -> None:
     now = time.monotonic()
     window_start = now - per_sec
@@ -39,7 +38,6 @@ def rate_limit(key: str, max_calls: int, per_sec: float) -> None:
         raise HTTPException(status_code=429, detail="Too Many Requests")
     arr.append(now)
 
-
 async def auth_opt(credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
     """Bearer token (опционально). Если API_TOKEN задан — требуем совпадение."""
     token_required = os.getenv("API_TOKEN")
@@ -50,16 +48,14 @@ async def auth_opt(credentials: HTTPAuthorizationCredentials = Depends(security)
     if credentials.credentials != token_required:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-
-# --- lifecycle ----------------------------------------------------------------
+# ---- lifecycle ---------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
     c = app.state.container
     _log.info("server_start", extra={"mode": c.settings.MODE, "symbol": c.settings.SYMBOL})
-    # автозапуск оркестратора можно контролировать env/настройкой (по умолчанию не запускаем)
-    if os.getenv("AUTO_START", "0") in {"1", "true", "yes"}:
+    # автозапуск оркестратора по переменной окружения (по умолчанию OFF)
+    if os.getenv("AUTO_START", "0").lower() in {"1", "true", "yes"}:
         c.orchestrator.start()
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -74,15 +70,27 @@ async def shutdown_event():
             pass
     _log.info("server_stop")
 
+# ---- liveness / readiness / health / metrics --------------------------------
+@router.get("/live")
+async def live() -> Dict[str, Any]:
+    return {"ok": True, "ts_ms": now_ms()}
 
-# --- endpoints ----------------------------------------------------------------
+@router.get("/ready")
+async def ready() -> JSONResponse:
+    try:
+        c = app.state.container
+        rep = await c.health.check(symbol=c.settings.SYMBOL)
+        return JSONResponse(status_code=(200 if rep.ok else 503),
+                            content={"ok": rep.ok, "components": rep.components, "ts_ms": rep.ts_ms})
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
+
 @router.get("/health")
 async def health() -> JSONResponse:
     c = app.state.container
     rep = await c.health.check(symbol=c.settings.SYMBOL)
-    payload = {"ok": rep.ok, "ts_ms": rep.ts_ms, "components": rep.components}
-    return JSONResponse(status_code=(200 if rep.ok else 503), content=payload)
-
+    return JSONResponse(status_code=(200 if rep.ok else 503),
+                        content={"ok": rep.ok, "ts_ms": rep.ts_ms, "components": rep.components})
 
 @router.get("/metrics", response_class=PlainTextResponse)
 async def metrics() -> str:
@@ -92,12 +100,11 @@ async def metrics() -> str:
         data = render_metrics_json()
         return "# metrics_fallback\n" + str(data) + "\n"
 
-
+# ---- orchestrator mgmt -------------------------------------------------------
 @router.get("/orchestrator/status")
 async def orchestrator_status(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
     c = app.state.container
     return {"ok": True, "status": c.orchestrator.status()}
-
 
 @router.post("/orchestrator/start")
 async def orchestrator_start(request: Request, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
@@ -109,7 +116,6 @@ async def orchestrator_start(request: Request, _: Any = Depends(auth_opt)) -> Di
     c.orchestrator.start()
     return {"ok": True, "message": "started", "status": c.orchestrator.status()}
 
-
 @router.post("/orchestrator/stop")
 async def orchestrator_stop(request: Request, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
     rate_limit(f"stop:{request.client.host}", max_calls=2, per_sec=60.0)
@@ -117,7 +123,7 @@ async def orchestrator_stop(request: Request, _: Any = Depends(auth_opt)) -> Dic
     await c.orchestrator.stop()
     return {"ok": True, "message": "stopped", "status": c.orchestrator.status()}
 
-
+# ---- simple data views -------------------------------------------------------
 @router.get("/positions")
 async def get_positions(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
     c = app.state.container
@@ -132,20 +138,24 @@ async def get_positions(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
         "unrealized_pnl": str(unreal),
     }
 
-
 @router.get("/trades")
 async def get_trades(limit: int = 100, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
     c = app.state.container
     rows = c.storage.trades.list_recent(c.settings.SYMBOL, limit)
     return {"trades": rows, "total": len(rows)}
 
-
 @router.get("/performance")
 async def performance(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
     c = app.state.container
     trades = c.storage.trades.list_today(c.settings.SYMBOL)
-    realized = sum(Decimal(r["cost"]) if r["side"] == "sell" else Decimal("0") for r in trades)  # грубо
+    realized = sum(Decimal(r["cost"]) if r["side"] == "sell" else Decimal("0") for r in trades)
     return {"total_trades": len(trades), "realized_quote": str(realized)}
 
+# ---- optional routers --------------------------------------------------------
+try:
+    from .adapters import telegram as telegram_adapter  # type: ignore
+    app.include_router(telegram_adapter.router)
+except Exception:
+    _log.info("telegram_adapter_not_loaded")
 
 app.include_router(router)
