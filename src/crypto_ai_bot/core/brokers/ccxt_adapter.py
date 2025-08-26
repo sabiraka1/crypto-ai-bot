@@ -36,20 +36,17 @@ async def _retry(
     last_exc: Optional[BaseException] = None
     for i in range(1, attempts + 1):
         try:
-            with timer("broker_call_ms", {**labels, "op": op, "try": str(i)}):
+            with timer("broker_call_ms", {"op": op, **labels, "try": str(i)}):
                 return await fn()
-        except Exception as exc:  # классификация ошибок — мягкая
+        except Exception as exc:
             last_exc = exc
-            inc("broker_retries_total", {**labels, "op": op, "try": str(i)})
-            # Rate limits/сетевые — явно транзиентные, остальное — условно
+            inc("broker_retries_total", {"op": op, **labels, "try": str(i)})
             is_transient = True
-            if hasattr(ccxt or object(), "RateLimitExceeded") and isinstance(exc, getattr(ccxt, "RateLimitExceeded")):  # type: ignore
+            if hasattr(ccxt or object(), "RateLimitExceeded") and isinstance(exc, getattr(ccxt, "RateLimitExceeded")):
                 is_transient = True
-            # последняя попытка — пробрасываем
             if i == attempts or not is_transient:
                 break
             await asyncio.sleep((base_delay_ms * (factor ** (i - 1))) / 1000.0)
-    # оборачиваем в TransientError для верхнего уровня
     raise TransientError(str(last_exc) if last_exc else f"{op} failed")
 
 
@@ -80,7 +77,7 @@ class CcxtBroker(IBroker):
         })
         if self.sandbox and hasattr(self._ex, "set_sandbox_mode"):
             try:
-                await self._ex.set_sandbox_mode(True)  # async‑версия
+                await self._ex.set_sandbox_mode(True)
             except Exception:
                 pass
 
@@ -118,7 +115,6 @@ class CcxtBroker(IBroker):
         if self.dry_run:
             p = Decimal("100")
             return TickerDTO(symbol=symbol, last=p, bid=p - Decimal("0.1"), ask=p + Decimal("0.1"), timestamp=now)
-
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
         await self._ensure_markets()
         t = await _retry("fetch_ticker", labels, lambda: self._ex.fetch_ticker(ex_symbol))
@@ -203,6 +199,13 @@ class CcxtBroker(IBroker):
         await self._ensure_markets()
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
         return await _retry("fetch_open_orders", labels, lambda: self._ex.fetch_open_orders(ex_symbol))
+
+    async def close(self) -> None:
+        try:
+            if self._ex and hasattr(self._ex, "close"):
+                await self._ex.close()
+        except Exception:
+            pass
 
     def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
         status = str(o.get("status") or "open")

@@ -37,6 +37,8 @@ class Container:
     lock: Optional[InstanceLock] = None
 
 
+# --- helpers ------------------------------------------------------------------
+
 def _create_storage_for_mode(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
     conn = sqlite3.connect(db_path)
@@ -50,16 +52,11 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
 def _create_broker_for_mode(settings: Settings) -> IBroker:
     mode = settings.MODE.lower()
     if mode == "paper":
-        balances = {
-            settings.SYMBOL.split("/")[1]: settings.PAPER_INITIAL_BALANCE_USDT,
-            settings.SYMBOL.split("/")[0]: settings.PAPER_INITIAL_BALANCE_BASE,
-        }
-        return PaperBroker(
-            symbol=settings.SYMBOL,
-            balances=balances,
-            fee_rate=settings.PAPER_FEE_PCT,
-            price_feed=lambda: settings.PAPER_PRICE,
-        )
+        balances = {"USDT": Decimal(str(settings.PAPER_INITIAL_BALANCE_USDT or 10000)),
+                    settings.SYMBOL.split("/")[0]: Decimal(str(getattr(settings, "PAPER_INITIAL_BALANCE_BASE", 0)))}
+        # простой ценовой фид из .env (см. .env.example → PAPER_PRICE)
+        price_feed = lambda: Decimal(str(settings.PAPER_PRICE or 100))  # noqa: E731
+        return PaperBroker(symbol=settings.SYMBOL, balances=balances, fee_rate=Decimal(str(settings.PAPER_FEE_PCT or 0)), price_feed=price_feed)
     elif mode == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
@@ -72,6 +69,8 @@ def _create_broker_for_mode(settings: Settings) -> IBroker:
     else:
         raise ValueError(f"Unknown MODE={settings.MODE}")
 
+
+# --- public -------------------------------------------------------------------
 
 def build_container() -> Container:
     settings = Settings.load()
