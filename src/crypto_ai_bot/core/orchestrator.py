@@ -54,14 +54,17 @@ class Orchestrator:
         self._stopping = False
 
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
-        self._recon_orders = OrdersReconciler(self.broker, self.symbol)
+        self._recon_orders = OrdersReconciler(self.broker, self.symbol, ttl_sec=int(getattr(self.settings, "ORDER_AUTO_CANCEL_TTL_SEC", 120)))
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
+        # тики
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
         self._tasks["exits"] = loop.create_task(self._exits_loop(), name="orc-exits")
         self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name="orc-reconcile")
         self._tasks["watchdog"] = loop.create_task(self._watchdog_loop(), name="orc-watchdog")
+        # one‑shot warm‑up (сверка сразу после старта)
+        self._tasks["warmup"] = loop.create_task(self._warmup_once(), name="orc-warmup")
 
     async def stop(self) -> None:
         if not self._tasks:
@@ -74,9 +77,30 @@ class Orchestrator:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         finally:
             self._tasks.clear()
+            # корректно закрываем брокера, если поддерживает close()
+            try:
+                close_coro = getattr(self.broker, "close", None)
+                if callable(close_coro):
+                    maybe = close_coro()
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+            except Exception as exc:
+                get_logger("orchestrator").error("broker_close_failed", extra={"error": str(exc)})
 
     def status(self) -> dict:
         return {"running": bool(self._tasks), "tasks": {k: (not v.done()) for k, v in self._tasks.items()}, "last_beat_ms": self._last_beat_ms}
+
+    async def _warmup_once(self) -> None:
+        # мягкая начальная сверка: balances/positions/orders
+        try:
+            if self._recon_bal:
+                await self._recon_bal.run_once()
+            if self._recon_pos:
+                await self._recon_pos.run_once()
+            if self._recon_orders:
+                await self._recon_orders.run_once()
+        except Exception as exc:
+            get_logger("orchestrator.warmup").error("warmup_failed", extra={"error": str(exc)})
 
     async def _eval_loop(self) -> None:
         while not self._stopping:

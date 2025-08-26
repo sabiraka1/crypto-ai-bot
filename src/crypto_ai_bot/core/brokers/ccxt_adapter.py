@@ -108,7 +108,6 @@ class CcxtBroker(IBroker):
         if not self.cb_enabled:
             return
         self._cb_errors_ms.clear()
-        # авто‑закрытие по таймауту — просто ждём истечения _cb_open_until_ms
 
     async def _cb_call(self, op: str, labels: Dict[str, str], fn: Callable[[], Awaitable[Any]]) -> Any:
         self._cb_check_open(labels)
@@ -273,6 +272,22 @@ class CcxtBroker(IBroker):
         await self._ensure_markets()
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
         return await self._cb_call("fetch_open_orders", labels, lambda: self._ex.fetch_open_orders(ex_symbol))
+
+    async def cancel_order(self, symbol: str, order_id: str) -> Any:
+        """Отмена ордера для сверки по TTL. Если биржа не поддерживает — пробуем best‑effort."""
+        if self.dry_run:
+            return {"id": order_id, "status": "canceled"}
+        ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        await self._ensure_exchange()
+        await self._ensure_markets()
+        labels = {"exchange": self.exchange_id, "symbol": ex_symbol, "op": "cancel"}
+        try:
+            res = await self._cb_call("cancel_order", labels, lambda: self._ex.cancel_order(order_id, ex_symbol))
+            inc("orders_canceled_total", labels)
+            return res
+        except Exception as exc:
+            self._log.error("cancel_order_failed", extra={"symbol": symbol, "order_id": order_id, "error": str(exc)})
+            raise
 
     async def close(self) -> None:
         try:

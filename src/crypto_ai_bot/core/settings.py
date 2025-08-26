@@ -75,12 +75,15 @@ class Settings:
     PAPER_FEE_PCT: Decimal = _dec("PAPER_FEE_PCT", "0.001")
     PAPER_PRICE: Decimal = _dec("PAPER_PRICE", "100.0")
 
-    # risk manager (существующие поля — оставляем)
+    # risk manager (существующее + расширения)
     RISK_COOLDOWN_SEC: int = _int("RISK_COOLDOWN_SEC", 10)
     RISK_MAX_SPREAD_PCT: float = _float("RISK_MAX_SPREAD_PCT", 0.002)
     RISK_MAX_POSITION_BASE: Decimal = _dec("RISK_MAX_POSITION_BASE", "1.0")
     RISK_MAX_ORDERS_PER_HOUR: int = _int("RISK_MAX_ORDERS_PER_HOUR", 30)
     RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal = _dec("RISK_DAILY_LOSS_LIMIT_QUOTE", "1000")
+    # новые оценочные поля (используются для safety‑margin)
+    RISK_FEE_PCT_EST: Decimal = _dec("RISK_FEE_PCT_EST", "0.001")
+    RISK_SLIPPAGE_PCT_EST: Decimal = _dec("RISK_SLIPPAGE_PCT_EST", "0.001")
 
     # Protective Exits
     EXITS_ENABLED: bool = _bool("EXITS_ENABLED", True)
@@ -95,7 +98,8 @@ class Settings:
     CB_WINDOW_SEC: int = _int("CB_WINDOW_SEC", 30)
     CB_COOLDOWN_SEC: int = _int("CB_COOLDOWN_SEC", 60)
 
-    # иные настройки — по мере необходимости
+    # Orders TTL auto‑cancel
+    ORDER_AUTO_CANCEL_TTL_SEC: int = _int("ORDER_AUTO_CANCEL_TTL_SEC", 120)
 
     @classmethod
     def load(cls) -> "Settings":
