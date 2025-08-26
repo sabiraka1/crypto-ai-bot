@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN
 import asyncio
 from typing import Optional, Dict, Any, List, Callable, Awaitable
@@ -59,9 +59,66 @@ class CcxtBroker(IBroker):
     sandbox: bool = False
     dry_run: bool = True
 
+    # TTL для обновления справочника рынков (по умолчанию 10 минут)
+    markets_refresh_ttl_ms: int = 10 * 60 * 1000
+
+    # Circuit Breaker (безопасные дефолты)
+    cb_enabled: bool = True
+    cb_threshold: int = 5           # ошибок за окно → открыть CB
+    cb_window_sec: int = 30         # окно учёта ошибок
+    cb_cooldown_sec: int = 60       # сколько держать CB открытым
+
     _ex: Any = None
     _markets_loaded: bool = False
+    _markets_loaded_at_ms: Optional[int] = None
     _log = get_logger("broker.ccxt")
+
+    # CB состояние
+    _cb_open_until_ms: Optional[int] = field(default=None, init=False)
+    _cb_errors_ms: List[int] = field(default_factory=list, init=False)
+
+    # ---------------- internal ----------------
+    def _cb_prune(self) -> None:
+        if not self._cb_errors_ms:
+            return
+        cutoff = now_ms() - self.cb_window_sec * 1000
+        self._cb_errors_ms = [t for t in self._cb_errors_ms if t >= cutoff]
+
+    def _cb_check_open(self, labels: Dict[str, str]) -> None:
+        if not self.cb_enabled:
+            return
+        now = now_ms()
+        if self._cb_open_until_ms and now < self._cb_open_until_ms:
+            inc("cb_blocked_calls_total", labels)
+            raise TransientError("circuit_open")
+
+    def _cb_on_failure(self, labels: Dict[str, str]) -> None:
+        if not self.cb_enabled:
+            return
+        self._cb_prune()
+        self._cb_errors_ms.append(now_ms())
+        self._cb_prune()
+        if len(self._cb_errors_ms) >= max(1, int(self.cb_threshold)):
+            self._cb_open_until_ms = now_ms() + max(1, int(self.cb_cooldown_sec)) * 1000
+            self._cb_errors_ms.clear()
+            self._log.error("circuit_open", extra=labels)
+            inc("cb_open_total", labels)
+
+    def _cb_on_success(self) -> None:
+        if not self.cb_enabled:
+            return
+        self._cb_errors_ms.clear()
+        # авто‑закрытие по таймауту — просто ждём истечения _cb_open_until_ms
+
+    async def _cb_call(self, op: str, labels: Dict[str, str], fn: Callable[[], Awaitable[Any]]) -> Any:
+        self._cb_check_open(labels)
+        try:
+            res = await _retry(op, labels, fn)
+            self._cb_on_success()
+            return res
+        except Exception:
+            self._cb_on_failure(labels)
+            raise
 
     async def _ensure_exchange(self) -> None:
         if self.dry_run or self._ex is not None:
@@ -81,17 +138,29 @@ class CcxtBroker(IBroker):
             except Exception:
                 pass
 
-    async def _ensure_markets(self) -> None:
+    async def _ensure_markets(self, *, force: bool = False) -> None:
         if self.dry_run:
             self._markets_loaded = True
+            self._markets_loaded_at_ms = now_ms()
+            return
+        if force:
+            try:
+                await self._ex.load_markets()
+                self._markets_loaded = True
+                self._markets_loaded_at_ms = now_ms()
+            except Exception as exc:
+                self._log.error("load_markets_failed", extra={"error": str(exc)})
             return
         if not self._markets_loaded:
             await self._ensure_exchange()
-            try:
-                await self._ex.load_markets()
-            except Exception:
-                pass
-            self._markets_loaded = True
+            await self._ensure_markets(force=True)
+            return
+        if self._markets_loaded_at_ms is None:
+            await self._ensure_markets(force=True)
+            return
+        age = now_ms() - self._markets_loaded_at_ms
+        if age >= max(60_000, int(self.markets_refresh_ttl_ms)):
+            await self._ensure_markets(force=True)
 
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
         if self.dry_run:
@@ -116,8 +185,9 @@ class CcxtBroker(IBroker):
             p = Decimal("100")
             return TickerDTO(symbol=symbol, last=p, bid=p - Decimal("0.1"), ask=p + Decimal("0.1"), timestamp=now)
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
+        await self._ensure_exchange()
         await self._ensure_markets()
-        t = await _retry("fetch_ticker", labels, lambda: self._ex.fetch_ticker(ex_symbol))
+        t = await self._cb_call("fetch_ticker", labels, lambda: self._ex.fetch_ticker(ex_symbol))
         last = Decimal(str(t.get("last") or t.get("close") or 0))
         bid = Decimal(str(t.get("bid") or last or 0))
         ask = Decimal(str(t.get("ask") or last or 0))
@@ -129,8 +199,9 @@ class CcxtBroker(IBroker):
         if self.dry_run:
             return BalanceDTO(free_quote=Decimal("100000"), free_base=Decimal("0"))
         labels = {"exchange": self.exchange_id, "symbol": symbol}
+        await self._ensure_exchange()
         await self._ensure_markets()
-        b = await _retry("fetch_balance", labels, lambda: self._ex.fetch_balance())
+        b = await self._cb_call("fetch_balance", labels, lambda: self._ex.fetch_balance())
         free = (b or {}).get("free", {})
         fq = Decimal(str(free.get(p.quote, 0)))
         fb = Decimal(str(free.get(p.base, 0)))
@@ -144,6 +215,7 @@ class CcxtBroker(IBroker):
         if ask <= 0:
             raise TransientError("ticker ask is not available")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        await self._ensure_exchange()
         await self._ensure_markets()
         info = self._market_info(ex_symbol)
         p_amount = int(info["precision"]["amount"])  # precision для amount
@@ -164,7 +236,7 @@ class CcxtBroker(IBroker):
                 amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
             )
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol, "side": "buy"}
-        order = await _retry("create_order", labels, lambda: self._ex.create_order(ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id}))
+        order = await self._cb_call("create_order", labels, lambda: self._ex.create_order(ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id}))
         inc("orders_sent_total", labels)
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
@@ -172,6 +244,7 @@ class CcxtBroker(IBroker):
         if base_amount <= 0:
             raise ValidationError("base_amount must be > 0")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        await self._ensure_exchange()
         await self._ensure_markets()
         info = self._market_info(ex_symbol)
         p_amount = int(info["precision"]["amount"])  # precision для amount
@@ -188,7 +261,7 @@ class CcxtBroker(IBroker):
                 amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
             )
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol, "side": "sell"}
-        order = await _retry("create_order", labels, lambda: self._ex.create_order(ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id}))
+        order = await self._cb_call("create_order", labels, lambda: self._ex.create_order(ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id}))
         inc("orders_sent_total", labels)
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
@@ -196,9 +269,10 @@ class CcxtBroker(IBroker):
         if self.dry_run:
             return []
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        await self._ensure_exchange()
         await self._ensure_markets()
         labels = {"exchange": self.exchange_id, "symbol": ex_symbol}
-        return await _retry("fetch_open_orders", labels, lambda: self._ex.fetch_open_orders(ex_symbol))
+        return await self._cb_call("fetch_open_orders", labels, lambda: self._ex.fetch_open_orders(ex_symbol))
 
     async def close(self) -> None:
         try:

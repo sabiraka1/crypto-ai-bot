@@ -3,126 +3,108 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Dict, Any
-
-from .validators.settings import validate_settings
 
 
-def _getenv_str(name: str, default: str = "") -> str:
-    return os.getenv(name, default)
+def _bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-def _getenv_int(name: str, default: int) -> int:
+
+def _int(name: str, default: int) -> int:
+    v = os.getenv(name)
     try:
-        return int(os.getenv(name, str(default)))
+        return int(str(v)) if v is not None else default
     except Exception:
         return default
 
-def _getenv_bool(name: str, default: bool = False) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return val.strip().lower() in ("1", "true", "yes", "y", "on")
 
-def _getenv_dec(name: str, default: str) -> Decimal:
+def _float(name: str, default: float) -> float:
+    v = os.getenv(name)
     try:
-        return Decimal(os.getenv(name, default))
+        return float(str(v)) if v is not None else default
     except Exception:
-        return Decimal(default)
+        return default
+
+
+def _str(name: str, default: str = "") -> str:
+    v = os.getenv(name)
+    return str(v) if v is not None else default
+
+
+def _dec(name: str, default: str | float) -> Decimal:
+    v = os.getenv(name)
+    try:
+        return Decimal(str(v)) if v is not None else Decimal(str(default))
+    except Exception:
+        return Decimal(str(default))
 
 
 @dataclass
 class Settings:
-    MODE: str
-    EXCHANGE: str
-    SYMBOL: str
-    API_KEY: str
-    API_SECRET: str
-    SANDBOX: bool
+    # режимы
+    MODE: str = _str("MODE", "paper")  # paper|live
+    EXCHANGE: str = _str("EXCHANGE", "gateio")
+    SYMBOL: str = _str("SYMBOL", "BTC/USDT")
 
-    FIXED_AMOUNT: Decimal
-    DB_PATH: str
-    SERVER_PORT: int
+    # API
+    API_KEY: str = _str("API_KEY", "")
+    API_SECRET: str = _str("API_SECRET", "")
+    SANDBOX: bool = _bool("SANDBOX", False)
 
-    IDEMPOTENCY_BUCKET_MS: int
-    IDEMPOTENCY_TTL_SEC: int
+    # торговые параметры
+    FIXED_AMOUNT: float = _float("FIXED_AMOUNT", 100.0)
 
     # интервалы оркестратора
-    EVAL_INTERVAL_SEC: float
-    EXITS_INTERVAL_SEC: float
-    RECONCILE_INTERVAL_SEC: float
-    WATCHDOG_INTERVAL_SEC: float
+    EVAL_INTERVAL_SEC: float = _float("EVAL_INTERVAL_SEC", 60)
+    EXITS_INTERVAL_SEC: float = _float("EXITS_INTERVAL_SEC", 5)
+    RECONCILE_INTERVAL_SEC: float = _float("RECONCILE_INTERVAL_SEC", 60)
+    WATCHDOG_INTERVAL_SEC: float = _float("WATCHDOG_INTERVAL_SEC", 15)
 
-    # risk
-    RISK_COOLDOWN_SEC: int
-    RISK_MAX_SPREAD_PCT: float
-    RISK_MAX_POSITION_BASE: Decimal
-    RISK_MAX_ORDERS_PER_HOUR: int
-    RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal
+    # идемпотентность
+    IDEMPOTENCY_BUCKET_MS: int = _int("IDEMPOTENCY_BUCKET_MS", 60_000)
+    IDEMPOTENCY_TTL_SEC: int = _int("IDEMPOTENCY_TTL_SEC", 600)
 
-    # paper/live расширения
-    PAPER_INITIAL_BALANCE_USDT: Decimal
-    PAPER_INITIAL_BALANCE_BASE: Decimal
-    PAPER_FEE_PCT: Decimal
-    PAPER_PRICE: Decimal
+    # БД
+    DB_PATH: str = _str("DB_PATH", "./data/crypto_ai_bot.sqlite3")
 
-    LIVE_MAX_QUOTE_AMOUNT: Decimal
+    # paper broker
+    PAPER_INITIAL_BALANCE_USDT: Decimal = _dec("PAPER_INITIAL_BALANCE_USDT", "10000")
+    PAPER_INITIAL_BALANCE_BASE: Decimal = _dec("PAPER_INITIAL_BALANCE_BASE", "0")
+    PAPER_FEE_PCT: Decimal = _dec("PAPER_FEE_PCT", "0.001")
+    PAPER_PRICE: Decimal = _dec("PAPER_PRICE", "100.0")
 
-    # reconciler
-    RECON_CANCEL_TTL_SEC: int
-    RECON_WRITEBACK_POSITIONS: bool
+    # risk manager (существующие поля — оставляем)
+    RISK_COOLDOWN_SEC: int = _int("RISK_COOLDOWN_SEC", 10)
+    RISK_MAX_SPREAD_PCT: float = _float("RISK_MAX_SPREAD_PCT", 0.002)
+    RISK_MAX_POSITION_BASE: Decimal = _dec("RISK_MAX_POSITION_BASE", "1.0")
+    RISK_MAX_ORDERS_PER_HOUR: int = _int("RISK_MAX_ORDERS_PER_HOUR", 30)
+    RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal = _dec("RISK_DAILY_LOSS_LIMIT_QUOTE", "1000")
 
-    # Telegram (опц.)
-    TELEGRAM_ENABLED: bool
-    TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_CHAT_ID: str
+    # Protective Exits
+    EXITS_ENABLED: bool = _bool("EXITS_ENABLED", True)
+    EXITS_MODE: str = _str("EXITS_MODE", "both")  # hard|trailing|both
+    EXITS_HARD_STOP_PCT: float = _float("EXITS_HARD_STOP_PCT", 0.05)
+    EXITS_TRAILING_PCT: float = _float("EXITS_TRAILING_PCT", 0.03)
+    EXITS_MIN_BASE_TO_EXIT: Decimal = _dec("EXITS_MIN_BASE_TO_EXIT", "0.0")
 
-    @staticmethod
-    def load() -> "Settings":
-        return Settings(
-            MODE=_getenv_str("MODE", "paper"),
-            EXCHANGE=_getenv_str("EXCHANGE", "gateio"),
-            SYMBOL=_getenv_str("SYMBOL", "BTC/USDT"),
-            API_KEY=_getenv_str("API_KEY", ""),
-            API_SECRET=_getenv_str("API_SECRET", ""),
-            SANDBOX=_getenv_bool("SANDBOX", False),
+    # Circuit Breaker (для CCXT)
+    CB_ENABLED: bool = _bool("CB_ENABLED", True)
+    CB_THRESHOLD: int = _int("CB_THRESHOLD", 5)
+    CB_WINDOW_SEC: int = _int("CB_WINDOW_SEC", 30)
+    CB_COOLDOWN_SEC: int = _int("CB_COOLDOWN_SEC", 60)
 
-            FIXED_AMOUNT=_getenv_dec("FIXED_AMOUNT", "10"),
-            DB_PATH=_getenv_str("DB_PATH", "./db.sqlite"),
-            SERVER_PORT=_getenv_int("SERVER_PORT", 8000),
+    # иные настройки — по мере необходимости
 
-            IDEMPOTENCY_BUCKET_MS=_getenv_int("IDEMPOTENCY_BUCKET_MS", 60000),
-            IDEMPOTENCY_TTL_SEC=_getenv_int("IDEMPOTENCY_TTL_SEC", 120),
-
-            EVAL_INTERVAL_SEC=float(os.getenv("EVAL_INTERVAL_SEC", "60")),
-            EXITS_INTERVAL_SEC=float(os.getenv("EXITS_INTERVAL_SEC", "5")),
-            RECONCILE_INTERVAL_SEC=float(os.getenv("RECONCILE_INTERVAL_SEC", "60")),
-            WATCHDOG_INTERVAL_SEC=float(os.getenv("WATCHDOG_INTERVAL_SEC", "15")),
-
-            RISK_COOLDOWN_SEC=_getenv_int("RISK_COOLDOWN_SEC", 60),
-            RISK_MAX_SPREAD_PCT=float(os.getenv("RISK_MAX_SPREAD_PCT", "0.002")),
-            RISK_MAX_POSITION_BASE=_getenv_dec("RISK_MAX_POSITION_BASE", "10"),
-            RISK_MAX_ORDERS_PER_HOUR=_getenv_int("RISK_MAX_ORDERS_PER_HOUR", 12),
-            RISK_DAILY_LOSS_LIMIT_QUOTE=_getenv_dec("RISK_DAILY_LOSS_LIMIT_QUOTE", "100"),
-
-            PAPER_INITIAL_BALANCE_USDT=_getenv_dec("PAPER_INITIAL_BALANCE_USDT", "10000"),
-            PAPER_INITIAL_BALANCE_BASE=_getenv_dec("PAPER_INITIAL_BALANCE_BASE", "0"),
-            PAPER_FEE_PCT=_getenv_dec("PAPER_FEE_PCT", "0.001"),
-            PAPER_PRICE=_getenv_dec("PAPER_PRICE", "100"),
-
-            LIVE_MAX_QUOTE_AMOUNT=_getenv_dec("LIVE_MAX_QUOTE_AMOUNT", "100"),
-
-            RECON_CANCEL_TTL_SEC=_getenv_int("RECON_CANCEL_TTL_SEC", 600),
-            RECON_WRITEBACK_POSITIONS=_getenv_bool("RECON_WRITEBACK_POSITIONS", False),
-
-            TELEGRAM_ENABLED=_getenv_bool("TELEGRAM_ENABLED", False),
-            TELEGRAM_BOT_TOKEN=_getenv_str("TELEGRAM_BOT_TOKEN", ""),
-            TELEGRAM_CHAT_ID=_getenv_str("TELEGRAM_CHAT_ID", ""),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return self.__dict__.copy()
-
-    def validate(self) -> None:
-        errors = validate_settings(self)
-        if errors:
-            raise ValueError("Invalid settings: " + "; ".join(errors))
+    @classmethod
+    def load(cls) -> "Settings":
+        s = cls()
+        # Базовые проверки (fail‑fast по минимуму)
+        if s.MODE.lower() == "live" and not s.API_KEY:
+            raise RuntimeError("CONFIG: API_KEY is required in live mode")
+        if s.IDEMPOTENCY_BUCKET_MS <= 0:
+            raise RuntimeError("CONFIG: IDEMPOTENCY_BUCKET_MS must be > 0")
+        if s.FIXED_AMOUNT <= 0:
+            raise RuntimeError("CONFIG: FIXED_AMOUNT must be > 0")
+        return s

@@ -1,220 +1,110 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, Optional, Any
+from typing import Dict, Optional
 
 from ..storage.facade import Storage
+from ..brokers.base import IBroker
 from ..events.bus import AsyncEventBus
+from ..brokers.symbols import parse_symbol
 from ...utils.time import now_ms
 from ...utils.logging import get_logger
-from ...utils.metrics import timer, inc
+from ...utils.ids import make_client_order_id
+
+_log = get_logger("risk.exits")
 
 
 @dataclass
-class ExitsConfig:
-    """
-    Конфигурация защитных выходов:
-    - sl_pct: размер стоп-лосса в долях (0.01 = 1%)
-    - tp_pct: размер тейк-профита в долях (0.02 = 2%); 0 = без TP
-    Значения по умолчанию безопасные и не требуют ENV.
-    """
-    sl_pct: Decimal = Decimal("0.01")
-    tp_pct: Decimal = Decimal("0.02")
-
-
-@dataclass
-class ExitsPlan:
-    """
-    План защитных выходов, рассчитанный от цены входа.
-    Хранится in-memory (идемпотентно формируется при наличии позиции).
-    """
-    symbol: str
-    entry_price: Decimal
-    sl_price: Decimal
-    tp_price: Optional[Decimal]  # может быть None, если tp_pct == 0
-    ts_ms: int
-
-
 class ProtectiveExits:
-    """
-    ProtectiveExits 1.1
+    storage: Storage
+    bus: AsyncEventBus
 
-    ▶ Назначение:
-      - Идемпотентно держит актуальный план SL/TP для каждой пары с позицией.
-      - НЕ размещает стоп/лимит заявки у биржи (для этого в IBroker нет методов);
-        оркестратор/стратегия могут использовать план, чтобы принимать решения,
-        а sell выполняется через обычный рыночный путь create_market_sell_base.
+    # внутреннее состояние по символам (entry/peak/idemp)
+    _state: Dict[str, Dict[str, Decimal]] = field(default_factory=dict, init=False)
 
-    ▶ Совместимость:
-      - Сигнатуры не менялись; bus опционален.
-      - Не требует ENV. При желании значения можно пробросить из Settings через compose.
+    async def ensure(self, *, symbol: str, broker: IBroker, settings: "Settings") -> Optional[dict]:
+        """Следит за позициями и при выполнении условий триггерит `market sell`.
 
-    ▶ Метрики:
-      - exits_ensure_ms — латентность ensure()
-      - exits_set_total — план создан/обновлён
-      - exits_already_ok_total — план уже актуален
-      - exits_cleared_total — план очищён (позиция закрыта)
-      - exits_skip_no_entry_total — нет входной цены — план не сформирован
-    """
-
-    def __init__(
-        self,
-        *,
-        storage: Storage,
-        bus: Optional[AsyncEventBus] = None,
-        config: Optional[ExitsConfig] = None,
-    ) -> None:
-        self._log = get_logger("risk.exits")
-        self._storage = storage
-        self._bus = bus
-        self._cfg = config or ExitsConfig()
-        # in-memory планы по символам
-        self._plans: Dict[str, ExitsPlan] = {}
-
-    # ---------- публичное API ----------
-
-    def current_plan(self, symbol: str) -> Optional[ExitsPlan]:
-        """Возвращает текущий план (если есть)."""
-        return self._plans.get(symbol)
-
-    async def ensure(self, *, symbol: str) -> Optional[ExitsPlan]:
-        """
-        Идемпотентно гарантирует, что для текущей открытой позиции есть план SL/TP.
-        - Если позиции нет → план очищается, если был.
-        - Если позиция есть → рассчитываем/обновляем план от входной цены.
-        """
-        with timer("exits_ensure_ms", {"symbol": symbol}, unit="ms"):
-            pos = self._safe_get_position(symbol)
-
-            # 1) Нет позиции → очищаем план, если он был
-            if not pos or not self._positive(pos.get("base_qty", 0)):
-                if symbol in self._plans:
-                    self._plans.pop(symbol, None)
-                    inc("exits_cleared_total", {"symbol": symbol})
-                    self._log.info("exits_cleared", extra={"symbol": symbol})
-                return None
-
-            # 2) Определяем входную цену
-            entry_price = self._detect_entry_price(symbol, pos)
-            if entry_price is None or entry_price <= 0:
-                # Без входной цены план не формируем — избежим ложных SL/TP
-                inc("exits_skip_no_entry_total", {"symbol": symbol})
-                self._log.info("exits_skip_no_entry", extra={"symbol": symbol, "pos": pos})
-                return None
-
-            # 3) Рассчитываем SL/TP
-            plan = self._build_plan(symbol, entry_price)
-
-            # 4) Идемпотентность: если новый план равен старому — ничего не делаем
-            old = self._plans.get(symbol)
-            if old and self._equal_plans(old, plan):
-                inc("exits_already_ok_total", {"symbol": symbol})
-                return old
-
-            # 5) Обновляем план и публикуем событие
-            self._plans[symbol] = plan
-            inc("exits_set_total", {"symbol": symbol})
-            self._log.info("exits_updated", extra={"symbol": symbol, "plan": asdict(plan)})
-
-            if self._bus:
-                try:
-                    await self._bus.publish(
-                        topic="protective_exit.updated",
-                        payload={"symbol": symbol, "plan": asdict(plan)},
-                        key=symbol,
-                    )
-                except Exception as exc:
-                    self._log.error("publish_failed", extra={"symbol": symbol, "error": str(exc)})
-
-            return plan
-
-    # ---------- утилиты / внутренняя логика ----------
-
-    def _build_plan(self, symbol: str, entry_price: Decimal) -> ExitsPlan:
-        sl = (entry_price * (Decimal("1.0") - self._cfg.sl_pct)).quantize(Decimal("0.00000001"))
-        tp: Optional[Decimal] = None
-        if self._cfg.tp_pct and self._cfg.tp_pct > 0:
-            tp = (entry_price * (Decimal("1.0") + self._cfg.tp_pct)).quantize(Decimal("0.00000001"))
-        return ExitsPlan(
-            symbol=symbol,
-            entry_price=entry_price,
-            sl_price=sl,
-            tp_price=tp,
-            ts_ms=now_ms(),
-        )
-
-    @staticmethod
-    def _equal_plans(a: ExitsPlan, b: ExitsPlan) -> bool:
-        # Сравнение с учётом округления
-        return (
-            a.symbol == b.symbol
-            and a.entry_price == b.entry_price
-            and a.sl_price == b.sl_price
-            and (a.tp_price or Decimal("0")) == (b.tp_price or Decimal("0"))
-        )
-
-    def _detect_entry_price(self, symbol: str, pos: Dict[str, Any]) -> Optional[Decimal]:
-        """
-        Пытаемся определить «цену входа» из известных полей позиции.
-        Поддерживаем несколько возможных вариантов названий, чтобы не быть хрупкими.
-        Если ничего нет — возвращаем None (ensure() корректно обработает).
-        """
-        # Наиболее вероятные имена в разных реализациях:
-        candidates = [
-            "avg_entry_price",
-            "avg_price",
-            "entry_price",
-            "avg_quote_per_base",
-            "price",
-        ]
-        for name in candidates:
-            v = pos.get(name)
-            if self._positive(v):
-                try:
-                    return Decimal(str(v))
-                except Exception:
-                    pass
-
-        # Попытка вычислить (если доступны cost/base_qty)
-        cost = pos.get("cost_quote")
-        base = pos.get("base_qty")
-        if self._positive(cost) and self._positive(base):
-            try:
-                return (Decimal(str(cost)) / Decimal(str(base)))
-            except Exception:
-                return None
-        return None
-
-    def _safe_get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """
-        Получает позицию из storage и приводит к dict с минимальным набором ключей:
-        { base_qty: Decimal/float, ...возможные поля со средней ценой... }
+        Работает в режиме long-only для spot. Идемпотентен за счёт client_order_id по бакетам времени.
         """
         try:
-            p = self._storage.positions.get_position(symbol)
-        except Exception:
-            return None
-        if p is None:
-            return None
-        # поддерживаем dataclass/obj/dict
-        if isinstance(p, dict):
-            return p
-        d: Dict[str, Any] = {}
-        for attr in ("base_qty", "avg_entry_price", "avg_price", "entry_price", "avg_quote_per_base", "price", "cost_quote"):
-            if hasattr(p, attr):
-                d[attr] = getattr(p, attr)
-        # часто есть геттер get_base_qty(...)
-        if "base_qty" not in d:
-            try:
-                d["base_qty"] = self._storage.positions.get_base_qty(symbol)
-            except Exception:
-                pass
-        return d
+            pos = self.storage.positions.get_position(symbol)
+            base_qty: Decimal = pos.base_qty or Decimal("0")
+        except Exception as exc:
+            _log.error("exits_read_position_failed", extra={"error": str(exc)})
+            return {"error": str(exc)}
 
-    @staticmethod
-    def _positive(x: Any) -> bool:
+        if base_qty <= 0:
+            # позиция закрыта — сбрасываем локальное состояние
+            self._state.pop(symbol, None)
+            return None
+
+        # параметры из Settings (безопасные дефолты)
+        if not getattr(settings, "EXITS_ENABLED", True):
+            return None
+        mode = (getattr(settings, "EXITS_MODE", "both") or "both").lower()  # hard|trailing|both
+        hard_pct = Decimal(str(getattr(settings, "EXITS_HARD_STOP_PCT", 0.05)))
+        trail_pct = Decimal(str(getattr(settings, "EXITS_TRAILING_PCT", 0.03)))
+        min_base = Decimal(str(getattr(settings, "EXITS_MIN_BASE_TO_EXIT", "0.00000000")))
+        bucket_ms = int(getattr(settings, "IDEMPOTENCY_BUCKET_MS", 60_000))
+
+        if min_base and base_qty < min_base:
+            return None
+
+        t = await broker.fetch_ticker(symbol)
+        last = t.last
+
+        st = self._state.setdefault(symbol, {})
+        # entry устанавливаем на первом вызове при наличии позиции
+        if "entry" not in st:
+            st["entry"] = Decimal(last)
+            st["peak"] = Decimal(last)
+        # обновляем пик
+        st["peak"] = max(Decimal(last), st.get("peak", Decimal(last)))
+
+        should_sell = False
+        reason = None
+
+        if mode in ("hard", "both"):
+            hard_stop_price = st["entry"] * (Decimal("1") - hard_pct)
+            if last <= hard_stop_price:
+                should_sell = True
+                reason = f"hard_stop_{hard_pct}"
+
+        if not should_sell and mode in ("trailing", "both"):
+            trail_price = st["peak"] * (Decimal("1") - trail_pct)
+            if last <= trail_price:
+                should_sell = True
+                reason = f"trailing_{trail_pct}"
+
+        if not should_sell:
+            return None
+
+        # идемпотентный client_order_id по бакету времени
+        bucket = (now_ms() // bucket_ms) * bucket_ms
+        client_id = make_client_order_id("exits", f"{symbol}:{reason}:{bucket}")
+
         try:
-            return x is not None and float(x) > 0
-        except Exception:
-            return False
+            order = await broker.create_market_sell_base(
+                symbol=symbol,
+                base_amount=base_qty,
+                client_order_id=client_id,
+            )
+            payload = {
+                "symbol": symbol,
+                "base_sold": str(base_qty),
+                "price": str(last),
+                "reason": reason,
+                "order_id": getattr(order, "id", None),
+                "client_order_id": client_id,
+                "ts": now_ms(),
+            }
+            await self.bus.publish("protective_exit.triggered", payload, key=symbol)
+            _log.error("protective_exit_triggered", extra=payload)
+            # сбрасываем локальное состояние после выхода
+            self._state.pop(symbol, None)
+            return payload
+        except Exception as exc:
+            _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(exc)})
+            return {"error": str(exc)}

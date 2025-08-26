@@ -1,4 +1,4 @@
-rom __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
@@ -17,7 +17,6 @@ from ..reconciliation.positions import PositionsReconciler
 from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
 from ...utils.logging import get_logger
-from ...utils.metrics import inc, timer
 
 
 @dataclass
@@ -48,14 +47,12 @@ class Orchestrator:
     _recon_pos: Optional[PositionsReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
-    # --- lifecycle ---
     def start(self) -> None:
         if self._tasks:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
 
-        # safety/reconcile
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
         self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
@@ -77,41 +74,26 @@ class Orchestrator:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         finally:
             self._tasks.clear()
-            # корректно закрываем брокера, если он поддерживает close()
-            try:
-                close_coro = getattr(self.broker, "close", None)
-                if callable(close_coro):
-                    maybe = close_coro()
-                    if asyncio.iscoroutine(maybe):
-                        await maybe
-            except Exception as exc:
-                get_logger("orchestrator").error("broker_close_failed", extra={"error": str(exc)})
 
     def status(self) -> dict:
         return {"running": bool(self._tasks), "tasks": {k: (not v.done()) for k, v in self._tasks.items()}, "last_beat_ms": self._last_beat_ms}
 
-    # --- loops ---
     async def _eval_loop(self) -> None:
         while not self._stopping:
             try:
-                with timer("orchestrator_eval_ms", {"symbol": self.symbol}):
-                    res = await eval_and_execute(
-                        symbol=self.symbol,
-                        storage=self.storage,
-                        broker=self.broker,
-                        bus=self.bus,
-                        exchange=self.settings.EXCHANGE,
-                        fixed_quote_amount=self.settings.FIXED_AMOUNT,
-                        idempotency_bucket_ms=self.settings.IDEMPOTENCY_BUCKET_MS,
-                        idempotency_ttl_sec=self.settings.IDEMPOTENCY_TTL_SEC,
-                        force_action=self.force_eval_action,
-                        risk_manager=self.risk,
-                        protective_exits=self.exits,
-                    )
-                    if isinstance(res, dict) and res.get("executed"):
-                        inc("orchestrator_ticks_total", {"status": "executed"})
-                    else:
-                        inc("orchestrator_ticks_total", {"status": "skipped"})
+                await eval_and_execute(
+                    symbol=self.symbol,
+                    storage=self.storage,
+                    broker=self.broker,
+                    bus=self.bus,
+                    exchange=self.settings.EXCHANGE,
+                    fixed_quote_amount=self.settings.FIXED_AMOUNT,
+                    idempotency_bucket_ms=self.settings.IDEMPOTENCY_BUCKET_MS,
+                    idempotency_ttl_sec=self.settings.IDEMPOTENCY_TTL_SEC,
+                    force_action=self.force_eval_action,
+                    risk_manager=self.risk,
+                    protective_exits=self.exits,
+                )
                 if self._dms:
                     self._dms.beat()
             except Exception as exc:
@@ -123,7 +105,7 @@ class Orchestrator:
             try:
                 pos = self.storage.positions.get_position(self.symbol)
                 if pos.base_qty and pos.base_qty > 0:
-                    await self.exits.ensure(symbol=self.symbol)
+                    await self.exits.ensure(symbol=self.symbol, broker=self.broker, settings=self.settings)
             except Exception as exc:
                 get_logger("orchestrator.exits").error("ensure_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.exits_interval_sec)
@@ -151,7 +133,6 @@ class Orchestrator:
                 if self._recon_bal:
                     await self._recon_bal.run_once()
 
-                inc("reconcile_runs_total")
             except Exception as exc:
                 get_logger("orchestrator.reconcile").error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
