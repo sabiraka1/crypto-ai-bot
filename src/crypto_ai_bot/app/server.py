@@ -1,145 +1,151 @@
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from typing import Any, Dict
+import os
+import time
+from typing import Any, Dict, List
 
-from fastapi import FastAPI, Request, Response, status
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi import FastAPI, APIRouter, Request, Depends, HTTPException, Body
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.metrics import render_prometheus
-from crypto_ai_bot.core.analytics.metrics import render_metrics_json
+from ..utils.logging import get_logger
+from ..utils.metrics import render_prometheus, render_metrics_json, inc
+from ..utils.time import now_ms
 from .compose import build_container
 
-log = get_logger("server")
+_log = get_logger("server")
+
+app = FastAPI(title="crypto-ai-bot", version="1.0.0")
+app.state.container = build_container()
+
+router = APIRouter()
+security = HTTPBearer(auto_error=False)
+
+# --- простейший rate-limit (in-memory per endpoint+ip) ------------------------
+_RL: Dict[str, List[float]] = {}  # key -> timestamps
 
 
-# ------------------ Жизненный цикл ------------------
+def rate_limit(key: str, max_calls: int, per_sec: float) -> None:
+    now = time.monotonic()
+    window_start = now - per_sec
+    arr = _RL.setdefault(key, [])
+    # drop old
+    i = 0
+    while i < len(arr) and arr[i] < window_start:
+        i += 1
+    if i:
+        del arr[:i]
+    if len(arr) >= max_calls:
+        raise HTTPException(status_code=429, detail="Too Many Requests")
+    arr.append(now)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # startup
-    app.state.container = build_container()
+
+async def auth_opt(credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
+    """Bearer token (опционально). Если API_TOKEN задан — требуем совпадение."""
+    token_required = os.getenv("API_TOKEN")
+    if not token_required:
+        return
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if credentials.credentials != token_required:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# --- lifecycle ----------------------------------------------------------------
+@app.on_event("startup")
+async def startup_event():
     c = app.state.container
+    _log.info("server_start", extra={"mode": c.settings.MODE, "symbol": c.settings.SYMBOL})
+    # автозапуск оркестратора можно контролировать env/настройкой (по умолчанию не запускаем)
+    if os.getenv("AUTO_START", "0") in {"1", "true", "yes"}:
+        c.orchestrator.start()
 
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    c = app.state.container
     try:
-        orch = getattr(c, "orchestrator", None)
-        if orch:
-            orch.start()
-        else:
-            orchestrators: Dict[str, Any] = getattr(c, "orchestrators", {}) or {}
-            for o in orchestrators.values():
-                o.start()
-        yield
+        await c.orchestrator.stop()
     finally:
+        await c.bus.close()
         try:
-            orch = getattr(c, "orchestrator", None)
-            if orch:
-                await orch.stop()
-            else:
-                orchestrators: Dict[str, Any] = getattr(c, "orchestrators", {}) or {}
-                for o in orchestrators.values():
-                    await o.stop()
-        except Exception as exc:
-            log.warning("shutdown_failed", extra={"error": str(exc)})
-        app.state.container = None
-
-
-app = FastAPI(title="crypto-ai-bot", version="1.0.0", lifespan=lifespan)
-
-
-# ------------------ Базовые проверки ------------------
-
-@app.get("/live")
-async def live() -> Dict[str, Any]:
-    return {"ok": True}
-
-
-@app.get("/ready")
-async def ready() -> JSONResponse:
-    c = app.state.container
-    if not c:
-        return JSONResponse(status_code=503, content={"ok": False, "reason": "no_container"})
-    try:
-        rep = await c.health.check(symbol=c.settings.SYMBOL)
-
-        # Проверка heartbeat оркестратора
-        try:
-            st = c.orchestrator.status()
-            if st.get("running") and st.get("last_beat_ms", 0) > 0:
-                if now_ms() - int(st["last_beat_ms"]) > 15_000:
-                    return JSONResponse(
-                        status_code=503,
-                        content={"ok": False, "reason": "stale_heartbeat", "status": st}
-                    )
+            c.storage.conn.close()
         except Exception:
             pass
-
-        return JSONResponse(status_code=(200 if rep.ok else 503),
-                            content={"ok": rep.ok, "ts_ms": rep.ts_ms})
-    except Exception as exc:
-        log.error("ready_failed", extra={"error": str(exc)})
-        return JSONResponse(status_code=503, content={"ok": False})
+    _log.info("server_stop")
 
 
-@app.get("/health")
+# --- endpoints ----------------------------------------------------------------
+@router.get("/health")
 async def health() -> JSONResponse:
     c = app.state.container
-    if not c:
-        return JSONResponse(status_code=503, content={"ok": False, "reason": "no_container"})
     rep = await c.health.check(symbol=c.settings.SYMBOL)
-    payload = {
-        "ok": rep.ok,
-        "ts_ms": rep.ts_ms,
-        "db_ok": bool(rep.components.get("db", False)),
-        "components": rep.components,
-    }
+    payload = {"ok": rep.ok, "ts_ms": rep.ts_ms, "components": rep.components}
     return JSONResponse(status_code=(200 if rep.ok else 503), content=payload)
 
 
-@app.get("/status")
-async def status_endpoint() -> Dict[str, Any]:
-    c = app.state.container
-    if not c:
-        return {"running": False}
-    orch = getattr(c, "orchestrator", None)
-    if orch:
-        return {"running": True, "orchestrators": {"default": orch.status()}}
-    orchestrators: Dict[str, Any] = getattr(c, "orchestrators", {}) or {}
-    return {"running": bool(orchestrators),
-            "orchestrators": {k: v.status() for k, v in orchestrators.items()}}
-
-
-# ------------------ Метрики ------------------
-
-@app.get("/metrics", response_class=PlainTextResponse)
+@router.get("/metrics", response_class=PlainTextResponse)
 async def metrics() -> str:
     try:
         return render_prometheus()
     except Exception:
         data = render_metrics_json()
-        return "# metrics fallback\n" + str(data) + "\n"
+        return "# metrics_fallback\n" + str(data) + "\n"
 
 
-# ------------------ Управление оркестратором ------------------
-
-@app.post("/orchestrator/start")
-async def orchestrator_start(request: Request):
-    c = request.app.state.container
-    c.orchestrator.start()
+@router.get("/orchestrator/status")
+async def orchestrator_status(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
+    c = app.state.container
     return {"ok": True, "status": c.orchestrator.status()}
 
 
-@app.post("/orchestrator/stop")
-async def orchestrator_stop(request: Request):
+@router.post("/orchestrator/start")
+async def orchestrator_start(request: Request, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
+    rate_limit(f"start:{request.client.host}", max_calls=1, per_sec=60.0)
+    c = request.app.state.container
+    st = c.orchestrator.status()
+    if st.get("running"):
+        return {"ok": True, "message": "already_running", "status": st}
+    c.orchestrator.start()
+    return {"ok": True, "message": "started", "status": c.orchestrator.status()}
+
+
+@router.post("/orchestrator/stop")
+async def orchestrator_stop(request: Request, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
+    rate_limit(f"stop:{request.client.host}", max_calls=2, per_sec=60.0)
     c = request.app.state.container
     await c.orchestrator.stop()
-    return {"ok": True, "status": c.orchestrator.status()}
+    return {"ok": True, "message": "stopped", "status": c.orchestrator.status()}
 
 
-@app.get("/orchestrator/status")
-async def orchestrator_status(request: Request):
-    c = request.app.state.container
-    return {"ok": True, "status": c.orchestrator.status()}
+@router.get("/positions")
+async def get_positions(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
+    c = app.state.container
+    pos = c.storage.positions.get_position(c.settings.SYMBOL)
+    t = await c.broker.fetch_ticker(c.settings.SYMBOL)
+    unreal = (t.last - (pos.avg_entry_price or 0)) * (pos.base_qty or 0)
+    return {
+        "symbol": c.settings.SYMBOL,
+        "base_qty": str(pos.base_qty),
+        "avg_price": str(pos.avg_entry_price),
+        "current_price": str(t.last),
+        "unrealized_pnl": str(unreal),
+    }
+
+
+@router.get("/trades")
+async def get_trades(limit: int = 100, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
+    c = app.state.container
+    rows = c.storage.trades.list_recent(c.settings.SYMBOL, limit)
+    return {"trades": rows, "total": len(rows)}
+
+
+@router.get("/performance")
+async def performance(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
+    c = app.state.container
+    trades = c.storage.trades.list_today(c.settings.SYMBOL)
+    realized = sum(Decimal(r["cost"]) if r["side"] == "sell" else Decimal("0") for r in trades)  # грубо
+    return {"total_trades": len(trades), "realized_quote": str(realized)}
+
+
+app.include_router(router)

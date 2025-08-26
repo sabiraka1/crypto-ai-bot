@@ -4,52 +4,31 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
-from ..signals._build import build_market_context
-from ..use_cases.evaluate import evaluate
-from ..use_cases.place_order import (
-    place_market_buy_quote,
-    place_market_sell_base,
-)
+from ..brokers.base import IBroker, OrderDTO
+from ..events.bus import AsyncEventBus
 from ..risk.manager import RiskManager
 from ..risk.protective_exits import ProtectiveExits
-from ..events.bus import AsyncEventBus
-from ..events import topics
-from ..brokers.base import IBroker
 from ..storage.facade import Storage
-from ...utils.metrics import inc, timer
+from ..strategies.manager import StrategyManager
+from ..strategies.base import StrategyContext
+from ..brokers.symbols import parse_symbol
 from ...utils.logging import get_logger
+from ...utils.ids import make_client_order_id
+from ...utils.time import now_ms
+from .partial_fills import PartialFillHandler
 
-_log = get_logger("use_cases.execute_trade")
+_log = get_logger("usecase.execute")
 
 
-def _normalize_risk_result(res: Any) -> Tuple[bool, str]:
-    """
-    Нормализуем ответ риск-менеджера к (allowed: bool, reason: str).
-    Поддерживаем:
-      • dict: {"ok": bool, "reason": str} | {"allowed": bool, ...}
-      • tuple/list: (bool, reason?) ; (bool,) ; [bool, ...]
-      • объект с атрибутами ok/reason
-      • просто bool
-    """
-    try:
-        if isinstance(res, dict):
-            if "ok" in res or "allowed" in res:
-                allowed = bool(res.get("ok", res.get("allowed")))
-                reason = str(res.get("reason", "")) if res.get("reason") is not None else ""
-                return allowed, reason
-        if isinstance(res, (tuple, list)):
-            if len(res) == 0:
-                return False, ""
-            if len(res) == 1:
-                return bool(res[0]), ""
-            return bool(res[0]), ("" if res[1] is None else str(res[1]))
-        if hasattr(res, "ok"):
-            allowed = bool(getattr(res, "ok"))
-            reason = "" if getattr(res, "reason", None) is None else str(getattr(res, "reason"))
-            return allowed, reason
-        return bool(res), ""
-    except Exception:
-        return False, "risk_result_unparseable"
+async def build_market_context(*, broker: IBroker, symbol: str) -> Dict[str, Any]:
+    t = await broker.fetch_ticker(symbol)
+    spread = float((t.ask - t.bid) / t.last * 100) if t.last and t.ask and t.bid else 0.0
+    return {"ticker": {"last": t.last, "bid": t.bid, "ask": t.ask, "timestamp": t.timestamp}, "spread": spread}
+
+
+async def evaluate(*, manager: StrategyManager, symbol: str, exchange: str, ctx: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    d, e = manager.decide(symbol=symbol, exchange=exchange, context=ctx, mode="first")
+    return d, e
 
 
 async def execute_trade(
@@ -59,102 +38,66 @@ async def execute_trade(
     broker: IBroker,
     bus: AsyncEventBus,
     exchange: str,
-    fixed_quote_amount,
+    fixed_quote_amount: Decimal,
     idempotency_bucket_ms: int,
     idempotency_ttl_sec: int,
+    force_action: Optional[str] = None,
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[ProtectiveExits] = None,
-    external: Optional[Dict[str, Any]] = None,
-    force_action: Optional[str] = None,
-    force_amount: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Единый шаг: evaluate → risk.check → place_order → exits.ensure (+метрики)."""
+    """Полный цикл исполнения одной попытки."""
+    # 1) market ctx + decision
+    ctx = await build_market_context(broker=broker, symbol=symbol)
+    manager = StrategyManager()
+    decision, explain = (force_action, {"reason": "forced"}) if force_action else await evaluate(manager=manager, symbol=symbol, exchange=exchange, ctx=ctx)
 
-    external = external or {}
+    # 2) risk checks
+    if risk_manager:
+        ok, reason = await risk_manager.check(symbol=symbol, action=decision, evaluation={"ctx": ctx, "explain": explain})
+        if not ok:
+            await bus.publish("trade.blocked", {"symbol": symbol, "reason": reason}, key=symbol)
+            return {"executed": False, "why": f"blocked:{reason}"}
 
-    # 1) Сбор контекста + решение
-    with timer("trade_eval_ms", {"symbol": symbol}):
-        ctx = await build_market_context(symbol=symbol, broker=broker, storage=storage)
-        eval_res = await evaluate(symbol, storage=storage, broker=broker, bus=bus)
-        decision = (force_action or eval_res.decision) or "hold"
-        explain = {**eval_res.features, "context": ctx}
-    inc("trade_decisions_total", {"decision": decision})
+    # 3) place order
+    order: Optional[OrderDTO] = None
+    if decision == "buy":
+        cid = make_client_order_id(exchange, f"{symbol}:buy:{now_ms()}")
+        order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=fixed_quote_amount, client_order_id=cid)
+    elif decision == "sell":
+        pos = storage.positions.get_position(symbol)
+        if pos.base_qty and pos.base_qty > 0:
+            cid = make_client_order_id(exchange, f"{symbol}:sell:{now_ms()}")
+            order = await broker.create_market_sell_base(symbol=symbol, base_amount=pos.base_qty, client_order_id=cid)
 
-    # 2) Риски (если передан менеджер)
-    if risk_manager is not None:
-        with timer("trade_risk_ms", {"symbol": symbol}):
-            # Приводим к фактическому интерфейсу RiskManager.allow_order/check:
-            #   side: 'buy' | 'sell' | 'hold'
-            #   quote_amount/base_amount/ticker — по ситуации
-            quote_amount: Optional[Decimal] = None
-            base_amount: Optional[Decimal] = None
-            if decision == "buy":
-                quote_amount = Decimal(str(fixed_quote_amount))
-            elif decision == "sell":
-                try:
-                    base_amount = storage.positions.get_base_qty(symbol)
-                except Exception:
-                    base_amount = None
-            # по возможности передадим тикер (для спреда и маржи)
-            try:
-                ticker = await broker.fetch_ticker(symbol)
-            except Exception:
-                ticker = None  # risk-менеджер умеет работать и без тикера
+    # 4) partial fills (если есть order и он не полностью исполнен)
+    if order and (order.filled < order.amount or (order.status or "").lower() != "closed"):
+        pf = PartialFillHandler(bus)
+        try:
+            follow = await pf.handle(order, broker)
+            if follow:
+                order = follow  # берём последний ордер как итоговый
+        except Exception as exc:
+            _log.error("partial_fills_failed", extra={"error": str(exc)})
 
-            risk_raw = await risk_manager.check(
-                symbol=symbol,
-                side=decision,
-                quote_amount=quote_amount,
-                base_amount=base_amount,
-                ticker=ticker,  # type: ignore[arg-type]
-            )
-            allowed, reason = _normalize_risk_result(risk_raw)
+    # 5) exits ensure
+    if protective_exits:
+        try:
+            await protective_exits.ensure(symbol=symbol)
+        except Exception as exc:
+            _log.error("exits_ensure_failed", extra={"error": str(exc)})
 
-        if not allowed:
-            inc("trade_blocked_total", {"reason": reason or "unknown"})
-            await bus.publish(topics.RISK_BLOCKED, {"symbol": symbol, "decision": decision, "reason": reason}, key=symbol)
-            return {"executed": False, "decision": decision, "why": f"blocked:{reason}", "explain": explain}
+    # 6) финальное событие
+    await bus.publish(
+        "trade.completed",
+        {
+            "symbol": symbol,
+            "decision": decision,
+            "executed": bool(order),
+            "order_id": getattr(order, "id", None),
+            "amount": str(getattr(order, "amount", "")) if order else "",
+            "filled": str(getattr(order, "filled", "")) if order else "",
+        },
+        key=symbol,
+    )
 
-    # 3) Ордер
-    result: Dict[str, Any] = {}
-    with timer("trade_place_ms", {"symbol": symbol, "decision": decision}):
-        if decision == "buy":
-            result = await place_market_buy_quote(
-                symbol,
-                fixed_quote_amount,
-                exchange=exchange,
-                storage=storage,
-                broker=broker,
-                bus=bus,
-                idempotency_bucket_ms=idempotency_bucket_ms,
-                idempotency_ttl_sec=idempotency_ttl_sec,
-            )
-        elif decision == "sell":
-            base_qty = storage.positions.get_base_qty(symbol)
-            if base_qty and base_qty > 0:
-                result = await place_market_sell_base(
-                    symbol,
-                    base_qty,
-                    exchange=exchange,
-                    storage=storage,
-                    broker=broker,
-                    bus=bus,
-                    idempotency_bucket_ms=idempotency_bucket_ms,
-                    idempotency_ttl_sec=idempotency_ttl_sec,
-                )
-            else:
-                result = {"skipped": True, "reason": "no_position"}
-        else:
-            result = {"skipped": True, "reason": "hold"}
-
-    # 4) Защитные выходы
-    if protective_exits is not None:
-        with timer("trade_exits_ms", {"symbol": symbol}):
-            try:
-                await protective_exits.ensure(symbol=symbol)
-            except Exception as exc:
-                _log.error("exits_ensure_failed", extra={"error": str(exc)})
-
-    # событие для наблюдаемости
-    await bus.publish(topics.TRADE_COMPLETED, {"symbol": symbol, "decision": decision, "result": result}, key=symbol)
-    return {"executed": True, "decision": decision, "result": result, "explain": explain}
+    return {"executed": bool(order), "decision": decision, "order": order}

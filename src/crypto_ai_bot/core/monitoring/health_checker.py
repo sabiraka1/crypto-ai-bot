@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Tuple
 
 from ..storage.facade import Storage
-from ..brokers.base import IBroker
 from ..events.bus import AsyncEventBus
-from ...utils.time import now_ms
+from ..brokers.base import IBroker
 from ...utils.logging import get_logger
-
+from ...utils.time import now_ms
 
 _log = get_logger("health")
 
@@ -18,20 +16,14 @@ _log = get_logger("health")
 class HealthReport:
     ok: bool
     ts_ms: int
-    details: Dict[str, Any]
+    components: Dict[str, Any]  # ✅ было details
 
 
 class HealthChecker:
-    """
-    Композитная проверка готовности: БД + шина + брокер (с таймаутом).
-    Если одна из проверок падает — /ready должно возвращать 503.
-    """
-
-    def __init__(self, *, storage: Storage, broker: IBroker, bus: AsyncEventBus, broker_timeout_sec: float = 3.0) -> None:
+    def __init__(self, *, storage: Storage, broker: IBroker, bus: AsyncEventBus) -> None:
         self._storage = storage
         self._broker = broker
         self._bus = bus
-        self._broker_timeout = max(0.5, float(broker_timeout_sec))
 
     async def check(self, *, symbol: str) -> HealthReport:
         ts = now_ms()
@@ -40,42 +32,33 @@ class HealthChecker:
         ok_broker, br_err = await self._check_broker(symbol)
 
         ok = bool(ok_db and ok_bus and ok_broker)
-        details = {
-            "db": {"ok": ok_db, "error": db_err},
-            "bus": {"ok": ok_bus, "error": bus_err},
-            "broker": {"ok": ok_broker, "error": br_err, "timeout_sec": self._broker_timeout},
-        }
-        if not ok:
-            _log.error("health_failed", extra={"details": details})
-        return HealthReport(ok=ok, ts_ms=ts, details=details)
+        return HealthReport(
+            ok=ok,
+            ts_ms=ts,
+            components={
+                "db": {"ok": ok_db, "error": db_err},
+                "bus": {"ok": ok_bus, "error": bus_err},
+                "broker": {"ok": ok_broker, "error": br_err},
+            },
+        )
 
-    # --- internals ------------------------------------------------------------
-    def _check_db(self) -> tuple[bool, Optional[str]]:
+    def _check_db(self) -> Tuple[bool, str]:
         try:
-            cur = self._storage.conn.execute("SELECT 1")
-            _ = cur.fetchone()
-            cur.close()
-            # meta-таблица миграций должна существовать
-            self._storage.conn.execute("SELECT 1 FROM schema_migrations LIMIT 1")
-            return True, None
+            self._storage.conn.execute("SELECT 1")
+            return True, ""
         except Exception as exc:
             return False, str(exc)
 
-    async def _check_bus(self) -> tuple[bool, Optional[str]]:
+    async def _check_bus(self) -> Tuple[bool, str]:
         try:
-            # простая публикация — любые исключения считаем неготовностью
-            await self._bus.publish("health.ping", {"ts": now_ms()}, key="health")
-            return True, None
+            await self._bus.publish("health.ping", {"ok": True}, key="ping")
+            return True, ""
         except Exception as exc:
             return False, str(exc)
 
-    async def _check_broker(self, symbol: str) -> tuple[bool, Optional[str]]:
+    async def _check_broker(self, symbol: str) -> Tuple[bool, str]:
         try:
-            async def _probe() -> None:
-                t = await self._broker.fetch_ticker(symbol)
-                if not t or (t.last is None):
-                    raise RuntimeError("ticker_unavailable")
-            await asyncio.wait_for(_probe(), timeout=self._broker_timeout)
-            return True, None
+            t = await self._broker.fetch_ticker(symbol)
+            return (t.last is not None and t.last > 0), ""
         except Exception as exc:
             return False, str(exc)
