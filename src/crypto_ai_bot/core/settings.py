@@ -3,90 +3,131 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import List
+from pathlib import Path
+from typing import Optional
 
 
-@dataclass
+def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    v = os.getenv(name)
+    return v if (v is not None and v != "") else default
+
+
+def _to_bool(v: Optional[str], default: bool = False) -> bool:
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _read_secret(name: str, file_name: str) -> str:
+    """
+    Безопасно читает секрет:
+    1) если установлен <NAME>_FILE и файл существует — читаем из файла;
+    2) иначе берём из <NAME>;
+    3) иначе ''.
+    """
+    file_path = _env(file_name)
+    if file_path:
+        try:
+            p = Path(file_path)
+            if p.exists():
+                return p.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    return _env(name, "") or ""
+
+
+def _default_db_path(exchange: str, symbol: str, mode: str, sandbox: bool) -> str:
+    pair = symbol.replace("/", "")
+    suffix = "-sandbox" if (mode.lower() == "live" and sandbox) else ""
+    fname = f"trader-{exchange}-{pair}-{mode.lower()}{suffix}.sqlite3"
+    return str(Path("./data") / fname)
+
+
+@dataclass(frozen=True)
 class Settings:
     MODE: str
-    EXCHANGE: str
-    API_KEY: str
-    API_SECRET: str
     SANDBOX: bool
-
+    EXCHANGE: str
     SYMBOL: str
+
     FIXED_AMOUNT: Decimal
 
+    DB_PATH: str
     IDEMPOTENCY_BUCKET_MS: int
     IDEMPOTENCY_TTL_SEC: int
 
-    ORDER_AUTO_CANCEL_TTL_SEC: int
+    RISK_COOLDOWN_SEC: int
+    RISK_MAX_SPREAD_PCT: float
+    RISK_MAX_POSITION_BASE: float
+    RISK_MAX_ORDERS_PER_HOUR: int
+    RISK_DAILY_LOSS_LIMIT_QUOTE: float
 
-    RISK_FEE_PCT_EST: Decimal
-    RISK_SLIPPAGE_PCT_EST: Decimal
+    API_KEY: str
+    API_SECRET: str
 
-    # --- intervals (добавлено) ---
+    PRICE_FEED: str
+    FIXED_PRICE: Decimal
+
+    # интервалы оркестратора (с дефолтами по спецификации)
     EVAL_INTERVAL_SEC: float
     EXITS_INTERVAL_SEC: float
     RECONCILE_INTERVAL_SEC: float
     WATCHDOG_INTERVAL_SEC: float
 
-    # --- backup ---
-    DB_PATH: str
-    DB_BACKUP_DIR: str
-    DB_BACKUP_RETENTION_DAYS: int
-    DB_BACKUP_COMPRESS: bool
-
     @staticmethod
     def load() -> "Settings":
-        def _d(name: str, default: str) -> str:
-            return os.getenv(name, default)
+        mode = _env("MODE", "paper")
+        sandbox = _to_bool(_env("SANDBOX", "0"), False)
+        exchange = _env("EXCHANGE", "gateio")
+        symbol = _env("SYMBOL", "BTC/USDT")
 
-        def _b(name: str, default: bool) -> bool:
-            return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
+        fixed_amount = Decimal(str(_env("FIXED_AMOUNT", "50")))
 
-        def _i(name: str, default: int) -> int:
-            return int(os.getenv(name, str(default)))
+        db_path = _env("DB_PATH")
+        if not db_path:
+            db_path = _default_db_path(exchange, symbol, mode, sandbox)
 
-        def _f(name: str, default: float) -> float:
-            return float(os.getenv(name, str(default)))
+        idem_bucket = int(_env("IDEMPOTENCY_BUCKET_MS", "60000"))
+        idem_ttl = int(_env("IDEMPOTENCY_TTL_SEC", "3600"))
 
-        def _dec(name: str, default: str) -> Decimal:
-            return Decimal(os.getenv(name, default))
+        risk_cooldown = int(_env("RISK_COOLDOWN_SEC", "60"))
+        risk_spread = float(_env("RISK_MAX_SPREAD_PCT", "0.3"))
+        risk_pos = float(_env("RISK_MAX_POSITION_BASE", "0.02"))
+        risk_rate = int(_env("RISK_MAX_ORDERS_PER_HOUR", "6"))
+        risk_daily_loss = float(_env("RISK_DAILY_LOSS_LIMIT_QUOTE", "100"))
+
+        # безопасное чтение секретов
+        api_key = _read_secret("API_KEY", "API_KEY_FILE")
+        api_secret = _read_secret("API_SECRET", "API_SECRET_FILE")
+
+        price_feed = (_env("PRICE_FEED", "fixed") or "fixed").lower()  # fixed | live
+        fixed_price = Decimal(str(_env("FIXED_PRICE", "100")))
+
+        eval_iv = float(_env("EVAL_INTERVAL_SEC", "60.0"))
+        exits_iv = float(_env("EXITS_INTERVAL_SEC", "5.0"))
+        recon_iv = float(_env("RECONCILE_INTERVAL_SEC", "60.0"))
+        wd_iv = float(_env("WATCHDOG_INTERVAL_SEC", "15.0"))
 
         return Settings(
-            MODE=_d("MODE", "paper"),
-            EXCHANGE=_d("EXCHANGE", "gateio"),
-            API_KEY=_d("API_KEY", ""),
-            API_SECRET=_d("API_SECRET", ""),
-            SANDBOX=_b("SANDBOX", True),
-
-            SYMBOL=_d("SYMBOL", "BTC/USDT"),
-            FIXED_AMOUNT=_dec("FIXED_AMOUNT", "10"),
-
-            IDEMPOTENCY_BUCKET_MS=_i("IDEMPOTENCY_BUCKET_MS", 5_000),
-            IDEMPOTENCY_TTL_SEC=_i("IDEMPOTENCY_TTL_SEC", 600),
-
-            ORDER_AUTO_CANCEL_TTL_SEC=_i("ORDER_AUTO_CANCEL_TTL_SEC", 120),
-
-            RISK_FEE_PCT_EST=_dec("RISK_FEE_PCT_EST", "0.001"),
-            RISK_SLIPPAGE_PCT_EST=_dec("RISK_SLIPPAGE_PCT_EST", "0.0005"),
-
-            # интервалы (дефолты практичные для прод)
-            EVAL_INTERVAL_SEC=_f("EVAL_INTERVAL_SEC", 60.0),
-            EXITS_INTERVAL_SEC=_f("EXITS_INTERVAL_SEC", 5.0),
-            RECONCILE_INTERVAL_SEC=_f("RECONCILE_INTERVAL_SEC", 60.0),
-            WATCHDOG_INTERVAL_SEC=_f("WATCHDOG_INTERVAL_SEC", 15.0),
-
-            DB_PATH=_d("DB_PATH", "./data/bot.sqlite3"),
-            DB_BACKUP_DIR=_d("DB_BACKUP_DIR", "./data/backups"),
-            DB_BACKUP_RETENTION_DAYS=_i("DB_BACKUP_RETENTION_DAYS", 7),
-            DB_BACKUP_COMPRESS=_b("DB_BACKUP_COMPRESS", False),
+            MODE=mode,
+            SANDBOX=sandbox,
+            EXCHANGE=exchange,
+            SYMBOL=symbol,
+            FIXED_AMOUNT=fixed_amount,
+            DB_PATH=db_path,
+            IDEMPOTENCY_BUCKET_MS=idem_bucket,
+            IDEMPOTENCY_TTL_SEC=idem_ttl,
+            RISK_COOLDOWN_SEC=risk_cooldown,
+            RISK_MAX_SPREAD_PCT=risk_spread,
+            RISK_MAX_POSITION_BASE=risk_pos,
+            RISK_MAX_ORDERS_PER_HOUR=risk_rate,
+            RISK_DAILY_LOSS_LIMIT_QUOTE=risk_daily_loss,
+            API_KEY=api_key,
+            API_SECRET=api_secret,
+            PRICE_FEED=price_feed,
+            FIXED_PRICE=fixed_price,
+            EVAL_INTERVAL_SEC=eval_iv,
+            EXITS_INTERVAL_SEC=exits_iv,
+            RECONCILE_INTERVAL_SEC=recon_iv,
+            WATCHDOG_INTERVAL_SEC=wd_iv,
         )
-
-    # Опционально: поддержка multi-symbol, если уже внедрено в compose
-    def get_symbols(self) -> List[str]:
-        raw = os.getenv("SYMBOLS")
-        if not raw:
-            return [self.SYMBOL]
-        return [s.strip() for s in raw.split(",") if s.strip()]
