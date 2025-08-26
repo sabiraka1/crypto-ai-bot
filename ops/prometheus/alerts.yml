@@ -149,3 +149,30 @@ groups:
     annotations:
       summary: "Circuit breaker разомкнут"
       description: "Circuit breaker {{ $labels.name }} в состоянии open"
+
+- name: trading_supplemental
+  rules:
+    - alert: NoTradesLongTime
+      expr: (time() - max(trades_last_timestamp)) > 3600
+      for: 5m
+      labels: { severity: warning }
+      annotations:
+        summary: "Нет сделок более часа"
+
+    - alert: APIRateLimitApproaching
+      expr: rate(broker_rate_limit_remaining[1m]) < 10
+      labels: { severity: warning }
+      annotations:
+        summary: "Приближаемся к лимиту API: {{ $value }} запросов осталось"
+
+    - alert: DatabaseSizeGrowing
+      expr: sqlite_db_size_bytes > 1073741824
+      labels: { severity: warning }
+      annotations:
+        summary: "БД превысила 1GB, нужна очистка"
+
+    - alert: UnexpectedSymbol
+      expr: count by (symbol) (trades_total{symbol!~"BTC/USDT|ETH/USDT"}) > 0
+      labels: { severity: warning }
+      annotations:
+        summary: "Обнаружена торговля неожиданным символом: {{ $labels.symbol }}"

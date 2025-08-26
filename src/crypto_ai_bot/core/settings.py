@@ -6,118 +6,72 @@ from decimal import Decimal
 from typing import List
 
 
-def _bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    try:
-        return int(str(v)) if v is not None else default
-    except Exception:
-        return default
-
-
-def _float(name: str, default: float) -> float:
-    v = os.getenv(name)
-    try:
-        return float(str(v)) if v is not None else default
-    except Exception:
-        return default
-
-
-def _str(name: str, default: str = "") -> str:
-    v = os.getenv(name)
-    return str(v) if v is not None else default
-
-
-def _dec(name: str, default: str | float) -> Decimal:
-    v = os.getenv(name)
-    try:
-        return Decimal(str(v)) if v is not None else Decimal(str(default))
-    except Exception:
-        return Decimal(str(default))
-
-
 @dataclass
 class Settings:
-    # режимы
-    MODE: str = _str("MODE", "paper")  # paper|live
-    EXCHANGE: str = _str("EXCHANGE", "gateio")
-    SYMBOL: str = _str("SYMBOL", "BTC/USDT")  # backward‑compat
-    SYMBOLS_CSV: str = _str("SYMBOLS", "")   # новый способ: CSV список
+    MODE: str
+    EXCHANGE: str
+    API_KEY: str
+    API_SECRET: str
+    SANDBOX: bool
 
-    # API
-    API_KEY: str = _str("API_KEY", "")
-    API_SECRET: str = _str("API_SECRET", "")
-    SANDBOX: bool = _bool("SANDBOX", False)
+    SYMBOL: str
+    FIXED_AMOUNT: Decimal
 
-    # торговые параметры
-    FIXED_AMOUNT: float = _float("FIXED_AMOUNT", 100.0)
+    IDEMPOTENCY_BUCKET_MS: int
+    IDEMPOTENCY_TTL_SEC: int
 
-    # интервалы оркестратора
-    EVAL_INTERVAL_SEC: float = _float("EVAL_INTERVAL_SEC", 60)
-    EXITS_INTERVAL_SEC: float = _float("EXITS_INTERVAL_SEC", 5)
-    RECONCILE_INTERVAL_SEC: float = _float("RECONCILE_INTERVAL_SEC", 60)
-    WATCHDOG_INTERVAL_SEC: float = _float("WATCHDOG_INTERVAL_SEC", 15)
+    ORDER_AUTO_CANCEL_TTL_SEC: int
 
-    # идемпотентность
-    IDEMPOTENCY_BUCKET_MS: int = _int("IDEMPOTENCY_BUCKET_MS", 60_000)
-    IDEMPOTENCY_TTL_SEC: int = _int("IDEMPOTENCY_TTL_SEC", 600)
+    RISK_FEE_PCT_EST: Decimal
+    RISK_SLIPPAGE_PCT_EST: Decimal
 
-    # БД
-    DB_PATH: str = _str("DB_PATH", "./data/crypto_ai_bot.sqlite3")
+    # --- backup ---
+    DB_PATH: str
+    DB_BACKUP_DIR: str
+    DB_BACKUP_RETENTION_DAYS: int
+    DB_BACKUP_COMPRESS: bool
 
-    # paper broker
-    PAPER_INITIAL_BALANCE_USDT: Decimal = _dec("PAPER_INITIAL_BALANCE_USDT", "10000")
-    PAPER_INITIAL_BALANCE_BASE: Decimal = _dec("PAPER_INITIAL_BALANCE_BASE", "0")
-    PAPER_FEE_PCT: Decimal = _dec("PAPER_FEE_PCT", "0.001")
-    PAPER_PRICE: Decimal = _dec("PAPER_PRICE", "100.0")
+    @staticmethod
+    def load() -> "Settings":
+        def _d(name: str, default: str) -> str:
+            return os.getenv(name, default)
 
-    # risk manager
-    RISK_COOLDOWN_SEC: int = _int("RISK_COOLDOWN_SEC", 10)
-    RISK_MAX_SPREAD_PCT: float = _float("RISK_MAX_SPREAD_PCT", 0.002)
-    RISK_MAX_POSITION_BASE: Decimal = _dec("RISK_MAX_POSITION_BASE", "1.0")
-    RISK_MAX_ORDERS_PER_HOUR: int = _int("RISK_MAX_ORDERS_PER_HOUR", 30)
-    RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal = _dec("RISK_DAILY_LOSS_LIMIT_QUOTE", "1000")
-    RISK_FEE_PCT_EST: Decimal = _dec("RISK_FEE_PCT_EST", "0.001")
-    RISK_SLIPPAGE_PCT_EST: Decimal = _dec("RISK_SLIPPAGE_PCT_EST", "0.001")
+        def _b(name: str, default: bool) -> bool:
+            return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
 
-    # Protective Exits
-    EXITS_ENABLED: bool = _bool("EXITS_ENABLED", True)
-    EXITS_MODE: str = _str("EXITS_MODE", "both")  # hard|trailing|both
-    EXITS_HARD_STOP_PCT: float = _float("EXITS_HARD_STOP_PCT", 0.05)
-    EXITS_TRAILING_PCT: float = _float("EXITS_TRAILING_PCT", 0.03)
-    EXITS_MIN_BASE_TO_EXIT: Decimal = _dec("EXITS_MIN_BASE_TO_EXIT", "0.0")
+        def _i(name: str, default: int) -> int:
+            return int(os.getenv(name, str(default)))
 
-    # Circuit Breaker (для CCXT)
-    CB_ENABLED: bool = _bool("CB_ENABLED", True)
-    CB_THRESHOLD: int = _int("CB_THRESHOLD", 5)
-    CB_WINDOW_SEC: int = _int("CB_WINDOW_SEC", 30)
-    CB_COOLDOWN_SEC: int = _int("CB_COOLDOWN_SEC", 60)
+        def _dec(name: str, default: str) -> Decimal:
+            return Decimal(os.getenv(name, default))
 
-    # Orders TTL auto‑cancel
-    ORDER_AUTO_CANCEL_TTL_SEC: int = _int("ORDER_AUTO_CANCEL_TTL_SEC", 120)
+        return Settings(
+            MODE=_d("MODE", "paper"),
+            EXCHANGE=_d("EXCHANGE", "gateio"),
+            API_KEY=_d("API_KEY", ""),
+            API_SECRET=_d("API_SECRET", ""),
+            SANDBOX=_b("SANDBOX", True),
 
-    @classmethod
-    def load(cls) -> "Settings":
-        s = cls()
-        # Базовые проверки (fail‑fast по минимуму)
-        if s.MODE.lower() == "live" and not s.API_KEY:
-            raise RuntimeError("CONFIG: API_KEY is required in live mode")
-        if s.IDEMPOTENCY_BUCKET_MS <= 0:
-            raise RuntimeError("CONFIG: IDEMPOTENCY_BUCKET_MS must be > 0")
-        if s.FIXED_AMOUNT <= 0:
-            raise RuntimeError("CONFIG: FIXED_AMOUNT must be > 0")
-        return s
+            SYMBOL=_d("SYMBOL", "BTC/USDT"),
+            FIXED_AMOUNT=_dec("FIXED_AMOUNT", "10"),
 
-    # helper для мультисимвольности (CSV из SYMBOLS, иначе fallback на SYMBOL)
+            IDEMPOTENCY_BUCKET_MS=_i("IDEMPOTENCY_BUCKET_MS", 5_000),
+            IDEMPOTENCY_TTL_SEC=_i("IDEMPOTENCY_TTL_SEC", 600),
+
+            ORDER_AUTO_CANCEL_TTL_SEC=_i("ORDER_AUTO_CANCEL_TTL_SEC", 120),
+
+            RISK_FEE_PCT_EST=_dec("RISK_FEE_PCT_EST", "0.001"),
+            RISK_SLIPPAGE_PCT_EST=_dec("RISK_SLIPPAGE_PCT_EST", "0.0005"),
+
+            DB_PATH=_d("DB_PATH", "./data/bot.sqlite3"),
+            DB_BACKUP_DIR=_d("DB_BACKUP_DIR", "./data/backups"),
+            DB_BACKUP_RETENTION_DAYS=_i("DB_BACKUP_RETENTION_DAYS", 7),
+            DB_BACKUP_COMPRESS=_b("DB_BACKUP_COMPRESS", False),
+        )
+
+    # Опционально: поддержка multi-symbol, если уже внедрено в compose
     def get_symbols(self) -> List[str]:
-        raw = (self.SYMBOLS_CSV or "").strip()
-        if raw:
-            out = [s.strip() for s in raw.split(",") if s.strip()]
-            return out or ([self.SYMBOL] if self.SYMBOL else [])
-        return [self.SYMBOL] if self.SYMBOL else []
+        raw = os.getenv("SYMBOLS")
+        if not raw:
+            return [self.SYMBOL]
+        return [s.strip() for s in raw.split(",") if s.strip()]

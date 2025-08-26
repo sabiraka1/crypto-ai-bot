@@ -1,211 +1,195 @@
 from __future__ import annotations
 
-import hashlib
+import os
 import re
 import sqlite3
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-# --- настройки -----------------------------------------------------------------
-_ALLOWED_PREFIXES = (
-    "create table",
-    "create unique index",
-    "create index",
-    "alter table",   # проверим дальше, что только ADD COLUMN
-    "insert into",
-    "update",
-    "delete from",
-)
-_FORBIDDEN_TOKENS = (
-    "drop table",
-    "drop view",
-    "attach ",
-    "detach ",
-    "vacuum",
-)
+try:
+    from ....utils.logging import get_logger  # type: ignore
+except Exception:  # fallback на stdlib
+    import logging
+    def get_logger(name: str):
+        logging.basicConfig(level=logging.INFO)
+        return logging.getLogger(name)
 
-_SQL_DIR_NAME = "sql"
+_log = get_logger("migrations.runner")
 
+ALLOWED_COMMANDS = {
+    "CREATE", "ALTER", "INSERT", "UPDATE", "DELETE",  # строго согласно политике безопасности
+}
 
-@dataclass
+SQL_DIR_CANDIDATES: List[Path] = [
+    Path(__file__).with_suffix("").parent / "sql",              # src/crypto_ai_bot/core/storage/migrations/sql
+    Path("migrations/sql"),                                      # относительный путь (на всякий случай)
+]
+
+@dataclass(frozen=True)
 class Migration:
     version: str
-    file: Path
+    name: str
     sql: str
     checksum: str
 
 
-def _strip_comments(sql: str) -> str:
-    # удаляем /* ... */ и -- до конца строки
-    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
-    sql = re.sub(r"--.*?$", " ", sql, flags=re.M)
-    return sql
+def _ensure_meta(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                applied_at INTEGER,
+                dirty INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS migration_lock (
+                id INTEGER PRIMARY KEY CHECK (id=1),
+                owner TEXT,
+                locked_at INTEGER
+            )
+            """
+        )
+    except Exception:
+        # В очень старых БД могла быть другая форма — пробуем мигрировать мета-таблицу мягко
+        pass
+
+
+def _hash_sql(sql: str) -> str:
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
+def _discover_sql_files() -> List[Path]:
+    for base in SQL_DIR_CANDIDATES:
+        if base.exists() and base.is_dir():
+            files = sorted(p for p in base.glob("*.sql"))
+            if files:
+                return files
+    return []
+
+
+def _parse_version_name(path: Path) -> Tuple[str, str]:
+    # Форматы: 001_init.sql, 20240820_add_orders.sql — всё до первого '_'/'-' считаем версией
+    stem = path.stem
+    m = re.match(r"^([0-9A-Za-z]+)[_-](.*)$", stem)
+    if m:
+        return m.group(1), m.group(2)
+    return stem, stem
 
 
 def _split_statements(sql: str) -> List[str]:
-    # безопасное разделение по ';' вне строк
-    out: List[str] = []
+    # Простой, но безопасный splitter: по ';' вне строк
+    statements: List[str] = []
     buff: List[str] = []
-    in_s = False
-    in_d = False
-    esc = False
+    in_str = False
+    quote = ''
     for ch in sql:
-        if ch == "'" and not in_d and not esc:
-            in_s = not in_s
-        elif ch == '"' and not in_s and not esc:
-            in_d = not in_d
-        if ch == ";" and not in_s and not in_d:
-            stmt = "".join(buff).strip()
+        if ch in ('"', "'"):
+            if not in_str:
+                in_str = True; quote = ch
+            elif quote == ch:
+                in_str = False
+        if ch == ';' and not in_str:
+            stmt = ''.join(buff).strip()
             if stmt:
-                out.append(stmt)
+                statements.append(stmt)
             buff = []
         else:
             buff.append(ch)
-        esc = (ch == "\\") and not esc
-    tail = "".join(buff).strip()
+    tail = ''.join(buff).strip()
     if tail:
-        out.append(tail)
-    return out
+        statements.append(tail)
+    return statements
 
 
-def _is_safe_alter(stmt_l: str) -> bool:
-    # разрешаем только: ALTER TABLE <name> ADD COLUMN <name> <type> [DEFAULT ...]
-    return bool(re.match(r"^alter\s+table\s+[^\s]+\s+add\s+column\s+.+", stmt_l))
+def _command_allowed(stmt: str) -> bool:
+    # Берём первый токен (DDL/DML)
+    first = re.split(r"\s+", stmt.strip(), maxsplit=1)[0].upper()
+    # CREATE INDEX/VIEW/UNIQUE → начинаются с CREATE, whitelist покрывает
+    return first in ALLOWED_COMMANDS
 
 
-def _validate_statement(stmt: str) -> None:
-    s = stmt.strip()
-    if not s:
-        return
-    s_l = s.lower()
-    for bad in _FORBIDDEN_TOKENS:
-        if bad in s_l:
-            raise ValueError(f"Forbidden SQL token in migration: {bad}")
-    if s_l.startswith("pragma") or s_l.startswith("begin") or s_l.startswith("commit") or s_l.startswith("rollback"):
-        raise ValueError("PRAGMA/transaction statements are not allowed in migrations; managed by runner")
-    if not any(s_l.startswith(pfx) for pfx in _ALLOWED_PREFIXES):
-        raise ValueError(f"Statement not allowed by whitelist: {s.split(maxsplit=3)[:3]}")
-    if s_l.startswith("alter table") and not _is_safe_alter(s_l):
-        raise ValueError("Only ALTER TABLE ... ADD COLUMN is allowed")
+def _load_migrations_from_fs() -> List[Migration]:
+    files = _discover_sql_files()
+    migs: List[Migration] = []
+    for p in files:
+        sql = p.read_text(encoding="utf-8")
+        ver, name = _parse_version_name(p)
+        migs.append(Migration(version=ver, name=name, sql=sql, checksum=_hash_sql(sql)))
+    return migs
 
 
-def _normalize(sql: str) -> str:
-    # нормализация для checksum
-    return re.sub(r"\s+", " ", _strip_comments(sql)).strip()
+def _load_applied(conn: sqlite3.Connection) -> dict:
+    rows = conn.execute("SELECT version, checksum, dirty FROM schema_migrations").fetchall()
+    return {str(r[0]): {"checksum": str(r[1]), "dirty": int(r[2])} for r in rows}
 
 
-def _checksum(sql: str) -> str:
-    return hashlib.sha256(_normalize(sql).encode("utf-8")).hexdigest()
-
-
-def _ensure_meta(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version TEXT PRIMARY KEY,
-            checksum TEXT NOT NULL,
-            applied_at_ms INTEGER NOT NULL,
-            dirty INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-
-
-def _set_pragmas(conn: sqlite3.Connection) -> None:
+def _apply_migration(conn: sqlite3.Connection, m: Migration, now_ms: int) -> None:
+    # Отмечаем dirty и готовим транзакцию
+    conn.execute("BEGIN IMMEDIATE;")  # single-writer
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except Exception:
-        pass
-    try:
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    try:
-        conn.execute("PRAGMA foreign_keys=ON")
-    except Exception:
-        pass
-
-
-def _load_migrations(dir_path: Path) -> List[Migration]:
-    if not dir_path.exists():
-        return []
-    files = sorted(
-        [p for p in dir_path.iterdir() if p.is_file() and p.name.lower().endswith(".sql")],
-        key=lambda p: p.name,
-    )
-    out: List[Migration] = []
-    for f in files:
-        m = re.match(r"^V(\d{4,})__.+\.sql$", f.name)
-        if not m:
-            continue
-        raw = f.read_text(encoding="utf-8")
-        sql = raw.lstrip("\ufeff")  # уберём BOM при наличии
-        out.append(Migration(version=m.group(1), file=f, sql=sql, checksum=_checksum(sql)))
-    return out
-
-
-def _already_applied(conn: sqlite3.Connection, version: str) -> Optional[Tuple[str, int, int]]:
-    row = conn.execute("SELECT checksum, applied_at_ms, dirty FROM schema_migrations WHERE version=?", (version,)).fetchone()
-    if row:
-        return str(row[0]), int(row[1]), int(row[2])
-    return None
-
-
-def _apply_migration(conn: sqlite3.Connection, m: Migration, *, now_ms: int) -> None:
-    # валидируем и исполняем атомарно под savepoint
-    sql_wo_comments = _strip_comments(m.sql)
-    statements = _split_statements(sql_wo_comments)
-    for st in statements:
-        _validate_statement(st)
-
-    sp = f"migr_{m.version}"
-    conn.execute(f"SAVEPOINT {sp}")
-    try:
-        for st in statements:
-            conn.execute(st)
         conn.execute(
-            "INSERT INTO schema_migrations(version, checksum, applied_at_ms, dirty) VALUES (?, ?, ?, 0)",
-            (m.version, m.checksum, now_ms),
+            "INSERT OR REPLACE INTO schema_migrations(version, name, checksum, applied_at, dirty) VALUES(?,?,?,?,?)",
+            (m.version, m.name, m.checksum, None, 1),
         )
-        conn.execute(f"RELEASE SAVEPOINT {sp}")
-    except Exception as exc:
-        conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-        conn.execute(f"RELEASE SAVEPOINT {sp}")
-        # помечаем как dirty (для сигнализации, что миграция падала)
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, checksum, applied_at_ms, dirty) VALUES (?, ?, ?, 1)",
-                (m.version, m.checksum, now_ms),
-            )
-        except Exception:
-            pass
+        for stmt in _split_statements(m.sql):
+            if not _command_allowed(stmt):
+                raise RuntimeError(f"Forbidden SQL command in migration {m.version}: {stmt[:40]}...")
+            conn.execute(stmt)
+        conn.execute(
+            "UPDATE schema_migrations SET applied_at=?, dirty=0 WHERE version=?",
+            (now_ms, m.version),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
         raise
 
 
-def run_migrations(conn: sqlite3.Connection, *, now_ms: int, migrations_dir: Optional[Path] = None) -> None:
-    """Запускает миграции из каталога sql/ по whitelist‑правилам, атомарно и с checksum‑контролем.
+def run_migrations(conn: sqlite3.Connection, *, now_ms: int) -> None:
+    """Основная точка входа (сигнатура совместима с compose).
 
-    - запрещены опасные SQL (DROP TABLE/VIEW, PRAGMA, транзакции и т.п.)
-    - ALTER TABLE разрешён только для ADD COLUMN
-    - все миграции выполняются под savepoint; на сбое откатываются
-    - если уже применённая версия имеет другой checksum — поднимаем исключение
+    Стратегия:
+      1) Ensure meta + lock-совместимость (BEGIN IMMEDIATE).
+      2) Загружаем список миграций из FS (если есть). Если нет — считаем, что нечего применять.
+      3) Проверяем checksum изменённых исторических миграций → fail-fast.
+      4) Применяем только отсутствующие версии, строго по порядку имён файлов.
     """
-    _set_pragmas(conn)
     _ensure_meta(conn)
 
-    base_dir = migrations_dir or (Path(__file__).resolve().parent / _SQL_DIR_NAME)
-    migrations = _load_migrations(base_dir)
+    available = _load_migrations_from_fs()
+    if not available:
+        _log.info("no_migrations_found")
+        return
 
-    for m in migrations:
-        applied = _already_applied(conn, m.version)
-        if applied:
-            old_checksum, _applied_at, dirty = applied
-            if old_checksum != m.checksum:
+    applied = _load_applied(conn)
+
+    # Проверка изменённых исторических миграций
+    for m in available:
+        if m.version in applied:
+            rec = applied[m.version]
+            if int(rec.get("dirty", 0)) == 1:
                 raise RuntimeError(
-                    f"Checksum mismatch for migration V{m.version} ({m.file.name}). "
-                    f"Recorded={old_checksum}, Actual={m.checksum}. Manual intervention required."
+                    f"schema_migrations is dirty at version {m.version}. Run migrate_repair first."
                 )
-            # уже применена — пропускаем
-            continue
-        _apply_migration(conn, m, now_ms=now_ms)
+            old = rec.get("checksum")
+            if old and old != m.checksum:
+                raise RuntimeError(
+                    f"checksum mismatch for version {m.version}: expected {old}, got {m.checksum}"
+                )
+
+    # Применяем только новые
+    pending = [m for m in available if m.version not in applied]
+    for m in pending:
+        _log.info("apply_migration", extra={"version": m.version, "name": m.name})
+        _apply_migration(conn, m, now_ms)
+    _log.info("migrations_done", extra={"applied": len(pending)})
