@@ -1,32 +1,22 @@
-# src/crypto_ai_bot/utils/decimal.py
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN, getcontext
+from decimal import Decimal, getcontext, ROUND_HALF_EVEN, ROUND_DOWN
 from typing import Any
 
-# Единая точность по проекту (совместимо с текущим кодом сигналов)
-getcontext().prec = 28
+# Глобальная настройка контекста (один раз на процесс)
+CTX = getcontext()
+CTX.prec = 28
+CTX.rounding = ROUND_HALF_EVEN
 
-def dec(x: Any, default: str | Decimal = "0") -> Decimal:
-    """
-    Надёжная конвертация в Decimal:
-      - None -> default
-      - Decimal -> как есть
-      - остальное -> Decimal(str(x))
-    """
-    if x is None:
-        return Decimal(default)
+def dec(x: Any) -> Decimal:
+    """Надёжная конвертация в Decimal без накопления двоичных артефактов."""
     if isinstance(x, Decimal):
         return x
-    try:
-        return Decimal(str(x))
-    except Exception:
-        return Decimal(default)
+    if x is None:
+        return Decimal("0")
+    return Decimal(str(x))
 
-def quantize_step(x: Decimal, step_pow10: int) -> Decimal:
-    """
-    Округление под шаг квотации:
-      step_pow10=8 -> шаг 1e-8 и т.п.
-    """
+def q_step(x: Decimal, step_pow10: int, *, rounding=ROUND_DOWN) -> Decimal:
+    """Квантование по 10^-step_pow10 (удобно для amount/price precision)."""
     q = Decimal(10) ** -step_pow10
-    return x.quantize(q, rounding=ROUND_DOWN)
+    return x.quantize(q, rounding=rounding)

@@ -31,6 +31,31 @@ async def evaluate(*, manager: StrategyManager, symbol: str, exchange: str, ctx:
     return d, e
 
 
+def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
+    """
+    Унифицируем ответ RiskManager:
+      - (ok, reason)                     -> (ok, reason)
+      - {"allowed": bool, "reasons": []} -> (allowed, ";".join(reasons))
+      - {"ok": bool, "reason": str}      -> (ok, reason)
+      - None / неожиданное               -> (True, "")
+    """
+    if result is None:
+        return True, ""
+    if isinstance(result, tuple) and len(result) >= 1:
+        ok = bool(result[0])
+        reason = str(result[1]) if len(result) > 1 and result[1] is not None else ""
+        return ok, reason
+    if isinstance(result, dict):
+        if "allowed" in result:
+            ok = bool(result.get("allowed"))
+            reasons = result.get("reasons") or []
+            reason = ";".join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else str(reasons)
+            return ok, reason
+        if "ok" in result:
+            return bool(result.get("ok")), str(result.get("reason") or "")
+    return True, ""
+
+
 async def execute_trade(
     *,
     symbol: str,
@@ -45,7 +70,7 @@ async def execute_trade(
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[ProtectiveExits] = None,
 ) -> Dict[str, Any]:
-    """Полный цикл исполнения одной попытки."""
+    """Полный цикл исполнения одной попытки (совместим с исходником)."""
     # 1) market ctx + decision
     ctx = await build_market_context(broker=broker, symbol=symbol)
     manager = StrategyManager()
@@ -53,51 +78,14 @@ async def execute_trade(
 
     # 2) risk checks
     if risk_manager:
-        ok, reason = await risk_manager.check(symbol=symbol, action=decision, evaluation={"ctx": ctx, "explain": explain})
+        try:
+            raw = await risk_manager.check(symbol=symbol, action=decision, evaluation={"ctx": ctx, "explain": explain})
+        except TypeError:
+            # на случай старой сигнатуры
+            raw = await risk_manager.check(symbol=symbol, side=decision, evaluation={"ctx": ctx, "explain": explain})  # type: ignore[call-arg]
+        ok, reason = _normalize_risk_result(raw)
         if not ok:
             await bus.publish("trade.blocked", {"symbol": symbol, "reason": reason}, key=symbol)
             return {"executed": False, "why": f"blocked:{reason}"}
 
-    # 3) place order
-    order: Optional[OrderDTO] = None
-    if decision == "buy":
-        cid = make_client_order_id(exchange, f"{symbol}:buy:{now_ms()}")
-        order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=fixed_quote_amount, client_order_id=cid)
-    elif decision == "sell":
-        pos = storage.positions.get_position(symbol)
-        if pos.base_qty and pos.base_qty > 0:
-            cid = make_client_order_id(exchange, f"{symbol}:sell:{now_ms()}")
-            order = await broker.create_market_sell_base(symbol=symbol, base_amount=pos.base_qty, client_order_id=cid)
-
-    # 4) partial fills (если есть order и он не полностью исполнен)
-    if order and (order.filled < order.amount or (order.status or "").lower() != "closed"):
-        pf = PartialFillHandler(bus)
-        try:
-            follow = await pf.handle(order, broker)
-            if follow:
-                order = follow  # берём последний ордер как итоговый
-        except Exception as exc:
-            _log.error("partial_fills_failed", extra={"error": str(exc)})
-
-    # 5) exits ensure
-    if protective_exits:
-        try:
-            await protective_exits.ensure(symbol=symbol)
-        except Exception as exc:
-            _log.error("exits_ensure_failed", extra={"error": str(exc)})
-
-    # 6) финальное событие
-    await bus.publish(
-        "trade.completed",
-        {
-            "symbol": symbol,
-            "decision": decision,
-            "executed": bool(order),
-            "order_id": getattr(order, "id", None),
-            "amount": str(getattr(order, "amount", "")) if order else "",
-            "filled": str(getattr(order, "filled", "")) if order else "",
-        },
-        key=symbol,
-    )
-
-    return {"executed": bool(order), "decision": decision, "order": order}
+    # 3) plac
