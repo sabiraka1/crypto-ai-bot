@@ -13,6 +13,13 @@ from ...utils.exceptions import ValidationError, BrokerError
 
 @dataclass
 class PaperBroker(IBroker):
+    """In-memory брокер для paper/backtest.
+    balances: стартовые балансы (например {"USDT": Decimal("10000")})
+    fee_rate: комиссия (0.001 = 0.1%)
+    spread: симметричный спред вокруг last
+    price_feed: опциональный коллбек текущей цены; если не задан — используем внутренний кэш с дефолтом.
+    """
+
     symbol: str
     balances: Dict[str, Decimal]
     fee_rate: Decimal = Decimal("0.001")
@@ -21,13 +28,20 @@ class PaperBroker(IBroker):
 
     _id_seq: int = field(default=1, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _last_price: Decimal = field(default=Decimal("100"), init=False)  # безопасный дефолт
 
     def _get_price(self) -> Decimal:
-        if not self.price_feed:
-            raise BrokerError("price_feed is not configured for PaperBroker")
-        p = Decimal(self.price_feed())
+        p = None
+        if self.price_feed:
+            try:
+                p = Decimal(self.price_feed())
+            except Exception as exc:
+                raise BrokerError(f"price_feed_failed:{exc}")
+        if p is None:
+            p = self._last_price
         if p <= 0:
-            raise BrokerError("price_feed returned non-positive price")
+            raise BrokerError("non_positive_price")
+        self._last_price = p
         return p
 
     def _ensure_currency(self, ccy: str) -> None:
@@ -35,7 +49,7 @@ class PaperBroker(IBroker):
             self.balances[ccy] = Decimal("0")
 
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
-        p = parse_symbol(symbol)
+        _ = parse_symbol(symbol)
         last = self._get_price()
         half = (self.spread / Decimal("2"))
         bid = last * (Decimal("1") - half)
@@ -56,28 +70,17 @@ class PaperBroker(IBroker):
             self._ensure_currency(p.base)
             self._ensure_currency(p.quote)
             price = self._get_price()
-            fee = (quote_amount * self.fee_rate).quantize(Decimal("0.00000001"))
+            fee = quote_amount * self.fee_rate
             total_cost = quote_amount + fee
             if self.balances[p.quote] < total_cost:
                 raise BrokerError("insufficient_quote_balance")
             base_amount = (quote_amount / price).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
             self.balances[p.quote] -= total_cost
             self.balances[p.base] += base_amount
-            oid = str(self._id_seq)
-            self._id_seq += 1
+            oid = str(self._id_seq); self._id_seq += 1
             return OrderDTO(
-                id=oid,
-                client_order_id=client_order_id,
-                symbol=symbol,
-                side="buy",
-                amount=base_amount,
-                status="closed",
-                filled=base_amount,
-                price=price,
-                cost=quote_amount,
-                fee_cost=fee,
-                fee_currency=p.quote,
-                timestamp=now_ms(),
+                id=oid, client_order_id=client_order_id, symbol=symbol, side="buy",
+                amount=base_amount, status="closed", filled=base_amount, price=price, cost=quote_amount, timestamp=now_ms(),
             )
 
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
@@ -90,24 +93,13 @@ class PaperBroker(IBroker):
             if self.balances[p.base] < base_amount:
                 raise BrokerError("insufficient_base_balance")
             price = self._get_price()
-            proceeds = (base_amount * price).quantize(Decimal("0.00000001"))
-            fee = (proceeds * self.fee_rate).quantize(Decimal("0.00000001"))
+            proceeds = (base_amount * price)
+            fee = proceeds * self.fee_rate
             net = proceeds - fee
             self.balances[p.base] -= base_amount
             self.balances[p.quote] += net
-            oid = str(self._id_seq)
-            self._id_seq += 1
+            oid = str(self._id_seq); self._id_seq += 1
             return OrderDTO(
-                id=oid,
-                client_order_id=client_order_id,
-                symbol=symbol,
-                side="sell",
-                amount=base_amount,
-                status="closed",
-                filled=base_amount,
-                price=price,
-                cost=net,
-                fee_cost=fee,
-                fee_currency=p.quote,
-                timestamp=now_ms(),
+                id=oid, client_order_id=client_order_id, symbol=symbol, side="sell",
+                amount=base_amount, status="closed", filled=base_amount, price=price, cost=net, timestamp=now_ms(),
             )
