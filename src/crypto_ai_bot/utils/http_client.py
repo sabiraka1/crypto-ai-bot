@@ -1,89 +1,47 @@
+# src/crypto_ai_bot/utils/http_client.py
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Optional
+import os
+from typing import Any, Dict, Optional, Union
 
-import httpx  # type: ignore
+try:
+    import httpx
+except Exception as exc:  # pragma: no cover
+    httpx = None  # type: ignore[assignment]
 
-from .logging import get_logger
-from .retry import retry  # если есть общий декоратор ретраев
-from .circuit_breaker import CircuitBreaker  # если есть общий CB; иначе можно заглушить
+_DEFAULT_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SEC", "10"))
 
+class HttpClientError(RuntimeError):
+    pass
 
-_log = get_logger("utils.http")
-_DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=5.0)  # общие таймауты на запрос
+async def get_json(url: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+    if httpx is None:
+        raise HttpClientError("httpx is not installed")
+    t = timeout or _DEFAULT_TIMEOUT
+    async with httpx.AsyncClient(timeout=t) as cli:
+        r = await cli.get(url)
+        _raise_for_status(r)
+        return _to_json(r)
 
+async def post_json(url: str, payload: Union[Dict[str, Any], list], *, timeout: Optional[float] = None) -> Dict[str, Any]:
+    if httpx is None:
+        raise HttpClientError("httpx is not installed")
+    t = timeout or _DEFAULT_TIMEOUT
+    async with httpx.AsyncClient(timeout=t) as cli:
+        r = await cli.post(url, json=payload)
+        _raise_for_status(r)
+        return _to_json(r)
 
-# --- Пул/синглтон клиента -----------------------------------------------------
+def _raise_for_status(r: "httpx.Response") -> None:
+    if r.status_code >= 400:
+        txt = r.text[:500] if hasattr(r, "text") else ""
+        raise HttpClientError(f"HTTP {r.status_code}: {txt}")
 
-_client_lock = asyncio.Lock()
-_client: Optional[httpx.AsyncClient] = None
-
-
-async def _get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        async with _client_lock:
-            if _client is None:
-                _client = httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, http2=True)
-    return _client
-
-
-# --- Circuit Breaker (опционально подключаем) --------------------------------
-
-# Если общий CircuitBreaker недоступен — можно временно заменить на no-op:
-_cb = CircuitBreaker(name="http", fail_max=5, reset_timeout=30) if "CircuitBreaker" in globals() else None
-
-
-@asynccontextmanager
-async def _cb_context() -> AsyncIterator[None]:
-    if _cb is None:
-        yield
-        return
-    with _cb:
-        yield
-
-
-# --- API: GET/POST ------------------------------------------------------------
-
-@retry(  # повторные попытки на временные ошибки сети
-    exceptions=(httpx.TransportError, httpx.ReadTimeout),
-    tries=3,
-    delay=0.25,
-    backoff=2.0,
-    jitter=0.1,
-)
-async def aget(url: str, *, headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None) -> httpx.Response:
-    async with _cb_context():
-        client = await _get_client()
-        resp = await client.get(url, headers=headers, params=params)
-        return resp
-
-
-@retry(
-    exceptions=(httpx.TransportError, httpx.ReadTimeout),
-    tries=3,
-    delay=0.25,
-    backoff=2.0,
-    jitter=0.1,
-)
-async def apost(url: str, *, json: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> httpx.Response:
-    async with _cb_context():
-        client = await _get_client()
-        resp = await client.post(url, json=json, data=data, headers=headers)
-        return resp
-
-
-# --- Graceful shutdown клиента ------------------------------------------------
-
-async def aclose() -> None:
-    """Закрывает общий AsyncClient (например, при graceful shutdown)."""
-    global _client
-    if _client is not None:
+def _to_json(r: "httpx.Response") -> Dict[str, Any]:
+    ctype = r.headers.get("content-type", "")
+    if "application/json" in ctype.lower():
         try:
-            await _client.aclose()
+            return r.json()  # type: ignore[return-value]
         except Exception:
             pass
-        _client = None
+    return {"status_code": r.status_code, "text": r.text}
