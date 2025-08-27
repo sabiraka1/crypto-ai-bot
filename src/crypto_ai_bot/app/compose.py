@@ -1,1 +1,102 @@
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Optional
+
+from crypto_ai_bot.core.infrastructure.settings import Settings
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
+from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
+from crypto_ai_bot.core.infrastructure.brokers.paper import PaperBroker
+from crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter import CcxtBroker
+from crypto_ai_bot.core.application.orchestrator import Orchestrator
+from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
+
+_log = get_logger("compose")
+
+
+@dataclass
+class Container:
+    settings: Settings
+    storage: Storage
+    broker: IBroker
+    bus: AsyncEventBus
+    health: HealthChecker
+    risk: RiskManager
+    exits: ProtectiveExits
+    orchestrator: Orchestrator
+    lock: Optional[InstanceLock] = None
+
+
+def _create_storage_for_mode(settings: Settings) -> Storage:
+    conn = sqlite3.connect(settings.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    run_migrations(conn, now_ms=now_ms())
+    storage = Storage.from_connection(conn)
+    _log.info("storage_created", extra={"mode": settings.MODE, "db_path": settings.DB_PATH})
+    return storage
+
+
+def _create_broker_for_mode(settings: Settings) -> IBroker:
+    if settings.MODE.lower() == "paper":
+        balances = {"USDT": Decimal("10000")}
+        return PaperBroker(symbol=settings.SYMBOL, balances=balances)
+    if settings.MODE.lower() == "live":
+        return CcxtBroker(
+            exchange_id=settings.EXCHANGE,
+            api_key=settings.API_KEY,
+            api_secret=settings.API_SECRET,
+            enable_rate_limit=True,
+            sandbox=bool(settings.SANDBOX),
+            dry_run=False,
+        )
+    raise ValueError(f"Unknown MODE={settings.MODE}")
+
+
+def build_container() -> Container:
+    settings = Settings.load()
+    storage = _create_storage_for_mode(settings)
+    bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
+    broker = _create_broker_for_mode(settings)
+    risk = RiskManager(
+        storage=storage,
+        config=RiskConfig(
+            cooldown_sec=settings.RISK_COOLDOWN_SEC,
+            max_spread_pct=settings.RISK_MAX_SPREAD_PCT,
+            max_position_base=settings.RISK_MAX_POSITION_BASE,
+            max_orders_per_hour=settings.RISK_MAX_ORDERS_PER_HOUR,
+            daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
+        ),
+    )
+    exits = ProtectiveExits(storage=storage, bus=bus)
+    health = HealthChecker(storage=storage, broker=broker, bus=bus)
+
+    lock = None
+    if settings.MODE == "live":
+        try:
+            lock_owner = settings.POD_NAME or settings.HOSTNAME or "local"
+            lock = InstanceLock(storage.conn, app="trader", owner=lock_owner)
+            lock.acquire(ttl_sec=300)
+        except Exception as exc:
+            _log.error("lock_init_failed", extra={"error": str(exc)})
+
+    orchestrator = Orchestrator(
+        symbol=settings.SYMBOL,
+        storage=storage,
+        broker=broker,
+        bus=bus,
+        risk=risk,
+        exits=exits,
+        health=health,
+        settings=settings,
+    )
+
     return Container(settings, storage, broker, bus, health, risk, exits, orchestrator, lock)
