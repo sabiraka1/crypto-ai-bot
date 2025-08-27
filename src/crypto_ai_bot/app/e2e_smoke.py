@@ -1,41 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import json
+import sys
+from typing import Any, Dict
 
+# запускать как:  python -m crypto_ai_bot.app.e2e_smoke
 from .compose import build_container
-from ..utils.logging import get_logger
-
-log = get_logger("e2e.smoke")
 
 
-async def run(cycles: int = 2) -> dict[str, Any]:
-    """Минимальный e2e‑смок: поднимаем контейнер, запускаем оркестр, ждём N циклов eval.
-    Работает в paper/live. Для live убедись, что API‑ключи заданы и EXCHANGE поддерживается CCXT.
-    """
+async def main() -> int:
     c = build_container()
-    orch = c.orchestrator
-    orch.start()
-
-    eval_t = float(getattr(c.settings, "EVAL_INTERVAL_SEC", 60))
-    wait_s = max(1.0, eval_t) * cycles + 2.0
-
-    log.info("orchestrator_started", extra={
+    rep = await c.health.check(symbol=c.settings.SYMBOL)
+    out: Dict[str, Any] = {
+        "ok": rep.ok,
         "symbol": c.settings.SYMBOL,
-        "eval_interval_s": eval_t,
-        "cycles": cycles,
-        "wait_s": wait_s,
-    })
-
-    try:
-        await asyncio.sleep(wait_s)
-        status = orch.status()
-        log.info("orchestrator_status", extra=status)
-        return {"ok": True, "status": status, "settings": c.settings.to_dict()}
-    finally:
-        await orch.stop()
-        log.info("orchestrator_stopped")
+        "components": rep.components,
+        "ts_ms": rep.ts_ms,
+        "mode": c.settings.MODE,
+        "exchange": c.settings.EXCHANGE,
+    }
+    print(json.dumps(out, ensure_ascii=False))
+    return 0 if rep.ok else 2
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    raise SystemExit(asyncio.run(main()))

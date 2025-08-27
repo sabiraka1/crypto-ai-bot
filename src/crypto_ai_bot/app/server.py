@@ -38,7 +38,17 @@ async def _auth(credentials: HTTPAuthorizationCredentials = Depends(security)) -
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# ---- exception handlers (hardening) -----------------------------------------
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    try:
+        c = app.state.container
+        st = c.orchestrator.status()
+        if st.get("running"):
+            await c.orchestrator.stop()
+            _log.info("orchestrator_stopped_on_shutdown")
+    except Exception as exc:
+        _log.error("shutdown_failed", extra={"error": str(exc)})
+
 
 @app.exception_handler(TradingError)
 async def trading_error_handler(request: Request, exc: TradingError):
@@ -60,8 +70,6 @@ async def unhandled_error_handler(request: Request, exc: Exception):
     _log.error("unhandled_error", extra={"error": str(exc)})
     return JSONResponse(status_code=500, content={"ok": False, "error": "InternalServerError"})
 
-
-# ---- endpoints ---------------------------------------------------------------
 
 @router.get("/live")
 async def live() -> Dict[str, Any]:

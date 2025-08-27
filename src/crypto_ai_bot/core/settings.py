@@ -1,59 +1,107 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _get(name: str, default: str) -> str:
     return os.getenv(name, default)
 
 
+def _read_text_file(path: str) -> str:
+    try:
+        p = Path(path)
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _secret(name: str, default: str = "") -> str:
+    """
+    Источники в порядке приоритета:
+    1) <NAME>_FILE (путь до файла с секретом)
+    2) <NAME>_B64  (base64-строка)
+    3) SECRETS_FILE (JSON с полями 'api_key', 'api_secret', ...)
+    4) просто ENV <NAME>
+    """
+    # файл
+    val_file = os.getenv(f"{name}_FILE")
+    if val_file:
+        txt = _read_text_file(val_file)
+        if txt:
+            return txt
+
+    # base64
+    val_b64 = os.getenv(f"{name}_B64")
+    if val_b64:
+        try:
+            return base64.b64decode(val_b64).decode("utf-8").strip()
+        except Exception:
+            pass
+
+    # общий JSON
+    secrets_path = os.getenv("SECRETS_FILE")
+    if secrets_path:
+        try:
+            data = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
+            key = name.lower()
+            if key in data and data[key]:
+                return str(data[key]).strip()
+            # поддержка стандартных имен
+            mapping = {"api_key": "api_key", "api_secret": "api_secret"}
+            if name.lower() in mapping and mapping[name.lower()] in data:
+                v = str(data[mapping[name.lower()]]).strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+    # просто ENV
+    return os.getenv(name, default)
+
+
 @dataclass
 class Settings:
-    # режим
     MODE: str
     SANDBOX: int
 
-    # биржа и символы
     EXCHANGE: str
     SYMBOL: str
     SYMBOLS: str
 
-    # sizing
     FIXED_AMOUNT: float
 
-    # paper feed
     PRICE_FEED: str
     FIXED_PRICE: float
 
-    # DB / idempotency
     DB_PATH: str
     BACKUP_RETENTION_DAYS: int
     IDEMPOTENCY_BUCKET_MS: int
     IDEMPOTENCY_TTL_SEC: int
 
-    # risk
     RISK_COOLDOWN_SEC: int
     RISK_MAX_SPREAD_PCT: float
     RISK_MAX_POSITION_BASE: float
     RISK_MAX_ORDERS_PER_HOUR: int
     RISK_DAILY_LOSS_LIMIT_QUOTE: float
 
-    # orchestrator intervals / dms
     EVAL_INTERVAL_SEC: int
     EXITS_INTERVAL_SEC: int
     RECONCILE_INTERVAL_SEC: int
     WATCHDOG_INTERVAL_SEC: int
     DMS_TIMEOUT_MS: int
 
-    # exits (NEW)
     EXITS_ENABLED: int
     EXITS_MODE: str
     EXITS_HARD_STOP_PCT: float
     EXITS_TRAILING_PCT: float
     EXITS_MIN_BASE_TO_EXIT: float
 
-    # security
     API_TOKEN: str
     API_KEY: str
     API_SECRET: str
@@ -61,7 +109,7 @@ class Settings:
     @classmethod
     def load(cls) -> "Settings":
         mode = _get("MODE", "paper")
-        base, quote = (_get("SYMBOL", "BTC/USDT").split("/")+["USDT"])[:2]
+        base, quote = (_get("SYMBOL", "BTC/USDT").split("/") + ["USDT"])[:2]
         db_default = f"./data/trader-{_get('EXCHANGE','gateio')}-{base}{quote}-{mode}{'-sandbox' if _get('SANDBOX','0') in ('1','true','yes') else ''}.sqlite3"
         return cls(
             MODE=mode,
@@ -100,6 +148,6 @@ class Settings:
             EXITS_MIN_BASE_TO_EXIT=float(_get("EXITS_MIN_BASE_TO_EXIT", "0")),
 
             API_TOKEN=_get("API_TOKEN", ""),
-            API_KEY=_get("API_KEY", ""),
-            API_SECRET=_get("API_SECRET", ""),
+            API_KEY=_secret("API_KEY", ""),
+            API_SECRET=_secret("API_SECRET", ""),
         )

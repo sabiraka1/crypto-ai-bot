@@ -9,36 +9,16 @@ from ..events.bus import AsyncEventBus
 from ..risk.manager import RiskManager
 from ..risk.protective_exits import ProtectiveExits
 from ..storage.facade import Storage
-from ..strategies.manager import StrategyManager
-from ..strategies.base import StrategyContext
-from ..brokers.symbols import parse_symbol
 from ...utils.logging import get_logger
 from ...utils.ids import make_client_order_id
 from ...utils.time import now_ms
-from .partial_fills import PartialFillHandler
+from ...utils.metrics import inc
 
-_log = get_logger("usecase.execute")
-
-
-async def build_market_context(*, broker: IBroker, symbol: str) -> Dict[str, Any]:
-    t = await broker.fetch_ticker(symbol)
-    spread = float((t.ask - t.bid) / t.last * 100) if t.last and t.ask and t.bid else 0.0
-    return {"ticker": {"last": t.last, "bid": t.bid, "ask": t.ask, "timestamp": t.timestamp}, "spread": spread}
-
-
-async def evaluate(*, manager: StrategyManager, symbol: str, exchange: str, ctx: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    d, e = manager.decide(symbol=symbol, exchange=exchange, context=ctx, mode="first")
-    return d, e
+_log = get_logger("usecase.execute_trade")
 
 
 def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
-    """
-    Унифицируем ответ RiskManager:
-      - (ok, reason)                     -> (ok, reason)
-      - {"allowed": bool, "reasons": []} -> (allowed, ";".join(reasons))
-      - {"ok": bool, "reason": str}      -> (ok, reason)
-      - None / неожиданное               -> (True, "")
-    """
+    """Единый формат результата risk.check: (ok, reason). Терпим dict/tuple/None."""
     if result is None:
         return True, ""
     if isinstance(result, tuple) and len(result) >= 1:
@@ -49,8 +29,7 @@ def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
         if "allowed" in result:
             ok = bool(result.get("allowed"))
             reasons = result.get("reasons") or []
-            reason = ";".join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else str(reasons)
-            return ok, reason
+            return ok, ";".join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else str(reasons)
         if "ok" in result:
             return bool(result.get("ok")), str(result.get("reason") or "")
     return True, ""
@@ -59,33 +38,79 @@ def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
 async def execute_trade(
     *,
     symbol: str,
+    side: str,  # "buy" | "sell"
     storage: Storage,
     broker: IBroker,
     bus: AsyncEventBus,
     exchange: str,
-    fixed_quote_amount: Decimal,
+    quote_amount: Optional[Decimal] = None,  # для BUY
+    base_amount: Optional[Decimal] = None,   # для SELL
     idempotency_bucket_ms: int,
     idempotency_ttl_sec: int,
-    force_action: Optional[str] = None,
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[ProtectiveExits] = None,
 ) -> Dict[str, Any]:
-    """Полный цикл исполнения одной попытки (совместим с исходником)."""
-    # 1) market ctx + decision
-    ctx = await build_market_context(broker=broker, symbol=symbol)
-    manager = StrategyManager()
-    decision, explain = (force_action, {"reason": "forced"}) if force_action else await evaluate(manager=manager, symbol=symbol, exchange=exchange, ctx=ctx)
+    """Единичное исполнение торгового действия с идемпотентностью и проверкой рисков."""
+    side = (side or "").lower()
+    if side not in ("buy", "sell"):
+        return {"executed": False, "why": "invalid_side"}
 
-    # 2) risk checks
+    # --- риск-гейт -------------------------------------------------------------
     if risk_manager:
-        try:
-            raw = await risk_manager.check(symbol=symbol, action=decision, evaluation={"ctx": ctx, "explain": explain})
-        except TypeError:
-            # на случай старой сигнатуры
-            raw = await risk_manager.check(symbol=symbol, side=decision, evaluation={"ctx": ctx, "explain": explain})  # type: ignore[call-arg]
+        raw = await risk_manager.check(symbol=symbol, action=side, evaluation={"explain": "execute_trade"})
         ok, reason = _normalize_risk_result(raw)
         if not ok:
-            await bus.publish("trade.blocked", {"symbol": symbol, "reason": reason}, key=symbol)
+            inc("orders_blocked_total", reason=(reason or "unspecified"))
+            await bus.publish("trade.blocked", {"symbol": symbol, "reason": reason, "side": side}, key=symbol)
             return {"executed": False, "why": f"blocked:{reason}"}
 
-    # 3) plac
+    # --- размещение ордера -----------------------------------------------------
+    order: Optional[OrderDTO] = None
+    try:
+        if side == "buy":
+            if quote_amount is None or quote_amount <= 0:
+                return {"executed": False, "why": "invalid_quote_amount"}
+            cid = make_client_order_id(exchange, f"{symbol}:buy:{now_ms()}")
+            order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=quote_amount, client_order_id=cid)
+
+        else:  # sell
+            amt = base_amount
+            if amt is None:
+                # если не задано — берём всю локальную позицию
+                pos = storage.positions.get_position(symbol)
+                amt = pos.base_qty
+            if not amt or amt <= 0:
+                return {"executed": False, "why": "no_base_to_sell"}
+            cid = make_client_order_id(exchange, f"{symbol}:sell:{now_ms()}")
+            order = await broker.create_market_sell_base(symbol=symbol, base_amount=amt, client_order_id=cid)
+
+    except Exception as exc:
+        inc("errors_total", kind="execute_trade_failed")
+        _log.error("execute_trade_failed", extra={"error": str(exc), "side": side})
+        await bus.publish("trade.failed", {"symbol": symbol, "error": str(exc), "side": side}, key=symbol)
+        return {"executed": False, "why": f"place_order_failed:{exc}"}
+
+    if order:
+        inc("orders_placed_total", side=(order.side or side))
+
+    # --- защитные выходы -------------------------------------------------------
+    if protective_exits and side == "buy":
+        try:
+            await protective_exits.ensure(symbol=symbol)
+        except Exception as exc:
+            inc("errors_total", kind="exits_ensure_failed")
+            _log.error("exits_ensure_failed", extra={"error": str(exc)})
+
+    await bus.publish(
+        "trade.completed",
+        {
+            "symbol": symbol,
+            "decision": side,
+            "executed": bool(order),
+            "order_id": getattr(order, "id", None),
+            "amount": str(getattr(order, "amount", "")) if order else "",
+            "filled": str(getattr(order, "filled", "")) if order else "",
+        },
+        key=symbol,
+    )
+    return {"executed": bool(order), "decision": side, "order": order}
