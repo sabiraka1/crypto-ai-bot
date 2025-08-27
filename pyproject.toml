@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crypto-ai-bot"
 version = "0.1.0"
-description = "Production-ready ASGI trading bot with Gate.io integration, protective exits, and full reconciliation"
+description = "Production-ready ASGI trading bot (Gate.io via CCXT), long-only, paper/live parity, protective exits, reconciliation, observability"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Sabir Åžahbaz" }]
+authors = [{ name = "Sabir Şahbaz" }]
 
 dependencies = [
   "fastapi>=0.115,<1.0",
@@ -39,11 +39,12 @@ dev = [
 ]
 
 [project.scripts]
-cab-maintenance = "crypto_ai_bot.cli.maintenance:main"
-cab-reconcile   = "crypto_ai_bot.cli.reconcile:main"
-cab-health      = "crypto_ai_bot.cli.health_monitor:main"
-cab-perf        = "crypto_ai_bot.cli.performance:main"
-cab-smoke       = "crypto_ai_bot.app.e2e_smoke:main"
+# CLI-команды (см. README)
+cab-maintenance   = "crypto_ai_bot.cli.maintenance:main"
+cab-reconcile     = "crypto_ai_bot.cli.reconcile:main"
+cab-health        = "crypto_ai_bot.cli.health_monitor:main"
+cab-perf          = "crypto_ai_bot.cli.performance:main"
+cab-smoke         = "crypto_ai_bot.cli.smoke:main"  # ← фикс: раньше указывало на app.e2e_smoke
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -61,17 +62,16 @@ select = ["E","F","W","I","B","C4","PIE","PT","RUF","UP","SIM"]
 ignore = ["E501","B008"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"os.getenv" = { msg = "Use Settings instead of os.getenv (see core/settings.py)" }
-"os.environ" = { msg = "Use Settings instead of os.environ (see core/settings.py)" }
-"requests.get" = { msg = "Use utils/http_client.py instead of direct requests" }
-"requests.post" = { msg = "Use utils/http_client.py instead of direct requests" }
-"urllib.request" = { msg = "Use utils/http_client.py for HTTP calls" }
-"time.sleep" = { msg = "Use asyncio.sleep in async code" }
+"os.getenv"        = { msg = "Use Settings instead of os.getenv (see core/settings.py)" }
+"os.environ"       = { msg = "Use Settings instead of os.environ (see core/settings.py)" }
+"requests.get"     = { msg = "Use utils/http_client.py instead of direct requests" }
+"requests.post"    = { msg = "Use utils/http_client.py instead of direct requests" }
+"urllib.request"   = { msg = "Use utils/http_client.py for HTTP calls" }
+"time.sleep"       = { msg = "Use asyncio.sleep in async code" }
 
 [tool.ruff.lint.per-file-ignores]
-"src/crypto_ai_bot/core/config/env_reader.py" = ["E402"]
 "src/crypto_ai_bot/utils/http_client.py" = ["E402"]
-"tests/**/*.py" = ["S101","S106"]
+"tests/**/*.py"                           = ["S101","S106"]
 
 [tool.mypy]
 python_version = "3.11"
