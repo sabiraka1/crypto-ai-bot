@@ -4,20 +4,20 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from ..use_cases.eval_and_execute import eval_and_execute
-from ..events.bus import AsyncEventBus
-from ..risk.manager import RiskManager
- # ↓↓↓ исправлено: один уровень вверх к utils
-from ..risk.protective_exits import ProtectiveExits
-from ..monitoring.health_checker import HealthChecker
-from ..storage.facade import Storage
-from ..brokers.base import IBroker
-from ..brokers.symbols import parse_symbol
-from ..reconciliation.orders import OrdersReconciler
-from ..reconciliation.positions import PositionsReconciler
-from ..reconciliation.balances import BalancesReconciler
-from ..safety.dead_mans_switch import DeadMansSwitch
-from ..utils.logging import get_logger  # ← было ...utils.logging
+from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.domain.risk.manager import RiskManager
+from crypto_ai_bot.core.domain.risk.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
+from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
+from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
+from crypto_ai_bot.core.application.reconciliation.positions import PositionsReconciler
+from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
+from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
+from crypto_ai_bot.utils.logging import get_logger
+
 
 @dataclass
 class Orchestrator:

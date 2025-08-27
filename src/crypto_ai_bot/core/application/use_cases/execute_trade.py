@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
-from ..brokers.base import IBroker, OrderDTO
-from ..events.bus import AsyncEventBus
-from ..risk.manager import RiskManager
-from ..risk.protective_exits import ProtectiveExits
-from ..storage.facade import Storage
-from ...utils.logging import get_logger
-from ...utils.ids import make_client_order_id
-from ...utils.time import now_ms
-from ...utils.metrics import inc
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.domain.risk.manager import RiskManager
+from crypto_ai_bot.core.domain.risk.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("usecase.execute_trade")
 
 
 def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
-    """Единый формат результата risk.check: (ok, reason).
-    Поддерживаем варианты: tuple, dict с ok/allowed/reason/reasons.
-    """
+    """Единый формат: (ok, reason). Поддержка tuple и dict с ok/reason/reasons."""
     if result is None:
         return True, ""
     if isinstance(result, tuple) and len(result) >= 1:
@@ -28,7 +25,6 @@ def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
         reason = str(result[1]) if len(result) > 1 and result[1] is not None else ""
         return ok, reason
     if isinstance(result, dict):
-        # Новый формат: {"ok": bool, "reasons": [..]}
         if "ok" in result:
             ok = bool(result.get("ok"))
             if "reasons" in result and isinstance(result["reasons"], (list, tuple)):
@@ -36,13 +32,10 @@ def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
             else:
                 reason = str(result.get("reason") or "")
             return ok, reason
-        # Старый альтернативный ключ:
         if "allowed" in result:
             ok = bool(result.get("allowed"))
             reasons = result.get("reasons") or []
-            if isinstance(reasons, (list, tuple)):
-                return ok, ";".join(map(str, reasons))
-            return ok, str(reasons)
+            return ok, ";".join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else str(reasons)
     return True, ""
 
 
@@ -54,19 +47,17 @@ async def execute_trade(
     broker: IBroker,
     bus: AsyncEventBus,
     exchange: str,
-    quote_amount: Optional[Decimal] = None,  # для BUY
-    base_amount: Optional[Decimal] = None,   # для SELL
+    quote_amount: Optional[Decimal] = None,
+    base_amount: Optional[Decimal] = None,
     idempotency_bucket_ms: int,
     idempotency_ttl_sec: int,
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[ProtectiveExits] = None,
 ) -> Dict[str, Any]:
-    """Единичное исполнение торгового действия с идемпотентностью и проверкой рисков."""
     side = (side or "").lower()
     if side not in ("buy", "sell"):
         return {"executed": False, "why": "invalid_side"}
 
-    # --- риск-гейт -------------------------------------------------------------
     if risk_manager:
         raw = await risk_manager.check(symbol=symbol, action=side, evaluation={"explain": "execute_trade"})
         ok, reason = _normalize_risk_result(raw)
@@ -75,7 +66,6 @@ async def execute_trade(
             await bus.publish("trade.blocked", {"symbol": symbol, "reason": reason, "side": side}, key=symbol)
             return {"executed": False, "why": f"blocked:{reason}"}
 
-    # --- размещение ордера -----------------------------------------------------
     order: Optional[OrderDTO] = None
     try:
         if side == "buy":
@@ -83,18 +73,15 @@ async def execute_trade(
                 return {"executed": False, "why": "invalid_quote_amount"}
             cid = make_client_order_id(exchange, f"{symbol}:buy:{now_ms()}")
             order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=quote_amount, client_order_id=cid)
-
         else:  # sell
             amt = base_amount
             if amt is None:
-                # если не задано — берём всю локальную позицию
                 pos = storage.positions.get_position(symbol)
                 amt = pos.base_qty
             if not amt or amt <= 0:
                 return {"executed": False, "why": "no_base_to_sell"}
             cid = make_client_order_id(exchange, f"{symbol}:sell:{now_ms()}")
             order = await broker.create_market_sell_base(symbol=symbol, base_amount=amt, client_order_id=cid)
-
     except Exception as exc:
         inc("errors_total", kind="execute_trade_failed")
         _log.error("execute_trade_failed", extra={"error": str(exc), "side": side})
@@ -104,7 +91,6 @@ async def execute_trade(
     if order:
         inc("orders_placed_total", side=(order.side or side))
 
-    # --- защитные выходы -------------------------------------------------------
     if protective_exits and side == "buy":
         try:
             await protective_exits.ensure(symbol=symbol)

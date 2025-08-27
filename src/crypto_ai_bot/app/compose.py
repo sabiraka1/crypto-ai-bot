@@ -5,22 +5,23 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
-from ..core.settings import Settings
-from ..core.events.bus import AsyncEventBus
-from ..core.storage.migrations.runner import run_migrations
-from ..core.storage.facade import Storage
-from ..core.monitoring.health_checker import HealthChecker
-from ..core.risk.manager import RiskManager, RiskConfig
-from ..core.risk.protective_exits import ProtectiveExits
-from ..core.brokers.base import IBroker
-from ..core.brokers.paper import PaperBroker
-from ..core.brokers.ccxt_adapter import CcxtBroker
-from ..core.orchestrator import Orchestrator
-from ..core.safety.instance_lock import InstanceLock
-from ..utils.time import now_ms
-from ..utils.logging import get_logger
+from crypto_ai_bot.core.infrastructure.settings import Settings
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
+from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
+from crypto_ai_bot.core.domain.risk.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
+from crypto_ai_bot.core.infrastructure.brokers.paper import PaperBroker
+from crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter import CcxtBroker
+from crypto_ai_bot.core.application.orchestrator import Orchestrator
+from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("compose")
+
 
 @dataclass
 class Container:
@@ -34,6 +35,7 @@ class Container:
     orchestrator: Orchestrator
     lock: Optional[InstanceLock] = None
 
+
 def _create_storage_for_mode(settings: Settings) -> Storage:
     conn = sqlite3.connect(settings.DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -41,6 +43,7 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
     storage = Storage.from_connection(conn)
     _log.info("storage_created", extra={"mode": settings.MODE, "db_path": settings.DB_PATH})
     return storage
+
 
 def _create_broker_for_mode(settings: Settings) -> IBroker:
     if settings.MODE.lower() == "paper":
@@ -56,6 +59,7 @@ def _create_broker_for_mode(settings: Settings) -> IBroker:
             dry_run=False,
         )
     raise ValueError(f"Unknown MODE={settings.MODE}")
+
 
 def build_container() -> Container:
     settings = Settings.load()
