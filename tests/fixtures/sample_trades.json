@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "symbol": "BTC/USDT",
+    "side": "buy",
+    "amount": "0.001",
+    "price": "50000",
+    "cost": "50",
+    "status": "closed",
+    "ts_ms": 1700000000000
+  },
+  {
+    "id": 2,
+    "symbol": "BTC/USDT",
+    "side": "sell",
+    "amount": "0.001",
+    "price": "51000",
+    "cost": "51",
+    "status": "closed",
+    "ts_ms": 1700001000000
+  }
+]
