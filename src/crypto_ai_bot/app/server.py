@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import os
-import time
-from decimal import Decimal
-from typing import Any, Dict, List
+from decimal import Decimal  # <— фикс: нужен для /performance
+from typing import Any, Dict
 
-from fastapi import FastAPI, APIRouter, Request, Depends, HTTPException
+from fastapi import FastAPI, APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..utils.logging import get_logger
-from ..utils.metrics import render_prometheus, render_metrics_json, inc
+from ..utils.metrics import render_prometheus, render_metrics_json
 from ..utils.time import now_ms
 from .compose import build_container
 
@@ -22,58 +21,19 @@ app.state.container = build_container()
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
-# ---- простой in-memory rate-limit (per endpoint+ip) -------------------------
-_RL: Dict[str, List[float]] = {}
-def rate_limit(key: str, max_calls: int, per_sec: float) -> None:
-    now = time.monotonic()
-    window_start = now - per_sec
-    arr = _RL.setdefault(key, [])
-    # drop old
-    i = 0
-    while i < len(arr) and arr[i] < window_start:
-        i += 1
-    if i:
-        del arr[:i]
-    if len(arr) >= max_calls:
-        raise HTTPException(status_code=429, detail="Too Many Requests")
-    arr.append(now)
 
-async def auth_opt(credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
-    """Bearer token (опционально). Если API_TOKEN задан — требуем совпадение."""
+async def _auth(credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
     token_required = os.getenv("API_TOKEN")
     if not token_required:
         return
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    if credentials.credentials != token_required:
+    if not credentials or credentials.credentials != token_required:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-# ---- lifecycle ---------------------------------------------------------------
-@app.on_event("startup")
-async def startup_event():
-    c = app.state.container
-    _log.info("server_start", extra={"mode": c.settings.MODE, "symbol": c.settings.SYMBOL})
-    # автозапуск оркестратора по переменной окружения (по умолчанию OFF)
-    if os.getenv("AUTO_START", "0").lower() in {"1", "true", "yes"}:
-        c.orchestrator.start()
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    c = app.state.container
-    try:
-        await c.orchestrator.stop()
-    finally:
-        await c.bus.close()
-        try:
-            c.storage.conn.close()
-        except Exception:
-            pass
-    _log.info("server_stop")
-
-# ---- liveness / readiness / health / metrics --------------------------------
 @router.get("/live")
 async def live() -> Dict[str, Any]:
     return {"ok": True, "ts_ms": now_ms()}
+
 
 @router.get("/ready")
 async def ready() -> JSONResponse:
@@ -85,6 +45,7 @@ async def ready() -> JSONResponse:
     except Exception as exc:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
 
+
 @router.get("/health")
 async def health() -> JSONResponse:
     c = app.state.container
@@ -92,70 +53,66 @@ async def health() -> JSONResponse:
     return JSONResponse(status_code=(200 if rep.ok else 503),
                         content={"ok": rep.ok, "ts_ms": rep.ts_ms, "components": rep.components})
 
+
 @router.get("/metrics", response_class=PlainTextResponse)
 async def metrics() -> str:
     try:
         return render_prometheus()
     except Exception:
         data = render_metrics_json()
-        return "# metrics_fallback\n" + str(data) + "\n"
+        return "#metrics_fallback\n" + str(data) + "\n"
 
-# ---- orchestrator mgmt -------------------------------------------------------
+
 @router.get("/orchestrator/status")
-async def orchestrator_status(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
+async def orchestrator_status(_: Any = Depends(_auth)) -> Dict[str, Any]:
     c = app.state.container
     return {"ok": True, "status": c.orchestrator.status()}
 
+
 @router.post("/orchestrator/start")
-async def orchestrator_start(request: Request, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
-    rate_limit(f"start:{request.client.host}", max_calls=1, per_sec=60.0)
-    c = request.app.state.container
-    st = c.orchestrator.status()
-    if st.get("running"):
-        return {"ok": True, "message": "already_running", "status": st}
+async def orchestrator_start(_: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = app.state.container
+    if c.orchestrator.status().get("running"):
+        return {"ok": True, "message": "already_running"}
     c.orchestrator.start()
-    return {"ok": True, "message": "started", "status": c.orchestrator.status()}
+    return {"ok": True, "message": "started"}
+
 
 @router.post("/orchestrator/stop")
-async def orchestrator_stop(request: Request, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
-    rate_limit(f"stop:{request.client.host}", max_calls=2, per_sec=60.0)
-    c = request.app.state.container
+async def orchestrator_stop(_: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = app.state.container
     await c.orchestrator.stop()
-    return {"ok": True, "message": "stopped", "status": c.orchestrator.status()}
+    return {"ok": True, "message": "stopped"}
 
-# ---- simple data views -------------------------------------------------------
+
 @router.get("/positions")
-async def get_positions(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
+async def get_positions(_: Any = Depends(_auth)) -> Dict[str, Any]:
     c = app.state.container
     pos = c.storage.positions.get_position(c.settings.SYMBOL)
     t = await c.broker.fetch_ticker(c.settings.SYMBOL)
-    unreal = (t.last - (pos.avg_entry_price or 0)) * (pos.base_qty or 0)
+    unreal = (t.last - (pos.avg_entry_price or Decimal("0"))) * (pos.base_qty or Decimal("0"))
     return {
         "symbol": c.settings.SYMBOL,
-        "base_qty": str(pos.base_qty),
-        "avg_price": str(pos.avg_entry_price),
+        "base_qty": str(pos.base_qty or Decimal("0")),
+        "avg_price": str(pos.avg_entry_price or Decimal("0")),
         "current_price": str(t.last),
         "unrealized_pnl": str(unreal),
     }
 
+
 @router.get("/trades")
-async def get_trades(limit: int = 100, _: Any = Depends(auth_opt)) -> Dict[str, Any]:
+async def get_trades(limit: int = 100, _: Any = Depends(_auth)) -> Dict[str, Any]:
     c = app.state.container
     rows = c.storage.trades.list_recent(c.settings.SYMBOL, limit)
     return {"trades": rows, "total": len(rows)}
 
+
 @router.get("/performance")
-async def performance(_: Any = Depends(auth_opt)) -> Dict[str, Any]:
+async def performance(_: Any = Depends(_auth)) -> Dict[str, Any]:
     c = app.state.container
     trades = c.storage.trades.list_today(c.settings.SYMBOL)
     realized = sum(Decimal(r["cost"]) if r["side"] == "sell" else Decimal("0") for r in trades)
     return {"total_trades": len(trades), "realized_quote": str(realized)}
 
-# ---- optional routers --------------------------------------------------------
-try:
-    from .adapters import telegram as telegram_adapter  # type: ignore
-    app.include_router(telegram_adapter.router)
-except Exception:
-    _log.info("telegram_adapter_not_loaded")
 
 app.include_router(router)
