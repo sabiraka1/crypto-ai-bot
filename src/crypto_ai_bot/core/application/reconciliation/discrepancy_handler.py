@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
-from ...utils.logging import get_logger
+from crypto_ai_bot.utils.logging import get_logger
 
 
 @dataclass

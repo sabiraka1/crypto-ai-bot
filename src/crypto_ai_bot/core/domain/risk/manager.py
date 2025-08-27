@@ -8,7 +8,7 @@ from collections import defaultdict
 
 from ..storage.facade import Storage
 from ..brokers.base import IBroker
-from ...utils.logging import get_logger
+from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("risk.manager")
 

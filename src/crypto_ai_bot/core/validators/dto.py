@@ -2,8 +2,8 @@
 from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Tuple
-from ...utils.exceptions import ValidationError
-from ...utils.ids import sanitize_ascii
+from crypto_ai_bot.utils.exceptions import ValidationError
+from crypto_ai_bot.utils.ids import sanitize_ascii
 ALLOWED_SIDES = {"buy", "sell"}
 def ensure_side(value: str) -> str:
     if not isinstance(value, str):

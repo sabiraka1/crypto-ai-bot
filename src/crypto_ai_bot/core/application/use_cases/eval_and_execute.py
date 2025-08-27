@@ -11,10 +11,10 @@ from ..risk.protective_exits import ProtectiveExits
 from ..storage.facade import Storage
 from ..strategies.manager import StrategyManager
 from ..strategies.base import StrategyContext
-from ...utils.logging import get_logger
-from ...utils.ids import make_client_order_id
-from ...utils.time import now_ms
-from ...utils.metrics import inc  # ← метрики
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.metrics import inc  # ← метрики
 
 _log = get_logger("usecase.eval_and_execute")
 

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from ...utils.metrics import snapshot
+from crypto_ai_bot.utils.metrics import snapshot
 
 def render_metrics_json() -> dict:
     return snapshot()

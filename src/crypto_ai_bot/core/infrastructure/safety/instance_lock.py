@@ -4,7 +4,7 @@ import time
 import sqlite3
 from dataclasses import dataclass
 
-from ...utils.logging import get_logger
+from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("safety.lock")
 

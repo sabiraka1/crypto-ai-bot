@@ -7,8 +7,8 @@ from typing import Callable, Dict, Optional
 
 from .base import IBroker, TickerDTO, BalanceDTO, OrderDTO
 from .symbols import parse_symbol
-from ...utils.time import now_ms
-from ...utils.exceptions import ValidationError, BrokerError
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.exceptions import ValidationError, BrokerError
 
 
 @dataclass

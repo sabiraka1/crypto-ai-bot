@@ -6,8 +6,8 @@ from typing import Optional
 
 from ..storage.facade import Storage
 from ..brokers.base import IBroker
-from ...utils.logging import get_logger
-from ...utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("safety.dms")
 

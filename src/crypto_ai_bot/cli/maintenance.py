@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from crypto_ai_bot.core.settings import Settings
+# ВАЖНО: новый путь до Settings после стратификации:
+from crypto_ai_bot.core.infrastructure.settings import Settings
 
 BACKUPS_DIR = Path("./backups")
 
@@ -38,13 +39,13 @@ def _rotate(retention_days: int) -> None:
     removed = 0
     for p in BACKUPS_DIR.glob("db-*.sqlite3"):
         try:
-            # db-YYYYmmdd-HHMMSS.sqlite3
-            dt = datetime.strptime(p.stem.split("-")[1], "%Y%m%d")
+            # поддержка двух именований
+            stem = p.stem
+            # db-YYYYmmdd-HHMMSS
+            ts = stem.split("-")[1]
+            dt = datetime.strptime(ts, "%Y%m%d%H%M%S") if len(ts) > 8 else datetime.strptime(ts, "%Y%m%d")
         except Exception:
-            try:
-                dt = datetime.strptime(p.stem[3:3+15], "%Y%m%d-%H%M%S")
-            except Exception:
-                continue
+            continue
         if dt < cutoff:
             p.unlink(missing_ok=True)
             removed += 1

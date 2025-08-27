@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, List, Tuple
 
-from ...utils.time import now_ms
+from crypto_ai_bot.utils.time import now_ms
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 ## `core/validators/settings.py`
 from __future__ import annotations
 from typing import List
-from ...utils.exceptions import ValidationError
+from crypto_ai_bot.utils.exceptions import ValidationError
 ALLOWED_MODES = {"paper", "live", "backtest"}
 ALLOWED_EXCHANGES = {"gateio"}
 def validate_settings(settings) -> List[str]:

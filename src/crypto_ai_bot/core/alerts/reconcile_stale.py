@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 from ..events.bus import Event, AsyncEventBus
-from ...utils.logging import get_logger
-from ...utils.metrics import inc
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("alerts.reconcile")
 

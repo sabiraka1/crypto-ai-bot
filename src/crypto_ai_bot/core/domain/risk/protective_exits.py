@@ -8,10 +8,10 @@ from ..brokers.base import IBroker, OrderDTO
 from ..storage.facade import Storage
 from ..events.bus import AsyncEventBus
 from ..settings import Settings
-from ...utils.logging import get_logger
-from ...utils.ids import make_client_order_id
-from ...utils.time import now_ms
-from ...utils.metrics import inc  # ← метрики
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.metrics import inc  # ← метрики
 
 _log = get_logger("risk.exits")
 

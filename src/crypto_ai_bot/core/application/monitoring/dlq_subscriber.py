@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Optional, Dict, Any
 
 from ..events.bus import AsyncEventBus, Event
-from ...utils.logging import get_logger
-from ...utils.metrics import inc
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import inc
 
 
 _log = get_logger("monitoring.dlq")

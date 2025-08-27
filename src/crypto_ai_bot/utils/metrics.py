@@ -5,7 +5,7 @@ from typing import Dict, Tuple, FrozenSet, Any
 
 # Простой встроенный сборщик метрик (без внешних библиотек).
 # Использование:
-#   from ...utils.metrics import inc, render_prometheus
+#   from crypto_ai_bot.utils.metrics import inc, render_prometheus
 #   inc("orc_eval_ticks_total")
 #   inc("orders_placed_total", side="buy")
 

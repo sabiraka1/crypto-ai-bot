@@ -6,8 +6,8 @@ from typing import Any, Dict, Tuple
 from ..storage.facade import Storage
 from ..events.bus import AsyncEventBus
 from ..brokers.base import IBroker
-from ...utils.logging import get_logger
-from ...utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("health")
 

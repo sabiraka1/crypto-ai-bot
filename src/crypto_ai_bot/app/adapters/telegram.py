@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Request, HTTPException
 
 from ...core.use_cases.eval_and_execute import eval_and_execute
-from ...utils.logging import get_logger
+from crypto_ai_bot.utils.logging import get_logger
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 _log = get_logger("telegram")

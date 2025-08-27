@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 from ..brokers.base import IBroker
 from ..brokers.symbols import parse_symbol
-from ...utils.decimal import dec
+from crypto_ai_bot.utils.decimal import dec
 
 @dataclass
 class MarketContext:

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Deque, Dict, Optional, Tuple
 
 from .base import BaseStrategy, StrategyContext, Decision
-from ...utils.decimal import dec
+from crypto_ai_bot.utils.decimal import dec
 
 
 class EmaCrossStrategy(BaseStrategy):

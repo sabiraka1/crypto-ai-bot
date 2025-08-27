@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...brokers.base import OrderDTO
-from ...utils.time import now_ms
+from crypto_ai_bot.utils.time import now_ms
 
 
 class TradesRepository:

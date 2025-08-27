@@ -3,20 +3,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
-from typing import Optional, Dict, Any, List, Callable
-import asyncio
+from typing import Optional, Dict, Any, List
 
 try:
     import ccxt  # type: ignore
-except Exception:  # ccxt может отсутствовать в окружениях тестирования
+except Exception:
     ccxt = None  # noqa: N816
 
 from .base import IBroker, TickerDTO, OrderDTO, BalanceDTO
 from .symbols import parse_symbol, to_exchange_symbol
-from ...utils.logging import get_logger
-from ...utils.time import now_ms
-from ...utils.exceptions import ValidationError, TransientError
-from ...utils.ids import make_client_order_id
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
+from crypto_ai_bot.utils.ids import make_client_order_id
 
 
 _log = get_logger("broker.ccxt")
