@@ -9,7 +9,7 @@ description = "Production-ready ASGI trading bot with Gate.io integration, prote
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Sabir Şahbaz" }]
+authors = [{ name = "Sabir Åžahbaz" }]
 
 dependencies = [
   "fastapi>=0.115,<1.0",
@@ -37,6 +37,13 @@ dev = [
   "black>=24.0,<25",
   "isort>=5.13,<6",
 ]
+
+[project.scripts]
+cab-maintenance = "crypto_ai_bot.cli.maintenance:main"
+cab-reconcile   = "crypto_ai_bot.cli.reconcile:main"
+cab-health      = "crypto_ai_bot.cli.health_monitor:main"
+cab-perf        = "crypto_ai_bot.cli.performance:main"
+cab-smoke       = "crypto_ai_bot.app.e2e_smoke:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
