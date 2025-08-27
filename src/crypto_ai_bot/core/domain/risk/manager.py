@@ -2,49 +2,75 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Any, Dict, List
 
 
 @dataclass(frozen=True)
 class RiskConfig:
-    cooldown_sec: int = 0
-    max_spread_pct: Decimal = Decimal("0.002")  # 0.2%
-    max_position_base: Decimal = Decimal("0")   # 0 = без лимита
-    max_orders_per_hour: int = 0               # 0 = без лимита
-    daily_loss_limit_quote: Decimal = Decimal("0")  # 0 = без лимита
+    cooldown_sec: int
+    max_spread_pct: Decimal
+    max_position_base: Decimal
+    max_orders_per_hour: int
+    daily_loss_limit_quote: Decimal
+    # доп. пороги
+    max_fee_pct: Decimal = Decimal("0.001")
+    max_slippage_pct: Decimal = Decimal("0.001")
 
 
 @dataclass(frozen=True)
 class RiskInputs:
+    now_ms: int
+    action: str                  # "BUY_QUOTE" | "SELL_BASE"
     spread_pct: Decimal
     position_base: Decimal
-    recent_orders: int
-    pnl_daily_quote: Decimal
-    cooldown_active: bool
+    orders_last_hour: int
+    daily_pnl_quote: Decimal
+    est_fee_pct: Decimal
+    est_slippage_pct: Decimal
 
 
 class RiskManager:
-    """Чистый domain-класс: без импортов из infrastructure/application."""
+    """Чистый домен: никаких импортов инфраструктуры, всё приходит во входах."""
 
     def __init__(self, config: RiskConfig) -> None:
-        self._cfg = config
+        self.config = config
+        self._last_trade_ms: int = 0
 
-    async def check(self, inputs: RiskInputs) -> Dict[str, Any]:
-        reasons = []
+    def check(self, inputs: RiskInputs) -> Dict[str, Any]:
+        reasons: List[str] = []
 
-        if self._cfg.cooldown_sec > 0 and inputs.cooldown_active:
-            reasons.append("cooldown_active")
+        if self._last_trade_ms and (inputs.now_ms - self._last_trade_ms) < self.config.cooldown_sec * 1000:
+            reasons.append("cooldown")
 
-        if self._cfg.max_spread_pct and inputs.spread_pct > self._cfg.max_spread_pct:
+        if inputs.spread_pct > self.config.max_spread_pct:
             reasons.append("spread_too_wide")
 
-        if self._cfg.max_position_base and inputs.position_base > self._cfg.max_position_base:
-            reasons.append("position_limit_exceeded")
+        if inputs.action == "BUY_QUOTE" and inputs.position_base >= self.config.max_position_base:
+            reasons.append("position_limit")
 
-        if self._cfg.max_orders_per_hour and inputs.recent_orders >= self._cfg.max_orders_per_hour:
-            reasons.append("orders_rate_limit")
+        if inputs.orders_last_hour >= self.config.max_orders_per_hour:
+            reasons.append("rate_limit")
 
-        if self._cfg.daily_loss_limit_quote and inputs.pnl_daily_quote <= -abs(self._cfg.daily_loss_limit_quote):
-            reasons.append("daily_loss_limit_reached")
+        if inputs.daily_pnl_quote < -self.config.daily_loss_limit_quote:
+            reasons.append("daily_loss_limit")
 
-        return {"ok": not reasons, "deny_reasons": reasons}
+        if inputs.est_fee_pct > self.config.max_fee_pct:
+            reasons.append("fee_too_high")
+        if inputs.est_slippage_pct > self.config.max_slippage_pct:
+            reasons.append("slippage_too_high")
+
+        return {
+            "ok": not reasons,
+            "reasons": reasons,
+            "limits": {
+                "max_spread_pct": str(self.config.max_spread_pct),
+                "max_fee_pct": str(self.config.max_fee_pct),
+                "max_slippage_pct": str(self.config.max_slippage_pct),
+                "max_position_base": str(self.config.max_position_base),
+                "max_orders_per_hour": self.config.max_orders_per_hour,
+                "daily_loss_limit_quote": str(self.config.daily_loss_limit_quote),
+            },
+        }
+
+    def on_trade_executed(self, ts_ms: int) -> None:
+        self._last_trade_ms = ts_ms

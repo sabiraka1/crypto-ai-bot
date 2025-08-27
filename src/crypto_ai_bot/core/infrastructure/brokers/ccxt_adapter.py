@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional, Dict, Any, List
+from decimal import Decimal, ROUND_DOWN
+from typing import Optional, Dict, Any, List, Callable
 
 try:
     import ccxt  # type: ignore
 except Exception:
-    ccxt = None
+    ccxt = None  # noqa: N816
 
-from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, TickerDTO, OrderDTO, BalanceDTO
-from crypto_ai_bot.core.infrastructure.brokers.symbols import to_exchange_symbol, parse_symbol
-from crypto_ai_bot.utils.decimal import dec, q_step
-from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
-from crypto_ai_bot.utils.ids import make_client_order_id
+from .base import IBroker, TickerDTO, OrderDTO, BalanceDTO
+from .symbols import to_exchange_symbol, parse_symbol
+from ...utils.logging import get_logger
+from ...utils.time import now_ms
+from ...utils.exceptions import ValidationError, TransientError
+from ...utils.ids import make_client_order_id
+from ...utils.decimal import dec, q_step
 
 
 @dataclass
@@ -25,7 +26,7 @@ class CcxtBroker(IBroker):
     api_secret: str = ""
     enable_rate_limit: bool = True
     sandbox: bool = False
-    dry_run: bool = True  # реальный live включается в compose в зависимости от MODE
+    dry_run: bool = True
 
     _ex: Any = None
     _markets_loaded: bool = False
@@ -56,8 +57,8 @@ class CcxtBroker(IBroker):
             return
         if not self._markets_loaded:
             self._ensure_exchange()
-            # ccxt — синхронный, поэтому to_thread
-            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), asyncio.get_running_loop())  # no-op ensure loop
+            # ccxt синхронный, поэтому to_thread
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), asyncio.get_running_loop())
             self._ex.load_markets()
             self._markets_loaded = True
 
