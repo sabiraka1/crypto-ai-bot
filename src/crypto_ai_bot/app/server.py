@@ -46,9 +46,9 @@ async def _startup() -> None:
     global _container
     _container = build_container()
     
-    # авто-старт оркестратора при старте сервера
+    # авто-старт оркестратора: проверяем TRADER_AUTOSTART или MODE=live
     autostart = (
-        os.getenv("TRADER_AUTOSTART", "0") in ("1", "true", "yes") 
+        _container.settings.TRADER_AUTOSTART in ("1", "true", "yes") 
         or _container.settings.MODE == "live"
     )
     if autostart:

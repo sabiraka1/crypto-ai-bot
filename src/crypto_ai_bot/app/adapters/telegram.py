@@ -6,7 +6,6 @@ from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("telegram")
 
-
 class TelegramNotifier:
     def __init__(self, token: str, chat_id: str) -> None:
         self._token = token.strip()
@@ -30,9 +29,8 @@ class TelegramNotifier:
             except Exception as exc:
                 _log.error("telegram_send_error", extra={"error": str(exc)})
 
-
 def from_settings(settings: Optional[Settings] = None) -> TelegramNotifier:
     s = settings or Settings.load()
-    token = getattr(s, "TELEGRAM_BOT_TOKEN", "") or ""
+    token = getattr(s, "API_TOKEN", "") or ""     # уже хранится в Settings
     chat = getattr(s, "TELEGRAM_CHAT_ID", "") if hasattr(s, "TELEGRAM_CHAT_ID") else ""
     return TelegramNotifier(token=token, chat_id=chat)
