@@ -54,3 +54,7 @@ class PositionsRepository:
 
         self.set_base_qty(sym, pos.base_qty)
         return pos
+
+
+# --- compatibility alias ---
+PositionsRepo = PositionsRepository

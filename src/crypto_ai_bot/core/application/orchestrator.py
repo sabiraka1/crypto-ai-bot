@@ -4,19 +4,20 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from ..use_cases.eval_and_execute import eval_and_execute
-from ..events.bus import AsyncEventBus
-from ..risk.manager import RiskManager
-from ..risk.protective_exits import ProtectiveExits
-from ..monitoring.health_checker import HealthChecker
-from ..storage.facade import Storage
-from ..brokers.base import IBroker
-from ..brokers.symbols import parse_symbol
-from ..reconciliation.orders import OrdersReconciler
-from ..reconciliation.positions import PositionsReconciler
-from ..reconciliation.balances import BalancesReconciler
-from ..safety.dead_mans_switch import DeadMansSwitch
-from ...utils.logging import get_logger
+from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.domain.risk.manager import RiskManager
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
+from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
+from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
+from crypto_ai_bot.core.application.reconciliation.positions import PositionsReconciler
+from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
+from crypto_ai_bot.core.application.safety.dead_mans_switch import DeadMansSwitch
+from crypto_ai_bot.utils.logging import get_logger
+
 
 @dataclass
 class Orchestrator:
@@ -29,7 +30,6 @@ class Orchestrator:
     health: HealthChecker
     settings: "Settings"
 
-    # Ð·Ð½Ð°Ñ‡ÐµÐ½Ð¸Ñ Ð¿Ð¾ ÑƒÐ¼Ð¾Ð»Ñ‡Ð°Ð½Ð¸ÑŽ Ð±ÑƒÐ´ÑƒÑ‚ Ð¿ÐµÑ€ÐµÐ·Ð°Ð¿Ð¸ÑÐ°Ð½Ñ‹ Ð¸Ð· Settings Ð² start()
     eval_interval_sec: float = 60.0
     exits_interval_sec: float = 5.0
     reconcile_interval_sec: float = 60.0
@@ -53,7 +53,7 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         self._stopping = False
 
-        # интервалы из Settings
+        # интервалы из Settings (если заданы)
         try:
             self.eval_interval_sec = float(self.settings.EVAL_INTERVAL_SEC)
             self.exits_interval_sec = float(self.settings.EXITS_INTERVAL_SEC)
@@ -62,9 +62,9 @@ class Orchestrator:
         except Exception:
             pass
 
-        # safety/reconcile
+        # безопасность и сверки
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
-        self._recon_orders = OrdersReconciler(self.broker, self.symbol, cancel_ttl_sec=int(self.settings.RECON_CANCEL_TTL_SEC) or None)
+        self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
@@ -112,25 +112,25 @@ class Orchestrator:
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
-        async def body():
-            pos = self.storage.positions.get_position(self.symbol)
-            if pos.base_qty and pos.base_qty > 0:
-                # 1) гарантируем, что план есть/актуализирован
-                await self.exits.ensure(symbol=self.symbol)
-                # 2) при наличии метода — проверяем и исполняем SL/TP
-                check_exec = getattr(self.exits, "check_and_execute", None)
-                if callable(check_exec):
-                    try:
-                        order = await check_exec(symbol=self.symbol, broker=self.broker)
-                        if order:
-                            get_logger("orchestrator.exits").info(
-                                "exit_executed",
-                                extra={"symbol": self.symbol, "side": order.side, "client_order_id": order.client_order_id},
-                            )
-                    except Exception as exc:
-                        get_logger("orchestrator.exits").error("check_and_execute_failed", extra={"error": str(exc)})
         while not self._stopping:
-            await self._run_tick(body, interval=self.exits_interval_sec, loop_name="exits")
+            try:
+                pos = self.storage.positions.get_position(self.symbol)
+                if pos.base_qty and pos.base_qty > 0:
+                    await self.exits.ensure(symbol=self.symbol)
+                    check_exec = getattr(self.exits, "check_and_execute", None)
+                    if callable(check_exec):
+                        try:
+                            order = await check_exec(symbol=self.symbol)
+                            if order:
+                                get_logger("orchestrator.exits").info(
+                                    "exit_executed",
+                                    extra={"symbol": self.symbol, "side": order.side, "client_order_id": order.client_order_id},
+                                )
+                        except Exception as exc:
+                            get_logger("orchestrator.exits").error("check_and_execute_failed", extra={"error": str(exc)})
+            except Exception as exc:
+                get_logger("orchestrator.exits").error("ensure_failed", extra={"error": str(exc)})
+            await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
         while not self._stopping:

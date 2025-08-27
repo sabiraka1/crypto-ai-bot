@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
@@ -37,19 +38,21 @@ class Container:
 
 
 def _create_storage_for_mode(settings: Settings) -> Storage:
-    conn = sqlite3.connect(settings.DB_PATH)
+    db_path = settings.DB_PATH
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     run_migrations(conn, now_ms=now_ms())
     storage = Storage.from_connection(conn)
-    _log.info("storage_created", extra={"mode": settings.MODE, "db_path": settings.DB_PATH})
+    _log.info("storage_created", extra={"mode": settings.MODE, "db_path": db_path})
     return storage
 
 
 def _create_broker_for_mode(settings: Settings) -> IBroker:
-    if settings.MODE.lower() == "paper":
+    mode = (settings.MODE or "").lower()
+    if mode == "paper":
         balances = {"USDT": Decimal("10000")}
         return PaperBroker(symbol=settings.SYMBOL, balances=balances)
-    if settings.MODE.lower() == "live":
+    if mode == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
             api_key=settings.API_KEY,
@@ -66,8 +69,8 @@ def build_container() -> Container:
     storage = _create_storage_for_mode(settings)
     bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
     broker = _create_broker_for_mode(settings)
+
     risk = RiskManager(
-        storage=storage,
         config=RiskConfig(
             cooldown_sec=settings.RISK_COOLDOWN_SEC,
             max_spread_pct=settings.RISK_MAX_SPREAD_PCT,
@@ -76,13 +79,14 @@ def build_container() -> Container:
             daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
         ),
     )
-    exits = ProtectiveExits(storage=storage, bus=bus)
+
+    exits = ProtectiveExits(storage=storage, bus=bus, broker=broker, settings=settings)
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
 
-    lock = None
-    if settings.MODE == "live":
+    lock: Optional[InstanceLock] = None
+    if settings.MODE.lower() == "live":
         try:
-            lock_owner = settings.POD_NAME or settings.HOSTNAME or "local"
+            lock_owner = os.getenv("POD_NAME", os.getenv("HOSTNAME", "local"))
             lock = InstanceLock(storage.conn, app="trader", owner=lock_owner)
             lock.acquire(ttl_sec=300)
         except Exception as exc:
@@ -99,4 +103,14 @@ def build_container() -> Container:
         settings=settings,
     )
 
-    return Container(settings, storage, broker, bus, health, risk, exits, orchestrator, lock)
+    return Container(
+        settings=settings,
+        storage=storage,
+        broker=broker,
+        bus=bus,
+        health=health,
+        risk=risk,
+        exits=exits,
+        orchestrator=orchestrator,
+        lock=lock,
+    )
