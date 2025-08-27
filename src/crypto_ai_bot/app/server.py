@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import os
-from decimal import Decimal  # <— фикс: нужен для /performance
+from decimal import Decimal
 from typing import Any, Dict
 
-from fastapi import FastAPI, APIRouter, Depends, HTTPException
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..utils.logging import get_logger
 from ..utils.metrics import render_prometheus, render_metrics_json
 from ..utils.time import now_ms
+from ..utils.exceptions import (
+    TradingError,
+    ValidationError,
+    BrokerError,
+    TransientError,
+    IdempotencyError,
+    CircuitOpenError,
+)
 from .compose import build_container
 
 _log = get_logger("server")
@@ -30,6 +38,31 @@ async def _auth(credentials: HTTPAuthorizationCredentials = Depends(security)) -
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+# ---- exception handlers (hardening) -----------------------------------------
+
+@app.exception_handler(TradingError)
+async def trading_error_handler(request: Request, exc: TradingError):
+    if isinstance(exc, ValidationError):
+        code = 400
+    elif isinstance(exc, IdempotencyError):
+        code = 409
+    elif isinstance(exc, BrokerError):
+        code = 502
+    elif isinstance(exc, (TransientError, CircuitOpenError)):
+        code = 503
+    else:
+        code = 500
+    return JSONResponse(status_code=code, content={"ok": False, "error": exc.__class__.__name__, "detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception):
+    _log.error("unhandled_error", extra={"error": str(exc)})
+    return JSONResponse(status_code=500, content={"ok": False, "error": "InternalServerError"})
+
+
+# ---- endpoints ---------------------------------------------------------------
+
 @router.get("/live")
 async def live() -> Dict[str, Any]:
     return {"ok": True, "ts_ms": now_ms()}
@@ -40,8 +73,10 @@ async def ready() -> JSONResponse:
     try:
         c = app.state.container
         rep = await c.health.check(symbol=c.settings.SYMBOL)
-        return JSONResponse(status_code=(200 if rep.ok else 503),
-                            content={"ok": rep.ok, "components": rep.components, "ts_ms": rep.ts_ms})
+        return JSONResponse(
+            status_code=(200 if rep.ok else 503),
+            content={"ok": rep.ok, "components": rep.components, "ts_ms": rep.ts_ms},
+        )
     except Exception as exc:
         return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
 
@@ -50,8 +85,10 @@ async def ready() -> JSONResponse:
 async def health() -> JSONResponse:
     c = app.state.container
     rep = await c.health.check(symbol=c.settings.SYMBOL)
-    return JSONResponse(status_code=(200 if rep.ok else 503),
-                        content={"ok": rep.ok, "ts_ms": rep.ts_ms, "components": rep.components})
+    return JSONResponse(
+        status_code=(200 if rep.ok else 503),
+        content={"ok": rep.ok, "ts_ms": rep.ts_ms, "components": rep.components},
+    )
 
 
 @router.get("/metrics", response_class=PlainTextResponse)
