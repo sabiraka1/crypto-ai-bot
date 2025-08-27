@@ -4,14 +4,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, Optional
 
-from ..brokers.base import IBroker, OrderDTO
-from ..storage.facade import Storage
-from ..events.bus import AsyncEventBus
-from ..settings import Settings
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.metrics import inc  # ← метрики
+from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("risk.exits")
 
@@ -103,7 +103,7 @@ class ProtectiveExits:
                 "client_order_id": client_id,
                 "ts": now_ms(),
             }
-            inc("exits_triggered_total", reason=(reason or "na"))  # ← метрика
+            inc("exits_triggered_total", reason=(reason or "na"))
             await self.bus.publish("protective_exit.triggered", payload, key=symbol)
             _log.warning("protective_exit_triggered", extra=payload)
             self._state.pop(symbol, None)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Any
 
-from ..events.bus import AsyncEventBus, Event
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -10,12 +10,12 @@ from crypto_ai_bot.utils.metrics import inc
 _log = get_logger("monitoring.dlq")
 
 
-async def _dlq_logger(event: Event) -> None:
+async def _dlq_logger(event: Dict[str, Any]) -> None:
     """
     Базовый подписчик DLQ: шлёт метрику и пишет в лог.
     Никакой логики повторной обработки тут нет — это просто наблюдаемость.
     """
-    payload: Dict[str, Any] = event.payload or {}
+    payload: Dict[str, Any] = event
     topic = payload.get("original_topic", "unknown")
     handler = payload.get("handler", "unknown")
     error = payload.get("error", "unknown")

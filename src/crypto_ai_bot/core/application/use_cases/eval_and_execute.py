@@ -4,17 +4,17 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
-from ..brokers.base import IBroker, OrderDTO
-from ..events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from ..risk.manager import RiskManager
 from ..risk.protective_exits import ProtectiveExits
-from ..storage.facade import Storage
 from ..strategies.manager import StrategyManager
 from ..strategies.base import StrategyContext
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.metrics import inc  # ← метрики
+from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("usecase.eval_and_execute")
 
@@ -56,7 +56,7 @@ async def eval_and_execute(
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[ProtectiveExits] = None,
 ) -> Dict[str, Any]:
-    inc("orc_eval_ticks_total")  # ← тик
+    inc("orc_eval_ticks_total")
     ctx = await _build_market_context(broker=broker, symbol=symbol)
 
     manager = StrategyManager()

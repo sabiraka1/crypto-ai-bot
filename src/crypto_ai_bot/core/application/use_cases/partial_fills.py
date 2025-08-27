@@ -3,8 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Optional
 
-from ..brokers.base import IBroker, OrderDTO
-from ..events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.time import now_ms

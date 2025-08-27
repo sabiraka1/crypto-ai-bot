@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from ..storage.facade import Storage
-from ..events.bus import AsyncEventBus
-from ..brokers.base import IBroker
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
 
@@ -16,7 +16,7 @@ _log = get_logger("health")
 class HealthReport:
     ok: bool
     ts_ms: int
-    components: Dict[str, Any]  # ✅ было details
+    components: Dict[str, Any]
 
 
 class HealthChecker:
