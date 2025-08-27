@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from .rules.loss_streak import LossStreakRule
 from .rules.max_drawdown import MaxDrawdownRule
+from crypto_ai_bot.utils.decimal import dec
 
 
 @dataclass(frozen=True)
@@ -16,11 +17,11 @@ class RiskConfig:
     max_orders_per_hour: int
     daily_loss_limit_quote: Decimal
     # доп. пороги
-    max_fee_pct: Decimal = Decimal("0.001")
-    max_slippage_pct: Decimal = Decimal("0.001")
+    max_fee_pct: Decimal = dec("0.001")
+    max_slippage_pct: Decimal = dec("0.001")
     # правила для loss streak и drawdown
     max_loss_streak: int = 3
-    max_drawdown_pct: Decimal = Decimal("10.0")
+    max_drawdown_pct: Decimal = dec("10.0")
 
 
 @dataclass(frozen=True)
@@ -74,15 +75,15 @@ class RiskManager:
             inputs = RiskInputs(
                 now_ms=d.get('now_ms', now_ms()),
                 action=d.get('action', 'BUY_QUOTE'),
-                spread_pct=Decimal(str(d.get('spread_pct', 0))),
-                position_base=Decimal(str(d.get('position_base', 0))),
+                spread_pct=dec(str(d.get('spread_pct', 0))),
+                position_base=dec(str(d.get('position_base', 0))),
                 orders_last_hour=d.get('recent_orders', d.get('orders_last_hour', 0)),
-                daily_pnl_quote=Decimal(str(d.get('pnl_daily_quote', d.get('daily_pnl_quote', 0)))),
-                est_fee_pct=Decimal(str(d.get('est_fee_pct', 0.001))),
-                est_slippage_pct=Decimal(str(d.get('est_slippage_pct', 0.001))),
+                daily_pnl_quote=dec(str(d.get('pnl_daily_quote', d.get('daily_pnl_quote', 0)))),
+                est_fee_pct=dec(str(d.get('est_fee_pct', 0.001))),
+                est_slippage_pct=dec(str(d.get('est_slippage_pct', 0.001))),
                 recent_trades=d.get('recent_trades'),
-                current_balance=Decimal(str(d.get('current_balance', 0))) if d.get('current_balance') else None,
-                peak_balance=Decimal(str(d.get('peak_balance', 0))) if d.get('peak_balance') else None,
+                current_balance=dec(str(d.get('current_balance', 0))) if d.get('current_balance') else None,
+                peak_balance=dec(str(d.get('peak_balance', 0))) if d.get('peak_balance') else None,
             )
             return self._check_inputs(inputs)
         
@@ -97,15 +98,15 @@ class RiskManager:
             inputs = RiskInputs(
                 now_ms=evaluation.get('now_ms', now_ms()),
                 action="BUY_QUOTE" if action == "buy" else "SELL_BASE" if action == "sell" else action,
-                spread_pct=Decimal(str(evaluation.get('spread_pct', 0))),
-                position_base=Decimal(str(evaluation.get('position_base', 0))),
+                spread_pct=dec(str(evaluation.get('spread_pct', 0))),
+                position_base=dec(str(evaluation.get('position_base', 0))),
                 orders_last_hour=evaluation.get('orders_last_hour', 0),
-                daily_pnl_quote=Decimal(str(evaluation.get('daily_pnl_quote', 0))),
-                est_fee_pct=Decimal(str(evaluation.get('est_fee_pct', 0.001))),
-                est_slippage_pct=Decimal(str(evaluation.get('est_slippage_pct', 0.001))),
+                daily_pnl_quote=dec(str(evaluation.get('daily_pnl_quote', 0))),
+                est_fee_pct=dec(str(evaluation.get('est_fee_pct', 0.001))),
+                est_slippage_pct=dec(str(evaluation.get('est_slippage_pct', 0.001))),
                 recent_trades=evaluation.get('recent_trades'),
-                current_balance=Decimal(str(evaluation.get('current_balance', 0))) if evaluation.get('current_balance') else None,
-                peak_balance=Decimal(str(evaluation.get('peak_balance', 0))) if evaluation.get('peak_balance') else None,
+                current_balance=dec(str(evaluation.get('current_balance', 0))) if evaluation.get('current_balance') else None,
+                peak_balance=dec(str(evaluation.get('peak_balance', 0))) if evaluation.get('peak_balance') else None,
             )
             return self._check_inputs(inputs)
         

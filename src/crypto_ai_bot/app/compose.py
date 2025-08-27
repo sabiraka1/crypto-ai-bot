@@ -53,6 +53,9 @@ def _create_broker_for_mode(settings: Settings) -> IBroker:
         balances = {"USDT": dec("10000")}
         return PaperBroker(symbol=settings.SYMBOL, balances=balances)
     if mode == "live":
+        # Fail-fast: ключи обязательны в live
+        if not settings.API_KEY or not settings.API_SECRET:
+            raise ValueError("API creds required in live mode")
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
             api_key=settings.API_KEY,
@@ -68,6 +71,8 @@ def build_container() -> Container:
     settings = Settings.load()
     storage = _create_storage_for_mode(settings)
     bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
+    bus.attach_logger_dlq()  # проще отлавливать сбои подписчиков
+
     broker = _create_broker_for_mode(settings)
 
     risk = RiskManager(

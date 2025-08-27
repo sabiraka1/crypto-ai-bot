@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Iterable, List, Tuple
 
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.decimal import dec
 
 
 @dataclass(frozen=True)
@@ -38,18 +39,18 @@ def fifo_pnl(trades: Iterable[dict]) -> List[PnLPoint]:
     Возвращает серию PnLPoint с текущим количеством, сред. ценой и реализованным PnL (quote).
     """
     lots: List[Tuple[Decimal, Decimal]] = []  # (qty_base, avg_price_quote_per_base)
-    realized = Decimal("0")
+    realized = dec("0")
     series: List[PnLPoint] = []
 
     for t in trades:
         side = str(t.get("side", "")).lower()
-        amt: Decimal = Decimal(str(t.get("amount", "0")))
-        cost: Decimal = Decimal(str(t.get("cost", "0")))  # сумма в quote
+        amt: Decimal = dec(str(t.get("amount", "0")))
+        cost: Decimal = dec(str(t.get("cost", "0")))  # сумма в quote
 
         if amt <= 0:
             series.append(PnLPoint(
                 qty_base=sum(q for q, _ in lots),
-                avg_price=Decimal("0") if not lots else (sum(q * p for q, p in lots) / max(Decimal("1e-18"), sum(q for q, _ in lots))),
+                avg_price=dec("0") if not lots else (sum(q * p for q, p in lots) / max(dec("1e-18"), sum(q for q, _ in lots))),
                 realized_quote=realized,
             ))
             continue
@@ -76,7 +77,7 @@ def fifo_pnl(trades: Iterable[dict]) -> List[PnLPoint]:
 
         # снимок состояния
         qty = sum(q for q, _ in lots)
-        avg = Decimal("0") if qty == 0 else (sum(q * p for q, p in lots) / qty)
+        avg = dec("0") if qty == 0 else (sum(q * p for q, p in lots) / qty)
         series.append(PnLPoint(qty_base=qty, avg_price=avg, realized_quote=realized))
 
     return series
