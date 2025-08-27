@@ -16,7 +16,9 @@ from ..reconciliation.orders import OrdersReconciler
 from ..reconciliation.positions import PositionsReconciler
 from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
+from ..safety.instance_lock import InstanceLock
 from ...utils.logging import get_logger
+
 
 @dataclass
 class Orchestrator:
@@ -29,14 +31,16 @@ class Orchestrator:
     health: HealthChecker
     settings: "Settings"
 
-    # Ð·Ð½Ð°Ñ‡ÐµÐ½Ð¸Ñ Ð¿Ð¾ ÑƒÐ¼Ð¾Ð»Ñ‡Ð°Ð½Ð¸ÑŽ Ð±ÑƒÐ´ÑƒÑ‚ Ð¿ÐµÑ€ÐµÐ·Ð°Ð¿Ð¸ÑÐ°Ð½Ñ‹ Ð¸Ð· Settings Ð² start()
-    eval_interval_sec: float = 60.0
-    exits_interval_sec: float = 5.0
-    reconcile_interval_sec: float = 60.0
-    watchdog_interval_sec: float = 15.0
+    eval_interval_sec: float = 1.0
+    exits_interval_sec: float = 2.0
+    reconcile_interval_sec: float = 5.0
+    watchdog_interval_sec: float = 2.0
 
     force_eval_action: Optional[str] = None
     dms_timeout_ms: int = 120_000
+
+    # NEW: продление лока инстанса
+    lock: Optional[InstanceLock] = None
 
     _tasks: Dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
@@ -53,18 +57,8 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         self._stopping = False
 
-        # интервалы из Settings
-        try:
-            self.eval_interval_sec = float(self.settings.EVAL_INTERVAL_SEC)
-            self.exits_interval_sec = float(self.settings.EXITS_INTERVAL_SEC)
-            self.reconcile_interval_sec = float(self.settings.RECONCILE_INTERVAL_SEC)
-            self.watchdog_interval_sec = float(self.settings.WATCHDOG_INTERVAL_SEC)
-        except Exception:
-            pass
-
-        # safety/reconcile
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
-        self._recon_orders = OrdersReconciler(self.broker, self.symbol, cancel_ttl_sec=int(self.settings.RECON_CANCEL_TTL_SEC) or None)
+        self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
@@ -89,6 +83,7 @@ class Orchestrator:
         return {"running": bool(self._tasks), "tasks": {k: (not v.done()) for k, v in self._tasks.items()}, "last_beat_ms": self._last_beat_ms}
 
     async def _eval_loop(self) -> None:
+        log = get_logger("orchestrator.eval")
         while not self._stopping:
             try:
                 await eval_and_execute(
@@ -107,33 +102,25 @@ class Orchestrator:
                 if self._dms:
                     self._dms.beat()
             except Exception as exc:
-                get_logger("orchestrator.eval").error("tick_failed", extra={"error": str(exc)})
+                log.error("tick_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
-        async def body():
-            pos = self.storage.positions.get_position(self.symbol)
-            if pos.base_qty and pos.base_qty > 0:
-                # 1) гарантируем, что план есть/актуализирован
-                await self.exits.ensure(symbol=self.symbol)
-                # 2) при наличии метода — проверяем и исполняем SL/TP
-                check_exec = getattr(self.exits, "check_and_execute", None)
-                if callable(check_exec):
-                    try:
-                        order = await check_exec(symbol=self.symbol, broker=self.broker)
-                        if order:
-                            get_logger("orchestrator.exits").info(
-                                "exit_executed",
-                                extra={"symbol": self.symbol, "side": order.side, "client_order_id": order.client_order_id},
-                            )
-                    except Exception as exc:
-                        get_logger("orchestrator.exits").error("check_and_execute_failed", extra={"error": str(exc)})
-        while not self._stopping:
-            await self._run_tick(body, interval=self.exits_interval_sec, loop_name="exits")
-
-    async def _reconcile_loop(self) -> None:
+        log = get_logger("orchestrator.exits")
         while not self._stopping:
             try:
+                pos = self.storage.positions.get_position(self.symbol)
+                if pos.base_qty and pos.base_qty > 0:
+                    await self.exits.ensure(symbol=self.symbol)
+            except Exception as exc:
+                log.error("ensure_failed", extra={"error": str(exc)})
+            await asyncio.sleep(self.exits_interval_sec)
+
+    async def _reconcile_loop(self) -> None:
+        log = get_logger("orchestrator.reconcile")
+        while not self._stopping:
+            try:
+                # лёгкий house-keeping
                 try:
                     prune = getattr(self.storage.idempotency, "prune_older_than", None)
                     if callable(prune):
@@ -153,20 +140,35 @@ class Orchestrator:
                     await self._recon_pos.run_once()
                 if self._recon_bal:
                     await self._recon_bal.run_once()
-
             except Exception as exc:
-                get_logger("orchestrator.reconcile").error("reconcile_failed", extra={"error": str(exc)})
+                log.error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
+        log = get_logger("orchestrator.watchdog")
         while not self._stopping:
             try:
                 rep = await self.health.check(symbol=self.symbol)
                 hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
                 await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
                 self._last_beat_ms = rep.ts_ms
+
                 if self._dms:
                     await self._dms.check_and_trigger()
+
+                # NEW: тихое продление InstanceLock, если есть
+                if self.lock:
+                    try:
+                        # поддерживаем несколько реализаций API
+                        if hasattr(self.lock, "renew"):
+                            self.lock.renew(ttl_sec=300)               # type: ignore[attr-defined]
+                        elif hasattr(self.lock, "extend"):
+                            self.lock.extend(ttl_sec=300)               # type: ignore[attr-defined]
+                        else:
+                            self.lock.acquire(ttl_sec=300)
+                    except Exception:
+                        pass
+
             except Exception as exc:
-                get_logger("orchestrator.watchdog").error("watchdog_failed", extra={"error": str(exc)})
+                log.error("watchdog_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.watchdog_interval_sec)

@@ -2,55 +2,104 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from decimal import Decimal
 
 
-def _d(name: str, default: str) -> Decimal:
-    return Decimal(os.getenv(name, default))
+def _get(name: str, default: str) -> str:
+    return os.getenv(name, default)
 
 
 @dataclass
 class Settings:
-    # режимы и биржа
-    MODE: str = os.getenv("MODE", "paper")              # paper|live
-    EXCHANGE: str = os.getenv("EXCHANGE", "gateio")
-    SYMBOL: str = os.getenv("SYMBOL", "BTC/USDT")
-    SANDBOX: int = int(os.getenv("SANDBOX", "0"))       # для ccxt (live)
-    API_KEY: str = os.getenv("API_KEY", "")
-    API_SECRET: str = os.getenv("API_SECRET", "")
+    # режим
+    MODE: str
+    SANDBOX: int
 
-    # база
-    DB_PATH: str = os.getenv("DB_PATH", "./data/trader.sqlite3")
+    # биржа и символы
+    EXCHANGE: str
+    SYMBOL: str
+    SYMBOLS: str
 
-    # оркестратор — интервалы (сек)
-    EVAL_INTERVAL_SEC: float = float(os.getenv("EVAL_INTERVAL_SEC", "1"))
-    EXITS_INTERVAL_SEC: float = float(os.getenv("EXITS_INTERVAL_SEC", "2"))
-    RECONCILE_INTERVAL_SEC: float = float(os.getenv("RECONCILE_INTERVAL_SEC", "5"))
-    WATCHDOG_INTERVAL_SEC: float = float(os.getenv("WATCHDOG_INTERVAL_SEC", "2"))
+    # sizing
+    FIXED_AMOUNT: float
 
-    # идемпотенси
-    IDEMPOTENCY_BUCKET_MS: int = int(os.getenv("IDEMPOTENCY_BUCKET_MS", "60000"))
-    IDEMPOTENCY_TTL_SEC: int = int(os.getenv("IDEMPOTENCY_TTL_SEC", "3600"))
+    # paper feed
+    PRICE_FEED: str
+    FIXED_PRICE: float
 
-    # риск-менеджмент (примерные дефолты)
-    RISK_COOLDOWN_SEC: int = int(os.getenv("RISK_COOLDOWN_SEC", "10"))
-    RISK_MAX_SPREAD_PCT: float = float(os.getenv("RISK_MAX_SPREAD_PCT", "0.5"))
-    RISK_MAX_POSITION_BASE: Decimal = _d("RISK_MAX_POSITION_BASE", "1")
-    RISK_MAX_ORDERS_PER_HOUR: int = int(os.getenv("RISK_MAX_ORDERS_PER_HOUR", "30"))
-    RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal = _d("RISK_DAILY_LOSS_LIMIT_QUOTE", "200")
+    # DB / idempotency
+    DB_PATH: str
+    BACKUP_RETENTION_DAYS: int
+    IDEMPOTENCY_BUCKET_MS: int
+    IDEMPOTENCY_TTL_SEC: int
 
-    # торговля
-    FIXED_AMOUNT: Decimal = _d("FIXED_AMOUNT", "50")  # USDT сумма на покупку
+    # risk
+    RISK_COOLDOWN_SEC: int
+    RISK_MAX_SPREAD_PCT: float
+    RISK_MAX_POSITION_BASE: float
+    RISK_MAX_ORDERS_PER_HOUR: int
+    RISK_DAILY_LOSS_LIMIT_QUOTE: float
 
-    # house-keeping / ретеншн
-    RETENTION_AUDIT_DAYS: int = int(os.getenv("RETENTION_AUDIT_DAYS", "7"))
-    RETENTION_MARKET_DATA_DAYS: int = int(os.getenv("RETENTION_MARKET_DATA_DAYS", "3"))
-    RETENTION_IDEMPOTENCY_SEC: int = int(os.getenv("RETENTION_IDEMPOTENCY_SEC", "86400"))
-    RETENTION_RECON_TRADES_DAYS: int = int(os.getenv("RETENTION_RECON_TRADES_DAYS", "30"))
+    # orchestrator intervals / dms
+    EVAL_INTERVAL_SEC: int
+    EXITS_INTERVAL_SEC: int
+    RECONCILE_INTERVAL_SEC: int
+    WATCHDOG_INTERVAL_SEC: int
+    DMS_TIMEOUT_MS: int
 
-    # Decimal precision (общий центр)
-    DECIMAL_PREC: int = int(os.getenv("DECIMAL_PREC", "28"))
+    # exits (NEW)
+    EXITS_ENABLED: int
+    EXITS_MODE: str
+    EXITS_HARD_STOP_PCT: float
+    EXITS_TRAILING_PCT: float
+    EXITS_MIN_BASE_TO_EXIT: float
+
+    # security
+    API_TOKEN: str
+    API_KEY: str
+    API_SECRET: str
 
     @classmethod
     def load(cls) -> "Settings":
-        return cls()
+        mode = _get("MODE", "paper")
+        base, quote = (_get("SYMBOL", "BTC/USDT").split("/")+["USDT"])[:2]
+        db_default = f"./data/trader-{_get('EXCHANGE','gateio')}-{base}{quote}-{mode}{'-sandbox' if _get('SANDBOX','0') in ('1','true','yes') else ''}.sqlite3"
+        return cls(
+            MODE=mode,
+            SANDBOX=int(_get("SANDBOX", "0")),
+
+            EXCHANGE=_get("EXCHANGE", "gateio"),
+            SYMBOL=_get("SYMBOL", "BTC/USDT"),
+            SYMBOLS=_get("SYMBOLS", ""),
+
+            FIXED_AMOUNT=float(_get("FIXED_AMOUNT", "50")),
+
+            PRICE_FEED=_get("PRICE_FEED", "fixed"),
+            FIXED_PRICE=float(_get("FIXED_PRICE", "100")),
+
+            DB_PATH=_get("DB_PATH", db_default),
+            BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
+            IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
+            IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
+
+            RISK_COOLDOWN_SEC=int(_get("RISK_COOLDOWN_SEC", "60")),
+            RISK_MAX_SPREAD_PCT=float(_get("RISK_MAX_SPREAD_PCT", "0.3")),
+            RISK_MAX_POSITION_BASE=float(_get("RISK_MAX_POSITION_BASE", "0.02")),
+            RISK_MAX_ORDERS_PER_HOUR=int(_get("RISK_MAX_ORDERS_PER_HOUR", "6")),
+            RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
+
+            EVAL_INTERVAL_SEC=int(_get("EVAL_INTERVAL_SEC", "60")),
+            EXITS_INTERVAL_SEC=int(_get("EXITS_INTERVAL_SEC", "5")),
+            RECONCILE_INTERVAL_SEC=int(_get("RECONCILE_INTERVAL_SEC", "60")),
+            WATCHDOG_INTERVAL_SEC=int(_get("WATCHDOG_INTERVAL_SEC", "15")),
+            DMS_TIMEOUT_MS=int(_get("DMS_TIMEOUT_MS", "120000")),
+
+            EXITS_ENABLED=int(_get("EXITS_ENABLED", "1")),
+            EXITS_MODE=_get("EXITS_MODE", "both"),
+            EXITS_HARD_STOP_PCT=float(_get("EXITS_HARD_STOP_PCT", "0.05")),
+            EXITS_TRAILING_PCT=float(_get("EXITS_TRAILING_PCT", "0.03")),
+            EXITS_MIN_BASE_TO_EXIT=float(_get("EXITS_MIN_BASE_TO_EXIT", "0")),
+
+            API_TOKEN=_get("API_TOKEN", ""),
+            API_KEY=_get("API_KEY", ""),
+            API_SECRET=_get("API_SECRET", ""),
+        )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Callable
 
 from ..core.settings import Settings
 from ..core.events.bus import AsyncEventBus
@@ -42,11 +42,19 @@ def _create_storage(settings: Settings) -> Storage:
     return st
 
 
+def _paper_price_feed(settings: Settings) -> Callable[[], Decimal]:
+    # сейчас поддерживаем безопасный вариант: FIXED
+    # (PRICE_FEED=live добавим позже, чтобы не плодить сетевые зависимости в paper)
+    return lambda: Decimal(str(settings.FIXED_PRICE))
+
+
 def _create_broker(settings: Settings) -> IBroker:
-    if settings.MODE.lower() == "paper":
+    mode = settings.MODE.lower()
+    if mode == "paper":
         balances = {"USDT": Decimal("10000")}
-        return PaperBroker(symbol=settings.SYMBOL, balances=balances)
-    if settings.MODE.lower() == "live":
+        pf = _paper_price_feed(settings)
+        return PaperBroker(symbol=settings.SYMBOL, balances=balances, price_feed=pf)
+    if mode == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
             api_key=settings.API_KEY,
@@ -77,7 +85,7 @@ def build_container() -> Container:
     exits = ProtectiveExits(storage=storage, bus=bus, broker=broker, settings=settings)
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
 
-    lock = None
+    lock: Optional[InstanceLock] = None
     if settings.MODE.lower() == "live":
         try:
             owner = os.getenv("POD_NAME", os.getenv("HOSTNAME", "local"))
@@ -95,6 +103,13 @@ def build_container() -> Container:
         exits=exits,
         health=health,
         settings=settings,
+        # интервалы из ENV/Settings
+        eval_interval_sec=float(settings.EVAL_INTERVAL_SEC),
+        exits_interval_sec=float(settings.EXITS_INTERVAL_SEC),
+        reconcile_interval_sec=float(settings.RECONCILE_INTERVAL_SEC),
+        watchdog_interval_sec=float(settings.WATCHDOG_INTERVAL_SEC),
+        dms_timeout_ms=int(settings.DMS_TIMEOUT_MS),
+        lock=lock,  # <— для авто-обновления
     )
 
     return Container(
