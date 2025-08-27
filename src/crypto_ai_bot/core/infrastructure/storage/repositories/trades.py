@@ -116,3 +116,19 @@ class TradesRepository:
             }
             for r in rows
         ]
+
+
+# --- compatibility aliases expected by storage.facade ---
+try:
+    TradesRepo  # already defined under this name
+except NameError:
+    try:
+        # if class is named TradesRepository – expose as TradesRepo
+        TradesRepo = TradesRepository  # type: ignore[name-defined]
+    except NameError:
+        try:
+            # if class is named TradeRepo – expose as TradesRepo
+            TradesRepo = TradeRepo  # type: ignore[name-defined]
+        except NameError:
+            # nothing to alias; leave as is to surface a clear error
+            pass
