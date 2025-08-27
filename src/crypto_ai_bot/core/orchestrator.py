@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from ..use_cases.eval_and_execute import eval_and_execute
 from ..events.bus import AsyncEventBus
 from ..risk.manager import RiskManager
+ # ↓↓↓ исправлено: один уровень вверх к utils
 from ..risk.protective_exits import ProtectiveExits
 from ..monitoring.health_checker import HealthChecker
 from ..storage.facade import Storage
@@ -16,9 +17,7 @@ from ..reconciliation.orders import OrdersReconciler
 from ..reconciliation.positions import PositionsReconciler
 from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
-from ...utils.logging import get_logger
-from ...utils.metrics import inc  # ← метрики
-
+from ..utils.logging import get_logger  # ← было ...utils.logging
 
 @dataclass
 class Orchestrator:
@@ -53,10 +52,12 @@ class Orchestrator:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
+
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
         self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
+
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
         self._tasks["exits"] = loop.create_task(self._exits_loop(), name="orc-exits")
         self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name="orc-reconcile")
@@ -78,7 +79,6 @@ class Orchestrator:
         return {"running": bool(self._tasks), "tasks": {k: (not v.done()) for k, v in self._tasks.items()}, "last_beat_ms": self._last_beat_ms}
 
     async def _eval_loop(self) -> None:
-        log = get_logger("orchestrator.eval")
         while not self._stopping:
             try:
                 await eval_and_execute(
@@ -97,24 +97,20 @@ class Orchestrator:
                 if self._dms:
                     self._dms.beat()
             except Exception as exc:
-                log.error("tick_failed", extra={"error": str(exc)})
-                inc("errors_total", kind="eval_tick_failed")
+                get_logger("orchestrator.eval").error("tick_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
-        log = get_logger("orchestrator.exits")
         while not self._stopping:
             try:
                 pos = self.storage.positions.get_position(self.symbol)
                 if pos.base_qty and pos.base_qty > 0:
                     await self.exits.ensure(symbol=self.symbol)
             except Exception as exc:
-                log.error("ensure_failed", extra={"error": str(exc)})
-                inc("errors_total", kind="exits_loop_failed")
+                get_logger("orchestrator.exits").error("ensure_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
-        log = get_logger("orchestrator.reconcile")
         while not self._stopping:
             try:
                 try:
@@ -136,23 +132,20 @@ class Orchestrator:
                     await self._recon_pos.run_once()
                 if self._recon_bal:
                     await self._recon_bal.run_once()
+
             except Exception as exc:
-                log.error("reconcile_failed", extra={"error": str(exc)})
-                inc("errors_total", kind="reconcile_failed")
+                get_logger("orchestrator.reconcile").error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
-        log = get_logger("orchestrator.watchdog")
         while not self._stopping:
             try:
                 rep = await self.health.check(symbol=self.symbol)
                 hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
                 await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
                 self._last_beat_ms = rep.ts_ms
-                inc("watchdog_heartbeat_total")
                 if self._dms:
                     await self._dms.check_and_trigger()
             except Exception as exc:
-                log.error("watchdog_failed", extra={"error": str(exc)})
-                inc("errors_total", kind="watchdog_failed")
+                get_logger("orchestrator.watchdog").error("watchdog_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.watchdog_interval_sec)

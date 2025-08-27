@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import os
+import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Callable
+from typing import Optional
 
 from ..core.settings import Settings
 from ..core.events.bus import AsyncEventBus
+from ..core.storage.migrations.runner import run_migrations
 from ..core.storage.facade import Storage
 from ..core.monitoring.health_checker import HealthChecker
 from ..core.risk.manager import RiskManager, RiskConfig
@@ -21,7 +22,6 @@ from ..utils.logging import get_logger
 
 _log = get_logger("compose")
 
-
 @dataclass
 class Container:
     settings: Settings
@@ -34,27 +34,19 @@ class Container:
     orchestrator: Orchestrator
     lock: Optional[InstanceLock] = None
 
+def _create_storage_for_mode(settings: Settings) -> Storage:
+    conn = sqlite3.connect(settings.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    run_migrations(conn, now_ms=now_ms())
+    storage = Storage.from_connection(conn)
+    _log.info("storage_created", extra={"mode": settings.MODE, "db_path": settings.DB_PATH})
+    return storage
 
-def _create_storage(settings: Settings) -> Storage:
-    # миграции выполняются внутри Storage.open(...)
-    st = Storage.open(settings.DB_PATH, now_ms=now_ms())
-    _log.info("storage_opened", extra={"db_path": settings.DB_PATH, "mode": settings.MODE})
-    return st
-
-
-def _paper_price_feed(settings: Settings) -> Callable[[], Decimal]:
-    # сейчас поддерживаем безопасный вариант: FIXED
-    # (PRICE_FEED=live добавим позже, чтобы не плодить сетевые зависимости в paper)
-    return lambda: Decimal(str(settings.FIXED_PRICE))
-
-
-def _create_broker(settings: Settings) -> IBroker:
-    mode = settings.MODE.lower()
-    if mode == "paper":
+def _create_broker_for_mode(settings: Settings) -> IBroker:
+    if settings.MODE.lower() == "paper":
         balances = {"USDT": Decimal("10000")}
-        pf = _paper_price_feed(settings)
-        return PaperBroker(symbol=settings.SYMBOL, balances=balances, price_feed=pf)
-    if mode == "live":
+        return PaperBroker(symbol=settings.SYMBOL, balances=balances)
+    if settings.MODE.lower() == "live":
         return CcxtBroker(
             exchange_id=settings.EXCHANGE,
             api_key=settings.API_KEY,
@@ -65,13 +57,11 @@ def _create_broker(settings: Settings) -> IBroker:
         )
     raise ValueError(f"Unknown MODE={settings.MODE}")
 
-
 def build_container() -> Container:
     settings = Settings.load()
-    storage = _create_storage(settings)
+    storage = _create_storage_for_mode(settings)
     bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
-    broker = _create_broker(settings)
-
+    broker = _create_broker_for_mode(settings)
     risk = RiskManager(
         storage=storage,
         config=RiskConfig(
@@ -82,14 +72,14 @@ def build_container() -> Container:
             daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
         ),
     )
-    exits = ProtectiveExits(storage=storage, bus=bus, broker=broker, settings=settings)
+    exits = ProtectiveExits(storage=storage, bus=bus)
     health = HealthChecker(storage=storage, broker=broker, bus=bus)
 
-    lock: Optional[InstanceLock] = None
-    if settings.MODE.lower() == "live":
+    lock = None
+    if settings.MODE == "live":
         try:
-            owner = os.getenv("POD_NAME", os.getenv("HOSTNAME", "local"))
-            lock = InstanceLock(storage.conn, app="trader", owner=owner)
+            lock_owner = settings.POD_NAME or settings.HOSTNAME or "local"
+            lock = InstanceLock(storage.conn, app="trader", owner=lock_owner)
             lock.acquire(ttl_sec=300)
         except Exception as exc:
             _log.error("lock_init_failed", extra={"error": str(exc)})
@@ -103,23 +93,6 @@ def build_container() -> Container:
         exits=exits,
         health=health,
         settings=settings,
-        # интервалы из ENV/Settings
-        eval_interval_sec=float(settings.EVAL_INTERVAL_SEC),
-        exits_interval_sec=float(settings.EXITS_INTERVAL_SEC),
-        reconcile_interval_sec=float(settings.RECONCILE_INTERVAL_SEC),
-        watchdog_interval_sec=float(settings.WATCHDOG_INTERVAL_SEC),
-        dms_timeout_ms=int(settings.DMS_TIMEOUT_MS),
-        lock=lock,  # <— для авто-обновления
     )
 
-    return Container(
-        settings=settings,
-        storage=storage,
-        broker=broker,
-        bus=bus,
-        health=health,
-        risk=risk,
-        exits=exits,
-        orchestrator=orchestrator,
-        lock=lock,
-    )
+    return Container(settings, storage, broker, bus, health, risk, exits, orchestrator, lock)

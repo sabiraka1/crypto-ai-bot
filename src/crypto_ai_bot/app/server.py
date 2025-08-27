@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from decimal import Decimal
 from typing import Any, Dict
 
@@ -30,8 +29,8 @@ router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
 
-async def _auth(credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
-    token_required = os.getenv("API_TOKEN")
+async def _auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
+    token_required = request.app.state.container.settings.API_TOKEN
     if not token_required:
         return
     if not credentials or credentials.credentials != token_required:
@@ -77,9 +76,9 @@ async def live() -> Dict[str, Any]:
 
 
 @router.get("/ready")
-async def ready() -> JSONResponse:
+async def ready(request: Request) -> JSONResponse:
     try:
-        c = app.state.container
+        c = request.app.state.container
         rep = await c.health.check(symbol=c.settings.SYMBOL)
         return JSONResponse(
             status_code=(200 if rep.ok else 503),
@@ -90,8 +89,8 @@ async def ready() -> JSONResponse:
 
 
 @router.get("/health")
-async def health() -> JSONResponse:
-    c = app.state.container
+async def health(request: Request) -> JSONResponse:
+    c = request.app.state.container
     rep = await c.health.check(symbol=c.settings.SYMBOL)
     return JSONResponse(
         status_code=(200 if rep.ok else 503),
@@ -109,14 +108,14 @@ async def metrics() -> str:
 
 
 @router.get("/orchestrator/status")
-async def orchestrator_status(_: Any = Depends(_auth)) -> Dict[str, Any]:
-    c = app.state.container
+async def orchestrator_status(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = request.app.state.container
     return {"ok": True, "status": c.orchestrator.status()}
 
 
 @router.post("/orchestrator/start")
-async def orchestrator_start(_: Any = Depends(_auth)) -> Dict[str, Any]:
-    c = app.state.container
+async def orchestrator_start(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = request.app.state.container
     if c.orchestrator.status().get("running"):
         return {"ok": True, "message": "already_running"}
     c.orchestrator.start()
@@ -124,15 +123,15 @@ async def orchestrator_start(_: Any = Depends(_auth)) -> Dict[str, Any]:
 
 
 @router.post("/orchestrator/stop")
-async def orchestrator_stop(_: Any = Depends(_auth)) -> Dict[str, Any]:
-    c = app.state.container
+async def orchestrator_stop(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = request.app.state.container
     await c.orchestrator.stop()
     return {"ok": True, "message": "stopped"}
 
 
 @router.get("/positions")
-async def get_positions(_: Any = Depends(_auth)) -> Dict[str, Any]:
-    c = app.state.container
+async def get_positions(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = request.app.state.container
     pos = c.storage.positions.get_position(c.settings.SYMBOL)
     t = await c.broker.fetch_ticker(c.settings.SYMBOL)
     unreal = (t.last - (pos.avg_entry_price or Decimal("0"))) * (pos.base_qty or Decimal("0"))
@@ -146,15 +145,15 @@ async def get_positions(_: Any = Depends(_auth)) -> Dict[str, Any]:
 
 
 @router.get("/trades")
-async def get_trades(limit: int = 100, _: Any = Depends(_auth)) -> Dict[str, Any]:
-    c = app.state.container
+async def get_trades(request: Request, limit: int = 100, _: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = request.app.state.container
     rows = c.storage.trades.list_recent(c.settings.SYMBOL, limit)
     return {"trades": rows, "total": len(rows)}
 
 
 @router.get("/performance")
-async def performance(_: Any = Depends(_auth)) -> Dict[str, Any]:
-    c = app.state.container
+async def performance(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
+    c = request.app.state.container
     trades = c.storage.trades.list_today(c.settings.SYMBOL)
     realized = sum(Decimal(r["cost"]) if r["side"] == "sell" else Decimal("0") for r in trades)
     return {"total_trades": len(trades), "realized_quote": str(realized)}

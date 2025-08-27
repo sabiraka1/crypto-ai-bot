@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any, Deque, Dict, Optional, Tuple
 
 from .base import BaseStrategy, StrategyContext, Decision
+from ...utils.decimal import dec
 
 
 class EmaCrossStrategy(BaseStrategy):
@@ -26,7 +27,7 @@ class EmaCrossStrategy(BaseStrategy):
         assert fast_period > 0 and slow_period > 0 and fast_period < slow_period
         self.fast_period = fast_period
         self.slow_period = slow_period
-        self.threshold = Decimal(str(threshold_pct)) / Decimal("100")
+        self.threshold = dec(threshold_pct) / dec(100)
         self.max_spread = float(max_spread_pct)
         self.use_vol_filter = bool(use_volatility_filter)
         self.max_vol = float(max_volatility_pct)
@@ -38,20 +39,20 @@ class EmaCrossStrategy(BaseStrategy):
 
     def _update_ema(self, price: Decimal) -> None:
         """EMA(t) = price*alpha + EMA(t-1)*(1-alpha)"""
-        alpha_f = Decimal("2") / (Decimal(self.fast_period) + Decimal("1"))
-        alpha_s = Decimal("2") / (Decimal(self.slow_period) + Decimal("1"))
+        alpha_f = dec(2) / (dec(self.fast_period) + dec(1))
+        alpha_s = dec(2) / (dec(self.slow_period) + dec(1))
 
         if self._ema_fast is None or self._ema_slow is None:
             # Инициализация через SMA
             if len(self._prices) >= self.slow_period:
-                self._ema_fast = sum(list(self._prices)[-self.fast_period:]) / Decimal(self.fast_period)
-                self._ema_slow = sum(list(self._prices)[-self.slow_period:]) / Decimal(self.slow_period)
+                self._ema_fast = sum(list(self._prices)[-self.fast_period:]) / dec(self.fast_period)
+                self._ema_slow = sum(list(self._prices)[-self.slow_period:]) / dec(self.slow_period)
             else:
                 # недостаточно истории для SMA инициализации
                 return
         else:
-            self._ema_fast = price * alpha_f + self._ema_fast * (Decimal("1") - alpha_f)
-            self._ema_slow = price * alpha_s + self._ema_slow * (Decimal("1") - alpha_s)
+            self._ema_fast = price * alpha_f + self._ema_fast * (dec(1) - alpha_f)
+            self._ema_slow = price * alpha_s + self._ema_slow * (dec(1) - alpha_s)
 
     def _filters_ok(self, d: Dict[str, Any]) -> Tuple[bool, str]:
         spread = float(d.get("spread", 0.0))
@@ -67,7 +68,7 @@ class EmaCrossStrategy(BaseStrategy):
 
     def decide(self, ctx: StrategyContext) -> Tuple[Decision, Dict[str, Any]]:
         d = ctx.data
-        last = Decimal(str(d.get("ticker", {}).get("last", "0")))
+        last = dec(d.get("ticker", {}).get("last", "0"))
         explain: Dict[str, Any] = {
             "strategy": "ema_cross",
             "params": {
@@ -101,8 +102,8 @@ class EmaCrossStrategy(BaseStrategy):
             return "hold", explain
 
         # Сигнал
-        upper = self._ema_slow * (Decimal("1") + self.threshold)
-        lower = self._ema_slow * (Decimal("1") - self.threshold)
+        upper = self._ema_slow * (dec(1) + self.threshold)
+        lower = self._ema_slow * (dec(1) - self.threshold)
 
         if self._ema_fast > upper:
             explain["reason"] = "ema_golden_cross"

@@ -18,7 +18,9 @@ _log = get_logger("usecase.execute_trade")
 
 
 def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
-    """Единый формат результата risk.check: (ok, reason). Терпим dict/tuple/None."""
+    """Единый формат результата risk.check: (ok, reason).
+    Поддерживаем варианты: tuple, dict с ok/allowed/reason/reasons.
+    """
     if result is None:
         return True, ""
     if isinstance(result, tuple) and len(result) >= 1:
@@ -26,12 +28,21 @@ def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
         reason = str(result[1]) if len(result) > 1 and result[1] is not None else ""
         return ok, reason
     if isinstance(result, dict):
+        # Новый формат: {"ok": bool, "reasons": [..]}
+        if "ok" in result:
+            ok = bool(result.get("ok"))
+            if "reasons" in result and isinstance(result["reasons"], (list, tuple)):
+                reason = ";".join(map(str, result["reasons"]))
+            else:
+                reason = str(result.get("reason") or "")
+            return ok, reason
+        # Старый альтернативный ключ:
         if "allowed" in result:
             ok = bool(result.get("allowed"))
             reasons = result.get("reasons") or []
-            return ok, ";".join(map(str, reasons)) if isinstance(reasons, (list, tuple)) else str(reasons)
-        if "ok" in result:
-            return bool(result.get("ok")), str(result.get("reason") or "")
+            if isinstance(reasons, (list, tuple)):
+                return ok, ";".join(map(str, reasons))
+            return ok, str(reasons)
     return True, ""
 
 

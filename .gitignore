@@ -1,43 +1,83 @@
-# Python
+# -----------------------------
+# Python cache / bytecode
+# -----------------------------
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg-info/
-.build/
-build/
-dist/
+*$py.class
 
-# Venv
+# -----------------------------
+# Virtual environments
+# -----------------------------
 .venv/
-env/
 venv/
+ENV/
+env/
 
-# Editors / IDE
+# -----------------------------
+# Jupyter
+# -----------------------------
+.ipynb_checkpoints/
+
+# -----------------------------
+# C extensions
+# -----------------------------
+*.so
+
+# -----------------------------
+# Build / Packaging
+# -----------------------------
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# -----------------------------
+# Logs / Dumps
+# -----------------------------
+*.log
+*.out
+*.err
+logs/
+*.pid
+
+# -----------------------------
+# SQLite / Databases
+# -----------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+/data/backups/
+backups/
+
+# -----------------------------
+# Coverage / Testing
+# -----------------------------
+.coverage
+.tox/
+.nox/
+.cache/
+.pytest_cache/
+htmlcov/
+coverage.xml
+
+# -----------------------------
+# Editors / IDEs
+# -----------------------------
 .vscode/
 .idea/
+*.sublime-workspace
+*.sublime-project
 
-# Data / DB
-data/
-*.sqlite3
-*.db
-
-# Logs / caches / coverage
-*.log
-logs/
-.coverage
-.coverage.*
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Env files
-.env
-.env.*
-!.env.example
-
-# OS
+# -----------------------------
+# OS generated files
+# -----------------------------
 .DS_Store
 Thumbs.db
+desktop.ini
