@@ -47,6 +47,14 @@ class Orchestrator:
     _recon_pos: Optional[PositionsReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
+    def __post_init__(self) -> None:
+        # Интервалы и таймауты — из Settings (если есть)
+        self.eval_interval_sec = float(getattr(self.settings, "EVAL_INTERVAL_SEC", self.eval_interval_sec))
+        self.exits_interval_sec = float(getattr(self.settings, "EXITS_INTERVAL_SEC", self.exits_interval_sec))
+        self.reconcile_interval_sec = float(getattr(self.settings, "RECONCILE_INTERVAL_SEC", self.reconcile_interval_sec))
+        self.watchdog_interval_sec = float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", self.watchdog_interval_sec))
+        self.dms_timeout_ms = int(getattr(self.settings, "DMS_TIMEOUT_MS", self.dms_timeout_ms))
+
     def start(self) -> None:
         if self._tasks:
             return

@@ -1,22 +1,20 @@
 from __future__ import annotations
 
-from decimal import Decimal, getcontext, ROUND_HALF_EVEN, ROUND_DOWN
-from typing import Any
+from decimal import Decimal, ROUND_DOWN, getcontext
+from typing import Union
 
-# Глобальная настройка контекста (один раз на процесс)
-CTX = getcontext()
-CTX.prec = 28
-CTX.rounding = ROUND_HALF_EVEN
+JsonNumber = Union[int, float, str, Decimal]
 
-def dec(x: Any) -> Decimal:
-    """Надёжная конвертация в Decimal без накопления двоичных артефактов."""
+# здравый default на 28 знаков хватает для спота
+getcontext().prec = 28
+
+def dec(x: JsonNumber) -> Decimal:
+    """Безопасное приведение в Decimal через str(x)."""
     if isinstance(x, Decimal):
         return x
-    if x is None:
-        return Decimal("0")
     return Decimal(str(x))
 
-def q_step(x: Decimal, step_pow10: int, *, rounding=ROUND_DOWN) -> Decimal:
-    """Квантование по 10^-step_pow10 (удобно для amount/price precision)."""
+def q_step(x: Decimal, step_pow10: int) -> Decimal:
+    """Квантование по степени десяти: step_pow10=8 -> 1e-8."""
     q = Decimal(10) ** -step_pow10
-    return x.quantize(q, rounding=rounding)
+    return x.quantize(q, rounding=ROUND_DOWN)
