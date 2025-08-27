@@ -7,7 +7,7 @@ from typing import Dict, Optional
 from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.domain.risk.manager import RiskManager
-from crypto_ai_bot.core.domain.risk.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker

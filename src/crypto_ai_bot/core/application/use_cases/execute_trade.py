@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.domain.risk.manager import RiskManager
-from crypto_ai_bot.core.domain.risk.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.ids import make_client_order_id
@@ -17,7 +17,6 @@ _log = get_logger("usecase.execute_trade")
 
 
 def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
-    """Единый формат: (ok, reason). Поддержка tuple и dict с ok/reason/reasons."""
     if result is None:
         return True, ""
     if isinstance(result, tuple) and len(result) >= 1:
@@ -42,7 +41,7 @@ def _normalize_risk_result(result: Any) -> Tuple[bool, str]:
 async def execute_trade(
     *,
     symbol: str,
-    side: str,  # "buy" | "sell"
+    side: str,
     storage: Storage,
     broker: IBroker,
     bus: AsyncEventBus,
@@ -73,7 +72,7 @@ async def execute_trade(
                 return {"executed": False, "why": "invalid_quote_amount"}
             cid = make_client_order_id(exchange, f"{symbol}:buy:{now_ms()}")
             order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=quote_amount, client_order_id=cid)
-        else:  # sell
+        else:
             amt = base_amount
             if amt is None:
                 pos = storage.positions.get_position(symbol)

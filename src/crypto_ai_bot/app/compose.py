@@ -11,7 +11,7 @@ from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migr
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
-from crypto_ai_bot.core.domain.risk.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
 from crypto_ai_bot.core.infrastructure.brokers.paper import PaperBroker
 from crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter import CcxtBroker
