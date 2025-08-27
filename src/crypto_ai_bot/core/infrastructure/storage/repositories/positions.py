@@ -54,3 +54,17 @@ class PositionsRepository:
 
         self.set_base_qty(sym, pos.base_qty)
         return pos
+
+
+# --- compatibility aliases expected by storage.facade ---
+try:
+    PositionsRepo  # if already defined under this exact name
+except NameError:
+    try:
+        PositionsRepo = PositionsRepository  # type: ignore[name-defined]
+    except NameError:
+        try:
+            PositionsRepo = PositionRepo  # type: ignore[name-defined]
+        except NameError:
+            # no alias available; leave as-is to surface a clear error
+            pass
