@@ -16,8 +16,8 @@ from ..reconciliation.orders import OrdersReconciler
 from ..reconciliation.positions import PositionsReconciler
 from ..reconciliation.balances import BalancesReconciler
 from ..safety.dead_mans_switch import DeadMansSwitch
-from ..safety.instance_lock import InstanceLock
 from ...utils.logging import get_logger
+from ...utils.metrics import inc  # ← метрики
 
 
 @dataclass
@@ -39,9 +39,6 @@ class Orchestrator:
     force_eval_action: Optional[str] = None
     dms_timeout_ms: int = 120_000
 
-    # NEW: продление лока инстанса
-    lock: Optional[InstanceLock] = None
-
     _tasks: Dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
     _last_beat_ms: int = field(default=0, init=False)
@@ -56,12 +53,10 @@ class Orchestrator:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
-
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
         self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
-
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
         self._tasks["exits"] = loop.create_task(self._exits_loop(), name="orc-exits")
         self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name="orc-reconcile")
@@ -103,6 +98,7 @@ class Orchestrator:
                     self._dms.beat()
             except Exception as exc:
                 log.error("tick_failed", extra={"error": str(exc)})
+                inc("errors_total", kind="eval_tick_failed")
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
@@ -114,13 +110,13 @@ class Orchestrator:
                     await self.exits.ensure(symbol=self.symbol)
             except Exception as exc:
                 log.error("ensure_failed", extra={"error": str(exc)})
+                inc("errors_total", kind="exits_loop_failed")
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
         log = get_logger("orchestrator.reconcile")
         while not self._stopping:
             try:
-                # лёгкий house-keeping
                 try:
                     prune = getattr(self.storage.idempotency, "prune_older_than", None)
                     if callable(prune):
@@ -142,6 +138,7 @@ class Orchestrator:
                     await self._recon_bal.run_once()
             except Exception as exc:
                 log.error("reconcile_failed", extra={"error": str(exc)})
+                inc("errors_total", kind="reconcile_failed")
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
@@ -152,23 +149,10 @@ class Orchestrator:
                 hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
                 await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
                 self._last_beat_ms = rep.ts_ms
-
+                inc("watchdog_heartbeat_total")
                 if self._dms:
                     await self._dms.check_and_trigger()
-
-                # NEW: тихое продление InstanceLock, если есть
-                if self.lock:
-                    try:
-                        # поддерживаем несколько реализаций API
-                        if hasattr(self.lock, "renew"):
-                            self.lock.renew(ttl_sec=300)               # type: ignore[attr-defined]
-                        elif hasattr(self.lock, "extend"):
-                            self.lock.extend(ttl_sec=300)               # type: ignore[attr-defined]
-                        else:
-                            self.lock.acquire(ttl_sec=300)
-                    except Exception:
-                        pass
-
             except Exception as exc:
                 log.error("watchdog_failed", extra={"error": str(exc)})
+                inc("errors_total", kind="watchdog_failed")
             await asyncio.sleep(self.watchdog_interval_sec)

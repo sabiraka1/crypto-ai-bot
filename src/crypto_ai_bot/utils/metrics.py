@@ -1,93 +1,68 @@
 from __future__ import annotations
 
-import time
-from contextlib import contextmanager
-from typing import Dict, Tuple, Optional
+import threading
+from typing import Dict, Tuple, FrozenSet, Any
 
-# Простой in-proc реестр метрик без внешних зависимостей.
-# Поддерживаем:
-#   - inc(name, labels)            -> Counter
-#   - gauge_set(name, value, ...)  -> Gauge
-#   - timer(name, labels)          -> Summary ( *_ms_sum / *_ms_count )
-#   - render_prometheus()          -> текст в формате Prometheus
-#   - render_metrics_json()        -> JSON-дамп всех метрик
+# Простой встроенный сборщик метрик (без внешних библиотек).
+# Использование:
+#   from ...utils.metrics import inc, render_prometheus
+#   inc("orc_eval_ticks_total")
+#   inc("orders_placed_total", side="buy")
 
-# Внутренние структуры: ключ — (metric_name, frozenset(sorted(labels.items()))).
-_COUNTERS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
-_GAUGES:  Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
-_SUM_MS:  Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
-_CNT:     Dict[Tuple[str, Tuple[Tuple[str, str], ...]], int]    = {}
+_LOCK = threading.RLock()
+_COUNTERS: Dict[Tuple[str, FrozenSet[Tuple[str, str]]], int] = {}
 
-def _lbls(labels: Optional[dict]) -> Tuple[Tuple[str, str], ...]:
-    if not labels:
-        return tuple()
-    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
+_HELP: Dict[str, str] = {
+    "orc_eval_ticks_total": "Number of eval loop ticks",
+    "orders_placed_total": "Orders placed",
+    "orders_blocked_total": "Orders blocked by risk",
+    "exits_triggered_total": "Protective exits executed",
+    "watchdog_heartbeat_total": "Watchdog heartbeats",
+    "errors_total": "Errors observed",
+}
 
-def _key(name: str, labels: Optional[dict]) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
-    return (str(name), _lbls(labels))
+_TYPE: Dict[str, str] = {
+    "orc_eval_ticks_total": "counter",
+    "orders_placed_total": "counter",
+    "orders_blocked_total": "counter",
+    "exits_triggered_total": "counter",
+    "watchdog_heartbeat_total": "counter",
+    "errors_total": "counter",
+}
 
-def inc(name: str, labels: Optional[dict] = None, value: float = 1.0) -> None:
-    k = _key(name, labels)
-    _COUNTERS[k] = _COUNTERS.get(k, 0.0) + float(value)
 
-def gauge_set(name: str, value: float, labels: Optional[dict] = None) -> None:
-    _GAUGES[_key(name, labels)] = float(value)
+def inc(name: str, **labels: Any) -> None:
+    """Увеличить счётчик (по метке уникально)."""
+    lab: FrozenSet[Tuple[str, str]] = frozenset((k, str(v)) for k, v in sorted(labels.items()))
+    key = (name, lab)
+    with _LOCK:
+        _COUNTERS[key] = _COUNTERS.get(key, 0) + 1
 
-@contextmanager
-def timer(name: str, labels: Optional[dict] = None):
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-        k = _key(name, labels)
-        _SUM_MS[k] = _SUM_MS.get(k, 0.0) + dt_ms
-        _CNT[k] = _CNT.get(k, 0) + 1
-
-def _fmt_labels(labels: Tuple[Tuple[str, str], ...]) -> str:
-    if not labels:
-        return ""
-    inner = ",".join(f'{k}="{v}"' for k, v in labels)
-    return "{" + inner + "}"
-
-def _sanitize(name: str) -> str:
-    # Prometheus: только [a-zA-Z0-9:_]
-    out = []
-    for ch in name:
-        out.append(ch if (ch.isalnum() or ch in [":", "_"]) else "_")
-    return "".join(out)
 
 def render_prometheus() -> str:
-    # Counters
+    # Текстовая экспозиция Prometheus
     lines = []
-    for (name, labels), val in _COUNTERS.items():
-        n = _sanitize(name)
-        lines.append(f"{n}{_fmt_labels(labels)} {val}")
-    # Gauges
-    for (name, labels), val in _GAUGES.items():
-        n = _sanitize(name)
-        lines.append(f"{n}{_fmt_labels(labels)} {val}")
-    # Timers -> *_ms_sum / *_ms_count
-    for (name, labels), s in _SUM_MS.items():
-        n = _sanitize(name)  # ожидаем имя вида "orchestrator_cycle_ms"
-        c = _CNT.get((name, labels), 0)
-        lines.append(f"{n}_sum{_fmt_labels(labels)} {s}")
-        lines.append(f"{n}_count{_fmt_labels(labels)} {c}")
+    with _LOCK:
+        for metric, typ in _TYPE.items():
+            help_text = _HELP.get(metric, metric)
+            lines.append(f"# HELP {metric} {help_text}")
+            lines.append(f"# TYPE {metric} {typ}")
+            # вывести все комбинации меток для данного метрика
+            for (name, lab), value in _COUNTERS.items():
+                if name != metric:
+                    continue
+                if lab:
+                    labels = ",".join(f'{k}="{v}"' for k, v in lab)
+                    lines.append(f"{metric}{{{labels}}} {value}")
+                else:
+                    lines.append(f"{metric} {value}")
     return "\n".join(lines) + "\n"
 
-def render_metrics_json() -> dict:
-    to_key = lambda pair: {k: v for k, v in pair}
-    return {
-        "counters": [
-            {"name": n, "labels": to_key(l), "value": v}
-            for (n, l), v in _COUNTERS.items()
-        ],
-        "gauges": [
-            {"name": n, "labels": to_key(l), "value": v}
-            for (n, l), v in _GAUGES.items()
-        ],
-        "timers": [
-            {"name": n, "labels": to_key(l), "sum_ms": _SUM_MS[(n, l)], "count": _CNT.get((n, l), 0)}
-            for (n, l) in _SUM_MS.keys()
-        ],
-    }
+
+def render_metrics_json() -> str:
+    # на случай, когда хотим отдать JSON вместо текстового формата
+    with _LOCK:
+        arr = []
+        for (name, lab), value in _COUNTERS.items():
+            arr.append({"name": name, "labels": dict(lab), "value": value})
+    return str({"counters": arr})

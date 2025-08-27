@@ -14,6 +14,7 @@ from ..strategies.base import StrategyContext
 from ...utils.logging import get_logger
 from ...utils.ids import make_client_order_id
 from ...utils.time import now_ms
+from ...utils.metrics import inc  # ← метрики
 
 _log = get_logger("usecase.eval_and_execute")
 
@@ -55,15 +56,19 @@ async def eval_and_execute(
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[ProtectiveExits] = None,
 ) -> Dict[str, Any]:
+    inc("orc_eval_ticks_total")  # ← тик
     ctx = await _build_market_context(broker=broker, symbol=symbol)
 
     manager = StrategyManager()
-    decision, explain = (force_action, {"reason": "forced"}) if force_action else manager.decide(symbol=symbol, exchange=exchange, context=ctx, mode="first")
+    decision, explain = (force_action, {"reason": "forced"}) if force_action else manager.decide(
+        symbol=symbol, exchange=exchange, context=ctx, mode="first"
+    )
 
     if risk_manager:
         raw = await risk_manager.check(symbol=symbol, action=decision, evaluation={"ctx": ctx, "explain": explain})
         ok, reason = _normalize_risk_result(raw)
         if not ok:
+            inc("orders_blocked_total", reason=(reason or "unspecified"))
             await bus.publish("trade.blocked", {"symbol": symbol, "reason": reason}, key=symbol)
             return {"executed": False, "why": f"blocked:{reason}"}
 
@@ -78,14 +83,19 @@ async def eval_and_execute(
                 cid = make_client_order_id(exchange, f"{symbol}:sell:{now_ms()}")
                 order = await broker.create_market_sell_base(symbol=symbol, base_amount=pos.base_qty, client_order_id=cid)
     except Exception as exc:
+        inc("errors_total", kind="place_order_failed")
         _log.error("place_order_failed", extra={"error": str(exc)})
         await bus.publish("trade.failed", {"symbol": symbol, "error": str(exc)}, key=symbol)
         return {"executed": False, "why": f"place_order_failed:{exc}"}
+
+    if order:
+        inc("orders_placed_total", side=(order.side or "na"))
 
     if protective_exits:
         try:
             await protective_exits.ensure(symbol=symbol)
         except Exception as exc:
+            inc("errors_total", kind="exits_ensure_failed")
             _log.error("exits_ensure_failed", extra={"error": str(exc)})
 
     await bus.publish(
