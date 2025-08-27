@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
@@ -20,6 +19,7 @@ from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
 
 _log = get_logger("compose")
 
@@ -50,7 +50,7 @@ def _create_storage_for_mode(settings: Settings) -> Storage:
 def _create_broker_for_mode(settings: Settings) -> IBroker:
     mode = (settings.MODE or "").lower()
     if mode == "paper":
-        balances = {"USDT": Decimal("10000")}
+        balances = {"USDT": dec("10000")}
         return PaperBroker(symbol=settings.SYMBOL, balances=balances)
     if mode == "live":
         return CcxtBroker(
@@ -77,6 +77,8 @@ def build_container() -> Container:
             max_position_base=settings.RISK_MAX_POSITION_BASE,
             max_orders_per_hour=settings.RISK_MAX_ORDERS_PER_HOUR,
             daily_loss_limit_quote=settings.RISK_DAILY_LOSS_LIMIT_QUOTE,
+            max_fee_pct=settings.RISK_MAX_FEE_PCT,
+            max_slippage_pct=settings.RISK_MAX_SLIPPAGE_PCT,
         ),
     )
 
@@ -86,7 +88,7 @@ def build_container() -> Container:
     lock: Optional[InstanceLock] = None
     if settings.MODE.lower() == "live":
         try:
-            lock_owner = os.getenv("POD_NAME", os.getenv("HOSTNAME", "local"))
+            lock_owner = settings.POD_NAME or settings.HOSTNAME or "local"
             lock = InstanceLock(storage.conn, app="trader", owner=lock_owner)
             lock.acquire(ttl_sec=300)
         except Exception as exc:

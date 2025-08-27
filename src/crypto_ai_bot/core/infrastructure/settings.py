@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+from crypto_ai_bot.utils.decimal import dec
+
 def _get(name: str, default: str) -> str:
     return os.getenv(name, default)
 
@@ -68,6 +70,9 @@ class Settings:
     RISK_MAX_FEE_PCT: Decimal
     RISK_MAX_SLIPPAGE_PCT: Decimal
 
+    HTTP_TIMEOUT_SEC: int
+    TRADER_AUTOSTART: int
+
     EVAL_INTERVAL_SEC: int
     EXITS_INTERVAL_SEC: int
     RECONCILE_INTERVAL_SEC: int
@@ -110,9 +115,11 @@ class Settings:
             RISK_MAX_POSITION_BASE=float(_get("RISK_MAX_POSITION_BASE", "0.02")),
             RISK_MAX_ORDERS_PER_HOUR=int(_get("RISK_MAX_ORDERS_PER_HOUR", "6")),
             RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
-            FEE_PCT_ESTIMATE=Decimal(_get("FEE_PCT_ESTIMATE", "0.001")),
-            RISK_MAX_FEE_PCT=Decimal(_get("RISK_MAX_FEE_PCT", "0.001")),
-            RISK_MAX_SLIPPAGE_PCT=Decimal(_get("RISK_MAX_SLIPPAGE_PCT", "0.001")),
+            FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
+            RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
+            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.001")),
+            HTTP_TIMEOUT_SEC=int(_get("HTTP_TIMEOUT_SEC", "30")),
+            TRADER_AUTOSTART=int(_get("TRADER_AUTOSTART", "0")),
             EVAL_INTERVAL_SEC=int(_get("EVAL_INTERVAL_SEC", "60")),
             EXITS_INTERVAL_SEC=int(_get("EXITS_INTERVAL_SEC", "5")),
             RECONCILE_INTERVAL_SEC=int(_get("RECONCILE_INTERVAL_SEC", "60")),
