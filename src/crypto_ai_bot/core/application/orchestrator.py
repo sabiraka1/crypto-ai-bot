@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from decimal import Decimal
+from typing import Dict, Optional, TYPE_CHECKING
 
 from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
@@ -13,10 +14,14 @@ from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
 from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
 from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
-from crypto_ai_bot.core.application.reconciliation.positions import PositionsReconciler
 from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
-from crypto_ai_bot.core.application.safety.dead_mans_switch import DeadMansSwitch
+from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from crypto_ai_bot.core.infrastructure.settings import Settings
+
+_log = get_logger("orchestrator")
 
 
 @dataclass
@@ -44,7 +49,6 @@ class Orchestrator:
 
     _dms: Optional[DeadMansSwitch] = field(default=None, init=False)
     _recon_orders: Optional[OrdersReconciler] = field(default=None, init=False)
-    _recon_pos: Optional[PositionsReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
     def start(self) -> None:
@@ -53,7 +57,7 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         self._stopping = False
 
-        # интервалы из Settings (если заданы)
+        # интервалы из Settings
         try:
             self.eval_interval_sec = float(self.settings.EVAL_INTERVAL_SEC)
             self.exits_interval_sec = float(self.settings.EXITS_INTERVAL_SEC)
@@ -65,7 +69,6 @@ class Orchestrator:
         # безопасность и сверки
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
         self._recon_orders = OrdersReconciler(self.broker, self.symbol)
-        self._recon_pos = PositionsReconciler(storage=self.storage, broker=self.broker, symbol=self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
         self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
@@ -97,7 +100,7 @@ class Orchestrator:
                     broker=self.broker,
                     bus=self.bus,
                     exchange=self.settings.EXCHANGE,
-                    fixed_quote_amount=self.settings.FIXED_AMOUNT,
+                    fixed_quote_amount=Decimal(str(self.settings.FIXED_AMOUNT)),
                     idempotency_bucket_ms=self.settings.IDEMPOTENCY_BUCKET_MS,
                     idempotency_ttl_sec=self.settings.IDEMPOTENCY_TTL_SEC,
                     force_action=self.force_eval_action,
@@ -108,7 +111,7 @@ class Orchestrator:
                 if self._dms:
                     self._dms.beat()
             except Exception as exc:
-                get_logger("orchestrator.eval").error("tick_failed", extra={"error": str(exc)})
+                _log.error("tick_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
@@ -122,19 +125,20 @@ class Orchestrator:
                         try:
                             order = await check_exec(symbol=self.symbol)
                             if order:
-                                get_logger("orchestrator.exits").info(
+                                _log.info(
                                     "exit_executed",
                                     extra={"symbol": self.symbol, "side": order.side, "client_order_id": order.client_order_id},
                                 )
                         except Exception as exc:
-                            get_logger("orchestrator.exits").error("check_and_execute_failed", extra={"error": str(exc)})
+                            _log.error("check_and_execute_failed", extra={"error": str(exc)})
             except Exception as exc:
-                get_logger("orchestrator.exits").error("ensure_failed", extra={"error": str(exc)})
+                _log.error("ensure_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
         while not self._stopping:
             try:
+                # Очистка старых записей
                 try:
                     prune = getattr(self.storage.idempotency, "prune_older_than", None)
                     if callable(prune):
@@ -148,15 +152,27 @@ class Orchestrator:
                 except Exception:
                     pass
 
+                # Сверка ордеров и балансов
                 if self._recon_orders:
                     await self._recon_orders.run_once()
-                if self._recon_pos:
-                    await self._recon_pos.run_once()
                 if self._recon_bal:
                     await self._recon_bal.run_once()
+                
+                # Сверка позиций (прямое сравнение)
+                try:
+                    pos = self.storage.positions.get_position(self.symbol)
+                    balance = await self.broker.fetch_balance(self.symbol)
+                    if abs(float(pos.base_qty) - float(balance.free_base)) > 0.00000001:
+                        _log.warning("position_discrepancy", extra={
+                            "symbol": self.symbol,
+                            "local": str(pos.base_qty),
+                            "exchange": str(balance.free_base)
+                        })
+                except Exception as exc:
+                    _log.error("position_reconcile_failed", extra={"error": str(exc)})
 
             except Exception as exc:
-                get_logger("orchestrator.reconcile").error("reconcile_failed", extra={"error": str(exc)})
+                _log.error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
 
     async def _watchdog_loop(self) -> None:
@@ -169,5 +185,5 @@ class Orchestrator:
                 if self._dms:
                     await self._dms.check_and_trigger()
             except Exception as exc:
-                get_logger("orchestrator.watchdog").error("watchdog_failed", extra={"error": str(exc)})
+                _log.error("watchdog_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.watchdog_interval_sec)

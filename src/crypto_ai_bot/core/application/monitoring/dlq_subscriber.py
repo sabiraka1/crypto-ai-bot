@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Any
 
-from ..events.bus import AsyncEventBus, Event
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus, Event
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -20,7 +20,7 @@ async def _dlq_logger(event: Event) -> None:
     handler = payload.get("handler", "unknown")
     error = payload.get("error", "unknown")
 
-    inc("events_dlq_total", {"original_topic": topic, "handler": handler})
+    inc("events_dlq_total", original_topic=topic, handler=handler)
     _log.error(
         "event_dlq",
         extra={

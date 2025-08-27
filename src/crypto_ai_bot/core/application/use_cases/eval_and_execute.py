@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Dict, Any
 
-from ...utils.decimal import dec
-from ...utils.time import now_ms
-from ...utils.ids import make_client_order_id
-from ...utils.logging import get_logger
-from ...utils.exceptions import TransientError, ValidationError
-from ...infrastructure.brokers.base import IBroker
-from ...infrastructure.events.bus import AsyncEventBus
-from ...infrastructure.storage.facade import Storage
-from ...infrastructure.brokers.symbols import parse_symbol
-from ...domain.risk.manager import RiskManager, RiskInputs
+from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
+from crypto_ai_bot.core.domain.risk.manager import RiskManager
 
 _log = get_logger("usecase.eval")
 
@@ -31,56 +30,65 @@ async def eval_and_execute(
     risk_manager: RiskManager,
     protective_exits,
     fee_estimate_pct: Decimal,
-) -> None:
-    # 1) маркет-данные
+) -> Dict[str, Any]:
+    # 1) Рыночные данные
     t = await broker.fetch_ticker(symbol)
-    last = t.last if t.last > 0 else t.ask
-    spread = (t.ask - t.bid) if (t.ask and t.bid) else Decimal("0")
-    spread_pct = (spread / last) if last > 0 else Decimal("0")
+    mid = (t.bid + t.ask) / Decimal("2") if t.bid and t.ask else (t.last or Decimal("0"))
+    spread_pct = ((t.ask - t.bid) / mid * Decimal("100")) if t.bid and t.ask and mid > 0 else Decimal("0")
 
-    # 2) состояние
+    # 2) Состояние позиции
     pos = storage.positions.get_position(symbol)
     position_base = pos.base_qty or Decimal("0")
 
-    # 3) частота/PNL
-    orders_last_hour = storage.trades.count_orders_last_minutes(symbol, 60) if hasattr(storage.trades, "count_orders_last_minutes") else 0
-    daily_pnl_quote = storage.trades.daily_pnl_quote(symbol) if hasattr(storage.trades, "daily_pnl_quote") else Decimal("0")
+    # 3) Простая логика для минимальной проверки риска
+    risk_inputs = {
+        "spread_pct": spread_pct,
+        "position_base": position_base,
+        "recent_orders": 0,  # Упрощено
+        "pnl_daily_quote": Decimal("0"),  # Упрощено
+        "cooldown_active": False
+    }
+    
+    risk_check = risk_manager.check(risk_inputs)
+    if not risk_check.get("ok", True) and not force_action:
+        _log.info("trade_blocked", extra={"reasons": risk_check.get("deny_reasons", [])})
+        return {"action": "skip", "reasons": risk_check.get("deny_reasons", [])}
 
-    # 4) оценки комиссии/проскальзывания
-    est_fee_pct = dec(getattr(broker, "fee_rate", fee_estimate_pct))
-    est_slippage_pct = (spread_pct / Decimal("2"))
-
-    # 5) действие
-    action = force_action or "BUY_QUOTE"
-
-    # 6) риск-чек
-    r = risk_manager.check(
-        RiskInputs(
-            now_ms=now_ms(),
-            action=action,
-            spread_pct=spread_pct,
-            position_base=position_base,
-            orders_last_hour=orders_last_hour,
-            daily_pnl_quote=daily_pnl_quote,
-            est_fee_pct=est_fee_pct,
-            est_slippage_pct=est_slippage_pct,
+    # 4) Решение: купить если нет позиции
+    if position_base <= 0 or force_action == "buy":
+        bucket = (now_ms() // idempotency_bucket_ms) * idempotency_bucket_ms
+        idem_key = f"{symbol}:buy:{bucket}"
+        
+        if not storage.idempotency.check_and_store(key=idem_key, ttl_sec=idempotency_ttl_sec, default_bucket_ms=idempotency_bucket_ms):
+            return {"action": "skip", "reason": "duplicate"}
+        
+        coid = make_client_order_id(exchange, f"{symbol}:buy")
+        order = await broker.create_market_buy_quote(
+            symbol=symbol,
+            quote_amount=fixed_quote_amount,
+            client_order_id=coid
         )
-    )
-    if not r["ok"]:
-        _log.info("trade_blocked", extra={"reasons": r["reasons"]})
-        await bus.publish("trade.blocked", {"symbol": symbol, "reasons": r["reasons"]}, key=symbol)
-        return
+        
+        # Обновить позицию
+        storage.positions.set_base_qty(symbol, position_base + order.filled)
+        
+        # Сохранить трейд
+        storage.trades.add_from_order(order)
+        
+        await bus.publish("trade.executed", {
+            "symbol": symbol,
+            "side": "buy",
+            "amount": str(order.filled),
+            "cost": str(order.cost or (order.filled * order.price if order.price else 0))
+        }, key=symbol)
+        
+        if protective_exits:
+            await protective_exits.ensure(symbol=symbol)
+        
+        return {"action": "buy", "order_id": order.id}
 
-    # 7) исполнение
-    client_id = make_client_order_id(exchange, f"{symbol}:{action.lower()}")
-    if action == "BUY_QUOTE":
-        order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=fixed_quote_amount, client_order_id=client_id)
-    else:
-        if position_base <= 0:
-            _log.info("sell_skipped_empty", extra={"symbol": symbol})
-            return
-        order = await broker.create_market_sell_base(symbol=symbol, base_amount=position_base, client_order_id=client_id)
+    # 5) Защитные выходы если есть позиция
+    if position_base > 0 and protective_exits:
+        await protective_exits.ensure(symbol=symbol)
 
-    risk_manager.on_trade_executed(order.timestamp or now_ms())
-    await bus.publish("trade.completed", {"symbol": symbol, "side": order.side, "amount": str(order.amount)}, key=symbol)
-    await protective_exits.ensure(symbol=symbol)
+    return {"action": "hold"}

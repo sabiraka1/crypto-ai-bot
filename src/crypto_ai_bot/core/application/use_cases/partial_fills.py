@@ -3,11 +3,11 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Optional
 
-from ..brokers.base import IBroker, OrderDTO
-from ..events.bus import AsyncEventBus
-from ...utils.logging import get_logger
-from ...utils.ids import make_client_order_id
-from ...utils.time import now_ms
+from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("usecase.partial_fills")
 
@@ -31,12 +31,11 @@ class PartialFillHandler:
 
             # 50–95%: дозаявить остаток
             if filled_pct >= 0.50:
-                remaining = (order.amount - order.filled).max(Decimal("0"))
+                remaining = max(order.amount - order.filled, Decimal("0"))
                 if remaining <= 0:
                     return None
 
                 if order.side == "buy":
-                    # оценка требуемой QUOTE по текущей цене
                     t = await broker.fetch_ticker(order.symbol)
                     px = t.ask or t.last
                     remaining_quote = remaining * px
@@ -55,7 +54,7 @@ class PartialFillHandler:
                 await self._emit("order.partial_topped_up", {"original": order.id, "new": new_order.id, "filled_pct": filled_pct})
                 return new_order
 
-            # <50%: отменить (если поддерживается) и переразместить на полный объём
+            # <50%: отменить и переразместить
             cancel = getattr(broker, "cancel_order", None)
             if callable(cancel):
                 try:
@@ -64,7 +63,6 @@ class PartialFillHandler:
                     pass
 
             if order.side == "buy":
-                # перерасчёт quote по текущей цене
                 t = await broker.fetch_ticker(order.symbol)
                 px = t.ask or t.last
                 full_quote = order.amount * px
