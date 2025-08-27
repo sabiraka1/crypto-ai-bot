@@ -1,27 +1,26 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Protocol, List, Dict, Any, Optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class TickerDTO:
     symbol: str
     last: Decimal
-    bid: Decimal
-    ask: Decimal
-    timestamp: int
+    bid: Optional[Decimal] = None
+    ask: Optional[Decimal] = None
+    timestamp: Optional[int] = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class BalanceDTO:
     free_quote: Decimal
     free_base: Decimal
 
 
-@dataclass
+@dataclass(frozen=True)
 class OrderDTO:
     id: str
     client_order_id: str
@@ -33,19 +32,15 @@ class OrderDTO:
     timestamp: int
     price: Optional[Decimal] = None
     cost: Optional[Decimal] = None
-    fee_cost: Optional[Decimal] = None
-    fee_currency: Optional[str] = None
 
 
-class IBroker(ABC):
-    @abstractmethod
+class IBroker(Protocol):
     async def fetch_ticker(self, symbol: str) -> TickerDTO: ...
-
-    @abstractmethod
     async def fetch_balance(self, symbol: str) -> BalanceDTO: ...
-
-    @abstractmethod
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO: ...
-
-    @abstractmethod
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO: ...
+
+    # опционально для сверок
+    async def fetch_open_orders(self, symbol: str) -> List[Dict[str, Any]]:  # noqa: D401
+        """Возвращает открытые ордера по символу, если поддерживается брокером."""
+        return []
