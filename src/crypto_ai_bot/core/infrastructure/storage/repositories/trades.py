@@ -5,7 +5,7 @@ import sqlite3
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional
 
-from ...brokers.base import OrderDTO
+from crypto_ai_bot.core.infrastructure.brokers.base import OrderDTO
 from crypto_ai_bot.utils.time import now_ms
 
 
@@ -117,18 +117,39 @@ class TradesRepository:
             for r in rows
         ]
 
+    def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
+        """Количество ордеров за последние N минут."""
+        since = now_ms() - (minutes * 60 * 1000)
+        cur = self._c.execute(
+            "SELECT COUNT(*) FROM trades WHERE symbol=? AND ts_ms > ?",
+            (symbol, since)
+        )
+        result = cur.fetchone()
+        return result[0] if result else 0
+
+    def daily_pnl_quote(self, symbol: str) -> Decimal:
+        """PnL за сегодня в quote валюте."""
+        from datetime import datetime, timezone
+        
+        today_start = int(datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).timestamp() * 1000)
+        
+        cur = self._c.execute(
+            """
+            SELECT SUM(CASE 
+                WHEN side='sell' THEN CAST(cost AS REAL)
+                WHEN side='buy' THEN -CAST(cost AS REAL)
+                ELSE 0 
+            END) 
+            FROM trades 
+            WHERE symbol=? AND ts_ms >= ?
+            """,
+            (symbol, today_start)
+        )
+        result = cur.fetchone()
+        return Decimal(str(result[0])) if result and result[0] else Decimal("0")
+
 
 # --- compatibility aliases expected by storage.facade ---
-try:
-    TradesRepo  # already defined under this name
-except NameError:
-    try:
-        # if class is named TradesRepository – expose as TradesRepo
-        TradesRepo = TradesRepository  # type: ignore[name-defined]
-    except NameError:
-        try:
-            # if class is named TradeRepo – expose as TradesRepo
-            TradesRepo = TradeRepo  # type: ignore[name-defined]
-        except NameError:
-            # nothing to alias; leave as is to surface a clear error
-            pass
+TradesRepo = TradesRepository  # Основной алиас используемый в facade.py
