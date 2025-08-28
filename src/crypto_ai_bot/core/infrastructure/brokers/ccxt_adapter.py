@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
-from typing import Optional, Dict, Any, List
+from decimal import Decimal
+from typing import Any, Dict, List
 
 try:
     import ccxt  # type: ignore
@@ -15,12 +16,13 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
 from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.utils.decimal import q_step  # ← единый хелпер квантования
 
-def _q_step(x: Decimal, step_pow10: int) -> Decimal:
-    return x.quantize(Decimal(10) ** -step_pow10, rounding=ROUND_DOWN)
 
 @dataclass
 class CcxtBroker(IBroker):
+    """Обёртка CCXT под единый контракт IBroker (BUY_QUOTE / SELL_BASE)."""
+
     exchange_id: str
     api_key: str = ""
     api_secret: str = ""
@@ -32,6 +34,7 @@ class CcxtBroker(IBroker):
     _markets_loaded: bool = False
     _log = get_logger("broker.ccxt")
 
+    # --- lifecycle -------------------------------------------------------------
     def _ensure_exchange(self) -> None:
         if self.dry_run or self._ex is not None:
             return
@@ -56,26 +59,29 @@ class CcxtBroker(IBroker):
             return
         if not self._markets_loaded:
             self._ensure_exchange()
-            # CCXT sync → выполняем в to_thread
+            # CCXT синхронный: выполняем в отдельном потоке, чтобы не блокировать event loop
             asyncio.run_coroutine_threadsafe(asyncio.sleep(0), asyncio.get_running_loop())
             self._ex.load_markets()
             self._markets_loaded = True
 
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
+        """Возвращает precision/limits. Dry-run: безопасные дефолты."""
         self._ensure_markets()
         if self.dry_run:
-            return {"precision": {"amount": 8, "price": 8},
-                    "limits": {"amount": {"min": Decimal("0.00000001")}, "cost": {"min": Decimal("1")}}}
+            return {
+                "precision": {"amount": 8, "price": 8},
+                "limits": {"amount": {"min": Decimal("0.00000001")}, "cost": {"min": Decimal("1")}},
+            }
         m = self._ex.markets.get(ex_symbol)
         if not m:
             raise ValidationError(f"unknown market {ex_symbol}")
-        p_amount = int(m.get("precision", {}).get("amount", 8))
-        p_price = int(m.get("precision", {}).get("price", 8))
         amount_min = Decimal(str(m.get("limits", {}).get("amount", {}).get("min", 0))) if m.get("limits") else None
         cost_min = Decimal(str(m.get("limits", {}).get("cost", {}).get("min", 0))) if m.get("limits") else None
-        return {"precision": {"amount": p_amount, "price": p_price},
-                "limits": {"amount": {"min": amount_min}, "cost": {"min": cost_min}}}
+        p_amount = int(m.get("precision", {}).get("amount", 8))
+        p_price = int(m.get("precision", {}).get("price", 8))
+        return {"precision": {"amount": p_amount, "price": p_price}, "limits": {"amount": {"min": amount_min}, "cost": {"min": cost_min}}}
 
+    # --- interface -------------------------------------------------------------
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
         now = now_ms()
@@ -101,7 +107,9 @@ class CcxtBroker(IBroker):
         fb = Decimal(str(free.get(p.base, 0)))
         return BalanceDTO(free_quote=fq, free_base=fb)
 
-    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO:
+    async def create_market_buy_quote(
+        self, *, symbol: str, quote_amount: Decimal, client_order_id: str
+    ) -> OrderDTO:
         if quote_amount <= 0:
             raise ValidationError("quote_amount must be > 0")
         t = await self.fetch_ticker(symbol)
@@ -110,9 +118,9 @@ class CcxtBroker(IBroker):
             raise TransientError("ticker ask is not available")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
         info = self._market_info(ex_symbol)
-        p_amount = int(info["precision"]["amount"])
+        p_amount = int(info["precision"]["amount"])  # precision для amount
         raw_amount_base = quote_amount / ask
-        amount_base_q = _q_step(raw_amount_base, p_amount)
+        amount_base_q = q_step(raw_amount_base, p_amount)  # ← единый хелпер
         min_amount = info["limits"]["amount"]["min"]
         if min_amount and amount_base_q < min_amount:
             raise ValidationError("calculated base amount is too small after rounding")
@@ -122,27 +130,33 @@ class CcxtBroker(IBroker):
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}-buy")
         if self.dry_run:
             ts = now_ms()
-            return OrderDTO(id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="buy",
-                            amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts)
+            return OrderDTO(
+                id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="buy",
+                amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
+            )
         self._ensure_exchange()
         order = await asyncio.to_thread(self._ex.create_order, ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id})
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
-    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
+    async def create_market_sell_base(
+        self, *, symbol: str, base_amount: Decimal, client_order_id: str
+    ) -> OrderDTO:
         if base_amount <= 0:
             raise ValidationError("base_amount must be > 0")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
         info = self._market_info(ex_symbol)
         p_amount = int(info["precision"]["amount"])
-        amount_base_q = _q_step(base_amount, p_amount)
+        amount_base_q = q_step(base_amount, p_amount)  # ← единый хелпер
         min_amount = info["limits"]["amount"]["min"]
         if min_amount and amount_base_q < min_amount:
             raise ValidationError("amount_base too small after rounding")
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}-sell")
         if self.dry_run:
             ts = now_ms()
-            return OrderDTO(id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="sell",
-                            amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts)
+            return OrderDTO(
+                id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="sell",
+                amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts,
+            )
         self._ensure_exchange()
         order = await asyncio.to_thread(self._ex.create_order, ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id})
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
@@ -164,5 +178,13 @@ class CcxtBroker(IBroker):
         ts = int(o.get("timestamp") or now_ms())
         oid = str(o.get("id") or client_order_id)
         side = str(o.get("side") or "buy")
-        return OrderDTO(id=oid, client_order_id=client_order_id, symbol=symbol, side=side,
-                        amount=amount, status=status, filled=filled, timestamp=ts)
+        return OrderDTO(
+            id=oid,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            status=status,
+            filled=filled,
+            timestamp=ts,
+        )

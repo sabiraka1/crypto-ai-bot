@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ...brokers.base import OrderDTO
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.decimal import dec  # ← ДОБАВЛЕН ИМПОРТ
 
 
 class TradesRepository:
@@ -23,8 +24,8 @@ class TradesRepository:
                 price = cost / order.filled
             if cost is None and price is not None and order.filled and order.filled > 0:
                 cost = price * order.filled
-            price = price or dec("0")
-            cost = cost or dec("0")
+            price = price or dec("0")  # ← ТЕПЕРЬ dec ДОСТУПЕН
+            cost = cost or dec("0")     # ← ТЕПЕРЬ dec ДОСТУПЕН
 
             cur = self._c.execute(
                 """
