@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import List, Dict, Any
 
 
@@ -9,8 +10,8 @@ from typing import List, Dict, Any
 class MaxDrawdownRule:
     """Правило ограничения просадки."""
     
-    max_drawdown_pct: Decimal = Decimal("10.0")  # 10%
-    max_daily_loss_quote: Decimal = Decimal("100")
+    max_drawdown_pct: Decimal = dec("10.0")  # 10%
+    max_daily_loss_quote: Decimal = dec("100")
     
     def check(self, 
              current_balance: Decimal,
@@ -26,7 +27,7 @@ class MaxDrawdownRule:
         
         # Проверка общей просадки от пика
         if peak_balance > 0:
-            drawdown_pct = ((peak_balance - current_balance) / peak_balance) * Decimal("100")
+            drawdown_pct = ((peak_balance - current_balance) / peak_balance) * dec("100")
             if drawdown_pct > self.max_drawdown_pct:
                 return False, f"max_drawdown_{drawdown_pct:.2f}%"
         
@@ -38,18 +39,18 @@ class MaxDrawdownRule:
         Returns: {"current": x, "max": y, "peak": z}
         """
         if not balances:
-            return {"current": Decimal("0"), "max": Decimal("0"), "peak": Decimal("0")}
+            return {"current": dec("0"), "max": dec("0"), "peak": dec("0")}
         
         peak = balances[0]
-        max_dd = Decimal("0")
-        current_dd = Decimal("0")
+        max_dd = dec("0")
+        current_dd = dec("0")
         
         for balance in balances:
             if balance > peak:
                 peak = balance
             
             if peak > 0:
-                dd = ((peak - balance) / peak) * Decimal("100")
+                dd = ((peak - balance) / peak) * dec("100")
                 max_dd = max(max_dd, dd)
                 current_dd = dd
         
@@ -62,7 +63,7 @@ class MaxDrawdownRule:
     def recovery_ratio(self, current: Decimal, trough: Decimal, peak: Decimal) -> Decimal:
         """Процент восстановления от минимума к пику."""
         if peak <= trough:
-            return Decimal("100")
+            return dec("100")
         
-        recovery = ((current - trough) / (peak - trough)) * Decimal("100")
-        return max(Decimal("0"), min(Decimal("100"), recovery))
+        recovery = ((current - trough) / (peak - trough)) * dec("100")
+        return max(dec("0"), min(dec("100"), recovery))

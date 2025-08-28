@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import Any, Deque, Dict, Tuple
 
 from .base import BaseStrategy, StrategyContext, Decision
@@ -12,25 +13,25 @@ class BollingerBandsStrategy(BaseStrategy):
 
     def __init__(self, period: int = 20, std_dev: float = 2.0, squeeze_threshold: float = 0.01):
         self.period = int(period)
-        self.std_dev = Decimal(str(std_dev))
-        self.squeeze_threshold = Decimal(str(squeeze_threshold))
+        self.std_dev = dec(str(std_dev))
+        self.squeeze_threshold = dec(str(squeeze_threshold))
         self._prices: Deque[Decimal] = deque(maxlen=self.period)
 
     def decide(self, ctx: StrategyContext) -> Tuple[Decision, Dict[str, Any]]:
-        price = Decimal(str(ctx.data.get("ticker", {}).get("last", "0")))
+        price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
         self._prices.append(price)
 
         if len(self._prices) < self.period:
             return "hold", {"reason": "insufficient_data", "samples": len(self._prices)}
 
-        sma = sum(self._prices) / Decimal(self.period)
-        var = sum((p - sma) * (p - sma) for p in self._prices) / Decimal(self.period)
+        sma = sum(self._prices) / dec(self.period)
+        var = sum((p - sma) * (p - sma) for p in self._prices) / dec(self.period)
         # корень через float для скорости/простоты
-        std = Decimal(str(float(var) ** 0.5))
+        std = dec(str(float(var) ** 0.5))
 
         upper = sma + std * self.std_dev
         lower = sma - std * self.std_dev
-        width = (upper - lower) / sma if sma > 0 else Decimal("0")
+        width = (upper - lower) / sma if sma > 0 else dec("0")
 
         explain: Dict[str, Any] = {"price": float(price), "upper": float(upper), "middle": float(sma), "lower": float(lower), "width": float(width)}
 

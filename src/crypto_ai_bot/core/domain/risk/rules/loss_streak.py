@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import List, Dict, Any
 
 
@@ -23,7 +24,7 @@ class LossStreakRule:
         # Считаем текущую серию убытков
         current_streak = 0
         for trade in reversed(recent_trades[-self.lookback_trades:]):
-            pnl = Decimal(str(trade.get("cost", 0)))
+            pnl = dec(str(trade.get("cost", 0)))
             side = str(trade.get("side", "")).lower()
             
             # Для buy отрицательный cost = покупка (убыток пока не продали)
@@ -51,7 +52,7 @@ class LossStreakRule:
             if side != "sell":
                 continue
                 
-            pnl = Decimal(str(trade.get("cost", 0)))
+            pnl = dec(str(trade.get("cost", 0)))
             if pnl <= 0:
                 current_streak += 1
                 max_streak = max(max_streak, current_streak)

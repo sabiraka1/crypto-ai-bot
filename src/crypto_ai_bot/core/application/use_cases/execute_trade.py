@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any, Dict, Optional
@@ -43,16 +43,16 @@ async def execute_trade(
 
     # ── Market data (для risk)
     ticker = await broker.fetch_ticker(symbol)
-    mid_price = (ticker.bid + ticker.ask) / Decimal("2") if ticker.bid and ticker.ask else (ticker.last or Decimal("0"))
-    spread_frac = ((ticker.ask - ticker.bid) / mid_price) if ticker.bid and ticker.ask and mid_price > 0 else Decimal("0")
+    mid_price = (ticker.bid + ticker.ask) / dec("2") if ticker.bid and ticker.ask else (ticker.last or dec("0"))
+    spread_frac = ((ticker.ask - ticker.bid) / mid_price) if ticker.bid and ticker.ask and mid_price > 0 else dec("0")
 
     # ── Состояние
     pos = storage.positions.get_position(symbol)
-    position_base = pos.base_qty if pos else Decimal("0")
+    position_base = pos.base_qty if pos else dec("0")
 
     # ── История/ограничители (если реализованы в storage)
     recent_orders = storage.trades.count_orders_last_minutes(symbol, 60) if getattr(storage, "trades", None) and hasattr(storage.trades, "count_orders_last_minutes") else 0
-    pnl_daily = storage.trades.daily_pnl_quote(symbol) if getattr(storage, "trades", None) and hasattr(storage.trades, "daily_pnl_quote") else Decimal("0")
+    pnl_daily = storage.trades.daily_pnl_quote(symbol) if getattr(storage, "trades", None) and hasattr(storage.trades, "daily_pnl_quote") else dec("0")
     cooldown_active = storage.cooldowns.is_active(symbol) if getattr(storage, "cooldowns", None) and hasattr(storage.cooldowns, "is_active") else False
 
     # ── Risk check (SYNC!)

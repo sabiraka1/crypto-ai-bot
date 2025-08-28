@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import Any, Deque, Dict, Tuple
 
 from .base import BaseStrategy, StrategyContext, Decision
@@ -19,8 +20,8 @@ class RSIMomentumStrategy(BaseStrategy):
         self._prices: Deque[Decimal] = deque(maxlen=max(rsi_period, momentum_period) + 1)
 
     def _calc_rsi(self) -> Decimal:
-        gains = Decimal("0")
-        losses = Decimal("0")
+        gains = dec("0")
+        losses = dec("0")
         for i in range(1, len(self._prices)):
             diff = self._prices[i] - self._prices[i - 1]
             if diff > 0:
@@ -28,25 +29,25 @@ class RSIMomentumStrategy(BaseStrategy):
             elif diff < 0:
                 losses += -diff
         if len(self._prices) <= 1:
-            return Decimal("50")
-        avg_gain = gains / Decimal(self.rsi_period)
-        avg_loss = losses / Decimal(self.rsi_period) if losses > 0 else Decimal("0")
+            return dec("50")
+        avg_gain = gains / dec(self.rsi_period)
+        avg_loss = losses / dec(self.rsi_period) if losses > 0 else dec("0")
         if avg_loss == 0:
-            return Decimal("100")
+            return dec("100")
         rs = avg_gain / avg_loss
-        return Decimal("100") - (Decimal("100") / (Decimal("1") + rs))
+        return dec("100") - (dec("100") / (dec("1") + rs))
 
     def _calc_momentum(self) -> Decimal:
         if len(self._prices) < self.momentum_period + 1:
-            return Decimal("0")
+            return dec("0")
         cur = self._prices[-1]
         past = self._prices[-1 - self.momentum_period]
         if past == 0:
-            return Decimal("0")
-        return ((cur - past) / past) * Decimal("100")
+            return dec("0")
+        return ((cur - past) / past) * dec("100")
 
     def decide(self, ctx: StrategyContext) -> Tuple[Decision, Dict[str, Any]]:
-        price = Decimal(str(ctx.data.get("ticker", {}).get("last", "0")))
+        price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
         if price <= 0:
             return "hold", {"reason": "no_price"}
 

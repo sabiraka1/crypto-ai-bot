@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -7,6 +7,7 @@ from typing import Optional
 from ..storage.facade import Storage
 from ..brokers.base import IBroker
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("safety.dms")
@@ -55,7 +56,7 @@ class DeadMansSwitch:
         """Экстренное закрытие всех базовых единиц по символу."""
         try:
             pos = self.storage.positions.get_position(self.symbol)
-            base_qty: Decimal = pos.base_qty or Decimal("0")
+            base_qty: Decimal = pos.base_qty or dec("0")
             if base_qty <= 0:
                 _log.info("dms_no_position_to_close", extra={"symbol": self.symbol})
                 return

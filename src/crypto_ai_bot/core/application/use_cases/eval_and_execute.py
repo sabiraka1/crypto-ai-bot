@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from decimal import Decimal
 from typing import Optional, Dict, Any
@@ -33,19 +33,19 @@ async def eval_and_execute(
 ) -> Dict[str, Any]:
     # 1) Рыночные данные
     t = await broker.fetch_ticker(symbol)
-    mid = (t.bid + t.ask) / Decimal("2") if t.bid and t.ask else (t.last or Decimal("0"))
-    spread_pct = ((t.ask - t.bid) / mid * Decimal("100")) if t.bid and t.ask and mid > 0 else Decimal("0")
+    mid = (t.bid + t.ask) / dec("2") if t.bid and t.ask else (t.last or dec("0"))
+    spread_pct = ((t.ask - t.bid) / mid * dec("100")) if t.bid and t.ask and mid > 0 else dec("0")
 
     # 2) Состояние позиции
     pos = storage.positions.get_position(symbol)
-    position_base = pos.base_qty or Decimal("0")
+    position_base = pos.base_qty or dec("0")
 
     # 3) Риск-чек (упрощённо)
     risk_inputs = {
         "spread_pct": spread_pct,
         "position_base": position_base,
         "recent_orders": 0,
-        "pnl_daily_quote": Decimal("0"),
+        "pnl_daily_quote": dec("0"),
         "cooldown_active": False
     }
     risk_check = risk_manager.check(risk_inputs)

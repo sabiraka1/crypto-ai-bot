@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import Optional
 
 
@@ -16,11 +17,11 @@ class ExitPlan:
 
 def make_fixed_sl_tp(*, entry_price: Decimal, sl_pct: float, tp_pct: Optional[float] = None) -> ExitPlan:
     """Фиксированный SL/TP в процентах от входа."""
-    e = Decimal(str(entry_price))
-    sl = e * (Decimal("1") - Decimal(str(sl_pct)) / Decimal("100"))
+    e = dec(str(entry_price))
+    sl = e * (dec("1") - dec(str(sl_pct)) / dec("100"))
     tp = None
     if tp_pct is not None:
-        tp = e * (Decimal("1") + Decimal(str(tp_pct)) / Decimal("100"))
+        tp = e * (dec("1") + dec(str(tp_pct)) / dec("100"))
     return ExitPlan(entry_price=e, sl_price=sl, tp_price=tp)
 
 
@@ -31,8 +32,8 @@ def update_trailing_stop(plan: ExitPlan, last: Decimal) -> ExitPlan:
     if plan.trail_max_price is None or last > plan.trail_max_price:
         plan.trail_max_price = last
         # SL подтягиваем вверх на trailing_pct
-        trail = Decimal(str(plan.trailing_pct)) / Decimal("100")
-        plan.sl_price = last * (Decimal("1") - trail)
+        trail = dec(str(plan.trailing_pct)) / dec("100")
+        plan.sl_price = last * (dec("1") - trail)
     return plan
 
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
 from ..utils.metrics import render_prometheus, render_metrics_json
 from ..utils.time import now_ms
 from ..utils.exceptions import (
@@ -157,11 +158,11 @@ async def orchestrator_stop(request: Request, _: Any = Depends(_auth)) -> Dict[s
 async def get_positions(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
     pos = _container.storage.positions.get_position(_container.settings.SYMBOL)
     t = await _container.broker.fetch_ticker(_container.settings.SYMBOL)
-    unreal = (t.last - (pos.avg_entry_price or Decimal("0"))) * (pos.base_qty or Decimal("0"))
+    unreal = (t.last - (pos.avg_entry_price or dec("0"))) * (pos.base_qty or dec("0"))
     return {
         "symbol": _container.settings.SYMBOL,
-        "base_qty": str(pos.base_qty or Decimal("0")),
-        "avg_price": str(pos.avg_entry_price or Decimal("0")),
+        "base_qty": str(pos.base_qty or dec("0")),
+        "avg_price": str(pos.avg_entry_price or dec("0")),
         "current_price": str(t.last),
         "unrealized_pnl": str(unreal),
     }
@@ -176,7 +177,7 @@ async def get_trades(request: Request, limit: int = 100, _: Any = Depends(_auth)
 @router.get("/performance")
 async def performance(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
     trades = _container.storage.trades.list_today(_container.settings.SYMBOL)
-    realized = sum(Decimal(r["cost"]) if r["side"] == "sell" else Decimal("0") for r in trades)
+    realized = sum(dec(r["cost"]) if r["side"] == "sell" else dec("0") for r in trades)
     return {"total_trades": len(trades), "realized_quote": str(realized)}
 
 

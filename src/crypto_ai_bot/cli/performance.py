@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import Optional
 
 from crypto_ai_bot.app.compose import build_container
@@ -17,11 +18,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     symbol = args.symbol or c.settings.SYMBOL
     trades = c.storage.trades.list_today(symbol)
 
-    realized = Decimal("0")
+    realized = dec("0")
     buys = sells = 0
     for t in trades:
         side = str(t.get("side") or "").lower()
-        cost = Decimal(str(t.get("cost") or "0"))
+        cost = dec(str(t.get("cost") or "0"))
         if side == "buy":
             realized -= cost
             buys += 1

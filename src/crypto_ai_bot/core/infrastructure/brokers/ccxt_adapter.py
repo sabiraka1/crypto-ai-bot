@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -13,6 +13,7 @@ except Exception:
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, TickerDTO, OrderDTO, BalanceDTO
 from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol, to_exchange_symbol
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
 from crypto_ai_bot.utils.ids import make_client_order_id
@@ -70,13 +71,13 @@ class CcxtBroker(IBroker):
         if self.dry_run:
             return {
                 "precision": {"amount": 8, "price": 8},
-                "limits": {"amount": {"min": Decimal("0.00000001")}, "cost": {"min": Decimal("1")}},
+                "limits": {"amount": {"min": dec("0.00000001")}, "cost": {"min": dec("1")}},
             }
         m = self._ex.markets.get(ex_symbol)
         if not m:
             raise ValidationError(f"unknown market {ex_symbol}")
-        amount_min = Decimal(str(m.get("limits", {}).get("amount", {}).get("min", 0))) if m.get("limits") else None
-        cost_min = Decimal(str(m.get("limits", {}).get("cost", {}).get("min", 0))) if m.get("limits") else None
+        amount_min = dec(str(m.get("limits", {}).get("amount", {}).get("min", 0))) if m.get("limits") else None
+        cost_min = dec(str(m.get("limits", {}).get("cost", {}).get("min", 0))) if m.get("limits") else None
         p_amount = int(m.get("precision", {}).get("amount", 8))
         p_price = int(m.get("precision", {}).get("price", 8))
         return {"precision": {"amount": p_amount, "price": p_price}, "limits": {"amount": {"min": amount_min}, "cost": {"min": cost_min}}}
@@ -86,25 +87,25 @@ class CcxtBroker(IBroker):
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
         now = now_ms()
         if self.dry_run:
-            p = Decimal("100")
-            return TickerDTO(symbol=symbol, last=p, bid=p - Decimal("0.1"), ask=p + Decimal("0.1"), timestamp=now)
+            p = dec("100")
+            return TickerDTO(symbol=symbol, last=p, bid=p - dec("0.1"), ask=p + dec("0.1"), timestamp=now)
         self._ensure_exchange()
         t = await asyncio.to_thread(self._ex.fetch_ticker, ex_symbol)
-        last = Decimal(str(t.get("last") or t.get("close") or 0))
-        bid = Decimal(str(t.get("bid") or last or 0))
-        ask = Decimal(str(t.get("ask") or last or 0))
+        last = dec(str(t.get("last") or t.get("close") or 0))
+        bid = dec(str(t.get("bid") or last or 0))
+        ask = dec(str(t.get("ask") or last or 0))
         ts = int(t.get("timestamp") or now)
         return TickerDTO(symbol=symbol, last=last, bid=bid, ask=ask, timestamp=ts)
 
     async def fetch_balance(self, symbol: str) -> BalanceDTO:
         p = parse_symbol(symbol)
         if self.dry_run:
-            return BalanceDTO(free_quote=Decimal("100000"), free_base=Decimal("0"))
+            return BalanceDTO(free_quote=dec("100000"), free_base=dec("0"))
         self._ensure_exchange()
         b = await asyncio.to_thread(self._ex.fetch_balance)
         free = (b or {}).get("free", {})
-        fq = Decimal(str(free.get(p.quote, 0)))
-        fb = Decimal(str(free.get(p.base, 0)))
+        fq = dec(str(free.get(p.quote, 0)))
+        fb = dec(str(free.get(p.base, 0)))
         return BalanceDTO(free_quote=fq, free_base=fb)
 
     async def create_market_buy_quote(
@@ -173,8 +174,8 @@ class CcxtBroker(IBroker):
 
     def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
         status = str(o.get("status") or "open")
-        filled = Decimal(str(o.get("filled") or 0))
-        amount = Decimal(str(o.get("amount") or fallback_amount))
+        filled = dec(str(o.get("filled") or 0))
+        amount = dec(str(o.get("amount") or fallback_amount))
         ts = int(o.get("timestamp") or now_ms())
         oid = str(o.get("id") or client_order_id)
         side = str(o.get("side") or "buy")

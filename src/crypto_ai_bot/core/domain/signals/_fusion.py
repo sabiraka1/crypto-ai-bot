@@ -1,15 +1,16 @@
-## `core/signals/_fusion.py`
+﻿## `core/signals/_fusion.py`
 from __future__ import annotations
 from decimal import Decimal
+from crypto_ai_bot.utils.decimal import dec
 from typing import Dict, Tuple
 def fuse_score(features: Dict[str, object]) -> Tuple[float, str]:
     """Простая эвристика: сравниваем last с SMA и EMA.
     Возвращает (score [0..1], explain).
     """
     try:
-        last = Decimal(str(features.get("last", "0")))
-        sma = Decimal(str(features.get("sma", "0")))
-        ema = Decimal(str(features.get("ema", "0")))
+        last = dec(str(features.get("last", "0")))
+        sma = dec(str(features.get("sma", "0")))
+        ema = dec(str(features.get("ema", "0")))
         spread = float(features.get("spread_pct", 0.0))
     except Exception:
         return 0.0, "invalid_features"

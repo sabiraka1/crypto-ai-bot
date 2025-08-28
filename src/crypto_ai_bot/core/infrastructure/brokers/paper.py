@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
@@ -8,13 +8,14 @@ from typing import Callable, Dict, Optional
 from .base import IBroker, TickerDTO, BalanceDTO, OrderDTO
 from .symbols import parse_symbol
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.exceptions import ValidationError, BrokerError
 
 
 @dataclass
 class PaperBroker(IBroker):
     """In-memory брокер для paper/backtest.
-    balances: стартовые балансы (например {"USDT": Decimal("10000")})
+    balances: стартовые балансы (например {"USDT": dec("10000")})
     fee_rate: комиссия (0.001 = 0.1%)
     spread: симметричный спред вокруг last
     price_feed: опциональный коллбек текущей цены; если не задан — используем внутренний кэш с дефолтом.
@@ -22,19 +23,19 @@ class PaperBroker(IBroker):
 
     symbol: str
     balances: Dict[str, Decimal]
-    fee_rate: Decimal = Decimal("0.001")
-    spread: Decimal = Decimal("0.0002")
+    fee_rate: Decimal = dec("0.001")
+    spread: Decimal = dec("0.0002")
     price_feed: Optional[Callable[[], Decimal]] = None
 
     _id_seq: int = field(default=1, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _last_price: Decimal = field(default=Decimal("100"), init=False)  # безопасный дефолт
+    _last_price: Decimal = field(default=dec("100"), init=False)  # безопасный дефолт
 
     def _get_price(self) -> Decimal:
         p = None
         if self.price_feed:
             try:
-                p = Decimal(self.price_feed())
+                p = dec(self.price_feed())
             except Exception as exc:
                 raise BrokerError(f"price_feed_failed:{exc}")
         if p is None:
@@ -46,14 +47,14 @@ class PaperBroker(IBroker):
 
     def _ensure_currency(self, ccy: str) -> None:
         if ccy not in self.balances:
-            self.balances[ccy] = Decimal("0")
+            self.balances[ccy] = dec("0")
 
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
         _ = parse_symbol(symbol)
         last = self._get_price()
-        half = (self.spread / Decimal("2"))
-        bid = last * (Decimal("1") - half)
-        ask = last * (Decimal("1") + half)
+        half = (self.spread / dec("2"))
+        bid = last * (dec("1") - half)
+        ask = last * (dec("1") + half)
         return TickerDTO(symbol=symbol, last=last, bid=bid, ask=ask, timestamp=now_ms())
 
     async def fetch_balance(self, symbol: str) -> BalanceDTO:
@@ -74,7 +75,7 @@ class PaperBroker(IBroker):
             total_cost = quote_amount + fee
             if self.balances[p.quote] < total_cost:
                 raise BrokerError("insufficient_quote_balance")
-            base_amount = (quote_amount / price).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+            base_amount = (quote_amount / price).quantize(dec("0.00000001"), rounding=ROUND_DOWN)
             self.balances[p.quote] -= total_cost
             self.balances[p.base] += base_amount
             oid = str(self._id_seq); self._id_seq += 1

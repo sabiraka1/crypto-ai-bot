@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
@@ -17,6 +17,7 @@ from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconcile
 from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
 
 if TYPE_CHECKING:
     from crypto_ai_bot.core.infrastructure.settings import Settings
@@ -100,7 +101,7 @@ class Orchestrator:
                     broker=self.broker,
                     bus=self.bus,
                     exchange=self.settings.EXCHANGE,
-                    fixed_quote_amount=Decimal(str(self.settings.FIXED_AMOUNT)),
+                    fixed_quote_amount=dec(str(self.settings.FIXED_AMOUNT)),
                     idempotency_bucket_ms=self.settings.IDEMPOTENCY_BUCKET_MS,
                     idempotency_ttl_sec=self.settings.IDEMPOTENCY_TTL_SEC,
                     force_action=self.force_eval_action,

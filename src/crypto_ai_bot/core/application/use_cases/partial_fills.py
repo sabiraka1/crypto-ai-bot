@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from decimal import Decimal
 from typing import Optional
@@ -6,6 +6,7 @@ from typing import Optional
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.time import now_ms
 
@@ -31,7 +32,7 @@ class PartialFillHandler:
 
             # 50–95%: дозаявить остаток
             if filled_pct >= 0.50:
-                remaining = max(order.amount - order.filled, Decimal("0"))
+                remaining = max(order.amount - order.filled, dec("0"))
                 if remaining <= 0:
                     return None
 
