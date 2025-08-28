@@ -1,25 +1,25 @@
+# src/crypto_ai_bot/utils/http_client.py
 from __future__ import annotations
 
 from typing import Optional
-from crypto_ai_bot.core.infrastructure.settings import Settings
 
-def create_http_client(*, settings: Optional[Settings] = None, timeout_override: Optional[int] = None):
-    """Создает HTTP клиент с настройками из Settings."""
-    s = settings or Settings.load()
-    timeout_sec = timeout_override or s.HTTP_TIMEOUT_SEC
-    
+# Лёгкая фабрика HTTP-клиента без зависимости от core/settings.
+# Вызывающий код сам решает, чем инициализировать timeout_sec (например, Settings.HTTP_TIMEOUT_SEC).
+def create_http_client(*, timeout_sec: int = 30):
+    # Сначала пробуем httpx (предпочтительно), иначе — aiohttp
     try:
-        import httpx
+        import httpx  # type: ignore
         return httpx.AsyncClient(timeout=timeout_sec)
-    except ImportError:
-        try:
-            import aiohttp
-            return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec))
-        except ImportError:
-            raise RuntimeError("Neither httpx nor aiohttp is available")
+    except Exception:
+        pass
 
-# Для обратной совместимости с существующим кодом
-def get_timeout_sec(settings: Optional[Settings] = None) -> int:
-    """Получить timeout из настроек."""
-    s = settings or Settings.load()
-    return s.HTTP_TIMEOUT_SEC
+    try:
+        import aiohttp  # type: ignore
+        return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec))
+    except Exception:
+        # В крайнем случае отдаём заглушку, чтобы не падать при импорте
+        class _Dummy:
+            async def get(self, *a, **k): raise RuntimeError("no http client installed")
+            async def post(self, *a, **k): raise RuntimeError("no http client installed")
+            async def close(self): pass
+        return _Dummy()
