@@ -107,6 +107,7 @@ class Orchestrator:
                     force_action=self.force_eval_action,
                     risk_manager=self.risk,
                     protective_exits=self.exits,
+                    settings=self.settings,
                     fee_estimate_pct=self.settings.FEE_PCT_ESTIMATE,
                 )
                 if self._dms:
