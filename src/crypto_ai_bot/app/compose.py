@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
+import os
+import sqlite3  # ← добавлен импорт
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional

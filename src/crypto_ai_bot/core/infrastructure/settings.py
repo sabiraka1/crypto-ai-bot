@@ -85,6 +85,11 @@ class Settings:
     EXITS_TRAILING_PCT: float
     EXITS_MIN_BASE_TO_EXIT: float
 
+    # Telegram fields
+    TELEGRAM_ENABLED: int
+    TELEGRAM_BOT_TOKEN: str
+    TELEGRAM_CHAT_ID: str
+
     API_TOKEN: str
     API_KEY: str
     API_SECRET: str
@@ -130,6 +135,11 @@ class Settings:
             EXITS_HARD_STOP_PCT=float(_get("EXITS_HARD_STOP_PCT", "0.05")),
             EXITS_TRAILING_PCT=float(_get("EXITS_TRAILING_PCT", "0.03")),
             EXITS_MIN_BASE_TO_EXIT=float(_get("EXITS_MIN_BASE_TO_EXIT", "0")),
+            # Telegram configuration
+            TELEGRAM_ENABLED=int(_get("TELEGRAM_ENABLED", "0")),
+            TELEGRAM_BOT_TOKEN=_secret("TELEGRAM_BOT_TOKEN", ""),
+            TELEGRAM_CHAT_ID=_get("TELEGRAM_CHAT_ID", ""),
+            # API credentials
             API_TOKEN=_get("API_TOKEN", ""),
             API_KEY=_secret("API_KEY", ""),
             API_SECRET=_secret("API_SECRET", ""),

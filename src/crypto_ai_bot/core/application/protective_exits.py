@@ -12,6 +12,7 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.decimal import dec
 
 _log = get_logger("risk.exits")
 
@@ -38,7 +39,7 @@ class ProtectiveExits:
     async def ensure(self, *, symbol: str) -> Optional[dict]:
         try:
             pos = self.storage.positions.get_position(symbol)
-            base_qty: Decimal = pos.base_qty or Decimal("0")
+            base_qty: Decimal = pos.base_qty or dec("0")
         except Exception as exc:
             _log.error("exits_read_position_failed", extra={"error": str(exc)})
             return {"error": str(exc)}
@@ -50,9 +51,9 @@ class ProtectiveExits:
         if not getattr(self.settings, "EXITS_ENABLED", True):
             return None
         mode = (getattr(self.settings, "EXITS_MODE", "both") or "both").lower()
-        hard_pct = Decimal(str(getattr(self.settings, "EXITS_HARD_STOP_PCT", 0.05)))
-        trail_pct = Decimal(str(getattr(self.settings, "EXITS_TRAILING_PCT", 0.03)))
-        min_base = Decimal(str(getattr(self.settings, "EXITS_MIN_BASE_TO_EXIT", "0.00000000")))
+        hard_pct = dec(getattr(self.settings, "EXITS_HARD_STOP_PCT", 0.05))
+        trail_pct = dec(getattr(self.settings, "EXITS_TRAILING_PCT", 0.03))
+        min_base = dec(getattr(self.settings, "EXITS_MIN_BASE_TO_EXIT", "0.00000000"))
         bucket_ms = int(getattr(self.settings, "IDEMPOTENCY_BUCKET_MS", 60_000))
 
         if min_base and base_qty < min_base:
@@ -63,21 +64,21 @@ class ProtectiveExits:
 
         st = self._state.setdefault(symbol, {})
         if "entry" not in st:
-            st["entry"] = Decimal(last)
-            st["peak"] = Decimal(last)
-        st["peak"] = max(Decimal(last), st.get("peak", Decimal(last)))
+            st["entry"] = dec(last)
+            st["peak"] = dec(last)
+        st["peak"] = max(dec(last), st.get("peak", dec(last)))
 
         should_sell = False
         reason = None
 
         if mode in ("hard", "both"):
-            hard_stop_price = st["entry"] * (Decimal("1") - hard_pct)
+            hard_stop_price = st["entry"] * (dec("1") - hard_pct)
             if last <= hard_stop_price:
                 should_sell = True
                 reason = f"hard_stop_{hard_pct}"
 
         if not should_sell and mode in ("trailing", "both"):
-            trail_price = st["peak"] * (Decimal("1") - trail_pct)
+            trail_price = st["peak"] * (dec("1") - trail_pct)
             if last <= trail_price:
                 should_sell = True
                 reason = f"trailing_{trail_pct}"
@@ -117,7 +118,7 @@ class ProtectiveExits:
         if not plan:
             return None
         pos = self.storage.positions.get_position(symbol)
-        base_qty = pos.base_qty or Decimal("0")
+        base_qty = pos.base_qty or dec("0")
         if base_qty <= 0:
             return None
         t = await self.broker.fetch_ticker(symbol)
