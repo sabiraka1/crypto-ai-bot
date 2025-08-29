@@ -5,7 +5,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
@@ -41,34 +41,31 @@ class Container:
 
 
 async def _telegram_send(settings: Any, text: str) -> None:
-    """Отправка сообщения в Telegram. Безопасный no-op если нет токена/чата."""
     token = getattr(settings, "TELEGRAM_BOT_TOKEN", "") or ""
     chat_id = getattr(settings, "TELEGRAM_CHAT_ID", "") or ""
     if not token or not chat_id:
         return
-    
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": chat_id, 
-        "text": text, 
-        "parse_mode": "HTML", 
-        "disable_web_page_preview": True
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     }
-    
+
     client = create_http_client(timeout_sec=10)
     try:
         await client.post(url, json=payload)
     except Exception as exc:
         _log.warning("telegram_send_failed", extra={"error": str(exc)})
     finally:
-        # httpx.AsyncClient / aiohttp.ClientSession — оба имеют close()
         close = getattr(client, "close", None)
         if callable(close):
             await close()  # type: ignore[misc]
 
 
 def _fmt_kv(d: dict) -> str:
-    """Форматирование словаря в строку key=value."""
     parts = []
     for k, v in d.items():
         if v is None:
@@ -78,8 +75,6 @@ def _fmt_kv(d: dict) -> str:
 
 
 def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
-    """Подписка на события для отправки уведомлений в Telegram."""
-    
     async def on_completed(evt: dict) -> None:
         text = "✅ <b>TRADE COMPLETED</b>\n" + _fmt_kv(evt)
         await _telegram_send(settings, text)
@@ -101,30 +96,81 @@ def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
     bus.subscribe("trade.blocked", on_blocked)
     bus.subscribe("trade.failed", on_failed)
     bus.subscribe("watchdog.heartbeat", on_heartbeat)
-    
-    _log.info("telegram_alerts_attached", extra={
-        "enabled": bool(getattr(settings, "TELEGRAM_BOT_TOKEN", "") and 
-                       getattr(settings, "TELEGRAM_CHAT_ID", ""))
-    })
+
+    _log.info(
+        "telegram_alerts_attached",
+        extra={
+            "enabled": bool(
+                getattr(settings, "TELEGRAM_BOT_TOKEN", "")
+                and getattr(settings, "TELEGRAM_CHAT_ID", "")
+            )
+        },
+    )
 
 
 def _create_storage_for_mode(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    run_migrations(conn, now_ms=now_ms())
+    run_migrations(conn, now_ms=now_ms(), db_path=db_path, do_backup=True, backup_retention_days=settings.BACKUP_RETENTION_DAYS)
     storage = Storage.from_connection(conn)
     _log.info("storage_created", extra={"mode": settings.MODE, "db_path": db_path})
     return storage
+
+
+def _create_paper_price_feed(settings: Settings) -> Callable[[], Decimal]:
+    """
+    Возвращает синхронный callable для PaperBroker.price_feed:
+      - PRICE_FEED=fixed → константа из FIXED_PRICE
+      - PRICE_FEED=live  → фон-обновление через CcxtBroker(dry_run=True), чтение последней цены синхронно
+    """
+    if (settings.PRICE_FEED or "").lower() == "fixed":
+        fixed = dec(str(settings.FIXED_PRICE))
+        return lambda: fixed
+
+    # live
+    last: Decimal = dec("100")
+
+    async def _updater() -> None:
+        nonlocal last
+        br = CcxtBroker(
+            exchange_id=settings.EXCHANGE,
+            enable_rate_limit=True,
+            sandbox=bool(settings.SANDBOX),
+            dry_run=True,  # только котировки
+        )
+        while True:
+            try:
+                t = await br.fetch_ticker(settings.SYMBOL)
+                if t.last and t.last > 0:
+                    last = t.last
+            except Exception as exc:
+                _log.warning("price_feed_update_failed", extra={"error": str(exc)})
+            await asyncio.sleep(2)
+
+    # стартуем таск обновления, вернем синхронный accessor
+    try:
+        asyncio.get_running_loop().create_task(_updater())
+    except RuntimeError:
+        # если цикла нет (редкий случай), создадим позже в первом заходе
+        async def _delayed():
+            await asyncio.sleep(0)
+            await _updater()
+        asyncio.get_event_loop().create_task(_delayed())  # type: ignore
+
+    def _get() -> Decimal:
+        return last
+
+    return _get
 
 
 def _create_broker_for_mode(settings: Settings) -> IBroker:
     mode = (settings.MODE or "").lower()
     if mode == "paper":
         balances = {"USDT": dec("10000")}
-        return PaperBroker(symbol=settings.SYMBOL, balances=balances)
+        price_feed = _create_paper_price_feed(settings)
+        return PaperBroker(symbol=settings.SYMBOL, balances=balances, price_feed=price_feed)
     if mode == "live":
-        # Fail-fast: ключи обязательны в live
         if not settings.API_KEY or not settings.API_SECRET:
             raise ValueError("API creds required in live mode")
         return CcxtBroker(
@@ -142,9 +188,8 @@ def build_container() -> Container:
     settings = Settings.load()
     storage = _create_storage_for_mode(settings)
     bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
-    bus.attach_logger_dlq()  # проще отлавливать сбои подписчиков
-    
-    # Подключаем Telegram уведомления
+    bus.attach_logger_dlq()
+
     attach_alerts(bus, settings)
 
     broker = _create_broker_for_mode(settings)
@@ -166,12 +211,16 @@ def build_container() -> Container:
 
     lock: Optional[InstanceLock] = None
     if settings.MODE.lower() == "live":
+        lock_owner = settings.POD_NAME or settings.HOSTNAME or "local"
+        lock = InstanceLock(storage.conn, app="trader", owner=lock_owner)
+        ok = False
         try:
-            lock_owner = settings.POD_NAME or settings.HOSTNAME or "local"
-            lock = InstanceLock(storage.conn, app="trader", owner=lock_owner)
-            lock.acquire(ttl_sec=300)
+            ok = lock.acquire(ttl_sec=300)
         except Exception as exc:
             _log.error("lock_init_failed", extra={"error": str(exc)})
+            raise
+        if not ok:
+            raise RuntimeError("Another instance is already running (instance lock not acquired)")
 
     orchestrator = Orchestrator(
         symbol=settings.SYMBOL,

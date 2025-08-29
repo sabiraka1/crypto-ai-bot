@@ -44,7 +44,7 @@ cab-maintenance   = "crypto_ai_bot.cli.maintenance:main"
 cab-reconcile     = "crypto_ai_bot.cli.reconcile:main"
 cab-health        = "crypto_ai_bot.cli.health_monitor:main"
 cab-perf          = "crypto_ai_bot.cli.performance:main"
-cab-smoke         = "crypto_ai_bot.cli.smoke:main"  # ← фикс: раньше указывало на app.e2e_smoke
+cab-smoke         = "crypto_ai_bot.cli.smoke:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -62,8 +62,8 @@ select = ["E","F","W","I","B","C4","PIE","PT","RUF","UP","SIM"]
 ignore = ["E501","B008"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"os.getenv"        = { msg = "Use Settings instead of os.getenv (see core/settings.py)" }
-"os.environ"       = { msg = "Use Settings instead of os.environ (see core/settings.py)" }
+"os.getenv"        = { msg = "Use Settings instead of os.getenv (see core/infrastructure/settings.py)" }
+"os.environ"       = { msg = "Use Settings instead of os.environ (see core/infrastructure/settings.py)" }
 "requests.get"     = { msg = "Use utils/http_client.py instead of direct requests" }
 "requests.post"    = { msg = "Use utils/http_client.py instead of direct requests" }
 "urllib.request"   = { msg = "Use utils/http_client.py for HTTP calls" }

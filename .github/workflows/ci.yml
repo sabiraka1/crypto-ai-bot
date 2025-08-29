@@ -45,7 +45,7 @@ jobs:
           mkdir -p data
           python - <<'PY'
           import sqlite3
-          from crypto_ai_bot.core.storage.migrations.runner import run_migrations
+          from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
           from crypto_ai_bot.utils.time import now_ms
           conn = sqlite3.connect("data/ci.sqlite3")
           conn.row_factory = sqlite3.Row
@@ -64,7 +64,7 @@ jobs:
 
       - name: Pytest (unit only)
         run: pytest -q || true
-        # Тесты сейчас частично устарели; допускаем временный желтый статус. После обновления тестов уберем "|| true".
+        # Тесты частично устарели; временно допускаем желтый статус. Потом уберем "|| true".
 
       - name: Build Docker (if Dockerfile exists)
         if: hashFiles('Dockerfile') != ''

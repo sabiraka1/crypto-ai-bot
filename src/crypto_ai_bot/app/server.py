@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿# src/crypto_ai_bot/app/server.py
+from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
@@ -6,7 +7,6 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
@@ -46,13 +46,9 @@ async def _startup() -> None:
     global _container
     _container = build_container()
     
-    # авто-старт оркестратора: используем Settings вместо os.getenv
-    autostart = (
-        bool(_container.settings.TRADER_AUTOSTART) 
-        or _container.settings.MODE == "live"
-    )
+    # авто-старт оркестратора
+    autostart = bool(_container.settings.TRADER_AUTOSTART) or _container.settings.MODE == "live"
     if autostart:
-        # стартуем в фоне, не блокируя event loop
         loop = asyncio.get_running_loop()
         loop.call_soon(_container.orchestrator.start)
         _log.info("orchestrator_autostart_enabled", extra={"mode": _container.settings.MODE})
@@ -176,9 +172,18 @@ async def get_trades(request: Request, limit: int = 100, _: Any = Depends(_auth)
 
 @router.get("/performance")
 async def performance(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
-    trades = _container.storage.trades.list_today(_container.settings.SYMBOL)
-    realized = sum(dec(r["cost"]) if r["side"] == "sell" else dec("0") for r in trades)
-    return {"total_trades": len(trades), "realized_quote": str(realized)}
+    """PNL за сегодня: sells - buys по данным из БД (реализованный)."""
+    rows = _container.storage.trades.list_today(_container.settings.SYMBOL)
+    buys = sum(dec(r["cost"]) for r in rows if str(r["side"]).lower() == "buy")
+    sells = sum(dec(r["cost"]) for r in rows if str(r["side"]).lower() == "sell")
+    realized = sells - buys
+    return {
+        "symbol": _container.settings.SYMBOL,
+        "total_trades": len(rows),
+        "buys_quote": str(buys),
+        "sells_quote": str(sells),
+        "realized_quote": str(realized),
+    }
 
 
 app.include_router(router)

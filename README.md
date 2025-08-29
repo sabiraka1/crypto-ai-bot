@@ -1,7 +1,7 @@
 # crypto-ai-bot
 
 Long-only автотрейдинг криптовалют (Gate.io через CCXT).  
-**Единая логика** для paper и live режимов: evaluate → risk → place_order → protective_exits → reconcile → watchdog.
+**Единая логика** для paper и live: `evaluate → risk → execute_trade → protective_exits → reconcile → watchdog`.
 
 ---
 
@@ -41,7 +41,7 @@ GET /ready — готовность (200/503)
 
 GET /metrics — метрики Prometheus (встроенный no-op сборщик)
 
-POST /orchestrator/start|stop, GET /orchestrator/status (при API_TOKEN — через Bearer auth)
+POST /orchestrator/start|stop, GET /orchestrator/status (при API_TOKEN — Bearer auth)
 
 4) CLI (после pip install -e .)
 bash
@@ -74,22 +74,16 @@ python -m crypto_ai_bot.cli.reconcile
 python -m crypto_ai_bot.cli.health_monitor --oneshot --url http://127.0.0.1:8000/health
 python -m crypto_ai_bot.cli.performance
 🎛️ Режимы (одна логика везде)
-PAPER: MODE=paper, PRICE_FEED=fixed|live, SANDBOX=0.
-Симулятор с реальной логикой: идемпотентность, риски, защитные выходы, сверки — как в live.
+PAPER: MODE=paper. Cимулятор с реальной логикой: идемпотентность, риски, защитные выходы, сверки — как в live.
 
-LIVE-SANDBOX: MODE=live, SANDBOX=1 (если CCXT/биржа поддерживает тестнет).
+LIVE: MODE=live. Реальные ордера через CCXT. (Отдельного spot-sandbox у Gate.io нет, поэтому аккуратный лайв — с малыми лимитами/саб-аккаунтом.)
 
-LIVE (prod): MODE=live, SANDBOX=0.
-Включаются InstanceLock и Dead Man’s Switch по умолчанию.
-
-Переключение без смены кода — только ENV.
+Переключение режимов — только ENV, код один и тот же.
 
 🔐 Безопасность и риски
 Идемпотентность: bucket_ms + TTL (ключи хранятся в БД).
 
-RiskManager (единый формат):
-{"ok": bool, "reasons": [...], "limits": {...}}
-Включает: cooldown per-symbol, лимит спреда, max position (base), max orders/hour, дневной loss-limit по quote.
+RiskManager (check → {"ok": bool, "reasons": [...], "limits": {...}}): cooldown per-symbol, лимит спреда, max position (base), max orders/hour, дневной loss-limit по quote.
 
 ProtectiveExits: hard stop + trailing (per-settings).
 
@@ -100,14 +94,14 @@ Live-only: Dead Man’s Switch + InstanceLock.
 🔄 Сверки (Reconciliation)
 Оркестратор периодически запускает:
 
-OrdersReconciler — открытые ордера (если брокер поддерживает fetch_open_orders),
+OrdersReconciler — открытые ордера (если брокер поддерживает fetch_open_orders)
 
-PositionsReconciler — локальная позиция vs. биржевой баланс base,
+PositionsReconciler — локальная позиция vs. биржевой баланс base
 
-BalancesReconciler — свободные base/quote по символу.
+BalancesReconciler — свободные base/quote по символу
 
 🗄️ База данных и обслуживание
-SQLite, миграции при старте (compose.build_container вызывает run_migrations).
+SQLite, миграции применяются при старте (migrations/runner.py).
 Обслуживание:
 
 bash
@@ -117,67 +111,77 @@ cab-maintenance rotate --days 30  # удаление старых
 cab-maintenance vacuum            # VACUUM + PRAGMA
 cab-maintenance integrity         # PRAGMA integrity_check
 📊 Наблюдаемость
-GET /health, GET /ready — liveness/readiness.
+GET /health, GET /ready — liveness/readiness
 
-GET /metrics — Prometheus-текст (встроенный, не требует внешних либ).
+GET /metrics — Prometheus-текст (встроенный, не требует внешних либ)
 
-Логи — структурные (JSON), поля корреляции.
+Логи — структурные (JSON), поля корреляции
 
-⚙️ Переменные окружения (ключевые)
+Telegram-алерты: в app/compose.py встроен подписчик шины (trade.completed/blocked/failed, watchdog.heartbeat). При пустых TELEGRAM_* — no-op.
+
+⚙️ ENV (ключевые)
 Режим/Биржа
 
-MODE=paper|live, SANDBOX=0|1, EXCHANGE=gateio
+ini
+Копировать код
+MODE=paper|live
+EXCHANGE=gateio
+SYMBOL=BTC/USDT
+Торговля/Риски
 
-SYMBOL=BTC/USDT (мультисимвол опционально через SYMBOLS)
-
-Торговля
-
-FIXED_AMOUNT (Decimal, quote)
-
-PRICE_FEED=fixed|live, FIXED_PRICE (для PRICE_FEED=fixed)
-
-Риски / Идемпотентность
-
-RISK_COOLDOWN_SEC, RISK_MAX_SPREAD_PCT, RISK_MAX_POSITION_BASE,
-RISK_MAX_ORDERS_PER_HOUR, RISK_DAILY_LOSS_LIMIT_QUOTE
-
-IDEMPOTENCY_BUCKET_MS, IDEMPOTENCY_TTL_SEC
-
-Оркестратор
-
-EVAL_INTERVAL_SEC, EXITS_INTERVAL_SEC,
-RECONCILE_INTERVAL_SEC, WATCHDOG_INTERVAL_SEC, DMS_TIMEOUT_MS
-
-Хранилище/Сервис
-
-DB_PATH, BACKUP_RETENTION_DAYS, LOG_LEVEL, API_TOKEN
-
+ini
+Копировать код
+FIXED_AMOUNT=25
+FEE_PCT_ESTIMATE=0.001
+RISK_COOLDOWN_SEC=0
+RISK_MAX_SPREAD_PCT=0.005
+RISK_MAX_POSITION_BASE=0
+RISK_MAX_ORDERS_PER_HOUR=10
+RISK_DAILY_LOSS_LIMIT_QUOTE=50
+RISK_MAX_FEE_PCT=0.002
+RISK_MAX_SLIPPAGE_PCT=0.01
+IDEMPOTENCY_BUCKET_MS=60000
+IDEMPOTENCY_TTL_SEC=120
+EVAL_INTERVAL_SEC=3
+EXITS_INTERVAL_SEC=5
+RECONCILE_INTERVAL_SEC=10
+WATCHDOG_INTERVAL_SEC=3
+DMS_TIMEOUT_MS=120000
 Ключи (любой из вариантов)
 
-API_KEY / API_SECRET
-
-API_KEY_FILE / API_SECRET_FILE
-
-API_KEY_B64 / API_SECRET_B64
-
-SECRETS_FILE (JSON)
-
-🧱 Архитектура и инварианты
-Слои и зависимости
-
+java
 Копировать код
-app/  →  core/  →  utils/
-Импорты только пакетные: from crypto_ai_bot.utils.logging import get_logger
+API_KEY / API_SECRET
+API_KEY_FILE / API_SECRET_FILE
+API_KEY_B64 / API_SECRET_B64
+SECRETS_FILE (JSON)
+Telegram (если нужны алерты)
 
-ENV читаем только в core/settings.py
+nginx
+Копировать код
+TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKEN_B64
+TELEGRAM_BOT_SECRET / TELEGRAM_BOT_SECRET_B64
+TELEGRAM_CHAT_ID
+Хранилище/Сервис
 
-Денежные величины — Decimal
+ini
+Копировать код
+DB_PATH=/data/crypto_ai_bot.db
+HTTP_TIMEOUT_SEC=30
+LOG_LEVEL=INFO
+🧱 Архитектура и инварианты
+Слои
 
-Брокеры: PaperBroker (симулятор), CcxtBroker/LiveBroker (live/sandbox)
+pgsql
+Копировать код
+app/  →  core (application → domain → infrastructure)  →  utils/
+ENV читаем только в core/infrastructure/settings.py
 
-Нет core/brokers/live.py с прямыми вызовами биржи — всё делает Ccxt-адаптер/LiveBroker
+Денежные величины — Decimal; внешние значения через utils.decimal.dec(...)
 
-Import-Linter контролирует слои (app/ не импортируется из core/utils и т. д.)
+Брокеры: PaperBroker (симулятор), CcxtBroker (live)
+
+Import-Linter контролирует слои
 
 Единый IBroker
 
@@ -185,16 +189,14 @@ fetch_ticker(symbol) -> TickerDTO
 
 fetch_balance(symbol) -> BalanceDTO(free_quote, free_base)
 
-create_market_buy_quote(symbol, quote_amount, client_order_id)
-
-create_market_sell_base(symbol, base_amount, client_order_id)
+create_market_buy_quote(...), create_market_sell_base(...)
 
 Gate.io / CCXT
 
-Нормализация символов, precision/limits, квантование, rate-limit/circuit-breaker/retry
+Нормализация символов, precision/limits, квантование, rate-limit / circuit-breaker / retry
 
-📦 Структура проекта (финальная)
-bash
+📦 Структура (финальная)
+pgsql
 Копировать код
 crypto-ai-bot/
 ├─ README.md
@@ -207,75 +209,33 @@ crypto-ai-bot/
 ├─ Procfile
 ├─ pytest.ini
 ├─ importlinter.ini
-├─ .github/workflows/ci.yml
-├─ ops/prometheus/
-│  ├─ alerts.yml
-│  ├─ alertmanager.yml
-│  ├─ prometheus.yml
-│  └─ docker-compose.yml
+├─ ops/prometheus/{alerts.yml,alertmanager.yml,prometheus.yml,docker-compose.yml}
+├─ scripts/{README.md,backup_db.py,rotate_backups.py,integrity_check.py,run_server.sh,run_server.ps1}
 └─ src/crypto_ai_bot/
-   ├─ app/
-   │  ├─ server.py
-   │  └─ compose.py
-   ├─ cli/
-   │  ├─ __init__.py
-   │  ├─ maintenance.py
-   │  ├─ reconcile.py
-   │  ├─ health_monitor.py
-   │  └─ performance.py
+   ├─ app/{server.py,compose.py,adapters/telegram.py}
+   ├─ cli/{__init__.py,smoke.py,maintenance.py,reconcile.py,health_monitor.py,performance.py}
    ├─ core/
-   │  ├─ settings.py
-   │  ├─ orchestrator.py
-   │  ├─ events/{bus.py,topics.py}
-   │  ├─ brokers/{base.py,ccxt_adapter.py,paper.py,symbols.py,live.py}
-   │  ├─ risk/{manager.py,protective_exits.py}
-   │  ├─ reconciliation/{orders.py,positions.py,balances.py}
-   │  ├─ safety/{dead_mans_switch.py,instance_lock.py}
-   │  ├─ monitoring/health_checker.py
-   │  └─ storage/
-   │     ├─ facade.py
-   │     ├─ migrations/{runner.py,cli.py,*.sql}
-   │     └─ repositories/{trades.py,positions.py,market_data.py,audit.py,idempotency.py}
-   └─ utils/
-      ├─ __init__.py
-      ├─ time.py, ids.py, logging.py, metrics.py
-      ├─ retry.py, circuit_breaker.py
-      ├─ exceptions.py
-      └─ http_client.py
-⚠️ Политика импортов и чистота кода
-Запрещено прямое использование os.getenv/os.environ — только Settings
-
-Запрещено requests.get/post и urllib.request — только utils/http_client.py
-
-В async-коде запрещено time.sleep — используйте asyncio.sleep
-
-Эти правила закреплены в Ruff banned-api и проверяются CI. См. pyproject.toml.
-
-📎 Дисклеймер
-Торговля криптовалютой связана с риском. Используйте систему на свой страх и риск.
-
-yaml
-Копировать код
-
-**Что поправил:** убрал наследие `app/e2e_smoke`, привёл команды CLI к актуальным entry-points, синхронизировал дерево каталогов и правила зависимостей с эталонной спецификацией, зафиксировал режимы и критичные ENV. :contentReference[oaicite:5]{index=5} :contentReference[oaicite:6]{index=6} :contentReference[oaicite:7]{index=7}
-
----
-
-## Коротко — что ещё проверить локально
-
-1) Установку и CLI:
-```bash
-pip install -e .
-cab-smoke
-Сервер:
-
-bash
-Копировать код
-uvicorn crypto_ai_bot.app.server:app --reload
-# открыть /ready, /health, /metrics
-Импорты/архконтракты:
-
-bash
-Копировать код
-python -m importlinter
-ruff check
+   │  ├─ application/
+   │  │  ├─ orchestrator.py
+   │  │  ├─ protective_exits.py
+   │  │  ├─ use_cases/{eval_and_execute.py,execute_trade.py,place_order.py,partial_fills.py}
+   │  │  ├─ reconciliation/{orders.py,positions.py,balances.py}
+   │  │  └─ monitoring/{health_checker.py,dlq_subscriber.py}
+   │  ├─ domain/
+   │  │  ├─ risk/{manager.py,rules/{loss_streak.py,max_drawdown.py}}
+   │  │  ├─ strategies/
+   │  │  ├─ indicators/
+   │  │  └─ signals/
+   │  └─ infrastructure/
+   │     ├─ settings.py
+   │     ├─ events/{bus.py,topics.py}
+   │     ├─ brokers/{base.py,ccxt_adapter.py,paper.py,symbols.py}
+   │     ├─ storage/
+   │     │  ├─ facade.py, sqlite_adapter.py, backup.py
+   │     │  ├─ migrations/{runner.py,V0001__init.sql,V0002__trades_fee_partial.sql,V0003__audit_idempotency.sql,V0004__safety_and_recon.sql,V0005__schema_fixes.sql}
+   │     │  └─ repositories/{trades.py,positions.py,market_data.py,audit.py,idempotency.py}
+   │     └─ safety/{dead_mans_switch.py,instance_lock.py}
+   ├─ alerts/{reconcile_stale.py}
+   ├─ analytics/{metrics.py,pnl.py}
+   ├─ validators/{settings.py,dto.py}
+   └─ utils/{__init__.py,time.py,ids.py,logging.py,metrics.py,decimal.py,retry.py,cir

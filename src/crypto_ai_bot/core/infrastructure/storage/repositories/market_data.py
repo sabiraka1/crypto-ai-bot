@@ -6,7 +6,7 @@ from typing import Dict, Any
 from ...brokers.base import TickerDTO
 
 
-class MarketDataRepo:
+class MarketDataRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._c = conn
         self._c.execute(
@@ -36,3 +36,7 @@ class MarketDataRepo:
             (symbol, limit),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+# Совместимость со старым именем
+MarketDataRepo = MarketDataRepository

@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿# src/crypto_ai_bot/core/application/orchestrator.py
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
@@ -160,16 +161,21 @@ class Orchestrator:
                 if self._recon_bal:
                     await self._recon_bal.run_once()
                 
-                # Сверка позиций (прямое сравнение)
+                # Сверка позиций (прямое сравнение) + событие в шину
                 try:
                     pos = self.storage.positions.get_position(self.symbol)
                     balance = await self.broker.fetch_balance(self.symbol)
                     if abs(float(pos.base_qty) - float(balance.free_base)) > 0.00000001:
-                        _log.warning("position_discrepancy", extra={
-                            "symbol": self.symbol,
-                            "local": str(pos.base_qty),
-                            "exchange": str(balance.free_base)
-                        })
+                        _log.warning(
+                            "position_discrepancy",
+                            extra={"symbol": self.symbol, "local": str(pos.base_qty), "exchange": str(balance.free_base)},
+                        )
+                        # публикуем событие (для алёртов)
+                        await self.bus.publish(
+                            "reconcile.position_mismatch",
+                            {"symbol": self.symbol, "local": str(pos.base_qty), "exchange": str(balance.free_base)},
+                            key=self.symbol,
+                        )
                 except Exception as exc:
                     _log.error("position_reconcile_failed", extra={"error": str(exc)})
 
