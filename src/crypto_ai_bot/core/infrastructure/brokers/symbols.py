@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/infrastructure/brokers/symbols.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,25 +15,16 @@ def parse_symbol(symbol: str) -> SymbolParts:
     return SymbolParts(base=base.upper(), quote=quote.upper())
 
 def to_exchange_symbol(exchange: str, internal_symbol: str) -> str:
-    """Внутренний формат 'BTC/USDT' -> формат биржи."""
+    """Внутренний формат 'BTC/USDT' -> формат биржи (CCXT unified)."""
     ex = (exchange or "").lower()
     bq = parse_symbol(internal_symbol)
-    if ex == "gateio":
-        # Gate: BTC_USDT
-        return f"{bq.base}_{bq.quote}"
-    # По умолчанию многие биржи понимают BASE/QUOTE
+    # CCXT для всех поддерживаемых спотовых бирж, включая gateio, ожидает 'BASE/QUOTE'
     return f"{bq.base}/{bq.quote}"
 
 def from_exchange_symbol(exchange: str, ex_symbol: str) -> str:
     """Формат биржи -> внутренний 'BASE/QUOTE'."""
-    ex = (exchange or "").lower()
-    if ex == "gateio":
-        # Gate: BTC_USDT -> BTC/USDT
-        if "_" in ex_symbol:
-            base, quote = ex_symbol.split("_", 1)
-            return f"{base}/{quote}"
-    # По умолчанию оставляем как есть (если уже 'BASE/QUOTE')
+    # Если уже 'BASE/QUOTE' — возвращаем как есть
     if "/" in ex_symbol:
         return ex_symbol
-    # fallback: не ломаемся, но нормализуем в верхний регистр
+    # fallback: нормализуем в верхний регистр (на случай редких неунифицированных форм)
     return ex_symbol.upper()

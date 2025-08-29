@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+﻿# src/crypto_ai_bot/core/infrastructure/brokers/ccxt_adapter.py
+from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List
 
@@ -17,6 +18,8 @@ from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
 from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.decimal import dec, q_step  # ← единый парсер и квантование
+from crypto_ai_bot.utils.retry import retry_async
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 
 
 @dataclass
@@ -31,6 +34,9 @@ class CcxtBroker(IBroker):
     _ex: Any = None
     _markets_loaded: bool = False
     _log = get_logger("broker.ccxt")
+    _breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker(
+        failures_threshold=5, open_timeout_ms=30_000, half_open_successes_to_close=2
+    ))
 
     def _ensure_exchange(self) -> None:
         if self.dry_run or self._ex is not None:
@@ -61,6 +67,28 @@ class CcxtBroker(IBroker):
             self._ex.load_markets()
             self._markets_loaded = True
 
+    async def _call_ex(self, fn, *args, **kwargs):
+        """
+        Унифицированный вызов CCXT c retry + circuit-breaker и маппингом транзиентных ошибок.
+        """
+        self._ensure_exchange()
+
+        @retry_async(attempts=4, backoff_base=0.25, backoff_factor=2.0, jitter=0.1, max_sleep=2.0, breaker=self._breaker)
+        async def _wrapped():
+            try:
+                return await asyncio.to_thread(fn, *args, **kwargs)
+            except Exception as exc:
+                msg = str(exc).lower()
+                # Типичные транзиентные сигналы: таймауты/сеть/лимиты/перегрузка
+                if any(s in msg for s in (
+                    "timed out", "timeout", "temporar", "rate limit", "ddos", "too many requests",
+                    "service unavailable", "exchange not available", "network", "econnreset", "502", "503", "504"
+                )):
+                    raise TransientError(msg)
+                raise
+
+        return await _wrapped()
+
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
         self._ensure_markets()
         if self.dry_run:
@@ -84,8 +112,7 @@ class CcxtBroker(IBroker):
         if self.dry_run:
             p = Decimal("100")
             return TickerDTO(symbol=symbol, last=p, bid=p - Decimal("0.1"), ask=p + Decimal("0.1"), timestamp=now)
-        self._ensure_exchange()
-        t = await asyncio.to_thread(self._ex.fetch_ticker, ex_symbol)
+        t = await self._call_ex(self._ex.fetch_ticker, ex_symbol)
         last = dec(t.get("last") or t.get("close") or 0)
         bid = dec(t.get("bid") or last or 0)
         ask = dec(t.get("ask") or last or 0)
@@ -96,8 +123,7 @@ class CcxtBroker(IBroker):
         p = parse_symbol(symbol)
         if self.dry_run:
             return BalanceDTO(free_quote=Decimal("100000"), free_base=Decimal("0"))
-        self._ensure_exchange()
-        b = await asyncio.to_thread(self._ex.fetch_balance)
+        b = await self._call_ex(self._ex.fetch_balance)
         free = (b or {}).get("free", {})
         fq = dec(free.get(p.quote, 0))
         fb = dec(free.get(p.base, 0))
@@ -126,8 +152,7 @@ class CcxtBroker(IBroker):
             ts = now_ms()
             return OrderDTO(id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="buy",
                             amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts)
-        self._ensure_exchange()
-        order = await asyncio.to_thread(self._ex.create_order, ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id})
+        order = await self._call_ex(self._ex.create_order, ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id})
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
@@ -145,17 +170,15 @@ class CcxtBroker(IBroker):
             ts = now_ms()
             return OrderDTO(id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="sell",
                             amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts)
-        self._ensure_exchange()
-        order = await asyncio.to_thread(self._ex.create_order, ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id})
+        order = await self._call_ex(self._ex.create_order, ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id})
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def fetch_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
         if self.dry_run:
             return []
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
-        self._ensure_exchange()
         try:
-            return await asyncio.to_thread(self._ex.fetch_open_orders, ex_symbol)
+            return await self._call_ex(self._ex.fetch_open_orders, ex_symbol)
         except Exception:
             return []
 
