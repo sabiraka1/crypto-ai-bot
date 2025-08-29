@@ -45,7 +45,6 @@ async def _telegram_send(settings: Any, text: str) -> None:
     chat_id = getattr(settings, "TELEGRAM_CHAT_ID", "") or ""
     if not token or not chat_id:
         return
-
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -53,7 +52,6 @@ async def _telegram_send(settings: Any, text: str) -> None:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-
     client = create_http_client(timeout_sec=10)
     try:
         await client.post(url, json=payload)
@@ -92,10 +90,22 @@ def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
         text = f"💓 <b>HEARTBEAT</b> {ok}\n" + _fmt_kv(evt)
         await _telegram_send(settings, text)
 
+    async def on_position_mismatch(evt: dict) -> None:
+        sym = evt.get("symbol", "")
+        local = evt.get("local", "")
+        exch = evt.get("exchange", "")
+        text = (
+            "⚠️ <b>POSITION MISMATCH</b>\n"
+            f"symbol={sym}\nlocal_base={local}\nexchange_base={exch}\n"
+            "Проверьте сверку/баланс. Если включён autofix — позиция будет выровнена."
+        )
+        await _telegram_send(settings, text)
+
     bus.subscribe("trade.completed", on_completed)
     bus.subscribe("trade.blocked", on_blocked)
     bus.subscribe("trade.failed", on_failed)
     bus.subscribe("watchdog.heartbeat", on_heartbeat)
+    bus.subscribe("reconcile.position_mismatch", on_position_mismatch)
 
     _log.info(
         "telegram_alerts_attached",
@@ -108,27 +118,52 @@ def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
     )
 
 
+def _assert_schema(conn: sqlite3.Connection) -> None:
+    """Fail-fast: ключевые таблицы должны существовать после миграций."""
+    required = ("positions", "trades", "audit", "idempotency", "market_data", "instance_lock", "schema_migrations")
+    missing = []
+    for t in required:
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (t,))
+        if cur.fetchone() is None:
+            missing.append(t)
+    if missing:
+        raise RuntimeError(f"Database schema incomplete, missing tables: {','.join(missing)}")
+
+
+def _apply_pragmas(conn: sqlite3.Connection) -> None:
+    # Дублируем безопасно (часть уже задаётся в миграторе) — это no-op если уже применено
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+
+
 def _create_storage_for_mode(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
+    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    run_migrations(conn, now_ms=now_ms(), db_path=db_path, do_backup=True, backup_retention_days=settings.BACKUP_RETENTION_DAYS)
+    _apply_pragmas(conn)
+    # миграции + бэкап (в соответствии с настройками)
+    run_migrations(
+        conn,
+        now_ms=now_ms(),
+        db_path=db_path,
+        do_backup=True,
+        backup_retention_days=settings.BACKUP_RETENTION_DAYS,
+    )
+    # строгая проверка схемы: если что-то нет — не продолжаем
+    _assert_schema(conn)
     storage = Storage.from_connection(conn)
     _log.info("storage_created", extra={"mode": settings.MODE, "db_path": db_path})
     return storage
 
 
 def _create_paper_price_feed(settings: Settings) -> Callable[[], Decimal]:
-    """
-    Возвращает синхронный callable для PaperBroker.price_feed:
-      - PRICE_FEED=fixed → константа из FIXED_PRICE
-      - PRICE_FEED=live  → фон-обновление через CcxtBroker(dry_run=True), чтение последней цены синхронно
-    """
     if (settings.PRICE_FEED or "").lower() == "fixed":
         fixed = dec(str(settings.FIXED_PRICE))
         return lambda: fixed
 
-    # live
     last: Decimal = dec("100")
 
     async def _updater() -> None:
@@ -137,7 +172,7 @@ def _create_paper_price_feed(settings: Settings) -> Callable[[], Decimal]:
             exchange_id=settings.EXCHANGE,
             enable_rate_limit=True,
             sandbox=bool(settings.SANDBOX),
-            dry_run=True,  # только котировки
+            dry_run=True,
         )
         while True:
             try:
@@ -148,11 +183,9 @@ def _create_paper_price_feed(settings: Settings) -> Callable[[], Decimal]:
                 _log.warning("price_feed_update_failed", extra={"error": str(exc)})
             await asyncio.sleep(2)
 
-    # стартуем таск обновления, вернем синхронный accessor
     try:
         asyncio.get_running_loop().create_task(_updater())
     except RuntimeError:
-        # если цикла нет (редкий случай), создадим позже в первом заходе
         async def _delayed():
             await asyncio.sleep(0)
             await _updater()

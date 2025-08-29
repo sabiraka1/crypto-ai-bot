@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import ccxt  # type: ignore
@@ -17,7 +17,7 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
 from crypto_ai_bot.utils.ids import make_client_order_id
-from crypto_ai_bot.utils.decimal import dec, q_step  # ← единый парсер и квантование
+from crypto_ai_bot.utils.decimal import dec, q_step
 from crypto_ai_bot.utils.retry import retry_async
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 
@@ -37,6 +37,8 @@ class CcxtBroker(IBroker):
     _breaker: CircuitBreaker = field(default_factory=lambda: CircuitBreaker(
         failures_threshold=5, open_timeout_ms=30_000, half_open_successes_to_close=2
     ))
+
+    # --------------------------- bootstrap ---------------------------
 
     def _ensure_exchange(self) -> None:
         if self.dry_run or self._ex is not None:
@@ -62,10 +64,20 @@ class CcxtBroker(IBroker):
             return
         if not self._markets_loaded:
             self._ensure_exchange()
-            # CCXT sync → не блокируем loop
+            # ccxt sync call; дергаем loop чтоб избежать RuntimeError в некоторых рантаймах
             asyncio.run_coroutine_threadsafe(asyncio.sleep(0), asyncio.get_running_loop())
             self._ex.load_markets()
             self._markets_loaded = True
+
+    def _reload_markets(self) -> None:
+        """Жёсткая перезагрузка справочника рынков (разовый fallback при unknown market)."""
+        if self.dry_run:
+            self._markets_loaded = True
+            return
+        self._markets_loaded = False
+        self._ensure_markets()
+
+    # --------------------------- helpers ---------------------------
 
     async def _call_ex(self, fn, *args, **kwargs):
         """
@@ -79,14 +91,13 @@ class CcxtBroker(IBroker):
                 return await asyncio.to_thread(fn, *args, **kwargs)
             except Exception as exc:
                 msg = str(exc).lower()
-                # Типичные транзиентные сигналы: таймауты/сеть/лимиты/перегрузка
+                # Транзиентные сигналы: таймауты/сеть/лимиты/перегрузка
                 if any(s in msg for s in (
                     "timed out", "timeout", "temporar", "rate limit", "ddos", "too many requests",
                     "service unavailable", "exchange not available", "network", "econnreset", "502", "503", "504"
                 )):
                     raise TransientError(msg)
                 raise
-
         return await _wrapped()
 
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
@@ -106,13 +117,26 @@ class CcxtBroker(IBroker):
         return {"precision": {"amount": p_amount, "price": p_price},
                 "limits": {"amount": {"min": amount_min}, "cost": {"min": cost_min}}}
 
+    # --------------------------- public API ---------------------------
+
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
         now = now_ms()
         if self.dry_run:
             p = Decimal("100")
             return TickerDTO(symbol=symbol, last=p, bid=p - Decimal("0.1"), ask=p + Decimal("0.1"), timestamp=now)
-        t = await self._call_ex(self._ex.fetch_ticker, ex_symbol)
+        try:
+            t = await self._call_ex(self._ex.fetch_ticker, ex_symbol)
+        except Exception as exc:
+            # если рынок не найден — один раз перезагрузим markets и повторим
+            if "unknown market" in str(exc).lower():
+                try:
+                    self._reload_markets()
+                    t = await self._call_ex(self._ex.fetch_ticker, ex_symbol)
+                except Exception:
+                    raise
+            else:
+                raise
         last = dec(t.get("last") or t.get("close") or 0)
         bid = dec(t.get("bid") or last or 0)
         ask = dec(t.get("ask") or last or 0)
@@ -129,6 +153,23 @@ class CcxtBroker(IBroker):
         fb = dec(free.get(p.base, 0))
         return BalanceDTO(free_quote=fq, free_base=fb)
 
+    # ---- создание ордеров с clientOrderId идемпотентностью ----
+
+    async def _fetch_order_by_client_id(self, *, ex_symbol: str, client_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Пробуем вытащить ордер по clientOrderId (если биржа и ccxt это поддерживают).
+        Сигнатура ccxt: fetch_order(id, symbol=None, params={})
+        Передаём id=None и params={'clientOrderId': ...}
+        """
+        try:
+            return await self._call_ex(self._ex.fetch_order, None, ex_symbol, {"clientOrderId": client_id})
+        except Exception:
+            return None
+
+    def _is_duplicate_client_id_error(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(s in msg for s in ("clientorderid", "duplicate", "already exists", "exist order"))
+
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO:
         if quote_amount <= 0:
             raise ValidationError("quote_amount must be > 0")
@@ -137,7 +178,14 @@ class CcxtBroker(IBroker):
         if ask <= 0:
             raise TransientError("ticker ask is not available")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
-        info = self._market_info(ex_symbol)
+
+        # market info с fallback на reload при unknown market
+        try:
+            info = self._market_info(ex_symbol)
+        except ValidationError:
+            self._reload_markets()
+            info = self._market_info(ex_symbol)
+
         p_amount = int(info["precision"]["amount"])
         raw_amount_base = quote_amount / ask
         amount_base_q = q_step(raw_amount_base, p_amount)
@@ -147,30 +195,63 @@ class CcxtBroker(IBroker):
         min_cost = info["limits"]["cost"]["min"]
         if min_cost and quote_amount < min_cost:
             raise ValidationError("quote amount below minimum cost")
+
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}-buy")
         if self.dry_run:
             ts = now_ms()
             return OrderDTO(id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="buy",
                             amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts)
-        order = await self._call_ex(self._ex.create_order, ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id})
+
+        try:
+            order = await self._call_ex(
+                self._ex.create_order, ex_symbol, "market", "buy", float(amount_base_q), None, {"clientOrderId": client_id}
+            )
+        except Exception as exc:
+            if self._is_duplicate_client_id_error(exc):
+                # пытаемся подтянуть уже созданный ордер
+                fetched = await self._fetch_order_by_client_id(ex_symbol=ex_symbol, client_id=client_id)
+                if fetched:
+                    return self._map_order(symbol, fetched, fallback_amount=amount_base_q, client_order_id=client_id)
+                # нет способа подтянуть — пусть решит внешний ретрай как Transient
+                raise TransientError("duplicate clientOrderId, but order not fetchable") from exc
+            # другие ошибки — как есть (их уже оборачивает _call_ex при необходимости)
+            raise
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
         if base_amount <= 0:
             raise ValidationError("base_amount must be > 0")
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
-        info = self._market_info(ex_symbol)
+
+        try:
+            info = self._market_info(ex_symbol)
+        except ValidationError:
+            self._reload_markets()
+            info = self._market_info(ex_symbol)
+
         p_amount = int(info["precision"]["amount"])
         amount_base_q = q_step(base_amount, p_amount)
         min_amount = info["limits"]["amount"]["min"]
         if min_amount and amount_base_q < min_amount:
             raise ValidationError("amount_base too small after rounding")
+
         client_id = client_order_id or make_client_order_id(self.exchange_id, f"{symbol}-sell")
         if self.dry_run:
             ts = now_ms()
             return OrderDTO(id=f"dry-{client_id}", client_order_id=client_id, symbol=symbol, side="sell",
                             amount=amount_base_q, status="closed", filled=amount_base_q, timestamp=ts)
-        order = await self._call_ex(self._ex.create_order, ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id})
+
+        try:
+            order = await self._call_ex(
+                self._ex.create_order, ex_symbol, "market", "sell", float(amount_base_q), None, {"clientOrderId": client_id}
+            )
+        except Exception as exc:
+            if self._is_duplicate_client_id_error(exc):
+                fetched = await self._fetch_order_by_client_id(ex_symbol=ex_symbol, client_id=client_id)
+                if fetched:
+                    return self._map_order(symbol, fetched, fallback_amount=amount_base_q, client_order_id=client_id)
+                raise TransientError("duplicate clientOrderId, but order not fetchable") from exc
+            raise
         return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def fetch_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
@@ -181,6 +262,8 @@ class CcxtBroker(IBroker):
             return await self._call_ex(self._ex.fetch_open_orders, ex_symbol)
         except Exception:
             return []
+
+    # --------------------------- mapping ---------------------------
 
     def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
         status = str(o.get("status") or "open")

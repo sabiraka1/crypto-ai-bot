@@ -8,7 +8,7 @@ from crypto_ai_bot.utils.time import now_ms
 
 class IdempotencyRepository:
     """
-    Репозиторий идемпотентности, согласованный со схемой baseline:
+    Таблица:
 
       idempotency(
         bucket_ms      INTEGER NOT NULL,
@@ -17,12 +17,11 @@ class IdempotencyRepository:
         PRIMARY KEY(bucket_ms, key)
       )
 
-    TTL не хранится в таблице — проверяем на лету через created_at_ms.
+    TTL не храним — чистим по created_at_ms.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        # Подтверждаем/создаем таблицу с нужной сигнатурой (idempotent)
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS idempotency (
@@ -37,27 +36,32 @@ class IdempotencyRepository:
 
     def check_and_store(self, key: str, ttl_sec: int, default_bucket_ms: int = 60_000) -> bool:
         """
-        Возвращает True если ключ свежий и сохранен; False если дубликат в пределах TTL.
+        True  -> ключ записан впервые в текущем time-bucket (не дубликат)
+        False -> запись уже была (дубликат)
         """
         cur = self._conn.cursor()
         now = now_ms()
-        # чистим протухшие записи (глобально, чтобы не раздувать таблицу)
+
+        # 1) очистка протухших ключей (безопасно глобально)
         cur.execute(
             "DELETE FROM idempotency WHERE (? - created_at_ms) > (? * 1000)",
             (now, int(ttl_sec)),
         )
-        # вычисляем bucket из default_bucket_ms (совместимо с вызывающим кодом)
+
+        # 2) нормальный расчёт bucket для текущего момента
         bucket = (now // int(default_bucket_ms)) * int(default_bucket_ms)
-        # пробуем вставить; при конфликте — значит дубликат для этого окна
+
+        # 3) вставка с использованием ВЫЧИСЛЕННОГО bucket (раньше тут была ошибка)
         cur.execute(
             """
             INSERT OR IGNORE INTO idempotency(bucket_ms, key, created_at_ms)
             VALUES (?, ?, ?)
             """,
-            (int(default_bucket_ms), key, now),
+            (int(bucket), key, now),
         )
         self._conn.commit()
-        # rowcount==0 → конфликт по PK → дубликат
+
+        # rowcount==0 => конфликт PK => дубликат
         return bool(cur.rowcount)
 
     def next_client_order_id(self, exchange: str, tag: str, *, bucket_ms: int) -> str:
@@ -78,5 +82,5 @@ class IdempotencyRepository:
         self._conn.commit()
 
 
-# Алиас для обратной совместимости
+# Совместимость со старым именем
 IdempotencyRepo = IdempotencyRepository

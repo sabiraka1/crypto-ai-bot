@@ -1,5 +1,4 @@
-﻿# src/crypto_ai_bot/app/server.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
@@ -7,6 +6,7 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials  # security imports
 
 from ..utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
@@ -45,8 +45,17 @@ async def _auth(request: Request, credentials: HTTPAuthorizationCredentials = De
 async def _startup() -> None:
     global _container
     _container = build_container()
-    
-    # авто-старт оркестратора
+
+    # Жёсткое требование токена для API в live-режиме, если включён флаг
+    try:
+        require_token = bool(int(getattr(_container.settings, "REQUIRE_API_TOKEN_IN_LIVE", 0)))
+    except Exception:
+        require_token = False
+    if (_container.settings.MODE or "").lower() == "live" and require_token:
+        if not (_container.settings.API_TOKEN or "").strip():
+            _container = None
+            raise RuntimeError("API token is required in LIVE mode (set REQUIRE_API_TOKEN_IN_LIVE=1)")
+
     autostart = bool(_container.settings.TRADER_AUTOSTART) or _container.settings.MODE == "live"
     if autostart:
         loop = asyncio.get_running_loop()
@@ -172,7 +181,6 @@ async def get_trades(request: Request, limit: int = 100, _: Any = Depends(_auth)
 
 @router.get("/performance")
 async def performance(request: Request, _: Any = Depends(_auth)) -> Dict[str, Any]:
-    """PNL за сегодня: sells - buys по данным из БД (реализованный)."""
     rows = _container.storage.trades.list_today(_container.settings.SYMBOL)
     buys = sum(dec(r["cost"]) for r in rows if str(r["side"]).lower() == "buy")
     sells = sum(dec(r["cost"]) for r in rows if str(r["side"]).lower() == "sell")

@@ -1,5 +1,4 @@
-﻿# src/crypto_ai_bot/core/infrastructure/storage/repositories/positions.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
@@ -14,13 +13,12 @@ from crypto_ai_bot.utils.time import now_ms
 class Position:
     symbol: str
     base_qty: Decimal
-    # расширенные поля (храним в таблице positions отдельными колонками)
     avg_entry_price: Decimal = dec("0")
     realized_pnl: Decimal = dec("0")
     unrealized_pnl: Decimal = dec("0")
     opened_at: int = 0
     updated_at: int = 0
-    last_trade_ts_ms: int = 0  # ← НОВОЕ
+    last_trade_ts_ms: int = 0
 
 
 class PositionsRepository:
@@ -28,7 +26,6 @@ class PositionsRepository:
         self._c = conn
 
     def get_position(self, symbol: str) -> Position:
-        # колонки гарантируются миграторами (идемпотентно)
         cur = self._c.execute(
             """
             SELECT base_qty,
@@ -57,7 +54,6 @@ class PositionsRepository:
             last_trade_ts_ms=int(row[6]),
         )
 
-    # совместимость со старым кодом
     def get_base_qty(self, symbol: str) -> Decimal:
         return self.get_position(symbol).base_qty
 
@@ -72,8 +68,7 @@ class PositionsRepository:
             """,
             (symbol, str(base_qty), now_ms()),
         )
-
-    # --- НОВОЕ: timestamp последней успешной сделки (для cooldown/аудита) ---
+        self._c.commit()  # ← добавлено
 
     def set_last_trade_ts(self, symbol: str, ts_ms: Optional[int] = None) -> None:
         ts = int(ts_ms or now_ms())
@@ -87,6 +82,7 @@ class PositionsRepository:
             """,
             (symbol, ts, ts),
         )
+        self._c.commit()  # ← добавлено
 
     def get_last_trade_ts(self, symbol: str) -> int:
         cur = self._c.execute("SELECT COALESCE(last_trade_ts_ms, 0) FROM positions WHERE symbol=?", (symbol,))
@@ -94,7 +90,6 @@ class PositionsRepository:
         return int(row[0]) if row else 0
 
     def is_cooldown_active(self, symbol: str, cooldown_sec: int, *, now_ts_ms: Optional[int] = None) -> bool:
-        """True, если последняя сделка была менее cooldown_sec назад."""
         if cooldown_sec <= 0:
             return False
         last = self.get_last_trade_ts(symbol)
@@ -103,7 +98,6 @@ class PositionsRepository:
         now_local = int(now_ts_ms or now_ms())
         return (now_local - last) < int(cooldown_sec * 1000)
 
-    # лёгкая интеграция для reconcile: обновить позицию на основе сделки
     def update_from_trade(self, trade: dict) -> Position:
         sym = str(trade["symbol"])
         side = str(trade["side"]).lower()
@@ -115,12 +109,10 @@ class PositionsRepository:
             pos.base_qty = max(dec("0"), pos.base_qty - amount)
 
         self.set_base_qty(sym, pos.base_qty)
-        # если есть явный ts сделки — можно фиксировать и last_trade_ts_ms
         ts_ms = int(trade.get("ts_ms", 0)) if isinstance(trade, dict) else 0
         if ts_ms > 0:
             self.set_last_trade_ts(sym, ts_ms)
         return pos
 
 
-# --- compatibility alias ---
 PositionsRepo = PositionsRepository
