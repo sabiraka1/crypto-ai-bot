@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
-import sqlite3  # ← добавлен импорт
+import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
@@ -21,6 +22,7 @@ from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.http_client import create_http_client
 
 _log = get_logger("compose")
 
@@ -36,6 +38,74 @@ class Container:
     exits: ProtectiveExits
     orchestrator: Orchestrator
     lock: Optional[InstanceLock] = None
+
+
+async def _telegram_send(settings: Any, text: str) -> None:
+    """Отправка сообщения в Telegram. Безопасный no-op если нет токена/чата."""
+    token = getattr(settings, "TELEGRAM_BOT_TOKEN", "") or ""
+    chat_id = getattr(settings, "TELEGRAM_CHAT_ID", "") or ""
+    if not token or not chat_id:
+        return
+    
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id, 
+        "text": text, 
+        "parse_mode": "HTML", 
+        "disable_web_page_preview": True
+    }
+    
+    client = create_http_client(timeout_sec=10)
+    try:
+        await client.post(url, json=payload)
+    except Exception as exc:
+        _log.warning("telegram_send_failed", extra={"error": str(exc)})
+    finally:
+        # httpx.AsyncClient / aiohttp.ClientSession — оба имеют close()
+        close = getattr(client, "close", None)
+        if callable(close):
+            await close()  # type: ignore[misc]
+
+
+def _fmt_kv(d: dict) -> str:
+    """Форматирование словаря в строку key=value."""
+    parts = []
+    for k, v in d.items():
+        if v is None:
+            continue
+        parts.append(f"{k}={v}")
+    return ", ".join(parts)
+
+
+def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
+    """Подписка на события для отправки уведомлений в Telegram."""
+    
+    async def on_completed(evt: dict) -> None:
+        text = "✅ <b>TRADE COMPLETED</b>\n" + _fmt_kv(evt)
+        await _telegram_send(settings, text)
+
+    async def on_blocked(evt: dict) -> None:
+        text = "⛔️ <b>TRADE BLOCKED</b>\n" + _fmt_kv(evt)
+        await _telegram_send(settings, text)
+
+    async def on_failed(evt: dict) -> None:
+        text = "❌ <b>TRADE FAILED</b>\n" + _fmt_kv(evt)
+        await _telegram_send(settings, text)
+
+    async def on_heartbeat(evt: dict) -> None:
+        ok = "OK" if evt.get("ok") else "WARN"
+        text = f"💓 <b>HEARTBEAT</b> {ok}\n" + _fmt_kv(evt)
+        await _telegram_send(settings, text)
+
+    bus.subscribe("trade.completed", on_completed)
+    bus.subscribe("trade.blocked", on_blocked)
+    bus.subscribe("trade.failed", on_failed)
+    bus.subscribe("watchdog.heartbeat", on_heartbeat)
+    
+    _log.info("telegram_alerts_attached", extra={
+        "enabled": bool(getattr(settings, "TELEGRAM_BOT_TOKEN", "") and 
+                       getattr(settings, "TELEGRAM_CHAT_ID", ""))
+    })
 
 
 def _create_storage_for_mode(settings: Settings) -> Storage:
@@ -73,6 +143,9 @@ def build_container() -> Container:
     storage = _create_storage_for_mode(settings)
     bus = AsyncEventBus(max_attempts=3, backoff_base_ms=250, backoff_factor=2.0)
     bus.attach_logger_dlq()  # проще отлавливать сбои подписчиков
+    
+    # Подключаем Telegram уведомления
+    attach_alerts(bus, settings)
 
     broker = _create_broker_for_mode(settings)
 
