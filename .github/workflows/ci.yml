@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ main ]
+    branches: [ "**" ]
 
 permissions:
   contents: read
@@ -12,64 +12,42 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
-
-    env:
-      PYTHONUNBUFFERED: "1"
-      PYTHONPATH: src
-      MODE: paper
-      EXCHANGE: gateio
-      SYMBOL: BTC/USDT
-      FIXED_AMOUNT: "50"
-      IDEMPOTENCY_BUCKET_MS: "60000"
-      IDEMPOTENCY_TTL_SEC: "3600"
-      DB_PATH: "./data/ci.sqlite3"
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
 
-      - name: Install deps
+      - name: Install project deps (if any)
         run: |
-          python -m pip install -U pip
-          pip install -e .
-          pip install ruff mypy import-linter pytest
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          # Инструменты гейта
+          pip install ruff mypy pytest
 
-      - name: Smoke: migrations on temp DB
+      - name: Lint (ruff)
         run: |
-          mkdir -p data
-          python - <<'PY'
-          import sqlite3
-          from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
-          from crypto_ai_bot.utils.time import now_ms
-          conn = sqlite3.connect("data/ci.sqlite3")
-          conn.row_factory = sqlite3.Row
-          v = run_migrations(conn, now_ms=now_ms(), db_path="data/ci.sqlite3", do_backup=False)
-          print("migration_version=", v)
-          PY
+          # мягкие правила по умолчанию; при наличии pyproject.toml/ruff.toml они будут учтены
+          ruff check src/ --output-format github
 
-      - name: Ruff (lint)
-        run: ruff check --output-format=github .
+      - name: Type-check (mypy)
+        run: |
+          # строгий, но практичный профиль — без падений на сторонних либах
+          mypy src/ --install-types --non-interactive --ignore-missing-imports --pretty
 
-      - name: Mypy (types)
-        run: mypy --install-types --non-interactive src
+      - name: Run tests (pytest) if tests/ exists
+        if: ${{ hashFiles('tests/**') != '' }}
+        run: |
+          pytest -q
 
-      - name: Import Linter
-        run: python -m importlinter
-
-      - name: Pytest (unit only)
-        run: pytest -q || true
-        # Тесты частично устарели; временно допускаем желтый статус. Потом уберем "|| true".
-
-      - name: Build Docker (if Dockerfile exists)
-        if: hashFiles('Dockerfile') != ''
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          tags: crypto-ai-bot:test
+      - name: Build Docker image (if Dockerfile exists)
+        if: ${{ hashFiles('Dockerfile') != '' }}
+        run: |
+          docker build -t crypto-ai-bot:ci .

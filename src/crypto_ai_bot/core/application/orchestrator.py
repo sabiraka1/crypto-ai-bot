@@ -19,6 +19,7 @@ from crypto_ai_bot.core.application.reconciliation.balances import BalancesRecon
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.time import now_ms  # ← добавлено
 
 if TYPE_CHECKING:
     from crypto_ai_bot.core.infrastructure.settings import Settings
@@ -160,22 +161,48 @@ class Orchestrator:
                     await self._recon_orders.run_once()
                 if self._recon_bal:
                     await self._recon_bal.run_once()
-                
-                # Сверка позиций (прямое сравнение) + событие в шину
+
+                # Сверка позиций (прямое сравнение) + событие в шину + (опционально) autofix
                 try:
                     pos = self.storage.positions.get_position(self.symbol)
                     balance = await self.broker.fetch_balance(self.symbol)
-                    if abs(float(pos.base_qty) - float(balance.free_base)) > 0.00000001:
+                    diff = Decimal(str(balance.free_base)) - Decimal(str(pos.base_qty or dec("0")))
+                    if abs(diff) > Decimal("0.00000001"):
                         _log.warning(
                             "position_discrepancy",
                             extra={"symbol": self.symbol, "local": str(pos.base_qty), "exchange": str(balance.free_base)},
                         )
-                        # публикуем событие (для алёртов)
                         await self.bus.publish(
                             "reconcile.position_mismatch",
                             {"symbol": self.symbol, "local": str(pos.base_qty), "exchange": str(balance.free_base)},
                             key=self.symbol,
                         )
+
+                        # --- НОВОЕ: безопасный autofix на базе флага RECONCILE_AUTOFIX ---
+                        try:
+                            if bool(getattr(self.settings, "RECONCILE_AUTOFIX", 0)):
+                                # 1) записываем виртуальную «reconciliation»-сделку (для аудита/PNL)
+                                add_rec = getattr(self.storage.trades, "add_reconciliation_trade", None)
+                                if callable(add_rec):
+                                    add_rec(
+                                        {
+                                            "symbol": self.symbol,
+                                            "side": ("buy" if diff > 0 else "sell"),
+                                            "amount": str(abs(diff)),
+                                            "status": "reconciliation",
+                                            "ts_ms": now_ms(),
+                                            "client_order_id": f"reconcile-{self.symbol}-{now_ms()}",
+                                        }
+                                    )
+                                # 2) выравниваем локальную позицию под биржу (без обновления last_trade_ts_ms)
+                                self.storage.positions.set_base_qty(self.symbol, dec(str(balance.free_base)))
+                                _log.info(
+                                    "reconcile_autofix_applied",
+                                    extra={"symbol": self.symbol, "new_local_base": str(balance.free_base)},
+                                )
+                        except Exception as exc:
+                            _log.error("reconcile_autofix_failed", extra={"error": str(exc)})
+
                 except Exception as exc:
                     _log.error("position_reconcile_failed", extra={"error": str(exc)})
 
