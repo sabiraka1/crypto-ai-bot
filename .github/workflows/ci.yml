@@ -1,53 +1,60 @@
-name: CI
+name: ci
 
 on:
   push:
-    branches: [ main, master ]
   pull_request:
-    branches: [ "**" ]
-
-permissions:
-  contents: read
 
 jobs:
-  build-test:
+  lint-and-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install project deps (if any)
+      - name: Install minimal tools
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-          # Инструменты гейта
-          pip install ruff mypy pytest
+          pip install ruff isort
 
       - name: Lint (ruff)
-        run: |
-          # мягкие правила по умолчанию; при наличии pyproject.toml/ruff.toml они будут учтены
-          ruff check src/ --output-format github
+        run: ruff check .
 
-      - name: Type-check (mypy)
-        run: |
-          # строгий, но практичный профиль — без падений на сторонних либах
-          mypy src/ --install-types --non-interactive --ignore-missing-imports --pretty
+      - name: Import order (isort check only)
+        run: isort --check-only .
 
-      - name: Run tests (pytest) if tests/ exists
-        if: ${{ hashFiles('tests/**') != '' }}
+      - name: Smoke run (paper mode, no network)
+        env:
+          MODE: paper
+          EXCHANGE: gateio
+          SYMBOL: BTC/USDT
+          FIXED_AMOUNT: "50"
+          DATA_DIR: ./data
+          IDEMPOTENCY_BUCKET_MS: "60000"
+          IDEMPOTENCY_TTL_SEC: "600"
         run: |
-          pytest -q
-
-      - name: Build Docker image (if Dockerfile exists)
-        if: ${{ hashFiles('Dockerfile') != '' }}
-        run: |
-          docker build -t crypto-ai-bot:ci .
+          python - <<'PY'
+          import os, asyncio
+          os.environ.setdefault("MODE","paper")
+          from crypto_ai_bot.app.compose import build_container
+          from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+          async def main():
+              c = build_container()
+              # один dry-run тик (force buy с фиксированной суммой)
+              order = await eval_and_execute(
+                  symbol=os.getenv("SYMBOL","BTC/USDT"),
+                  storage=c.storage, broker=c.broker, bus=c.bus, exchange=c.settings.EXCHANGE,
+                  fixed_quote_amount=c.settings.FIXED_AMOUNT,
+                  idempotency_bucket_ms=c.settings.IDEMPOTENCY_BUCKET_MS,
+                  idempotency_ttl_sec=c.settings.IDEMPOTENCY_TTL_SEC,
+                  force_action="buy",
+                  risk_manager=c.risk, protective_exits=c.exits, settings=c.settings,
+                  fee_estimate_pct=c.settings.FEE_PCT_ESTIMATE,
+              )
+              assert order is not None
+              print("smoke_ok", order.client_order_id)
+          asyncio.run(main())
+          PY

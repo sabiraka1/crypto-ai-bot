@@ -20,7 +20,6 @@ from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("compose")
 
@@ -33,9 +32,9 @@ class Container:
     health: HealthChecker
     risk: RiskManager
     exits: ProtectiveExits
-    orchestrator: Orchestrator                   # primary (обратная совместимость)
-    orchestrators: Dict[str, Orchestrator]       # все по символам
-    broker: IBroker                              # live: общий, paper: broker primary-оркестратора
+    orchestrator: Orchestrator
+    orchestrators: Dict[str, Orchestrator]
+    broker: IBroker
     lock: Optional[InstanceLock] = None
 
 
@@ -46,7 +45,6 @@ async def _telegram_send(settings: Any, text: str) -> None:
     if not token or not chat_id:
         return
     try:
-        # httpx может быть не установлен в окружении — оборачиваем в try
         import httpx  # type: ignore
         async with httpx.AsyncClient(timeout=5.0) as cli:
             await cli.post(
@@ -54,7 +52,6 @@ async def _telegram_send(settings: Any, text: str) -> None:
                 json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             )
     except Exception:
-        # без падений — алерт просто не уйдет
         pass
 
 
@@ -68,49 +65,26 @@ def _fmt_kv(d: dict) -> str:
 # ---------- Alerts wiring ----------
 def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
     async def on_completed(evt: dict) -> None:
-        text = "✅ <b>TRADE COMPLETED</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
+        await _telegram_send(settings, "✅ <b>TRADE COMPLETED</b>\n" + _fmt_kv(evt))
     async def on_blocked(evt: dict) -> None:
-        text = "⛔️ <b>TRADE BLOCKED</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
+        await _telegram_send(settings, "⛔️ <b>TRADE BLOCKED</b>\n" + _fmt_kv(evt))
     async def on_failed(evt: dict) -> None:
-        text = "❌ <b>TRADE FAILED</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
+        await _telegram_send(settings, "❌ <b>TRADE FAILED</b>\n" + _fmt_kv(evt))
     async def on_heartbeat(evt: dict) -> None:
         ok = "OK" if evt.get("ok") else "WARN"
-        text = f"💓 <b>HEARTBEAT</b> {ok}\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
+        await _telegram_send(settings, f"💓 <b>HEARTBEAT</b> {ok}\n" + _fmt_kv(evt))
     async def on_position_mismatch(evt: dict) -> None:
-        sym = evt.get("symbol", "")
-        local = evt.get("local", "")
-        exch = evt.get("exchange", "")
-        text = (
-            "⚠️ <b>POSITION MISMATCH</b>\n"
-            f"symbol={sym}\nlocal_base={local}\nexchange_base={exch}\n"
-            "Проверьте сверку/баланс. Если включён autofix — позиция будет выровнена."
-        )
-        await _telegram_send(settings, text)
-
+        sym = evt.get("symbol", ""); local = evt.get("local", ""); exch = evt.get("exchange", "")
+        await _telegram_send(settings, "⚠️ <b>POSITION MISMATCH</b>\n"
+                           f"symbol={sym}\nlocal_base={local}\nexchange_base={exch}")
     async def on_paused(evt: dict) -> None:
-        text = "⏸️ <b>ORCHESTRATOR PAUSED</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
+        await _telegram_send(settings, "⏸️ <b>ORCHESTRATOR PAUSED</b>\n" + _fmt_kv(evt))
     async def on_resumed(evt: dict) -> None:
-        text = "▶️ <b>ORCHESTRATOR RESUMED</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
-    # SLA auto pause/resume (kill-switch)
+        await _telegram_send(settings, "▶️ <b>ORCHESTRATOR RESUMED</b>\n" + _fmt_kv(evt))
     async def on_auto_paused(evt: dict) -> None:
-        text = "🛑 <b>AUTO-PAUSED (SLA)</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
-
+        await _telegram_send(settings, "🛑 <b>AUTO-PAUSED (SLA/BUDGET)</b>\n" + _fmt_kv(evt))
     async def on_auto_resumed(evt: dict) -> None:
-        text = "🟢 <b>AUTO-RESUMED</b>\n" + _fmt_kv(evt)
-        await _telegram_send(settings, text)
+        await _telegram_send(settings, "🟢 <b>AUTO-RESUMED</b>\n" + _fmt_kv(evt))
 
     bus.subscribe("trade.completed", on_completed)
     bus.subscribe("trade.blocked", on_blocked)
@@ -122,15 +96,8 @@ def attach_alerts(bus: AsyncEventBus, settings: Any) -> None:
     bus.subscribe("orchestrator.auto_paused", on_auto_paused)
     bus.subscribe("orchestrator.auto_resumed", on_auto_resumed)
 
-    _log.info(
-        "telegram_alerts_attached",
-        extra={
-            "enabled": bool(
-                getattr(settings, "TELEGRAM_BOT_TOKEN", "")
-                and getattr(settings, "TELEGRAM_CHAT_ID", "")
-            )
-        },
-    )
+    _log.info("telegram_alerts_attached",
+              extra={"enabled": bool(getattr(settings, "TELEGRAM_BOT_TOKEN", "") and getattr(settings, "TELEGRAM_CHAT_ID", ""))})
 
 
 # ---------- Storage / Brokers ----------
@@ -139,11 +106,30 @@ def _open_storage(settings: Settings) -> Storage:
     conn = sqlite3.connect(os.path.join(settings.DATA_DIR, "bot.db"))
     conn.row_factory = sqlite3.Row
     run_migrations(conn)
+
+    # UNIQUE client_order_id (для дедупликации) + полезные индексы
+    try:
+        conn.execute(
+            'CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_client_id_unique '
+            'ON trades(client_order_id) '
+            'WHERE client_order_id IS NOT NULL AND client_order_id <> "";'
+        )
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_trades_broker_order_id '
+            'ON trades(broker_order_id);'
+        )
+        conn.commit()
+    except Exception:
+        pass
+
     return Storage(conn)
 
 
 def _create_broker_live(settings: Settings) -> IBroker:
     wait_close = float(getattr(settings, "WAIT_ORDER_CLOSE_SEC", 0.0) or 0.0)
+    rate_cps  = float(getattr(settings, "RATE_CALLS_PER_SEC", 0.0) or 0.0)
+    rate_burst = int(getattr(settings, "RATE_BURST", 0) or 0)
+    idem_bucket = int(getattr(settings, "IDEMPOTENCY_BUCKET_MS", 60_000) or 60_000)
     if not settings.API_KEY or not settings.API_SECRET:
         raise ValueError("API creds required in live mode")
     return CcxtBroker(
@@ -154,17 +140,15 @@ def _create_broker_live(settings: Settings) -> IBroker:
         sandbox=bool(settings.SANDBOX),
         dry_run=False,
         wait_close_sec=wait_close,
+        rate_calls_per_sec=rate_cps,
+        rate_burst=rate_burst,
+        idempotency_bucket_ms=idem_bucket,
     )
 
 
 def _make_simple_price_feed(symbol: str):
-    """
-    Минимальный price-feed для PaperBroker без сторонних зависимостей.
-    Возвращает кортеж (last, bid, ask) как Decimal.
-    """
     base_price = dec("100")
     async def _feed():
-        # Простая статическая котировка; PaperBroker обычно сам делает TickerDTO
         return base_price, base_price - dec("0.1"), base_price + dec("0.1")
     return _feed
 
@@ -183,9 +167,8 @@ def build_container() -> Container:
     attach_alerts(bus, settings)
     health = HealthChecker(storage=storage)
     risk = RiskManager(RiskConfig.from_settings(settings))
-    exits = ProtectiveExits(storage=storage, broker=None, settings=settings)  # реальный broker укажем ниже
+    exits = ProtectiveExits(storage=storage, broker=None, settings=settings)  # broker проставим ниже
 
-    # Список символов: основной + дополнительные через ENV SYMBOLS (","-разделитель)
     syms: List[str] = [settings.SYMBOL]
     extra = [s.strip() for s in str(getattr(settings, "SYMBOLS", "") or "").split(",") if s.strip()]
     for s in extra:
@@ -197,62 +180,36 @@ def build_container() -> Container:
     primary_broker: Optional[IBroker] = None
 
     if mode == "live":
-        # Один общий брокер на все символы (единые ключи Gate.io)
         primary_broker = _create_broker_live(settings)
         for sym in syms:
             exits_sym = ProtectiveExits(storage=storage, broker=primary_broker, settings=settings)
-            orch = Orchestrator(
-                symbol=sym,
-                storage=storage,
-                broker=primary_broker,
-                bus=bus,
-                risk=risk,
-                exits=exits_sym,
-                health=health,
-                settings=settings,
-            )
+            orch = Orchestrator(symbol=sym, storage=storage, broker=primary_broker, bus=bus,
+                                risk=risk, exits=exits_sym, health=health, settings=settings)
             orchestrators[sym] = orch
     elif mode == "paper":
-        # Отдельный PaperBroker на символ (PaperBroker обычно символо-зависим)
         for sym in syms:
             pb = _create_broker_paper(settings, sym)
             exits_sym = ProtectiveExits(storage=storage, broker=pb, settings=settings)
-            orch = Orchestrator(
-                symbol=sym,
-                storage=storage,
-                broker=pb,
-                bus=bus,
-                risk=risk,
-                exits=exits_sym,
-                health=health,
-                settings=settings,
-            )
+            orch = Orchestrator(symbol=sym, storage=storage, broker=pb, bus=bus,
+                                risk=risk, exits=exits_sym, health=health, settings=settings)
             orchestrators[sym] = orch
-        # primary_broker для обратной совместимости: берём у primary orchestrator
         primary_broker = orchestrators[settings.SYMBOL].broker
     else:
         raise ValueError(f"Unknown MODE={settings.MODE}")
 
-    # Instance lock на процесс
     lock = InstanceLock(settings.INSTANCE_LOCK_FILE)
     if not lock.acquire(block=False):
         raise RuntimeError("Another instance is running")
 
-    container = Container(
+    return Container(
         settings=settings,
         storage=storage,
         bus=bus,
         health=health,
         risk=risk,
         exits=exits,
-        orchestrator=orchestrators[settings.SYMBOL],  # primary для обратной совместимости
+        orchestrator=orchestrators[settings.SYMBOL],
         orchestrators=orchestrators,
         broker=primary_broker,
         lock=lock,
     )
-
-    _log.info(
-        "container_built",
-        extra={"mode": settings.MODE, "exchange": settings.EXCHANGE, "symbols": syms},
-    )
-    return container

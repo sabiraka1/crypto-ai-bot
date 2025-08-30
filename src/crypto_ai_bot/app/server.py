@@ -1,75 +1,82 @@
 ﻿from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from ..utils.logging import get_logger
-from ..utils.metrics import render_prometheus, render_metrics_json
-from ..utils.time import now_ms
-from ..utils.exceptions import (
+from crypto_ai_bot.app.compose import build_container
+from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.metrics import render_prometheus, render_metrics_json
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.exceptions import (
     TradingError,
-    ValidationError,
+    RateLimitError,
+    IdempotencyError,
     BrokerError,
     TransientError,
-    IdempotencyError,
     CircuitOpenError,
 )
-from crypto_ai_bot.utils.decimal import dec
-from .compose import build_container
 
 _log = get_logger("server")
 
 app = FastAPI(title="crypto-ai-bot", version="1.0.0")
-_container = None
-
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
+# контейнер процесса (инициализируется на startup)
+_container = None
+_startup_blocked_reason: Optional[str] = None
 
-def _get_orch(symbol: str):
-    sym = symbol or _container.settings.SYMBOL
-    if sym == "all":
-        return None
-    orch = _container.orchestrators.get(sym)
-    if not orch:
-        raise HTTPException(404, f"orchestrator for symbol={sym} not found")
-    return orch
 
-async def _auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
+# ---------- auth ----------
+async def _auth(_: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
     if not _container:
         raise HTTPException(status_code=503, detail="Service Unavailable")
-    token_required = _container.settings.API_TOKEN
+    token_required = (_container.settings.API_TOKEN or "").strip()
     if not token_required:
         return
     if not credentials or credentials.credentials != token_required:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+# ---------- app lifecycle ----------
 @app.on_event("startup")
 async def _startup() -> None:
-    global _container
+    """
+    1) собираем контейнер
+    2) при live+REQUIRE_API_TOKEN_IN_LIVE=1 — требуем API_TOKEN
+    3) стартовый reconcile-barrier по каждому символу (dec()!)
+    4) автозапуск всех оркестраторов при autostart
+    """
+    global _container, _startup_blocked_reason
     _container = build_container()
+    _startup_blocked_reason = None
 
-    # требование токена в live (по флагу)
+    # требование токена в live-режиме (при флаге)
+    require_token = False
     try:
         require_token = bool(int(getattr(_container.settings, "REQUIRE_API_TOKEN_IN_LIVE", 0)))
     except Exception:
         require_token = False
     if (_container.settings.MODE or "").lower() == "live" and require_token:
         if not (_container.settings.API_TOKEN or "").strip():
-            _container = None
-            raise RuntimeError("API token is required in LIVE mode (set REQUIRE_API_TOKEN_IN_LIVE=1)")
+            _startup_blocked_reason = "API token is required in LIVE mode (set REQUIRE_API_TOKEN_IN_LIVE=1)"
+            _log.error("startup_blocked_no_api_token")
+            raise RuntimeError(_startup_blocked_reason)
 
-    # стартовый reconcile-барьер для каждого символа
+    # стартовая сверка по всем символам
     try:
-        tol = dec(str(getattr(_container.settings, "RECONCILE_READY_TOLERANCE_BASE", "0.00000010")))
-        for sym, orch in _container.orchestrators.items():
+        symbols: List[str] = list(_container.orchestrators.keys()) or [_container.settings.SYMBOL]
+        for sym in symbols:
             pos = _container.storage.positions.get_position(sym)
-            bal = await orch.broker.fetch_balance(sym)
+            bal = await _container.broker.fetch_balance(sym)
+            tol = dec(str(getattr(_container.settings, "RECONCILE_READY_TOLERANCE_BASE", "0.00000010")))
             diff = (bal.free_base or dec("0")) - (pos.base_qty or dec("0"))
             if abs(diff) > tol:
                 if bool(getattr(_container.settings, "RECONCILE_AUTOFIX", 0)):
@@ -83,54 +90,59 @@ async def _startup() -> None:
                             "ts_ms": now_ms(),
                             "client_order_id": f"reconcile-start-{sym}-{now_ms()}",
                         })
-                    _container.storage.positions.set_base_qty(sym, dec(str(bal.free_base)))
-                    adder = getattr(_container.storage.audit, "add", None)
-                    if callable(adder):
-                        try: adder("reconcile.autofix_startup", {"symbol": sym, "new_local_base": str(bal.free_base), "ts_ms": now_ms()})
-                        except Exception: pass
-                    _log.info("startup_reconcile_autofix_applied", extra={"diff": str(diff), "symbol": sym})
+                    _container.storage.positions.set_base_qty(sym, bal.free_base or dec("0"))
+                    _log.info("startup_reconcile_autofix_applied", extra={
+                        "symbol": sym, "exchange": str(bal.free_base), "local": str(pos.base_qty), "diff": str(diff)
+                    })
                 else:
-                    adder = getattr(_container.storage.audit, "add", None)
-                    if callable(adder):
-                        try: adder("reconcile.blocked_startup", {"symbol": sym, "exchange": str(bal.free_base),
-                                                                 "local": str(pos.base_qty), "ts_ms": now_ms()})
-                        except Exception: pass
-                    _log.error("startup_reconcile_blocked", extra={"expected": str(bal.free_base), "local": str(pos.base_qty), "symbol": sym})
-                    raise RuntimeError(
-                        f"[{sym}] Position mismatch at startup: exchange={bal.free_base} local={pos.base_qty}. "
+                    _startup_blocked_reason = (
+                        f"Position mismatch at startup for {sym}: exchange={bal.free_base} local={pos.base_qty}. "
                         f"Enable RECONCILE_AUTOFIX=1 or fix manually."
                     )
+                    _log.error("startup_reconcile_blocked", extra={
+                        "symbol": sym, "exchange": str(bal.free_base), "local": str(pos.base_qty), "diff": str(diff)
+                    })
+                    raise RuntimeError(_startup_blocked_reason)
+            else:
+                _log.info("startup_reconcile_ok", extra={"symbol": sym, "position": str(pos.base_qty), "diff": str(diff)})
+    except RuntimeError:
+        raise
     except Exception as exc:
+        _startup_blocked_reason = f"startup_reconcile_failed: {exc}"
         _log.error("startup_reconcile_failed", extra={"error": str(exc)})
 
-    autostart = bool(_container.settings.TRADER_AUTOSTART) or _container.settings.MODE == "live"
-    if autostart:
+    # автозапуск оркестраторов
+    autostart = bool(_container.settings.TRADER_AUTOSTART) or (_container.settings.MODE or "").lower() == "live"
+    if autostart and _container:
         loop = asyncio.get_running_loop()
         for sym, orch in _container.orchestrators.items():
             loop.call_soon(orch.start)
-        _log.info("orchestrators_autostart_enabled", extra={"symbols": list(_container.orchestrators.keys())})
+        _log.info("orchestrators_autostarted", extra={"symbols": list(_container.orchestrators.keys())})
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    if _container:
-        try:
-            tasks = []
-            for orch in _container.orchestrators.values():
-                st = orch.status()
-                if st.get("running"):
-                    tasks.append(orch.stop())
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            _log.info("orchestrators_stopped_on_shutdown")
-        except Exception as exc:
-            _log.error("shutdown_failed", extra={"error": str(exc)})
+    """Аккуратно останавливаем все оркестраторы и снимаем lock."""
+    if not _container:
+        return
+    try:
+        # параллельная остановка всех
+        await asyncio.gather(*(orch.stop() for orch in _container.orchestrators.values()), return_exceptions=True)
+    except Exception as exc:
+        _log.error("shutdown_stop_failed", extra={"error": str(exc)})
+    try:
+        if getattr(_container, "lock", None):
+            _container.lock.release()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    _log.info("shutdown_ok")
 
 
+# ---------- error mapping ----------
 @app.exception_handler(TradingError)
-async def trading_error_handler(request: Request, exc: TradingError):
-    if isinstance(exc, ValidationError):
-        code = 400
+async def trading_error_handler(_: Request, exc: TradingError):
+    if isinstance(exc, RateLimitError):
+        code = 429
     elif isinstance(exc, IdempotencyError):
         code = 409
     elif isinstance(exc, BrokerError):
@@ -141,37 +153,29 @@ async def trading_error_handler(request: Request, exc: TradingError):
         code = 500
     return JSONResponse(status_code=code, content={"ok": False, "error": exc.__class__.__name__, "detail": str(exc)})
 
+
 @app.exception_handler(Exception)
-async def unhandled_error_handler(request: Request, exc: Exception):
+async def unhandled_error_handler(_: Request, exc: Exception):
     _log.error("unhandled_error", extra={"error": str(exc)})
     return JSONResponse(status_code=500, content={"ok": False, "error": "InternalServerError"})
 
 
+# ---------- health / metrics ----------
 @router.get("/")
 async def root() -> Dict[str, Any]:
     return {"name": "crypto-ai-bot", "version": "1.0.0"}
-
 
 @router.get("/live")
 async def live() -> Dict[str, Any]:
     return {"ok": True, "ts_ms": now_ms()}
 
-
 @router.get("/ready")
 async def ready() -> JSONResponse:
-    if not _container:
-        return JSONResponse(status_code=503, content={"ok": False, "error": "container_not_ready"})
-    try:
-        # готов, если хоть один орк жив и health.ok
-        oks = []
-        for sym, orch in _container.orchestrators.items():
-            rep = await _container.health.check(symbol=sym)
-            oks.append(rep.ok)
-        ok = any(oks)
-        return JSONResponse(status_code=(200 if ok else 503), content={"ok": ok, "symbols": list(_container.orchestrators.keys())})
-    except Exception as exc:
-        return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
-
+    if (not _container) or (_startup_blocked_reason is not None):
+        detail = _startup_blocked_reason or "Container not ready"
+        return JSONResponse(status_code=503, content={"ok": False, "detail": detail})
+    # контейнер собран — считаем готовым (оркестраторы стартуют асинхронно)
+    return JSONResponse(status_code=200, content={"ok": True, "ts_ms": now_ms()})
 
 @router.get("/metrics", response_class=PlainTextResponse)
 async def metrics() -> str:
@@ -182,99 +186,119 @@ async def metrics() -> str:
         return "#metrics_fallback\n" + str(data) + "\n"
 
 
-# -------- orchestrators control --------
-
-@router.get("/orchestrator/list")
-async def orchestrator_list(_: Any = Depends(_auth)) -> Dict[str, Any]:
-    sts = {sym: o.status() for sym, o in _container.orchestrators.items()}
-    return {"ok": True, "symbols": list(_container.orchestrators.keys()), "status": sts}
+# ---------- orchestrators control ----------
+def _pick_symbols(symbol: Optional[str]) -> List[str]:
+    if not _container:
+        return []
+    if symbol is None or symbol == "":
+        return [_container.settings.SYMBOL]
+    if symbol.lower() == "all":
+        return list(_container.orchestrators.keys())
+    if symbol not in _container.orchestrators:
+        raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
+    return [symbol]
 
 @router.get("/orchestrator/status")
-async def orchestrator_status(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    if symbol == "all":
-        sts = {sym: o.status() for sym, o in _container.orchestrators.items()}
-        return {"ok": True, "status": sts}
-    orch = _get_orch(symbol)
-    return {"ok": True, "status": orch.status()}
+async def orchestrator_status(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    syms = _pick_symbols(symbol)
+    status = {s: _container.orchestrators[s].status() for s in syms}  # type: ignore[index]
+    return {"ok": True, "status": status}
 
 @router.post("/orchestrator/start")
-async def orchestrator_start(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    if symbol == "all":
-        for o in _container.orchestrators.values():
-            if not o.status().get("running"):
-                o.start()
-        return {"ok": True, "message": "started_all"}
-    orch = _get_orch(symbol)
-    if orch.status().get("running"):
-        return {"ok": True, "message": "already_running"}
-    orch.start()
-    return {"ok": True, "message": "started"}
+async def orchestrator_start(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    for s in _pick_symbols(symbol):
+        if not _container.orchestrators[s].status().get("running"):
+            _container.orchestrators[s].start()
+    return {"ok": True, "message": "started", "symbols": _pick_symbols(symbol)}
 
 @router.post("/orchestrator/stop")
-async def orchestrator_stop(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    if symbol == "all":
-        await asyncio.gather(*[o.stop() for o in _container.orchestrators.values()], return_exceptions=True)
-        return {"ok": True, "message": "stopped_all"}
-    orch = _get_orch(symbol)
-    await orch.stop()
-    return {"ok": True, "message": "stopped"}
+async def orchestrator_stop(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    await asyncio.gather(*(_container.orchestrators[s].stop() for s in _pick_symbols(symbol)))
+    return {"ok": True, "message": "stopped", "symbols": _pick_symbols(symbol)}
 
 @router.post("/orchestrator/pause")
-async def orchestrator_pause(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    if symbol == "all":
-        await asyncio.gather(*[o.pause() for o in _container.orchestrators.values()], return_exceptions=True)
-        return {"ok": True, "message": "paused_all"}
-    orch = _get_orch(symbol)
-    await orch.pause()
-    return {"ok": True, "message": "paused", "status": orch.status()}
+async def orchestrator_pause(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    await asyncio.gather(*(_container.orchestrators[s].pause() for s in _pick_symbols(symbol)))
+    return {"ok": True, "message": "paused", "symbols": _pick_symbols(symbol)}
 
 @router.post("/orchestrator/resume")
-async def orchestrator_resume(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    if symbol == "all":
-        await asyncio.gather(*[o.resume() for o in _container.orchestrators.values()], return_exceptions=True)
-        return {"ok": True, "message": "resumed_all"}
-    orch = _get_orch(symbol)
-    await orch.resume()
-    return {"ok": True, "message": "resumed", "status": orch.status()}
+async def orchestrator_resume(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    await asyncio.gather(*(_container.orchestrators[s].resume() for s in _pick_symbols(symbol)))
+    return {"ok": True, "message": "resumed", "symbols": _pick_symbols(symbol)}
 
 
-# -------- read-only views (per symbol) --------
-
+# ---------- positions & PnL ----------
 @router.get("/positions")
-async def get_positions(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    sym = symbol or _container.settings.SYMBOL
-    pos = _container.storage.positions.get_position(sym)
-    t = await _container.broker.fetch_ticker(sym) if _container.settings.MODE == "live" else await _container.orchestrators[sym].broker.fetch_ticker(sym)
-    unreal = (t.last - (pos.avg_entry_price or dec("0"))) * (pos.base_qty or dec("0"))
-    return {
-        "symbol": sym,
-        "base_qty": str(pos.base_qty or dec("0")),
-        "avg_price": str(pos.avg_entry_price or dec("0")),
-        "current_price": str(t.last),
-        "unrealized_pnl": str(unreal),
-    }
+async def get_positions(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    syms = _pick_symbols(symbol)
+    res: Dict[str, Dict[str, str]] = {}
+    for s in syms:
+        pos = _container.storage.positions.get_position(s)
+        t = await _container.broker.fetch_ticker(s)
+        unreal = (t.last - (pos.avg_entry_price or dec("0"))) * (pos.base_qty or dec("0"))
+        res[s] = {
+            "base_qty": str(pos.base_qty or dec("0")),
+            "avg_price": str(pos.avg_entry_price or dec("0")),
+            "current_price": str(t.last),
+            "unrealized_quote": str(unreal),
+        }
+    return {"ok": True, "positions": res}
 
-@router.get("/trades")
-async def get_trades(symbol: str = Query(None), limit: int = 100, _: Any = Depends(_auth)) -> Dict[str, Any]:
-    sym = symbol or _container.settings.SYMBOL
-    rows = _container.storage.trades.list_recent(sym, limit)
-    return {"symbol": sym, "trades": rows, "total": len(rows)}
+@router.get("/pnl/today")
+async def pnl_today(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    syms = _pick_symbols(symbol)
+    res: Dict[str, Dict[str, str]] = {}
+    for s in syms:
+        rows = _container.storage.trades.list_today(s)
+        buys = sum(dec(str(r["cost"])) for r in rows if str(r["side"]).lower() == "buy")
+        sells = sum(dec(str(r["cost"])) for r in rows if str(r["side"]).lower() == "sell")
+        fees = sum(dec(str(r.get("fee_quote", 0))) for r in rows)
+        realized = (sells - buys) - fees
+        res[s] = {
+            "total_trades": str(len(rows)),
+            "buys_quote": str(buys),
+            "sells_quote": str(sells),
+            "fees_quote": str(fees),
+            "realized_quote": str(realized),
+        }
+    return {"ok": True, "pnl": res}
 
-@router.get("/performance")
-async def performance(symbol: str = Query(None), _: Any = Depends(_auth)) -> Dict[str, Any]:
-    sym = symbol or _container.settings.SYMBOL
-    rows = _container.storage.trades.list_today(sym)
-    buys = sum(dec(r["cost"]) for r in rows if str(r["side"]).lower() == "buy")
-    sells = sum(dec(r["cost"]) for r in rows if str(r["side"]).lower() == "sell")
-    fees  = sum(dec(r.get("fee_quote") or 0) for r in rows)
-    realized = (sells - buys) - fees
-    return {
-        "symbol": sym,
-        "total_trades": len(rows),
-        "buys_quote": str(buys),
-        "sells_quote": str(sells),
-        "fees_quote": str(fees),
-        "realized_quote": str(realized),
-    }
 
+# ---------- manual trade trigger (force) ----------
+@router.post("/trade/force")
+async def trade_force(
+    action: str = Query(..., regex="^(buy|sell|hold)$"),
+    symbol: Optional[str] = Query(default=None),
+    quote_amount: Optional[str] = Query(default=None),  # для buy (в котировочной валюте)
+    _: Any = Depends(_auth),
+) -> Dict[str, Any]:
+    s = _pick_symbols(symbol)[0]
+    # форсируем действие только на одном символе за раз
+    order = await eval_and_execute(
+        symbol=s,
+        storage=_container.storage,
+        broker=_container.broker,
+        bus=_container.bus,
+        exchange=_container.settings.EXCHANGE,
+        fixed_quote_amount=dec(str(quote_amount or _container.settings.FIXED_AMOUNT)),
+        idempotency_bucket_ms=_container.settings.IDEMPOTENCY_BUCKET_MS,
+        idempotency_ttl_sec=_container.settings.IDEMPOTENCY_TTL_SEC,
+        force_action=action,
+        risk_manager=_container.risk,
+        protective_exits=_container.exits,
+        settings=_container.settings,
+        fee_estimate_pct=_container.settings.FEE_PCT_ESTIMATE,
+    )
+    return {"ok": True, "symbol": s, "order": None if not order else {
+        "id": order.id,
+        "client_order_id": order.client_order_id,
+        "side": order.side,
+        "amount": str(order.amount),
+        "price": str(order.price or ""),
+        "cost": str(order.cost or ""),
+        "fee_quote": str(getattr(order, "fee_quote", "")),
+    }}
+
+
+# mount
 app.include_router(router)
