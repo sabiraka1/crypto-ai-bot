@@ -4,7 +4,7 @@ import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Any
 
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
@@ -41,11 +41,10 @@ def _open_storage(settings: Settings) -> Storage:
     os.makedirs(settings.DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(
         os.path.join(settings.DATA_DIR, "bot.db"),
-        check_same_thread=False,   # позволяет использовать соединение в разных потоках
+        check_same_thread=False,
     )
     conn.row_factory = sqlite3.Row
 
-    # WAL + busy_timeout для конкурентных записей
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout = 5000;")
@@ -54,17 +53,14 @@ def _open_storage(settings: Settings) -> Storage:
     return Storage(conn)
 
 
-async def _maybe_start_bus(settings: Settings):
-    url = str(getattr(settings, "EVENT_BUS_URL", "") or "").strip()
-    if url.startswith("redis://") or url.startswith("rediss://"):
-        bus = RedisEventBus(url)
-        try:
-            await bus.start()
-            return bus
-        except Exception as exc:
-            _log.error("redis_bus_start_failed_fallback_inmemory", extra={"error": str(exc)})
-            return AsyncEventBus()
-    return AsyncEventBus()
+# --- Event Bus выбор: Redis если доступен, иначе in-memory ---
+def _build_event_bus(settings) -> Any:
+    redis_url = getattr(settings, "REDIS_URL", "") or ""
+    if redis_url:
+        bus = RedisEventBus(redis_url)
+    else:
+        bus = AsyncEventBus()
+    return bus
 
 
 def attach_alerts(bus, settings: Settings) -> None:
@@ -140,7 +136,8 @@ def attach_alerts(bus, settings: Settings) -> None:
 async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
-    bus = await _maybe_start_bus(s)
+    bus = _build_event_bus(s)
+    await bus.start() if hasattr(bus, "start") else None
     br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
     risk = RiskManager(RiskConfig.from_settings(s)); risk.attach_storage(st); risk.attach_settings(s)
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)

@@ -7,10 +7,18 @@ from typing import Any, Dict, Optional, Tuple
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import inc, observe
 
 _log = get_logger("broker.ccxt")
 
-# === Вспомогательный токен-бакет (простая реализация) ===
+
+class BrokerError(Exception): ...
+class InsufficientFunds(BrokerError): ...
+class RateLimited(BrokerError): ...
+class OrderNotFound(BrokerError): ...
+class ValidationError(BrokerError): ...
+
+
 class _TokenBucket:
     def __init__(self, rate_per_sec: float, capacity: int) -> None:
         self._rate = float(rate_per_sec)
@@ -34,28 +42,24 @@ class _TokenBucket:
 
 @dataclass
 class CcxtBroker:
-    exchange: Any           # ccxt.async_support.<exchange>
+    exchange: Any
     settings: Any
 
     def __post_init__(self) -> None:
-        rps = float(getattr(self.settings, "BROKER_RATE_RPS", 8))   # по умолчанию 8 запросов/сек
+        rps = float(getattr(self.settings, "BROKER_RATE_RPS", 8))
         cap = int(getattr(self.settings, "BROKER_RATE_BURST", 16))
         self._bucket = _TokenBucket(rps, cap)
-        self._m_lock = asyncio.Lock()
         self._markets: Dict[str, dict] = {}
-        self._sym_to_gate: Dict[str, str] = {}  # "BTC/USDT" -> "btc_usdt"
-        self._gate_to_sym: Dict[str, str] = {}  # обратный маппинг
+        self._sym_to_gate: Dict[str, str] = {}
+        self._gate_to_sym: Dict[str, str] = {}
 
-    # === Символы: canonical <-> gateio native ===
     @staticmethod
     def _to_gate(sym: str) -> str:
-        # BTC/USDT -> btc_usdt ; ETH/USDT -> eth_usdt
         base, quote = sym.split("/")
         return f"{base.lower()}_{quote.lower()}"
 
     @staticmethod
     def _from_gate(g: str) -> str:
-        # btc_usdt -> BTC/USDT
         base, quote = g.split("_")
         return f"{base.upper()}/{quote.upper()}"
 
@@ -65,91 +69,127 @@ class CcxtBroker:
         await self._bucket.acquire()
         mk = await self.exchange.load_markets()
         self._markets = mk or {}
-        # построим карту символов
         for k in self._markets.keys():
             if "_" in k and "/" not in k:
                 can = self._from_gate(k)
                 self._sym_to_gate[can] = k
                 self._gate_to_sym[k] = can
             elif "/" in k:
-                self._sym_to_gate[k] = self._to_gate(k)
-                self._gate_to_sym[self._to_gate(k)] = k
+                g = self._to_gate(k)
+                self._sym_to_gate[k] = g
+                self._gate_to_sym[g] = k
 
-    def _q(self, sym: str) -> dict:
-        # Возвращает дескриптор рынка (precision/limits) для canonical символа
+    def _market_desc(self, sym: str) -> dict:
         can = sym
-        if can not in self._sym_to_gate:
-            # fallback: построить маппинг на лету
-            self._sym_to_gate[can] = self._to_gate(can)
-        gate = self._sym_to_gate[can]
-        md = self._markets.get(gate) or self._markets.get(can) or {}
-        return md
+        gate = self._sym_to_gate.get(can) or self._to_gate(can)
+        return self._markets.get(gate) or self._markets.get(can) or {}
 
     @staticmethod
     def _quant(x: Decimal, step: Optional[Decimal]) -> Decimal:
         if not step or step <= 0:
             return x
-        # округление вниз к сетке
-        q = (x / step).to_integral_value(rounding=ROUND_DOWN) * step
-        return q
+        return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
 
     def _apply_precision(self, sym: str, *, amount: Optional[Decimal], price: Optional[Decimal]) -> Tuple[Optional[Decimal], Optional[Decimal]]:
-        md = self._q(sym)
-        p_amt = None
-        p_pr = None
-        if amount is not None:
-            step = None
-            try:
-                step = dec(str(md.get("precision", {}).get("amount"))) if md.get("precision", {}).get("amount") else None
-                if not step:
-                    step = dec(str(md.get("limits", {}).get("amount", {}).get("min"))) if md.get("limits", {}).get("amount", {}).get("min") else None
-            except Exception:
+        md = self._market_desc(sym)
+        p_amt = amount
+        p_pr = price
+        try:
+            if amount is not None:
                 step = None
-            p_amt = self._quant(amount, step)
-        if price is not None:
-            step = None
-            try:
-                step = dec(str(md.get("precision", {}).get("price"))) if md.get("precision", {}).get("price") else None
-            except Exception:
+                prec = md.get("precision", {}) or {}
+                limits = md.get("limits", {}) or {}
+                if "amount" in prec and prec["amount"]:
+                    step = dec(str(prec["amount"]))
+                elif "amount" in limits and "min" in limits["amount"]:
+                    step = dec(str(limits["amount"]["min"]))
+                p_amt = self._quant(amount, step)
+            if price is not None:
                 step = None
-            p_pr = self._quant(price, step)
+                prec = md.get("precision", {}) or {}
+                if "price" in prec and prec["price"]:
+                    step = dec(str(prec["price"]))
+                p_pr = self._quant(price, step)
+        except Exception:
+            pass
         return p_amt, p_pr
 
-    # === Публичные методы ===
+    @staticmethod
+    def _map_error(exc: Exception) -> BrokerError:
+        msg = str(exc).lower()
+        if "insufficient" in msg or "balance" in msg:
+            return InsufficientFunds(msg)
+        if "not found" in msg:
+            return OrderNotFound(msg)
+        if "429" in msg or "rate limit" in msg:
+            return RateLimited(msg)
+        if "invalid" in msg or "precision" in msg or "amount" in msg or "min" in msg:
+            return ValidationError(msg)
+        return BrokerError(msg)
+
     async def fetch_ticker(self, symbol: str) -> Any:
         await self._ensure_markets()
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         await self._bucket.acquire()
-        return await self.exchange.fetch_ticker(gate)
+        try:
+            t0 = asyncio.get_event_loop().time()
+            res = await self.exchange.fetch_ticker(gate)
+            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"})
+            return res
+        except Exception as exc:
+            inc("broker.request.error", {"fn": "fetch_ticker"})
+            raise self._map_error(exc)
 
     async def fetch_balance(self, symbol: str) -> Any:
         await self._ensure_markets()
         base, quote = symbol.split("/")
         await self._bucket.acquire()
-        bal = await self.exchange.fetch_balance()
-        # Приведём к нашему DTO: free_base/free_quote
-        acct_base = bal.get(base, {}) or {}
-        acct_quote = bal.get(quote, {}) or {}
-        return {
-            "free_base": dec(str(acct_base.get("free", 0) or 0)),
-            "free_quote": dec(str(acct_quote.get("free", 0) or 0)),
-        }
+        try:
+            t0 = asyncio.get_event_loop().time()
+            bal = await self.exchange.fetch_balance()
+            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_balance"})
+            acct_base = bal.get(base, {}) or {}
+            acct_quote = bal.get(quote, {}) or {}
+            return {
+                "free_base": dec(str(acct_base.get("free", 0) or 0)),
+                "free_quote": dec(str(acct_quote.get("free", 0) or 0)),
+            }
+        except Exception as exc:
+            inc("broker.request.error", {"fn": "fetch_balance"})
+            raise self._map_error(exc)
 
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal,
                                       client_order_id: Optional[str] = None) -> Any:
+        """
+        Gate/CCXT: для MARKET BUY нужен amount в БАЗОВОЙ.
+        Считаем base_amount = quote_amount / ask и квантуем по сетке amount.
+        """
         await self._ensure_markets()
-        _, p_price = self._apply_precision(symbol, amount=None, price=None)  # пусть цена — рыночная
-        q_amt, _ = self._apply_precision(symbol, amount=quote_amount, price=None)
+        # получаем актуальный ask
+        t = await self.fetch_ticker(symbol)
+        ask = dec(str(t.get("ask") or "0"))
+        if ask <= 0:
+            # fallback: last
+            ask = dec(str(t.get("last") or "0"))
+        if ask <= 0:
+            raise ValidationError("ticker_ask_invalid")
+
+        base_amount = quote_amount / ask
+        base_amount, _ = self._apply_precision(symbol, amount=base_amount, price=None)
+
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         params = {"type": "market", "timeInForce": "IOC"}
         if client_order_id:
             params["clientOrderId"] = client_order_id
         await self._bucket.acquire()
         try:
-            return await self.exchange.create_order(gate, "market", "buy", None, float(q_amt), params)
+            t0 = asyncio.get_event_loop().time()
+            order = await self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params)
+            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})
+            return order
         except Exception as exc:
-            _log.error("create_market_buy_failed", extra={"symbol": symbol, "error": str(exc)})
-            raise
+            inc("broker.request.error", {"fn": "create_buy"})
+            raise self._map_error(exc)
 
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal,
                                       client_order_id: Optional[str] = None) -> Any:
@@ -161,7 +201,10 @@ class CcxtBroker:
             params["clientOrderId"] = client_order_id
         await self._bucket.acquire()
         try:
-            return await self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params)
+            t0 = asyncio.get_event_loop().time()
+            order = await self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params)
+            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"})
+            return order
         except Exception as exc:
-            _log.error("create_market_sell_failed", extra={"symbol": symbol, "error": str(exc)})
-            raise
+            inc("broker.request.error", {"fn": "create_sell"})
+            raise self._map_error(exc)
