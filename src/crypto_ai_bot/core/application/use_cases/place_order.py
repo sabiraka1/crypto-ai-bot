@@ -2,142 +2,94 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 
-from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
-from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
-from crypto_ai_bot.core.infrastructure.events import topics
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
-from crypto_ai_bot.utils.ids import make_client_order_id
+from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.exceptions import ValidationError, TransientError
+from crypto_ai_bot.utils.metrics import inc
 
-_log = get_logger("use_cases.place_order")
+_log = get_logger("usecase.place_order")
 
-@dataclass(frozen=True)
+
+@dataclass
+class PlaceOrderInputs:
+    symbol: str
+    side: str                 # "buy" | "sell"  (стратегия long-only: используем "buy")
+    quote_amount: Decimal = dec("0")   # для market buy (в котируемой валюте)
+    base_amount: Decimal = dec("0")    # для market sell (в базовой), на будущее
+    client_order_id: Optional[str] = None
+
+
+@dataclass
 class PlaceOrderResult:
-    order: Optional[OrderDTO]
-    client_order_id: str
-    idempotency_key: str
-    duplicate: bool = False
+    ok: bool
+    reason: str = ""
+    order: Optional[Any] = None
 
-async def place_market_buy_quote(
-    symbol: str,
-    amount_quote: Decimal,
+
+async def place_order(
     *,
-    exchange: str,
-    storage: Storage,
-    broker: IBroker,
-    bus: AsyncEventBus,
-    idempotency_bucket_ms: int,
-    idempotency_ttl_sec: int,
+    storage: StoragePort,
+    broker: BrokerPort,
+    bus: EventBusPort,
+    settings: Any,
+    inputs: PlaceOrderInputs,
 ) -> PlaceOrderResult:
-    bucket = (now_ms() // idempotency_bucket_ms) * idempotency_bucket_ms
-    idem_key = f"{symbol}:buy:{bucket}"
-    client_id = make_client_order_id(exchange, f"{symbol}:buy")
+    """Единое исполнение рыночного ордера через порты. Подключён слippage-gate."""
+    sym = inputs.symbol
+    side = (inputs.side or "").lower()
 
-    if not storage.idempotency.check_and_store(key=idem_key, ttl_sec=idempotency_ttl_sec, default_bucket_ms=idempotency_bucket_ms):
-        _log.info("duplicate_buy", extra={"symbol": symbol, "client_order_id": client_id})
-        await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "buy", "duplicate": True}, key=symbol)
-        return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
-
+    # --- Slippage gate (используем спред как прокси) ---
+    # RISK_MAX_SLIPPAGE_PCT: если не задан, пропускаем проверку.
     try:
-        order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=amount_quote, client_order_id=client_id)
-        partial = order.filled < order.amount or order.status != "closed"
-        
-        await bus.publish(
-            topics.ORDER_EXECUTED,
-            {
-                "symbol": symbol,
-                "side": "buy",
-                "client_order_id": client_id,
-                "order_id": order.id,
-                "filled": str(order.filled),
-                "amount": str(order.amount),
-                "status": order.status,
-                "partial": partial,
-                "ts_ms": order.timestamp,
-            },
-            key=symbol,
-        )
-        
+        max_slip_pct = Decimal(str(getattr(settings, "RISK_MAX_SLIPPAGE_PCT", "") or "0"))
+    except Exception:
+        max_slip_pct = dec("0")
+
+    if max_slip_pct > 0:
         try:
-            storage.trades.add_from_order(order)
-            storage.audit.add(
-                action="buy_market",
-                payload={"symbol": symbol, "order_id": order.id, "amount": str(order.amount)},
-                ts_ms=now_ms(),
-            )
-        except Exception:
-            pass
+            t = await broker.fetch_ticker(sym)  # порт брокера
+            bid = dec(str(t.get("bid") or "0"))
+            ask = dec(str(t.get("ask") or "0"))
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2
+                spread_pct = (ask - bid) / mid * 100
+                if spread_pct > max_slip_pct:
+                    reason = f"slippage_exceeds:{spread_pct:.4f}%>{max_slip_pct}%"
+                    inc("trade.blocked", {"reason": "slippage"})
+                    await bus.publish("trade.blocked", {"symbol": sym, "reason": reason})
+                    return PlaceOrderResult(ok=False, reason=reason)
+        except Exception as exc:
+            # при ошибке котировок не блокируем, но логируем
+            _log.warning("slippage_check_failed", extra={"symbol": sym, "error": str(exc)})
 
-        return PlaceOrderResult(order=order, client_order_id=client_id, idempotency_key=idem_key, duplicate=False)
-
-    except (ValidationError, TransientError) as exc:
-        await bus.publish(
-            topics.ORDER_FAILED,
-            {"symbol": symbol, "side": "buy", "client_order_id": client_id, "reason": str(exc)},
-            key=symbol,
-        )
-        raise
-
-async def place_market_sell_base(
-    symbol: str,
-    amount_base: Decimal,
-    *,
-    exchange: str,
-    storage: Storage,
-    broker: IBroker,
-    bus: AsyncEventBus,
-    idempotency_bucket_ms: int,
-    idempotency_ttl_sec: int,
-) -> PlaceOrderResult:
-    bucket = (now_ms() // idempotency_bucket_ms) * idempotency_bucket_ms
-    idem_key = f"{symbol}:sell:{bucket}"
-    client_id = make_client_order_id(exchange, f"{symbol}:sell")
-
-    if not storage.idempotency.check_and_store(key=idem_key, ttl_sec=idempotency_ttl_sec, default_bucket_ms=idempotency_bucket_ms):
-        _log.info("duplicate_sell", extra={"symbol": symbol, "client_order_id": client_id})
-        await bus.publish(topics.ORDER_EXECUTED, {"symbol": symbol, "side": "sell", "duplicate": True}, key=symbol)
-        return PlaceOrderResult(order=None, client_order_id=client_id, idempotency_key=idem_key, duplicate=True)
-
+    # --- Исполнение ---
     try:
-        order = await broker.create_market_sell_base(symbol=symbol, base_amount=amount_base, client_order_id=client_id)
-        partial = order.filled < order.amount or order.status != "closed"
+        if side == "buy":
+            q = inputs.quote_amount if inputs.quote_amount > 0 else dec(str(getattr(settings, "FIXED_AMOUNT", 0) or 0))
+            inc("broker.order.create", {"side": "buy"})
+            order = await broker.create_market_buy_quote(symbol=sym, quote_amount=q, client_order_id=inputs.client_order_id)
+        elif side == "sell":
+            b = inputs.base_amount if inputs.base_amount > 0 else dec("0")
+            inc("broker.order.create", {"side": "sell"})
+            order = await broker.create_market_sell_base(symbol=sym, base_amount=b, client_order_id=inputs.client_order_id)
+        else:
+            return PlaceOrderResult(ok=False, reason="invalid_side")
 
-        await bus.publish(
-            topics.ORDER_EXECUTED,
-            {
-                "symbol": symbol,
-                "side": "sell",
-                "client_order_id": client_id,
-                "order_id": order.id,
-                "filled": str(order.filled),
-                "amount": str(order.amount),
-                "status": order.status,
-                "partial": partial,
-                "ts_ms": order.timestamp,
-            },
-            key=symbol,
-        )
+        # запись сделки в БД (репозиторий сам обновит позицию)
+        storage.trades.add_from_order(order)
+        await bus.publish("trade.completed", {
+            "symbol": sym, "side": side,
+            "amount": str(getattr(order, "amount", "")),
+            "price": str(getattr(order, "price", "")),
+            "cost": str(getattr(order, "cost", "")),
+            "fee_quote": str(getattr(order, "fee_quote", "")),
+        })
+        return PlaceOrderResult(ok=True, order=order)
 
-        try:
-            storage.trades.add_from_order(order)
-            storage.audit.add(
-                action="sell_market",
-                payload={"symbol": symbol, "order_id": order.id, "amount": str(order.amount)},
-                ts_ms=now_ms(),
-            )
-        except Exception:
-            pass
-
-        return PlaceOrderResult(order=order, client_order_id=client_id, idempotency_key=idem_key, duplicate=False)
-
-    except (ValidationError, TransientError) as exc:
-        await bus.publish(
-            topics.ORDER_FAILED,
-            {"symbol": symbol, "side": "sell", "client_order_id": client_id, "reason": str(exc)},
-            key=symbol,
-        )
-        raise
+    except Exception as exc:
+        _log.error("place_order_failed", extra={"symbol": sym, "side": side, "error": str(exc)})
+        inc("trade.failed", {"where": "broker"})
+        await bus.publish("trade.failed", {"symbol": sym, "side": side, "error": str(exc)})
+        return PlaceOrderResult(ok=False, reason="broker_exception")
