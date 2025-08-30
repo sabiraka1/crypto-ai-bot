@@ -1,9 +1,8 @@
-# src/crypto_ai_bot/core/infrastructure/storage/repositories/trades.py
 from __future__ import annotations
 
 import sqlite3
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
@@ -12,8 +11,9 @@ from crypto_ai_bot.core.infrastructure.brokers.base import OrderDTO
 class TradesRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._c = conn
+        self._c.row_factory = sqlite3.Row
 
-    # ---- запись сделок ----
+    # ---- запись ----
     def add_from_order(self, order: OrderDTO) -> int:
         if not order or not order.symbol:
             return 0
@@ -62,7 +62,7 @@ class TradesRepository:
         self._c.commit()
         return int(cur.lastrowid or 0)
 
-    # ---- агрегаты и выборки ----
+    # ---- агрегаты / выборки ----
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
         window_ms = int(minutes) * 60_000
         cutoff = now_ms() - window_ms
@@ -101,10 +101,7 @@ class TradesRepository:
             """,
             (symbol, int(limit)),
         )
-        rows = []
-        for r in cur.fetchall():
-            rows.append({k: r[k] if k in r.keys() else None for k in r.keys()})
-        return rows
+        return [dict(r) for r in cur.fetchall()]
 
     def list_today(self, symbol: str) -> List[Dict[str, str]]:
         from datetime import datetime, timezone
@@ -117,10 +114,7 @@ class TradesRepository:
             """,
             (symbol, start),
         )
-        rows = []
-        for r in cur.fetchall():
-            rows.append({k: r[k] if k in r.keys() else None for k in r.keys()})
-        return rows
+        return [dict(r) for r in cur.fetchall()]
 
     # ---- пост-фактум обогащение ----
     def list_missing_fees(self, symbol: str, since_ms: int, limit: int = 50) -> List[Dict[str, str]]:
@@ -134,10 +128,22 @@ class TradesRepository:
             """,
             (symbol, int(since_ms), int(limit)),
         )
-        rows = []
-        for r in cur.fetchall():
-            rows.append({k: r[k] if k in r.keys() else None for k in r.keys()})
-        return rows
+        return [dict(r) for r in cur.fetchall()]
+
+    def list_unbound_trades(self, symbol: str, since_ms: int, limit: int = 50) -> List[Dict[str, str]]:
+        """Локальные сделки без broker_order_id, но с client_order_id."""
+        cur = self._c.execute(
+            """
+            SELECT id, broker_order_id, client_order_id, symbol, side, amount, price, cost, ts_ms, fee_quote
+            FROM trades
+            WHERE symbol=? AND ts_ms>=? AND (broker_order_id IS NULL OR broker_order_id='')
+                  AND client_order_id IS NOT NULL AND client_order_id!='' AND status!='reconciliation'
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (symbol, int(since_ms), int(limit)),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     def set_fee_by_id(self, row_id: int, fee_quote: Decimal) -> None:
         self._c.execute("UPDATE trades SET fee_quote=? WHERE id=?;", (str(dec(str(fee_quote))), int(row_id)))
@@ -145,6 +151,15 @@ class TradesRepository:
 
     def update_price_cost_by_id(self, row_id: int, price: Decimal, cost: Decimal) -> None:
         self._c.execute("UPDATE trades SET price=?, cost=? WHERE id=?;", (str(dec(str(price))), str(dec(str(cost))), int(row_id)))
+        self._c.commit()
+
+    def bind_broker_order(self, row_id: int, *, broker_order_id: str, price: Optional[Decimal] = None, cost: Optional[Decimal] = None, fee_quote: Optional[Decimal] = None) -> None:
+        sets = ["broker_order_id=?"]; args = [str(broker_order_id)]
+        if price is not None: sets.append("price=?"); args.append(str(dec(str(price))))
+        if cost  is not None: sets.append("cost=?"); args.append(str(dec(str(cost))))
+        if fee_quote is not None: sets.append("fee_quote=?"); args.append(str(dec(str(fee_quote))))
+        args.append(int(row_id))
+        self._c.execute(f"UPDATE trades SET {', '.join(sets)} WHERE id=?;", args)
         self._c.commit()
 
 # совместимость

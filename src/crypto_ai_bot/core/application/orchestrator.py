@@ -1,5 +1,4 @@
-﻿# src/crypto_ai_bot/core/application/orchestrator.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
@@ -20,6 +19,7 @@ from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSw
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils import metrics as M  # ← SLA
 
 if TYPE_CHECKING:
     from crypto_ai_bot.core.infrastructure.settings import Settings
@@ -50,12 +50,12 @@ class Orchestrator:
     _stopping: bool = field(default=False, init=False)
     _last_beat_ms: int = field(default=0, init=False)
     _paused: bool = field(default=False, init=False)
+    _auto_hold: bool = field(default=False, init=False)   # ← авто-пауза активна?
 
     _dms: Optional[DeadMansSwitch] = field(default=None, init=False)
     _recon_orders: Optional[OrdersReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
-    # simple in-flight guard
     _inflight: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(0), init=False)
 
     # ------------ lifecycle ------------
@@ -81,10 +81,10 @@ class Orchestrator:
         self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
-        self._tasks["eval"] = loop.create_task(self._eval_loop(), name="orc-eval")
-        self._tasks["exits"] = loop.create_task(self._exits_loop(), name="orc-exits")
-        self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name="orc-reconcile")
-        self._tasks["watchdog"] = loop.create_task(self._watchdog_loop(), name="orc-watchdog")
+        self._tasks["eval"] = loop.create_task(self._eval_loop(), name=f"orc-eval-{self.symbol}")
+        self._tasks["exits"] = loop.create_task(self._exits_loop(), name=f"orc-exits-{self.symbol}")
+        self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name=f"orc-reconcile-{self.symbol}")
+        self._tasks["watchdog"] = loop.create_task(self._watchdog_loop(), name=f"orc-watchdog-{self.symbol}")
 
     async def stop(self) -> None:
         if not self._tasks:
@@ -105,25 +105,63 @@ class Orchestrator:
 
     def status(self) -> dict:
         return {
+            "symbol": self.symbol,
             "running": bool(self._tasks),
             "paused": self._paused,
+            "auto_hold": self._auto_hold,
             "tasks": {k: (not v.done()) for k, v in self._tasks.items()},
             "last_beat_ms": self._last_beat_ms,
         }
 
+    # ------------ manual control ------------
     async def pause(self) -> None:
         if self._paused:
             return
         self._paused = True
         await self.bus.publish("orchestrator.paused", {"symbol": self.symbol, "ts_ms": now_ms()}, key=self.symbol)
-        _log.info("orchestrator_paused")
+        adder = getattr(self.storage.audit, "add", None)
+        if callable(adder):
+            try: adder("orchestrator.paused", {"symbol": self.symbol, "ts_ms": now_ms()})
+            except Exception: pass
+        _log.info("orchestrator_paused", extra={"symbol": self.symbol})
 
     async def resume(self) -> None:
         if not self._paused or self._stopping:
             return
         self._paused = False
+        self._auto_hold = False
         await self.bus.publish("orchestrator.resumed", {"symbol": self.symbol, "ts_ms": now_ms()}, key=self.symbol)
-        _log.info("orchestrator_resumed")
+        adder = getattr(self.storage.audit, "add", None)
+        if callable(adder):
+            try: adder("orchestrator.resumed", {"symbol": self.symbol, "ts_ms": now_ms()})
+            except Exception: pass
+        _log.info("orchestrator_resumed", extra={"symbol": self.symbol})
+
+    async def _auto_pause(self, reason: str, data: Dict[str, str]) -> None:
+        if self._auto_hold and self._paused:
+            return
+        self._paused = True
+        self._auto_hold = True
+        payload = {"symbol": self.symbol, "reason": reason, "ts_ms": now_ms(), **data}
+        await self.bus.publish("orchestrator.auto_paused", payload, key=self.symbol)
+        adder = getattr(self.storage.audit, "add", None)
+        if callable(adder):
+            try: adder("orchestrator.auto_paused", payload)
+            except Exception: pass
+        _log.warning("orchestrator_auto_paused", extra=payload)
+
+    async def _auto_resume(self, reason: str, data: Dict[str, str]) -> None:
+        if not self._auto_hold:
+            return
+        self._auto_hold = False
+        self._paused = False
+        payload = {"symbol": self.symbol, "reason": reason, "ts_ms": now_ms(), **data}
+        await self.bus.publish("orchestrator.auto_resumed", payload, key=self.symbol)
+        adder = getattr(self.storage.audit, "add", None)
+        if callable(adder):
+            try: adder("orchestrator.auto_resumed", payload)
+            except Exception: pass
+        _log.info("orchestrator_auto_resumed", extra=payload)
 
     # ------------ internals ------------
     async def _wait_drain(self) -> None:
@@ -168,7 +206,7 @@ class Orchestrator:
                         if self._dms:
                             self._dms.beat()
             except Exception as exc:
-                _log.error("tick_failed", extra={"error": str(exc)})
+                _log.error("tick_failed", extra={"error": str(exc), "symbol": self.symbol})
             await asyncio.sleep(self.eval_interval_sec)
 
     async def _exits_loop(self) -> None:
@@ -188,16 +226,16 @@ class Orchestrator:
                                     if order:
                                         _log.info("exit_executed", extra={"symbol": self.symbol, "side": order.side, "client_order_id": order.client_order_id})
                                 except Exception as exc:
-                                    _log.error("check_and_execute_failed", extra={"error": str(exc)})
+                                    _log.error("check_and_execute_failed", extra={"error": str(exc), "symbol": self.symbol})
             except Exception as exc:
-                _log.error("ensure_failed", extra={"error": str(exc)})
+                _log.error("ensure_failed", extra={"error": str(exc), "symbol": self.symbol})
             await asyncio.sleep(self.exits_interval_sec)
 
     async def _reconcile_loop(self) -> None:
         while not self._stopping:
             try:
                 async with self._flight():
-                    # обслуживание хранилищ
+                    # техобслуживание
                     try:
                         prune = getattr(self.storage.idempotency, "prune_older_than", None)
                         if callable(prune):
@@ -211,19 +249,19 @@ class Orchestrator:
                     except Exception:
                         pass
 
-                    # сверки (в паузе — только обслуживание)
                     if not self._paused:
+                        # сверки
                         if getattr(self, "_recon_orders", None):
                             await self._recon_orders.run_once()
                         if getattr(self, "_recon_bal", None):
                             await self._recon_bal.run_once()
 
-                        # позиционная сверка
+                        # позиция
                         try:
                             pos = self.storage.positions.get_position(self.symbol)
                             balance = await self.broker.fetch_balance(self.symbol)
-                            diff = Decimal(str(balance.free_base)) - Decimal(str(pos.base_qty or dec("0")))
-                            if abs(diff) > Decimal("0.00000001"):
+                            diff = dec(str(balance.free_base)) - dec(str(pos.base_qty or dec("0")))
+                            if abs(diff) > dec("0.00000001"):
                                 _log.warning("position_discrepancy", extra={"symbol": self.symbol, "local": str(pos.base_qty), "exchange": str(balance.free_base)})
                                 await self.bus.publish(
                                     "reconcile.position_mismatch",
@@ -233,63 +271,150 @@ class Orchestrator:
                                 if bool(getattr(self.settings, "RECONCILE_AUTOFIX", 0)):
                                     add_rec = getattr(self.storage.trades, "add_reconciliation_trade", None)
                                     if callable(add_rec):
-                                        add_rec({"symbol": self.symbol, "side": ("buy" if diff > 0 else "sell"), "amount": str(abs(diff)), "status": "reconciliation",
-                                                 "ts_ms": now_ms(), "client_order_id": f"reconcile-{self.symbol}-{now_ms()}"} )
+                                        add_rec({"symbol": self.symbol, "side": ("buy" if diff > 0 else "sell"), "amount": str(abs(diff)),
+                                                 "status": "reconciliation", "ts_ms": now_ms(),
+                                                 "client_order_id": f"reconcile-{self.symbol}-{now_ms()}"} )
                                     self.storage.positions.set_base_qty(self.symbol, dec(str(balance.free_base)))
+                                    adder = getattr(self.storage.audit, "add", None)
+                                    if callable(adder):
+                                        try: adder("reconcile.autofix_applied", {"symbol": self.symbol, "new_local_base": str(balance.free_base), "ts_ms": now_ms()})
+                                        except Exception: pass
                         except Exception as exc:
-                            _log.error("position_reconcile_failed", extra={"error": str(exc)})
+                            _log.error("position_reconcile_failed", extra={"error": str(exc), "symbol": self.symbol})
 
-                        # --- НОВОЕ: обогащение недостающих комиссий ---
+                        # fees enrichment (оставляем как в предыдущей версии)
                         try:
-                            # настройки с дефолтами
                             lookback_min = int(getattr(self.settings, "ENRICH_TRADES_LOOKBACK_MIN", 180))
                             batch_limit = int(getattr(self.settings, "ENRICH_TRADES_BATCH", 50))
                             since = now_ms() - lookback_min * 60_000
                             missing = self.storage.trades.list_missing_fees(self.symbol, since, batch_limit)
                             if missing and hasattr(self.broker, "fetch_order_trades"):
-                                # подгружаем мои сделки по символу
                                 trades = await getattr(self.broker, "fetch_order_trades")(self.symbol, since_ms=since, limit=200)
                                 if trades:
                                     quote = parse_symbol(self.symbol).quote
-                                    # индексируем по orderId
                                     by_order: Dict[str, list] = {}
                                     for tr in trades:
                                         oid = str(tr.get("order") or tr.get("orderId") or "")
-                                        if not oid:
-                                            continue
+                                        if not oid: continue
                                         by_order.setdefault(oid, []).append(tr)
                                     for row in missing:
                                         row_id = int(row["id"])
-                                        oid = str(row.get("broker_order_id") or "")  # может быть пусто
+                                        oid = str(row.get("broker_order_id") or "")
                                         fee_total = dec("0")
                                         price, cost = dec(str(row.get("price") or "0")), dec(str(row.get("cost") or "0"))
                                         if oid and oid in by_order:
                                             for tr in by_order[oid]:
                                                 fee_total += dec(str(self._extract_trade_fee(tr, quote)))
-                                            # уточним price/cost, если пришли исполняемые trades
-                                            # (по рынку цена может быть не задана в исходном ордере)
                                             try:
-                                                px = dec(str(trades[-1].get("price") or price))
+                                                px = dec(str(by_order[oid][-1].get("price") or price))
                                                 cs = sum(dec(str(t.get("cost") or 0)) for t in by_order[oid]) or cost
                                                 if cs > 0:
                                                     self.storage.trades.update_price_cost_by_id(row_id, px, cs)
                                             except Exception:
                                                 pass
                                         elif hasattr(self.broker, "fetch_order_safe") and oid:
-                                            # fallback: подтянуть ордер и посчитать fee
                                             o = await getattr(self.broker, "fetch_order_safe")(oid, self.symbol)
                                             if o:
                                                 fee_total = dec(str(self._extract_trade_fee(o, quote)))
                                         if fee_total > 0:
                                             self.storage.trades.set_fee_by_id(row_id, fee_total)
                         except Exception as exc:
-                            _log.error("enrich_fees_failed", extra={"error": str(exc)})
+                            _log.error("enrich_fees_failed", extra={"error": str(exc), "symbol": self.symbol})
+
+                        # биндинг clientOrderId -> orderId (оставляем как в предыдущей версии)
+                        try:
+                            lookback_min = int(getattr(self.settings, "BIND_LOOKBACK_MIN", 180))
+                            since = now_ms() - lookback_min * 60_000
+                            unbound = self.storage.trades.list_unbound_trades(self.symbol, since, limit=100)
+                            if unbound and hasattr(self.broker, "fetch_order_trades"):
+                                trades = await getattr(self.broker, "fetch_order_trades")(self.symbol, since_ms=since, limit=500)
+                                index: Dict[str, Dict[str, Decimal | str]] = {}
+                                quote = parse_symbol(self.symbol).quote
+                                for tr in trades or []:
+                                    coid = ""
+                                    try:
+                                        coid = getattr(self.broker, "_extract_client_order_id_from_trade")(tr)  # type: ignore[attr-defined]
+                                    except Exception:
+                                        pass
+                                    if not coid:
+                                        oid = str(tr.get("order") or tr.get("orderId") or "")
+                                        if hasattr(self.broker, "fetch_order_client_id") and oid:
+                                            try:
+                                                coid = await getattr(self.broker, "fetch_order_client_id")(oid, self.symbol)
+                                            except Exception:
+                                                coid = ""
+                                    if not coid:
+                                        continue
+                                    oid = str(tr.get("order") or tr.get("orderId") or "")
+                                    fee = dec(str(self._extract_trade_fee(tr, quote)))
+                                    px  = dec(str(tr.get("price") or 0))
+                                    cs  = dec(str(tr.get("cost") or 0))
+                                    v = index.setdefault(coid, {"orderId": oid, "fee": dec("0"), "price": px, "cost": dec("0")})
+                                    v["orderId"] = oid or str(v["orderId"])
+                                    v["fee"] = dec(str(v["fee"])) + fee
+                                    v["price"] = px or dec(str(v["price"]))
+                                    v["cost"] = dec(str(v["cost"])) + cs
+                                for row in unbound:
+                                    coid = str(row.get("client_order_id") or "")
+                                    if not coid or coid not in index:
+                                        continue
+                                    v = index[coid]
+                                    self.storage.trades.bind_broker_order(
+                                        int(row["id"]),
+                                        broker_order_id=str(v["orderId"]),
+                                        price=dec(str(v["price"])),
+                                        cost=dec(str(v["cost"])),
+                                        fee_quote=dec(str(v["fee"])),
+                                    )
+                        except Exception as exc:
+                            _log.error("bind_client_id_failed", extra={"error": str(exc), "symbol": self.symbol})
 
             except Exception as exc:
-                _log.error("reconcile_failed", extra={"error": str(exc)})
+                _log.error("reconcile_failed", extra={"error": str(exc), "symbol": self.symbol})
             await asyncio.sleep(self.reconcile_interval_sec)
 
-    # helper to get fee from a trade/order dict in quote ccy
+    async def _watchdog_loop(self) -> None:
+        # пороги (с дефолтами)
+        err_pause = float(getattr(self.settings, "AUTO_PAUSE_ERROR_RATE_5M", 0.50))
+        err_resume = float(getattr(self.settings, "AUTO_RESUME_ERROR_RATE_5M", 0.20))
+        lat_pause = float(getattr(self.settings, "AUTO_PAUSE_LATENCY_MS_5M", 2_000.0))
+        lat_resume = float(getattr(self.settings, "AUTO_RESUME_LATENCY_MS_5M", 1_000.0))
+        win = 5 * 60
+
+        while not self._stopping:
+            try:
+                async with self._flight():
+                    rep = await self.health.check(symbol=self.symbol)
+                    hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
+                    await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
+                    self._last_beat_ms = rep.ts_ms
+                    if self._dms:
+                        await self._dms.check_and_trigger()
+
+                    # --- SLA контроль: считаем по label fn="create_order"/"fetch_ticker" и т.п. ---
+                    # Для простоты берём aggregate по всем fn (без фильтра)
+                    labels = {}  # пустые метки = агрегат
+                    er = M.error_rate(labels, win)
+                    al = M.avg_latency_ms(labels, win)
+
+                    if (er >= err_pause) or (al >= lat_pause):
+                        await self._auto_pause(
+                            reason="sla_threshold_exceeded",
+                            data={"error_rate_5m": f"{er:.4f}", "avg_latency_ms_5m": f"{al:.2f}",
+                                  "err_pause": str(err_pause), "lat_pause": str(lat_pause)},
+                        )
+                    elif self._auto_hold and (er <= err_resume) and (al <= lat_resume):
+                        await self._auto_resume(
+                            reason="sla_stabilized",
+                            data={"error_rate_5m": f"{er:.4f}", "avg_latency_ms_5m": f"{al:.2f}",
+                                  "err_resume": str(err_resume), "lat_resume": str(lat_resume)},
+                        )
+
+            except Exception as exc:
+                _log.error("watchdog_failed", extra={"error": str(exc), "symbol": self.symbol})
+            await asyncio.sleep(self.watchdog_interval_sec)
+
+    # helper
     def _extract_trade_fee(self, d: dict, quote_ccy: str) -> Decimal:
         fee = d.get("fee"); total = dec("0")
         if fee and str(fee.get("currency") or "").upper() == quote_ccy:

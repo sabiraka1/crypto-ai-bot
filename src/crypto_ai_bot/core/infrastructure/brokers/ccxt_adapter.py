@@ -29,7 +29,7 @@ class CcxtBroker(IBroker):
     enable_rate_limit: bool = True
     sandbox: bool = False
     dry_run: bool = True
-    wait_close_sec: float = 0.0  # ← НОВОЕ: дожим статуса closed
+    wait_close_sec: float = 0.0  # дожим статуса closed
 
     _ex: Any = None
     _markets_loaded: bool = False
@@ -121,6 +121,26 @@ class CcxtBroker(IBroker):
                 except Exception: pass
         return total
 
+    def _extract_client_order_id_from_trade(self, tr: Dict[str, Any]) -> str:
+        # 1) стандарт CCXT в некоторых биржах
+        if tr.get("clientOrderId"):
+            return str(tr["clientOrderId"])
+        # 2) популярные поля в info
+        info = tr.get("info") or {}
+        for k in ("clientOrderId","clientOrderID","cOID","text","client_oid","client-id"):
+            if k in info and info[k]:
+                return str(info[k])
+        return ""
+
+    def _extract_client_order_id_from_order(self, od: Dict[str, Any]) -> str:
+        if od.get("clientOrderId"):
+            return str(od["clientOrderId"])
+        info = od.get("info") or {}
+        for k in ("clientOrderId","clientOrderID","cOID","text","client_oid","client-id"):
+            if k in info and info[k]:
+                return str(info[k])
+        return ""
+
     # ---------- public ----------
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol); now = now_ms()
@@ -160,7 +180,6 @@ class CcxtBroker(IBroker):
         return any(s in msg for s in ("clientorderid","duplicate","already exists","exist order"))
 
     async def _wait_closed(self, *, order_id: str, ex_symbol: str) -> Optional[Dict[str, Any]]:
-        """Поллинг fetch_order до 'closed' или таймаута."""
         if self.dry_run or self.wait_close_sec <= 0 or not order_id:
             return None
         t0 = time.time()
@@ -176,7 +195,7 @@ class CcxtBroker(IBroker):
             except Exception:
                 pass
             await asyncio.sleep(delay)
-        return last  # вернём последнее, что нашли (может быть None)
+        return last
 
     def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
         status = str(o.get("status") or "open")
@@ -229,12 +248,10 @@ class CcxtBroker(IBroker):
             if self._is_duplicate_client_id_error(exc):
                 fetched = await self._fetch_order_by_client_id(ex_symbol=ex_symbol, client_id=client_id)
                 if fetched:
-                    # при дубликате тоже подождём закрытия
                     closed = await self._wait_closed(order_id=str(fetched.get("id") or ""), ex_symbol=ex_symbol)
                     return self._map_order(symbol, closed or fetched, fallback_amount=amount_base_q, client_order_id=client_id)
                 raise TransientError("duplicate clientOrderId, but order not fetchable") from exc
             raise
-        # основной путь: дождаться закрытия
         closed = await self._wait_closed(order_id=str(order.get("id") or ""), ex_symbol=ex_symbol)
         return self._map_order(symbol, closed or order, fallback_amount=amount_base_q, client_order_id=client_id)
 
@@ -296,3 +313,10 @@ class CcxtBroker(IBroker):
             return tr or []
         except Exception:
             return []
+
+    async def fetch_order_client_id(self, order_id: str, symbol: str) -> str:
+        """Вернуть clientOrderId по order_id, если биржа поддерживает."""
+        if not order_id or self.dry_run:
+            return ""
+        od = await self.fetch_order_safe(order_id, symbol)
+        return self._extract_client_order_id_from_order(od or {}) if od else ""
