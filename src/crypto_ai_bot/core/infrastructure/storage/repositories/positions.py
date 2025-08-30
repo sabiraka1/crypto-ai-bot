@@ -1,118 +1,124 @@
 ﻿from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
+from datetime import datetime, timezone
 
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.time import now_ms
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
 @dataclass
 class Position:
     symbol: str
     base_qty: Decimal
-    avg_entry_price: Decimal = dec("0")
-    realized_pnl: Decimal = dec("0")
-    unrealized_pnl: Decimal = dec("0")
-    opened_at: int = 0
-    updated_at: int = 0
-    last_trade_ts_ms: int = 0
+    avg_entry_price: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    updated_ts_ms: int
 
 
+@dataclass
 class PositionsRepository:
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._c = conn
+    conn: Any  # sqlite3.Connection с row_factory=sqlite3.Row
 
     def get_position(self, symbol: str) -> Position:
-        cur = self._c.execute(
+        cur = self.conn.cursor()
+        cur.execute(
             """
-            SELECT base_qty,
-                   COALESCE(avg_entry_price, 0),
-                   COALESCE(realized_pnl, 0),
-                   COALESCE(unrealized_pnl, 0),
-                   COALESCE(opened_at, 0),
-                   COALESCE(updated_at, 0),
-                   COALESCE(last_trade_ts_ms, 0)
+            SELECT symbol, base_qty, avg_entry_price, realized_pnl, unrealized_pnl, updated_ts_ms
             FROM positions
-            WHERE symbol=?
+            WHERE symbol = ?
             """,
             (symbol,),
         )
-        row = cur.fetchone()
-        if not row:
-            return Position(symbol=symbol, base_qty=dec("0"))
+        r = cur.fetchone()
+        if not r:
+            return Position(
+                symbol=symbol,
+                base_qty=dec("0"),
+                avg_entry_price=dec("0"),
+                realized_pnl=dec("0"),
+                unrealized_pnl=dec("0"),
+                updated_ts_ms=0,
+            )
         return Position(
-            symbol=symbol,
-            base_qty=dec(str(row[0])),
-            avg_entry_price=dec(str(row[1])),
-            realized_pnl=dec(str(row[2])),
-            unrealized_pnl=dec(str(row[3])),
-            opened_at=int(row[4]),
-            updated_at=int(row[5]),
-            last_trade_ts_ms=int(row[6]),
+            symbol=r["symbol"],
+            base_qty=dec(str(r["base_qty"] or "0")),
+            avg_entry_price=dec(str(r["avg_entry_price"] or "0")),
+            realized_pnl=dec(str(r["realized_pnl"] or "0")),
+            unrealized_pnl=dec(str(r["unrealized_pnl"] or "0")),
+            updated_ts_ms=int(r["updated_ts_ms"] or 0),
         )
 
-    def get_base_qty(self, symbol: str) -> Decimal:
-        return self.get_position(symbol).base_qty
-
-    def set_base_qty(self, symbol: str, base_qty: Decimal) -> None:
-        self._c.execute(
+    def set_base_qty(self, symbol: str, value: Decimal) -> None:
+        cur = self.conn.cursor()
+        ts = _now_ms()
+        cur.execute(
             """
-            INSERT INTO positions(symbol, base_qty, updated_at)
-            VALUES(?, ?, ?)
+            INSERT INTO positions (symbol, base_qty, avg_entry_price, realized_pnl, unrealized_pnl, updated_ts_ms)
+            VALUES (?, ?, COALESCE((SELECT avg_entry_price FROM positions WHERE symbol=?), '0'),
+                    COALESCE((SELECT realized_pnl FROM positions WHERE symbol=?), '0'),
+                    COALESCE((SELECT unrealized_pnl FROM positions WHERE symbol=?), '0'),
+                    ?)
             ON CONFLICT(symbol) DO UPDATE SET
-                base_qty=excluded.base_qty,
-                updated_at=excluded.updated_at
+                base_qty = excluded.base_qty,
+                updated_ts_ms = excluded.updated_ts_ms
             """,
-            (symbol, str(base_qty), now_ms()),
+            (symbol, str(value), symbol, symbol, symbol, ts),
         )
-        self._c.commit()  # ← добавлено
+        self.conn.commit()
 
-    def set_last_trade_ts(self, symbol: str, ts_ms: Optional[int] = None) -> None:
-        ts = int(ts_ms or now_ms())
-        self._c.execute(
-            """
-            INSERT INTO positions(symbol, last_trade_ts_ms, updated_at)
-            VALUES(?, ?, ?)
-            ON CONFLICT(symbol) DO UPDATE SET
-                last_trade_ts_ms=excluded.last_trade_ts_ms,
-                updated_at=excluded.updated_at
-            """,
-            (symbol, ts, ts),
-        )
-        self._c.commit()  # ← добавлено
+    def apply_trade(self, *, symbol: str, side: str, base_amount: Decimal,
+                    price: Decimal, fee_quote: Decimal = dec("0"),
+                    last_price: Optional[Decimal] = None) -> None:
+        side = (side or "").lower().strip()
+        if side not in ("buy", "sell"):
+            return
 
-    def get_last_trade_ts(self, symbol: str) -> int:
-        cur = self._c.execute("SELECT COALESCE(last_trade_ts_ms, 0) FROM positions WHERE symbol=?", (symbol,))
-        row = cur.fetchone()
-        return int(row[0]) if row else 0
+        pos = self.get_position(symbol)
+        base0 = pos.base_qty
+        avg0 = pos.avg_entry_price
+        realized0 = pos.realized_pnl
 
-    def is_cooldown_active(self, symbol: str, cooldown_sec: int, *, now_ts_ms: Optional[int] = None) -> bool:
-        if cooldown_sec <= 0:
-            return False
-        last = self.get_last_trade_ts(symbol)
-        if last <= 0:
-            return False
-        now_local = int(now_ts_ms or now_ms())
-        return (now_local - last) < int(cooldown_sec * 1000)
-
-    def update_from_trade(self, trade: dict) -> Position:
-        sym = str(trade["symbol"])
-        side = str(trade["side"]).lower()
-        amount = dec(str(trade["amount"]))
-        pos = self.get_position(sym)
         if side == "buy":
-            pos.base_qty = pos.base_qty + amount
+            if base_amount <= 0:
+                return
+            new_base = base0 + base_amount
+            new_avg = ((avg0 * base0) + (price * base_amount)) / new_base if new_base > 0 else dec("0")
+            new_realized = realized0 - (fee_quote if fee_quote else dec("0"))
         else:
-            pos.base_qty = max(dec("0"), pos.base_qty - amount)
+            if base_amount <= 0:
+                return
+            matched = base_amount if base_amount <= base0 else base0
+            pnl = (price - avg0) * matched
+            new_realized = realized0 + pnl - (fee_quote if fee_quote else dec("0"))
+            new_base = base0 - base_amount
+            new_avg = avg0 if new_base > 0 else dec("0")
 
-        self.set_base_qty(sym, pos.base_qty)
-        ts_ms = int(trade.get("ts_ms", 0)) if isinstance(trade, dict) else 0
-        if ts_ms > 0:
-            self.set_last_trade_ts(sym, ts_ms)
-        return pos
+        ref_price = (last_price if last_price is not None else price) or dec("0")
+        if new_base > 0 and new_avg > 0 and ref_price > 0:
+            new_unreal = (ref_price - new_avg) * new_base
+        else:
+            new_unreal = dec("0")
 
-
-PositionsRepo = PositionsRepository
+        cur = self.conn.cursor()
+        ts = _now_ms()
+        cur.execute(
+            """
+            INSERT INTO positions (symbol, base_qty, avg_entry_price, realized_pnl, unrealized_pnl, updated_ts_ms)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                base_qty = excluded.base_qty,
+                avg_entry_price = excluded.avg_entry_price,
+                realized_pnl = excluded.realized_pnl,
+                unrealized_pnl = excluded.unrealized_pnl,
+                updated_ts_ms = excluded.updated_ts_ms
+            """,
+            (symbol, str(new_base), str(new_avg), str(new_realized), str(new_unreal), ts),
+        )
+        self.conn.commit()

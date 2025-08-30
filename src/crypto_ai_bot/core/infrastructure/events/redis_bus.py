@@ -11,15 +11,13 @@ _log = get_logger("events.redis")
 
 class RedisEventBus:
     """
-    Durable pub/sub через Redis.
-    Совместим по API с AsyncEventBus: publish(), subscribe()/on().
-    Подписки исполняются в фоне (start() запускает воркер).
+    Durable pub/sub через Redis. Совместим по API с AsyncEventBus: publish(), subscribe()/on().
     """
 
     def __init__(self, url: str, *, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self.url = url
         self._loop = loop or asyncio.get_event_loop()
-        self._redis = None   # создаём в start()
+        self._redis = None
         self._pub = None
         self._sub = None
         self._subs: Dict[str, Callable[[dict], Awaitable[None]]] = {}
@@ -59,7 +57,6 @@ class RedisEventBus:
             pass
         _log.info("redis_event_bus_closed")
 
-    # API совместимый с AsyncEventBus
     def subscribe(self, topic: str, coro: Callable[[dict], Awaitable[None]]) -> None:
         self._subs[topic] = coro
 
@@ -78,7 +75,6 @@ class RedisEventBus:
 
     async def _worker(self) -> None:
         assert self._sub is not None
-        # subscribe to known topics
         if self._subs:
             await self._sub.subscribe(*list(self._subs.keys()))
         while not self._stopping:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -84,23 +85,30 @@ def attach_alerts(bus, settings: Settings) -> None:
 
     async def on_auto_paused(evt: dict):
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
+
     async def on_auto_resumed(evt: dict):
         await _send(f"🟢 <b>AUTO-RESUME</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
+
     async def on_pos_mm(evt: dict):
         await _send(f"🔄 <b>RECONCILE</b> {evt.get('symbol','')}\nБиржа: <code>{evt.get('exchange','')}</code>\nЛокально: <code>{evt.get('local','')}</code>")
+
     async def on_dms_triggered(evt: dict):
         await _send(f"🛑 <b>DMS TRIGGERED</b> {evt.get('symbol','')}\nПродано базового: <code>{evt.get('amount','')}</code>")
+
     async def on_dms_skipped(evt: dict):
         await _send(f"⛔ <b>DMS SKIPPED</b> {evt.get('symbol','')}\nПадение: <code>{evt.get('drop_pct','')}%</code>")
+
     async def on_trade_completed(evt: dict):
         s = evt.get("symbol",""); side = evt.get("side","")
         cost = evt.get("cost",""); fee = evt.get("fee_quote","")
         price = evt.get("price",""); amt = evt.get("amount","")
         await _send(f"✅ <b>TRADE</b> {s} {side.upper()}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>")
+
     async def on_budget_exceeded(evt: dict):
         s = evt.get("symbol",""); kind = evt.get("type","")
         detail = f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}" if kind=="max_orders_5m" else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
         await _send(f"⏳ <b>BUDGET</b> {s} превышен ({kind})\n{detail}")
+
     async def on_trade_blocked(evt: dict):
         s = evt.get("symbol",""); reason = evt.get("reason","")
         await _send(f"🚫 <b>BLOCKED</b> {s}\nПричина: <code>{reason}</code>")
@@ -125,9 +133,7 @@ async def build_container_async() -> Container:
     st = _open_storage(s)
     bus = await _maybe_start_bus(s)
     br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
-    risk = RiskManager(RiskConfig.from_settings(s))
-    risk.attach_storage(st)
-    risk.attach_settings(s)
+    risk = RiskManager(RiskConfig.from_settings(s)); risk.attach_storage(st); risk.attach_settings(s)
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
 
@@ -147,42 +153,8 @@ async def build_container_async() -> Container:
     for sym in symbols:
         orchs[sym] = Orchestrator(
             symbol=sym, storage=st, broker=br, bus=bus,
-            risk=risk, exits=exits, health=health, settings=s,
-            dms=_make_dms(sym),
+            risk=risk, exits=exits, health=health, settings=s, dms=_make_dms(sym),
         )
 
     attach_alerts(bus, s)
     return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs)
-
-# Для совместимости с существующими импортами build_container()
-def build_container() -> Container:
-    # запускаем асинхронную сборку поверх текущего лупа
-    try:
-        loop = asyncio.get_running_loop()  # type: ignore[name-defined]
-    except Exception:
-        loop = None
-    if loop and loop.is_running():
-        # редкий кейс: если уже есть луп, создадим контейнер синхронно через run_until_complete в отдельном лупе нельзя.
-        # Поэтому требуем явного await в сервере, но для совместимости — откат на in-memory bus.
-        s = Settings.load()
-        st = _open_storage(s)
-        bus = AsyncEventBus()
-        br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
-        risk = RiskManager(RiskConfig.from_settings(s)); risk.attach_storage(st); risk.attach_settings(s)
-        exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
-        health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
-        symbols: List[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
-        orchs: Dict[str, Orchestrator] = {}
-        def _make_dms(sym: str) -> SafetySwitchPort:
-            return DeadMansSwitch(storage=st, broker=br, symbol=sym,
-                                  timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
-                                  rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
-                                  recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-                                  max_impact_pct=getattr(s, "DMS_MAX_IMPACT_PCT", 0), bus=bus)
-        for sym in symbols:
-            orchs[sym] = Orchestrator(symbol=sym, storage=st, broker=br, bus=bus,
-                                      risk=risk, exits=exits, health=health, settings=s, dms=_make_dms(sym))
-        attach_alerts(bus, s)
-        return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs)
-    else:
-        return asyncio.run(build_container_async())
