@@ -1,5 +1,4 @@
-﻿# src/crypto_ai_bot/core/infrastructure/brokers/ccxt_adapter.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio, time
 from dataclasses import dataclass, field
@@ -20,7 +19,7 @@ from crypto_ai_bot.utils.ids import make_client_order_id
 from crypto_ai_bot.utils.decimal import dec, q_step
 from crypto_ai_bot.utils.retry import retry_async
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
-from crypto_ai_bot.utils.metrics import inc  # ← метрики
+from crypto_ai_bot.utils.metrics import inc
 
 @dataclass
 class CcxtBroker(IBroker):
@@ -30,6 +29,7 @@ class CcxtBroker(IBroker):
     enable_rate_limit: bool = True
     sandbox: bool = False
     dry_run: bool = True
+    wait_close_sec: float = 0.0  # ← НОВОЕ: дожим статуса closed
 
     _ex: Any = None
     _markets_loaded: bool = False
@@ -38,6 +38,7 @@ class CcxtBroker(IBroker):
         failures_threshold=5, open_timeout_ms=30_000, half_open_successes_to_close=2
     ))
 
+    # ---------- bootstrap ----------
     def _ensure_exchange(self) -> None:
         if self.dry_run or self._ex is not None:
             return
@@ -68,6 +69,7 @@ class CcxtBroker(IBroker):
         self._markets_loaded = False
         self._ensure_markets()
 
+    # ---------- ccxt wrapper ----------
     async def _call_ex(self, fn, *args, **kwargs):
         self._ensure_exchange()
 
@@ -79,7 +81,7 @@ class CcxtBroker(IBroker):
                 return await asyncio.to_thread(fn, *args, **kwargs)
             except Exception as exc:
                 msg = str(exc).lower()
-                if any(s in msg for s in ("timed out", "timeout", "temporar", "rate limit", "ddos",
+                if any(s in msg for s in ("timed out","timeout","temporar","rate limit","ddos",
                                            "too many requests","service unavailable","exchange not available",
                                            "network","econnreset","502","503","504")):
                     inc("broker_call_transient_errors_total", fn=getattr(fn, "__name__", "unknown"))
@@ -91,6 +93,7 @@ class CcxtBroker(IBroker):
                 inc("broker_call_latency_ms_sum", fn=getattr(fn, "__name__", "unknown"), ms=str(dt_ms))
         return await _wrapped()
 
+    # ---------- utils ----------
     def _market_info(self, ex_symbol: str) -> Dict[str, Any]:
         self._ensure_markets()
         if self.dry_run:
@@ -105,6 +108,20 @@ class CcxtBroker(IBroker):
         return {"precision":{"amount":p_amount,"price":p_price},
                 "limits":{"amount":{"min":amount_min},"cost":{"min":cost_min}}}
 
+    def _extract_fee_quote(self, d: Dict[str, Any], quote_ccy: str) -> Decimal:
+        total = Decimal("0")
+        fee = d.get("fee")
+        if fee and str(fee.get("currency") or "").upper() == quote_ccy:
+            try: total += dec(fee.get("cost") or 0)
+            except Exception: pass
+        fees = d.get("fees") or []
+        for f in fees:
+            if str(f.get("currency") or "").upper() == quote_ccy:
+                try: total += dec(f.get("cost") or 0)
+                except Exception: pass
+        return total
+
+    # ---------- public ----------
     async def fetch_ticker(self, symbol: str) -> TickerDTO:
         ex_symbol = to_exchange_symbol(self.exchange_id, symbol); now = now_ms()
         if self.dry_run:
@@ -142,18 +159,49 @@ class CcxtBroker(IBroker):
         msg = str(exc).lower()
         return any(s in msg for s in ("clientorderid","duplicate","already exists","exist order"))
 
-    def _extract_fee_quote(self, order: Dict[str, Any], quote_ccy: str) -> Decimal:
-        fee = order.get("fee")
-        total = Decimal("0")
-        if fee and str(fee.get("currency") or "").upper() == quote_ccy:
-            try: total += dec(fee.get("cost") or 0)
-            except Exception: pass
-        fees = order.get("fees") or []
-        for f in fees:
-            if str(f.get("currency") or "").upper() == quote_ccy:
-                try: total += dec(f.get("cost") or 0)
-                except Exception: pass
-        return total
+    async def _wait_closed(self, *, order_id: str, ex_symbol: str) -> Optional[Dict[str, Any]]:
+        """Поллинг fetch_order до 'closed' или таймаута."""
+        if self.dry_run or self.wait_close_sec <= 0 or not order_id:
+            return None
+        t0 = time.time()
+        delay = 0.5
+        last: Optional[Dict[str, Any]] = None
+        while (time.time() - t0) < float(self.wait_close_sec):
+            try:
+                od = await self._call_ex(self._ex.fetch_order, order_id, ex_symbol)
+                last = od
+                st = str(od.get("status") or "").lower()
+                if st == "closed":
+                    return od
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+        return last  # вернём последнее, что нашли (может быть None)
+
+    def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
+        status = str(o.get("status") or "open")
+        filled = dec(o.get("filled") or 0)
+        amount = dec(o.get("amount") or fallback_amount)
+        ts = int(o.get("timestamp") or now_ms())
+        oid = str(o.get("id") or client_order_id)
+        side = str(o.get("side") or "buy")
+        px = dec(o.get("price") or 0)
+        cost = dec(o.get("cost") or 0)
+        quote = parse_symbol(symbol).quote
+        fee_q = self._extract_fee_quote(o, quote_ccy=quote)
+        return OrderDTO(
+            id=oid,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            status=status,
+            filled=filled,
+            timestamp=ts,
+            price=px if px > 0 else None,
+            cost=cost if cost > 0 else None,
+            fee_quote=fee_q,
+        )
 
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str) -> OrderDTO:
         if quote_amount <= 0: raise ValidationError("quote_amount must be > 0")
@@ -181,10 +229,14 @@ class CcxtBroker(IBroker):
             if self._is_duplicate_client_id_error(exc):
                 fetched = await self._fetch_order_by_client_id(ex_symbol=ex_symbol, client_id=client_id)
                 if fetched:
-                    return self._map_order(symbol, fetched, fallback_amount=amount_base_q, client_order_id=client_id)
+                    # при дубликате тоже подождём закрытия
+                    closed = await self._wait_closed(order_id=str(fetched.get("id") or ""), ex_symbol=ex_symbol)
+                    return self._map_order(symbol, closed or fetched, fallback_amount=amount_base_q, client_order_id=client_id)
                 raise TransientError("duplicate clientOrderId, but order not fetchable") from exc
             raise
-        return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
+        # основной путь: дождаться закрытия
+        closed = await self._wait_closed(order_id=str(order.get("id") or ""), ex_symbol=ex_symbol)
+        return self._map_order(symbol, closed or order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str) -> OrderDTO:
         if base_amount <= 0: raise ValidationError("base_amount must be > 0")
@@ -207,10 +259,12 @@ class CcxtBroker(IBroker):
             if self._is_duplicate_client_id_error(exc):
                 fetched = await self._fetch_order_by_client_id(ex_symbol=ex_symbol, client_id=client_id)
                 if fetched:
-                    return self._map_order(symbol, fetched, fallback_amount=amount_base_q, client_order_id=client_id)
+                    closed = await self._wait_closed(order_id=str(fetched.get("id") or ""), ex_symbol=ex_symbol)
+                    return self._map_order(symbol, closed or fetched, fallback_amount=amount_base_q, client_order_id=client_id)
                 raise TransientError("duplicate clientOrderId, but order not fetchable") from exc
             raise
-        return self._map_order(symbol, order, fallback_amount=amount_base_q, client_order_id=client_id)
+        closed = await self._wait_closed(order_id=str(order.get("id") or ""), ex_symbol=ex_symbol)
+        return self._map_order(symbol, closed or order, fallback_amount=amount_base_q, client_order_id=client_id)
 
     async def fetch_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
         if self.dry_run: return []
@@ -220,24 +274,25 @@ class CcxtBroker(IBroker):
         except Exception:
             return []
 
-    def _map_order(self, symbol: str, o: Dict[str, Any], *, fallback_amount: Decimal, client_order_id: str) -> OrderDTO:
-        status = str(o.get("status") or "open")
-        filled = dec(o.get("filled") or 0)
-        amount = dec(o.get("amount") or fallback_amount)
-        ts = int(o.get("timestamp") or now_ms())
-        oid = str(o.get("id") or client_order_id)
-        side = str(o.get("side") or "buy")
-        # комиссия: собираем из fee/fees по валюте котировки
-        quote = parse_symbol(symbol).quote
-        fee_q = self._extract_fee_quote(o, quote_ccy=quote)
-        return OrderDTO(
-            id=oid,
-            client_order_id=client_order_id,
-            symbol=symbol,
-            side=side,
-            amount=amount,
-            status=status,
-            filled=filled,
-            timestamp=ts,
-            fee_quote=fee_q,
-        )
+    # ---------- enrichment helpers ----------
+    async def fetch_order_safe(self, order_id: str, symbol: str) -> Optional[Dict[str, Any]]:
+        if self.dry_run or not order_id:
+            return None
+        ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        try:
+            return await self._call_ex(self._ex.fetch_order, order_id, ex_symbol)
+        except Exception:
+            return None
+
+    async def fetch_order_trades(self, symbol: str, since_ms: Optional[int] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        if self.dry_run:
+            return []
+        ex_symbol = to_exchange_symbol(self.exchange_id, symbol)
+        try:
+            params = {}
+            if since_ms:
+                params["since"] = int(since_ms)
+            tr = await self._call_ex(self._ex.fetch_my_trades, ex_symbol, since_ms or None, int(limit), params)
+            return tr or []
+        except Exception:
+            return []

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
@@ -15,12 +15,6 @@ class TradesRepository:
 
     # ---- запись сделок ----
     def add_from_order(self, order: OrderDTO) -> int:
-        """
-        Сохраняет исполненный ордер в trades. Возвращает rowid.
-        Поля:
-          - cost: переводим в котировку, если возможно (price*filled) — fallback 0
-          - fee_quote: берём из order.fee_quote (если не задано — 0)
-        """
         if not order or not order.symbol:
             return 0
         ts = int(order.timestamp or now_ms())
@@ -50,10 +44,6 @@ class TradesRepository:
         return int(cur.lastrowid or 0)
 
     def add_reconciliation_trade(self, row: Dict[str, str]) -> int:
-        """
-        Техническая запись для аудита при autofix (status='reconciliation').
-        row: {symbol, side, amount, ts_ms, client_order_id}
-        """
         ts = int(row.get("ts_ms") or now_ms())
         cur = self._c.execute(
             """
@@ -72,7 +62,7 @@ class TradesRepository:
         self._c.commit()
         return int(cur.lastrowid or 0)
 
-    # ---- агрегаты для risk ----
+    # ---- агрегаты и выборки ----
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
         window_ms = int(minutes) * 60_000
         cutoff = now_ms() - window_ms
@@ -84,11 +74,6 @@ class TradesRepository:
         return int(row[0]) if row else 0
 
     def daily_pnl_quote(self, symbol: str) -> Decimal:
-        """
-        PnL за «сегодня» в валюте котировки: сумма (sell.cost - buy.cost) - суммарные fee.
-        Привязка к UTC-дню (простая и предсказуемая).
-        """
-        # границы дня по UTC
         from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc)
         start = int(datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp() * 1000)
@@ -99,20 +84,15 @@ class TradesRepository:
             """,
             (symbol, start),
         )
-        pnl = dec("0")
-        fees = dec("0")
+        pnl = dec("0"); fees = dec("0")
         for side, cost, fee in cur.fetchall():
             s = str(side or "").lower()
-            c = dec(str(cost))
-            f = dec(str(fee))
-            if s == "sell":
-                pnl += c
-            elif s == "buy":
-                pnl -= c
+            c = dec(str(cost)); f = dec(str(fee))
+            if s == "sell": pnl += c
+            elif s == "buy": pnl -= c
             fees += f
         return pnl - fees
 
-    # ---- выборки для API ----
     def list_recent(self, symbol: str, limit: int = 100) -> List[Dict[str, str]]:
         cur = self._c.execute(
             """
@@ -141,6 +121,31 @@ class TradesRepository:
         for r in cur.fetchall():
             rows.append({k: r[k] if k in r.keys() else None for k in r.keys()})
         return rows
+
+    # ---- пост-фактум обогащение ----
+    def list_missing_fees(self, symbol: str, since_ms: int, limit: int = 50) -> List[Dict[str, str]]:
+        cur = self._c.execute(
+            """
+            SELECT id, broker_order_id, client_order_id, symbol, side, amount, price, cost, ts_ms, fee_quote
+            FROM trades
+            WHERE symbol=? AND ts_ms>=? AND COALESCE(fee_quote,0)=0 AND status!='reconciliation'
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (symbol, int(since_ms), int(limit)),
+        )
+        rows = []
+        for r in cur.fetchall():
+            rows.append({k: r[k] if k in r.keys() else None for k in r.keys()})
+        return rows
+
+    def set_fee_by_id(self, row_id: int, fee_quote: Decimal) -> None:
+        self._c.execute("UPDATE trades SET fee_quote=? WHERE id=?;", (str(dec(str(fee_quote))), int(row_id)))
+        self._c.commit()
+
+    def update_price_cost_by_id(self, row_id: int, price: Decimal, cost: Decimal) -> None:
+        self._c.execute("UPDATE trades SET price=?, cost=? WHERE id=?;", (str(dec(str(price))), str(dec(str(cost))), int(row_id)))
+        self._c.commit()
 
 # совместимость
 TradesRepo = TradesRepository

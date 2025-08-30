@@ -55,17 +55,16 @@ class Orchestrator:
     _recon_orders: Optional[OrdersReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
+    # simple in-flight guard
     _inflight: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(0), init=False)
 
     # ------------ lifecycle ------------
-
     def start(self) -> None:
         if self._tasks:
             return
         loop = asyncio.get_running_loop()
         self._stopping = False
 
-        # интервалы из Settings (санация значений)
         def _safe_float(v, default):
             try:
                 x = float(v)
@@ -78,7 +77,6 @@ class Orchestrator:
         self.reconcile_interval_sec = _safe_float(getattr(self.settings, "RECONCILE_INTERVAL_SEC", self.reconcile_interval_sec), self.reconcile_interval_sec)
         self.watchdog_interval_sec = _safe_float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", self.watchdog_interval_sec), self.watchdog_interval_sec)
 
-        # безопасность и сверки
         self._dms = DeadMansSwitch(self.storage, self.broker, self.symbol, timeout_ms=self.dms_timeout_ms)
         self._recon_orders = OrdersReconciler(self.broker, self.symbol)
         self._recon_bal = BalancesReconciler(self.broker, self.symbol)
@@ -92,8 +90,7 @@ class Orchestrator:
         if not self._tasks:
             return
         self._stopping = True
-        self._paused = True  # блокируем новые действия
-        # ждём дренажа in-flight операций (макс. 5 сек, чтобы не зависнуть)
+        self._paused = True
         try:
             await asyncio.wait_for(self._wait_drain(), timeout=5.0)
         except asyncio.TimeoutError:
@@ -114,8 +111,6 @@ class Orchestrator:
             "last_beat_ms": self._last_beat_ms,
         }
 
-    # ------------ control ------------
-
     async def pause(self) -> None:
         if self._paused:
             return
@@ -131,16 +126,13 @@ class Orchestrator:
         _log.info("orchestrator_resumed")
 
     # ------------ internals ------------
-
     async def _wait_drain(self) -> None:
-        # дожидаемся, пока счётчик in-flight вернётся к нулю
         while self._inflight._value < 0:  # type: ignore[attr-defined]
             await asyncio.sleep(0.05)
 
     from contextlib import asynccontextmanager
     @asynccontextmanager
     async def _flight(self):
-        # отмечаем in-flight секцию
         self._inflight.release()
         try:
             yield
@@ -151,7 +143,6 @@ class Orchestrator:
                 pass
 
     # ------------ loops ------------
-
     async def _eval_loop(self) -> None:
         while not self._stopping:
             try:
@@ -206,7 +197,7 @@ class Orchestrator:
         while not self._stopping:
             try:
                 async with self._flight():
-                    # Проводим техобслуживание репозиториев
+                    # обслуживание хранилищ
                     try:
                         prune = getattr(self.storage.idempotency, "prune_older_than", None)
                         if callable(prune):
@@ -220,16 +211,14 @@ class Orchestrator:
                     except Exception:
                         pass
 
-                    if self._paused:
-                        # в паузе только обслуживание — без внешних вызовов брокера
-                        pass
-                    else:
+                    # сверки (в паузе — только обслуживание)
+                    if not self._paused:
                         if getattr(self, "_recon_orders", None):
                             await self._recon_orders.run_once()
                         if getattr(self, "_recon_bal", None):
                             await self._recon_bal.run_once()
 
-                        # сверка позиций
+                        # позиционная сверка
                         try:
                             pos = self.storage.positions.get_position(self.symbol)
                             balance = await self.broker.fetch_balance(self.symbol)
@@ -244,27 +233,71 @@ class Orchestrator:
                                 if bool(getattr(self.settings, "RECONCILE_AUTOFIX", 0)):
                                     add_rec = getattr(self.storage.trades, "add_reconciliation_trade", None)
                                     if callable(add_rec):
-                                        add_rec(
-                                            {"symbol": self.symbol, "side": ("buy" if diff > 0 else "sell"), "amount": str(abs(diff)), "status": "reconciliation",
-                                             "ts_ms": now_ms(), "client_order_id": f"reconcile-{self.symbol}-{now_ms()}"} )
+                                        add_rec({"symbol": self.symbol, "side": ("buy" if diff > 0 else "sell"), "amount": str(abs(diff)), "status": "reconciliation",
+                                                 "ts_ms": now_ms(), "client_order_id": f"reconcile-{self.symbol}-{now_ms()}"} )
                                     self.storage.positions.set_base_qty(self.symbol, dec(str(balance.free_base)))
                         except Exception as exc:
                             _log.error("position_reconcile_failed", extra={"error": str(exc)})
+
+                        # --- НОВОЕ: обогащение недостающих комиссий ---
+                        try:
+                            # настройки с дефолтами
+                            lookback_min = int(getattr(self.settings, "ENRICH_TRADES_LOOKBACK_MIN", 180))
+                            batch_limit = int(getattr(self.settings, "ENRICH_TRADES_BATCH", 50))
+                            since = now_ms() - lookback_min * 60_000
+                            missing = self.storage.trades.list_missing_fees(self.symbol, since, batch_limit)
+                            if missing and hasattr(self.broker, "fetch_order_trades"):
+                                # подгружаем мои сделки по символу
+                                trades = await getattr(self.broker, "fetch_order_trades")(self.symbol, since_ms=since, limit=200)
+                                if trades:
+                                    quote = parse_symbol(self.symbol).quote
+                                    # индексируем по orderId
+                                    by_order: Dict[str, list] = {}
+                                    for tr in trades:
+                                        oid = str(tr.get("order") or tr.get("orderId") or "")
+                                        if not oid:
+                                            continue
+                                        by_order.setdefault(oid, []).append(tr)
+                                    for row in missing:
+                                        row_id = int(row["id"])
+                                        oid = str(row.get("broker_order_id") or "")  # может быть пусто
+                                        fee_total = dec("0")
+                                        price, cost = dec(str(row.get("price") or "0")), dec(str(row.get("cost") or "0"))
+                                        if oid and oid in by_order:
+                                            for tr in by_order[oid]:
+                                                fee_total += dec(str(self._extract_trade_fee(tr, quote)))
+                                            # уточним price/cost, если пришли исполняемые trades
+                                            # (по рынку цена может быть не задана в исходном ордере)
+                                            try:
+                                                px = dec(str(trades[-1].get("price") or price))
+                                                cs = sum(dec(str(t.get("cost") or 0)) for t in by_order[oid]) or cost
+                                                if cs > 0:
+                                                    self.storage.trades.update_price_cost_by_id(row_id, px, cs)
+                                            except Exception:
+                                                pass
+                                        elif hasattr(self.broker, "fetch_order_safe") and oid:
+                                            # fallback: подтянуть ордер и посчитать fee
+                                            o = await getattr(self.broker, "fetch_order_safe")(oid, self.symbol)
+                                            if o:
+                                                fee_total = dec(str(self._extract_trade_fee(o, quote)))
+                                        if fee_total > 0:
+                                            self.storage.trades.set_fee_by_id(row_id, fee_total)
+                        except Exception as exc:
+                            _log.error("enrich_fees_failed", extra={"error": str(exc)})
 
             except Exception as exc:
                 _log.error("reconcile_failed", extra={"error": str(exc)})
             await asyncio.sleep(self.reconcile_interval_sec)
 
-    async def _watchdog_loop(self) -> None:
-        while not self._stopping:
-            try:
-                async with self._flight():
-                    rep = await self.health.check(symbol=self.symbol)
-                    hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
-                    await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
-                    self._last_beat_ms = rep.ts_ms
-                    if self._dms:
-                        await self._dms.check_and_trigger()
-            except Exception as exc:
-                _log.error("watchdog_failed", extra={"error": str(exc)})
-            await asyncio.sleep(self.watchdog_interval_sec)
+    # helper to get fee from a trade/order dict in quote ccy
+    def _extract_trade_fee(self, d: dict, quote_ccy: str) -> Decimal:
+        fee = d.get("fee"); total = dec("0")
+        if fee and str(fee.get("currency") or "").upper() == quote_ccy:
+            try: total += dec(fee.get("cost") or 0)
+            except Exception: pass
+        fees = d.get("fees") or []
+        for f in fees:
+            if str(f.get("currency") or "").upper() == quote_ccy:
+                try: total += dec(f.get("cost") or 0)
+                except Exception: pass
+        return total
