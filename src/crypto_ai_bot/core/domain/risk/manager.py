@@ -2,123 +2,111 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Tuple, Any
+from typing import Optional, Any, Tuple
 
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
+
+_log = get_logger("risk.manager")
 
 
 @dataclass
 class RiskConfig:
-    max_position_base: Decimal = dec("0")
-    max_loss_day_quote: Decimal = dec("0")
-    cooldown_after_loss_min: int = 0
-    stop_on_slippage_pct: Decimal = dec("0")
+    # мягкие лимиты: если метод в хранилище отсутствует — считаем лимит неприменимым
+    MAX_DAILY_LOSS_QUOTE: Decimal = dec("0")   # если <0, блокируем новые buy при убытке ниже -X
+    MAX_POSITION_BASE: Decimal = dec("0")      # хард лимит по размеру позиции (в базовой валюте)
+    MAX_DAILY_TURNOVER_QUOTE: Decimal = dec("0")  # уже дублируется в budget_guard, оставляем как soft
+    # можно расширять без ломающих последствий
 
     @classmethod
     def from_settings(cls, s: Any) -> "RiskConfig":
-        def _d(name: str, default: str = "0") -> Decimal:
-            v = getattr(s, name, default)
-            return dec(str(v if v is not None else default))
-        def _i(name: str, default: int = 0) -> int:
+        def dget(name: str, default: str = "0") -> Decimal:
             try:
-                return int(getattr(s, name, default) or default)
+                return dec(str(getattr(s, name, default) or default))
             except Exception:
-                return default
-
+                return dec(default)
         return cls(
-            max_position_base=_d("MAX_POSITION_BASE", "0"),
-            max_loss_day_quote=_d("MAX_LOSS_DAY_QUOTE", "0"),
-            cooldown_after_loss_min=_i("COOLDOWN_AFTER_LOSS_MIN", 0),
-            stop_on_slippage_pct=_d("STOP_ON_SLIPPAGE_PCT", "0"),
+            MAX_DAILY_LOSS_QUOTE=dget("RISK_MAX_DAILY_LOSS_QUOTE", "0"),
+            MAX_POSITION_BASE=dget("RISK_MAX_POSITION_BASE", "0"),
+            MAX_DAILY_TURNOVER_QUOTE=dget("RISK_MAX_DAILY_TURNOVER_QUOTE", "0"),
         )
 
 
 class RiskManager:
     """
-    RiskGate long-only с пер-символьными оверрайдами, читаемыми на лету:
-    - Пер-символьные ключи имеют вид NAME_<BASE>_<QUOTE> (например MAX_POSITION_BASE_BTC_USDT).
-    - Если пер-символьного нет — используем глобальный из cfg.
+    Domain-level риск-менеджер:
+    - не импортирует application/infra;
+    - использует duck-typing storage.trades.* если методы присутствуют;
+    - если метод отсутствует — ограничение считается «неактивным».
     """
     def __init__(self, cfg: RiskConfig) -> None:
         self.cfg = cfg
-        self._storage = None
-        self._settings = None
-        self._cooldown_until_ms: int = 0
+        self._storage: Optional[Any] = None
+        self._settings: Optional[Any] = None
 
-    def attach_storage(self, storage) -> None:
+    def attach_storage(self, storage: Any) -> None:
         self._storage = storage
 
-    def attach_settings(self, settings) -> None:
+    def attach_settings(self, settings: Any) -> None:
         self._settings = settings
 
-    # --- helpers ---
-    def _per_symbol_decimal(self, symbol: str, name: str, fallback: Decimal) -> Decimal:
-        if not self._settings:
-            return fallback
-        try:
-            base, quote = str(symbol).replace("-", "/").split("/")
-            key = f"{name}_{base}_{quote}".upper().replace("/", "_")
-            v = getattr(self._settings, key, None)
-            return dec(str(v)) if v not in (None, "") else fallback
-        except Exception:
-            return fallback
-
-    def _per_symbol_int(self, symbol: str, name: str, fallback: int) -> int:
-        if not self._settings:
-            return fallback
-        try:
-            base, quote = str(symbol).replace("-", "/").split("/")
-            key = f"{name}_{base}_{quote}".upper().replace("/", "_")
-            v = getattr(self._settings, key, None)
-            return int(v) if v not in (None, "") else fallback
-        except Exception:
-            return fallback
-
-    # --- policy ---
-    def allow(
-        self,
-        *,
-        symbol: str,
-        action: str,
-        quote_amount: Optional[Decimal],
-        base_amount: Optional[Decimal],
-    ) -> Tuple[bool, str]:
+    # public API
+    def allow(self, *, symbol: str, action: str,
+              quote_amount: Optional[Decimal], base_amount: Optional[Decimal]) -> Tuple[bool, str]:
         action = (action or "").lower().strip()
-        if action in ("", "hold", "none"):
-            return True, "hold"
+        if action not in ("buy", "sell", "hold"):
+            return False, "unknown_action"
 
-        # cooldown
-        if self._cooldown_until_ms and now_ms() < self._cooldown_until_ms:
-            return False, "cooldown_after_loss"
+        if action == "hold":
+            return True, ""
 
-        # дневной стоп по убытку (пер-символьный override)
-        mldq = self._per_symbol_decimal(symbol, "MAX_LOSS_DAY_QUOTE", self.cfg.max_loss_day_quote)
-        if mldq > 0 and self._storage is not None:
-            try:
-                pnl = self._storage.trades.daily_pnl_quote(symbol)
-                if pnl <= (dec("0") - mldq):
-                    cd = self._per_symbol_int(symbol, "COOLDOWN_AFTER_LOSS_MIN", self.cfg.cooldown_after_loss_min)
-                    if cd > 0:
-                        self._cooldown_until_ms = now_ms() + cd * 60_000
-                    return False, f"day_loss_exceeded:{pnl}"
-            except Exception:
-                pass
+        # лимит по позиции (base)
+        try:
+            if self.cfg.MAX_POSITION_BASE > 0 and action == "buy":
+                pos = self._storage.positions.get_position(symbol) if self._storage else None
+                cur_base = dec(str(getattr(pos, "base_qty", 0) or 0)) if pos else dec("0")
+                add_base = dec("0")
+                # очень грубо: если известна avg_entry_price — оценим base через quote/price,
+                # но безопаснее блокировать по cur_base (не увеличивать выше MAX_POSITION_BASE).
+                if cur_base >= self.cfg.MAX_POSITION_BASE:
+                    return False, "position_base_limit"
+        except Exception:
+            pass
 
-        # ограничение позиции
-        mpb = self._per_symbol_decimal(symbol, "MAX_POSITION_BASE", self.cfg.max_position_base)
-        if mpb > 0 and self._storage is not None:
-            try:
-                pos = self._storage.positions.get_position(symbol)
-                cur_base = dec(str(pos.base_qty or 0))
-                if action == "buy" and cur_base >= mpb:
-                    return False, "max_position_reached"
-                if action == "sell":
-                    want_base = dec(str(base_amount or 0))
-                    if want_base > cur_base:
-                        return False, "insufficient_base_for_sell"
-            except Exception:
-                pass
+        # дневной PnL (quote)
+        try:
+            if self.cfg.MAX_DAILY_LOSS_QUOTE > 0 and action == "buy":
+                # сначала пытаемся использовать realized pnl:
+                trades = getattr(self._storage, "trades", None)
+                realized = None
+                if trades and hasattr(trades, "realized_pnl_day_quote"):
+                    try:
+                        realized = trades.realized_pnl_day_quote(symbol)
+                    except Exception:
+                        realized = None
+                # если нет realized — берём общий дневной pnl:
+                if realized is None and trades and hasattr(trades, "daily_pnl_quote"):
+                    try:
+                        realized = trades.daily_pnl_quote(symbol)
+                    except Exception:
+                        realized = None
+                if realized is not None and realized < (dec("0") - self.cfg.MAX_DAILY_LOSS_QUOTE):
+                    return False, "max_daily_loss"
+        except Exception:
+            pass
 
-        # проскальзывание — реализуется в местах знания фактической цены; флаг оставляем для будущего
-        return True, "ok"
+        # дневной оборот — мягкое правило (budget_guard уже блокирует жёстко)
+        try:
+            if self.cfg.MAX_DAILY_TURNOVER_QUOTE > 0 and action == "buy":
+                trades = getattr(self._storage, "trades", None)
+                if trades and hasattr(trades, "daily_turnover_quote"):
+                    try:
+                        t = trades.daily_turnover_quote(symbol)
+                        if t >= self.cfg.MAX_DAILY_TURNOVER_QUOTE:
+                            return False, "turnover_limit"
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return True, ""

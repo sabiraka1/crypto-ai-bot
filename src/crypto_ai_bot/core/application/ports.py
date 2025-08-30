@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Protocol, Optional, Dict, Any
 from decimal import Decimal
 
+# --------- Value objects (duck-typing) ---------
 class PositionLike(Protocol):
     base_qty: Optional[Decimal]
     avg_entry_price: Optional[Decimal]
@@ -14,7 +15,9 @@ class OrderLike(Protocol):
     filled: Optional[Decimal]
     price: Optional[Decimal]
     cost: Optional[Decimal]
+    # optional fields e.g. fee_quote, symbol, etc.
 
+# --------- Ports ---------
 class EventBusPort(Protocol):
     async def publish(self, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None: ...
 
@@ -27,11 +30,16 @@ class BrokerPort(Protocol):
     async def fetch_balance(self, symbol: str) -> Any: ...
 
 class TradesRepoPort(Protocol):
+    # execution/persistence
     def add_from_order(self, order: OrderLike) -> None: ...
+    # existing queries
     def list_today(self, symbol: str) -> list[dict]: ...
     def daily_turnover_quote(self, symbol: str) -> Decimal: ...
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int: ...
     def add_reconciliation_trade(self, data: dict) -> None: ...
+    # NEW: soft-optional PnL
+    def daily_pnl_quote(self, symbol: str) -> Decimal: ...
+    def realized_pnl_day_quote(self, symbol: str) -> Decimal: ...
 
 class PositionsRepoPort(Protocol):
     def get_position(self, symbol: str) -> PositionLike: ...

@@ -9,6 +9,7 @@ from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
@@ -28,7 +29,7 @@ class Container:
     settings: Settings
     storage: Storage
     broker
-    bus: AsyncEventBus
+    bus
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
@@ -43,7 +44,20 @@ def _open_storage(settings: Settings) -> Storage:
     return Storage(conn)
 
 
-def attach_alerts(bus: AsyncEventBus, settings: Settings) -> None:
+async def _maybe_start_bus(settings: Settings):
+    url = str(getattr(settings, "EVENT_BUS_URL", "") or "").strip()
+    if url.startswith("redis://") or url.startswith("rediss://"):
+        bus = RedisEventBus(url)
+        try:
+            await bus.start()
+            return bus
+        except Exception as exc:
+            _log.error("redis_bus_start_failed_fallback_inmemory", extra={"error": str(exc)})
+            return AsyncEventBus()
+    return AsyncEventBus()
+
+
+def attach_alerts(bus, settings: Settings) -> None:
     tg = TelegramAlerts(bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
                         chat_id=getattr(settings, "TELEGRAM_CHAT_ID", ""))
     if not tg.enabled():
@@ -59,13 +73,14 @@ def attach_alerts(bus: AsyncEventBus, settings: Settings) -> None:
             _log.error("telegram_send_exception", extra={"error": str(exc)})
 
     def _sub(topic: str, coro):
-        try:
-            bus.subscribe(topic, coro)  # type: ignore[attr-defined]
-        except Exception:
-            try:
-                bus.on(topic, coro)      # type: ignore[attr-defined]
-            except Exception as exc:
-                _log.error("bus_subscribe_failed", extra={"topic": topic, "error": str(exc)})
+        for attr in ("subscribe", "on"):
+            if hasattr(bus, attr):
+                try:
+                    getattr(bus, attr)(topic, coro)
+                    return
+                except Exception as exc:
+                    _log.error("bus_subscribe_failed", extra={"topic": topic, "error": str(exc)})
+        _log.error("bus_has_no_subscribe_api")
 
     async def on_auto_paused(evt: dict):
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
@@ -105,10 +120,10 @@ def attach_alerts(bus: AsyncEventBus, settings: Settings) -> None:
     _log.info("telegram_alerts_enabled")
 
 
-def build_container() -> Container:
+async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
-    bus = AsyncEventBus()
+    bus = await _maybe_start_bus(s)
     br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
     risk = RiskManager(RiskConfig.from_settings(s))
     risk.attach_storage(st)
@@ -116,11 +131,9 @@ def build_container() -> Container:
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
 
-    # список символов
     symbols: List[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
     orchs: Dict[str, Orchestrator] = {}
 
-    # DMS фабрика → создаём экземпляр (infra), но application получает порт
     def _make_dms(sym: str) -> SafetySwitchPort:
         return DeadMansSwitch(
             storage=st, broker=br, symbol=sym,
@@ -139,8 +152,37 @@ def build_container() -> Container:
         )
 
     attach_alerts(bus, s)
+    return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs)
 
-    return Container(
-        settings=s, storage=st, broker=br, bus=bus,
-        risk=risk, exits=exits, health=health, orchestrators=orchs,
-    )
+# Для совместимости с существующими импортами build_container()
+def build_container() -> Container:
+    # запускаем асинхронную сборку поверх текущего лупа
+    try:
+        loop = asyncio.get_running_loop()  # type: ignore[name-defined]
+    except Exception:
+        loop = None
+    if loop and loop.is_running():
+        # редкий кейс: если уже есть луп, создадим контейнер синхронно через run_until_complete в отдельном лупе нельзя.
+        # Поэтому требуем явного await в сервере, но для совместимости — откат на in-memory bus.
+        s = Settings.load()
+        st = _open_storage(s)
+        bus = AsyncEventBus()
+        br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
+        risk = RiskManager(RiskConfig.from_settings(s)); risk.attach_storage(st); risk.attach_settings(s)
+        exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
+        health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
+        symbols: List[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
+        orchs: Dict[str, Orchestrator] = {}
+        def _make_dms(sym: str) -> SafetySwitchPort:
+            return DeadMansSwitch(storage=st, broker=br, symbol=sym,
+                                  timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
+                                  rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
+                                  recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
+                                  max_impact_pct=getattr(s, "DMS_MAX_IMPACT_PCT", 0), bus=bus)
+        for sym in symbols:
+            orchs[sym] = Orchestrator(symbol=sym, storage=st, broker=br, bus=bus,
+                                      risk=risk, exits=exits, health=health, settings=s, dms=_make_dms(sym))
+        attach_alerts(bus, s)
+        return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs)
+    else:
+        return asyncio.run(build_container_async())
