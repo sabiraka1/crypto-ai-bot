@@ -1,33 +1,22 @@
 from __future__ import annotations
-
 from typing import Protocol, Optional, Dict, Any
 from decimal import Decimal
-
-
-# ---------- Value objects (duck-typing) ----------
 
 class PositionLike(Protocol):
     base_qty: Optional[Decimal]
     avg_entry_price: Optional[Decimal]
 
-
 class OrderLike(Protocol):
     id: str
     client_order_id: str
-    side: str                      # "buy" | "sell"
+    side: str
     amount: Decimal
     filled: Optional[Decimal]
     price: Optional[Decimal]
     cost: Optional[Decimal]
-    # опционально:
-    # fee_quote: Optional[Decimal]
-
-
-# ---------- Ports (application-facing interfaces) ----------
 
 class EventBusPort(Protocol):
     async def publish(self, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None: ...
-
 
 class BrokerPort(Protocol):
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal,
@@ -37,7 +26,6 @@ class BrokerPort(Protocol):
     async def fetch_ticker(self, symbol: str) -> Any: ...
     async def fetch_balance(self, symbol: str) -> Any: ...
 
-
 class TradesRepoPort(Protocol):
     def add_from_order(self, order: OrderLike) -> None: ...
     def list_today(self, symbol: str) -> list[dict]: ...
@@ -45,21 +33,17 @@ class TradesRepoPort(Protocol):
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int: ...
     def add_reconciliation_trade(self, data: dict) -> None: ...
 
-
 class PositionsRepoPort(Protocol):
     def get_position(self, symbol: str) -> PositionLike: ...
     def set_base_qty(self, symbol: str, value: Decimal) -> None: ...
-
 
 class IdempotencyRepoPort(Protocol):
     def check_and_store(self, client_order_id: str, ttl: int) -> bool: ...
     def prune_older_than(self, seconds: int) -> None: ...
 
-
 class AuditRepoPort(Protocol):
     def log(self, kind: str, data: dict) -> None: ...
     def prune_older_than(self, days: int) -> None: ...
-
 
 class StoragePort(Protocol):
     @property
@@ -70,7 +54,6 @@ class StoragePort(Protocol):
     def idempotency(self) -> Optional[IdempotencyRepoPort]: ...
     @property
     def audit(self) -> Optional[AuditRepoPort]: ...
-
 
 class SafetySwitchPort(Protocol):
     def beat(self) -> None: ...
