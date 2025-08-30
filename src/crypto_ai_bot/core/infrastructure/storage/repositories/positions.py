@@ -45,6 +45,10 @@ class PositionsRepository:
             version=int(r["version"] or 0),
         )
 
+    # 🔹 для совместимости с PositionsReconciler
+    def get_base_qty(self, symbol: str) -> Decimal:
+        return self.get_position(symbol).base_qty
+
     def set_base_qty(self, symbol: str, value: Decimal) -> None:
         cur = self.conn.cursor()
         ts = _now_ms()
@@ -65,11 +69,9 @@ class PositionsRepository:
         if side not in ("buy", "sell"):
             return
 
-        # читаем текущую позицию (версия)
         pos = self.get_position(symbol)
         base0, avg0, realized0, ver0 = pos.base_qty, pos.avg_entry_price, pos.realized_pnl, pos.version
 
-        # расчёт новых значений
         if side == "buy":
             if base_amount <= 0:
                 return
@@ -86,12 +88,8 @@ class PositionsRepository:
             new_avg = avg0 if new_base > 0 else dec("0")
 
         ref_price = (last_price if last_price is not None else price) or dec("0")
-        if new_base > 0 and new_avg > 0 and ref_price > 0:
-            new_unreal = (ref_price - new_avg) * new_base
-        else:
-            new_unreal = dec("0")
+        new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
 
-        # CAS-апдейт: WHERE version = старой версии; при конфликте — одна лёгкая ретрай-попытка
         cur = self.conn.cursor()
         ts = _now_ms()
         for _ in range(2):
@@ -116,10 +114,8 @@ class PositionsRepository:
             self.conn.commit()
             if cur.rowcount > 0:
                 return
-            # версия изменилась — перечитать и пересчитать (другая транзакция обновила позицию)
             pos = self.get_position(symbol)
             base0, avg0, realized0, ver0 = pos.base_qty, pos.avg_entry_price, pos.realized_pnl, pos.version
-            # повторим расчёт с обновлённой базой
             if side == "buy":
                 new_base = base0 + base_amount
                 new_avg = ((avg0 * base0) + (price * base_amount)) / new_base if new_base > 0 else dec("0")
@@ -130,7 +126,4 @@ class PositionsRepository:
                 new_realized = realized0 + pnl - (fee_quote if fee_quote else dec("0"))
                 new_base = base0 - base_amount
                 new_avg = avg0 if new_base > 0 else dec("0")
-            if new_base > 0 and new_avg > 0 and ref_price > 0:
-                new_unreal = (ref_price - new_avg) * new_base
-            else:
-                new_unreal = dec("0")
+            new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")

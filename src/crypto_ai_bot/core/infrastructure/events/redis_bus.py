@@ -12,6 +12,7 @@ _log = get_logger("events.redis")
 class RedisEventBus:
     """
     Durable pub/sub через Redis. Совместим по API с AsyncEventBus: publish(), subscribe()/on().
+    Фикс: новые подписки после start() немедленно оформляются в Redis.
     """
 
     def __init__(self, url: str, *, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
@@ -23,6 +24,7 @@ class RedisEventBus:
         self._subs: Dict[str, Callable[[dict], Awaitable[None]]] = {}
         self._task: Optional[asyncio.Task] = None
         self._stopping = False
+        self._ready = asyncio.Event()
 
     async def start(self) -> None:
         try:
@@ -33,8 +35,12 @@ class RedisEventBus:
         self._redis = redis.from_url(self.url, decode_responses=True)
         self._pub = self._redis
         self._sub = self._redis.pubsub()
+        # подписываем то, что уже накоплено
+        if self._subs:
+            await self._sub.subscribe(*list(self._subs.keys()))
         self._stopping = False
         self._task = self._loop.create_task(self._worker(), name="redis-bus-worker")
+        self._ready.set()
         _log.info("redis_event_bus_started", extra={"url": self.url})
 
     async def close(self) -> None:
@@ -58,10 +64,22 @@ class RedisEventBus:
         _log.info("redis_event_bus_closed")
 
     def subscribe(self, topic: str, coro: Callable[[dict], Awaitable[None]]) -> None:
+        """API совместимый, синхронный. Фактическая подписка в Redis — асинхронно."""
         self._subs[topic] = coro
+        # если bus уже запущен — оформим подписку немедленно
+        if self._ready.is_set():
+            self._loop.create_task(self._subscribe_runtime(topic))
 
     def on(self, topic: str, coro: Callable[[dict], Awaitable[None]]) -> None:
         self.subscribe(topic, coro)
+
+    async def _subscribe_runtime(self, topic: str) -> None:
+        try:
+            if self._sub is not None:
+                await self._sub.subscribe(topic)
+                _log.info("redis_subscribed", extra={"topic": topic})
+        except Exception as exc:
+            _log.error("redis_subscribe_failed", extra={"topic": topic, "error": str(exc)})
 
     async def publish(self, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None:
         if not self._pub:
@@ -75,8 +93,6 @@ class RedisEventBus:
 
     async def _worker(self) -> None:
         assert self._sub is not None
-        if self._subs:
-            await self._sub.subscribe(*list(self._subs.keys()))
         while not self._stopping:
             try:
                 raw = await self._sub.get_message(ignore_subscribe_messages=True, timeout=1.0)

@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Callable, Dict, Optional
 
 from .base import IBroker, TickerDTO, BalanceDTO, OrderDTO
-from .symbols import parse_symbol
+from crypto_ai_bot.core.application.symbols import canonical
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.exceptions import ValidationError, BrokerError
 from crypto_ai_bot.utils.decimal import dec  # ← парсер внешних значений
