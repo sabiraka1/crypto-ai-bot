@@ -3,9 +3,8 @@
 import asyncio, os
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, TYPE_CHECKING, Awaitable
 
-from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
 from crypto_ai_bot.core.application.ports import (
     EventBusPort, StoragePort, BrokerPort, SafetySwitchPort
 )
@@ -15,15 +14,16 @@ from crypto_ai_bot.core.application.monitoring.health_checker import HealthCheck
 from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
 from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
 from crypto_ai_bot.core.application.symbols import parse_symbol
+from crypto_ai_bot.core.application.eval_loop import EvalLoop
+from crypto_ai_bot.core.application.exits_loop import ExitsLoop
+from crypto_ai_bot.core.application.watchdog_loop import WatchdogLoop
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils import metrics as M
-from crypto_ai_bot.utils.metrics import inc
 from crypto_ai_bot.utils.budget_guard import check as budget_check
 
 if TYPE_CHECKING:
-    from crypto_ai_bot.core.infrastructure.settings import Settings  # тип только для аннотаций
+    from crypto_ai_bot.core.infrastructure.settings import Settings  # только для типов
 
 _log = get_logger("orchestrator")
 
@@ -50,8 +50,6 @@ class Orchestrator:
     exits: ProtectiveExits
     health: HealthChecker
     settings: "Settings"
-
-    # внедряем реализацию переключателя безопасности снаружи (infra), но через порт
     dms: Optional[SafetySwitchPort] = None
 
     eval_interval_sec: float = 60.0
@@ -73,6 +71,7 @@ class Orchestrator:
     _inflight: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(0), init=False)
     _starting: bool = field(default=False, init=False)
 
+    # ---------- public control ----------
     def start(self) -> None:
         if self._starting or self._tasks:
             return
@@ -94,7 +93,7 @@ class Orchestrator:
             self.watchdog_interval_sec = _safe_float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", self.watchdog_interval_sec), self.watchdog_interval_sec)
 
             try:
-                self.risk.attach_storage(self.storage)     # duck-typing
+                self.risk.attach_storage(self.storage)
                 self.risk.attach_settings(self.settings)
             except Exception:
                 pass
@@ -102,10 +101,49 @@ class Orchestrator:
             self._recon_orders = OrdersReconciler(self.broker, self.symbol)
             self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
-            self._tasks["eval"] = loop.create_task(self._eval_loop(), name=f"orc-eval-{self.symbol}")
-            self._tasks["exits"] = loop.create_task(self._exits_loop(), name=f"orc-exits-{self.symbol}")
+            # loop instances
+            self._eval_loop = EvalLoop(
+                symbol=self.symbol,
+                storage=self.storage,
+                broker=self.broker,
+                bus=self.bus,
+                settings=self.settings,
+                risk_manager=self.risk,
+                protective_exits=self.exits,
+                eval_interval_sec=self.eval_interval_sec,
+                dms=self.dms,
+                force_eval_action=self.force_eval_action,
+                fee_estimate_pct=self.settings.FEE_PCT_ESTIMATE,
+                is_paused=self.is_paused,
+                fixed_amount_resolver=lambda s: _fixed_amount_for(self.settings, s),
+                flight_cm=self._flight_cm,
+                on_budget_exceeded=self._on_budget_exceeded,
+            )
+            self._exits_loop = ExitsLoop(
+                symbol=self.symbol,
+                storage=self.storage,
+                protective_exits=self.exits,
+                exits_interval_sec=self.exits_interval_sec,
+                is_paused=self.is_paused,
+                flight_cm=self._flight_cm,
+            )
+            self._watchdog_loop = WatchdogLoop(
+                symbol=self.symbol,
+                bus=self.bus,
+                health_checker=self.health,
+                settings=self.settings,
+                watchdog_interval_sec=self.watchdog_interval_sec,
+                dms=self.dms,
+                is_paused=self.is_paused,
+                auto_pause=self._auto_pause,
+                auto_resume=self._auto_resume,
+                flight_cm=self._flight_cm,
+            )
+
+            self._tasks["eval"] = loop.create_task(self._eval_loop.run(), name=f"orc-eval-{self.symbol}")
+            self._tasks["exits"] = loop.create_task(self._exits_loop.run(), name=f"orc-exits-{self.symbol}")
+            self._tasks["watchdog"] = loop.create_task(self._watchdog_loop.run(), name=f"orc-watchdog-{self.symbol}")
             self._tasks["reconcile"] = loop.create_task(self._reconcile_loop(), name=f"orc-reconcile-{self.symbol}")
-            self._tasks["watchdog"] = loop.create_task(self._watchdog_loop(), name=f"orc-watchdog-{self.symbol}")
         finally:
             self._starting = False
 
@@ -118,6 +156,10 @@ class Orchestrator:
             await asyncio.wait_for(self._wait_drain(), timeout=5.0)
         except asyncio.TimeoutError:
             _log.warning("orchestrator_drain_timeout")
+        # остановить внутренние лупы
+        self._eval_loop.stop()
+        self._exits_loop.stop()
+        self._watchdog_loop.stop()
         for t in list(self._tasks.values()):
             if not t.done():
                 t.cancel()
@@ -149,6 +191,10 @@ class Orchestrator:
         self._auto_hold = False
         await self.bus.publish("orchestrator.resumed", {"symbol": self.symbol, "ts_ms": now_ms()}, key=self.symbol)
 
+    # ---------- helpers ----------
+    def is_paused(self) -> bool:
+        return self._paused
+
     async def _auto_pause(self, reason: str, data: Dict[str, str]) -> None:
         if self._auto_hold and self._paused:
             return
@@ -164,6 +210,10 @@ class Orchestrator:
         self._paused = False
         payload = {"symbol": self.symbol, "reason": reason, "ts_ms": now_ms(), **data}
         await self.bus.publish("orchestrator.auto_resumed", payload, key=self.symbol)
+
+    async def _on_budget_exceeded(self, payload: Dict[str, str]) -> None:
+        await self.bus.publish("budget.exceeded", payload, key=self.symbol)
+        await self._auto_pause("budget_exceeded", {k: v for k, v in payload.items() if k != "symbol"})
 
     async def _wait_drain(self) -> None:
         while self._inflight._value < 0:  # type: ignore[attr-defined]
@@ -181,64 +231,9 @@ class Orchestrator:
             except Exception:
                 pass
 
-    async def _eval_loop(self) -> None:
-        while not self._stopping:
-            try:
-                if self._paused:
-                    await asyncio.sleep(min(1.0, self.eval_interval_sec))
-                else:
-                    over = budget_check(self.storage, self.symbol, self.settings)
-                    if over:
-                        payload = {"symbol": self.symbol, **over, "ts_ms": now_ms()}
-                        await self.bus.publish("budget.exceeded", payload, key=self.symbol)
-                        await self._auto_pause("budget_exceeded", over)
-                        await asyncio.sleep(self.eval_interval_sec)
-                        continue
-
-                    async with self._flight():
-                        fixed_amt = _fixed_amount_for(self.settings, self.symbol)
-                        await eval_and_execute(
-                            symbol=self.symbol,
-                            storage=self.storage,
-                            broker=self.broker,
-                            bus=self.bus,
-                            exchange=self.settings.EXCHANGE,
-                            fixed_quote_amount=fixed_amt,
-                            idempotency_bucket_ms=self.settings.IDEMPOTENCY_BUCKET_MS,
-                            idempotency_ttl_sec=self.settings.IDEMPOTENCY_TTL_SEC,
-                            force_action=self.force_eval_action,
-                            risk_manager=self.risk,
-                            protective_exits=self.exits,
-                            settings=self.settings,
-                            fee_estimate_pct=self.settings.FEE_PCT_ESTIMATE,
-                        )
-                        if self.dms:
-                            self.dms.beat()
-            except Exception as exc:
-                _log.error("tick_failed", extra={"error": str(exc), "symbol": self.symbol})
-            await asyncio.sleep(self.eval_interval_sec)
-
-    async def _exits_loop(self) -> None:
-        while not self._stopping:
-            try:
-                if self._paused:
-                    await asyncio.sleep(min(1.0, self.exits_interval_sec))
-                else:
-                    async with self._flight():
-                        pos = self.storage.positions.get_position(self.symbol)
-                        if pos.base_qty and pos.base_qty > 0:
-                            await self.exits.ensure(symbol=self.symbol)
-                            check_exec = getattr(self.exits, "check_and_execute", None)
-                            if callable(check_exec):
-                                try:
-                                    order = await check_exec(symbol=self.symbol)
-                                    if order:
-                                        _log.info("exit_executed", extra={"symbol": self.symbol, "side": order.side, "client_order_id": order.client_order_id})
-                                except Exception as exc:
-                                    _log.error("check_and_execute_failed", extra={"error": str(exc), "symbol": self.symbol})
-            except Exception as exc:
-                _log.error("ensure_failed", extra={"error": str(exc), "symbol": self.symbol})
-            await asyncio.sleep(self.exits_interval_sec)
+    def _flight_cm(self) -> Awaitable:
+        # удобный фабричный вызов для передачи в лупы
+        return self._flight()
 
     async def _reconcile_loop(self) -> None:
         while not self._stopping:
@@ -263,33 +258,3 @@ class Orchestrator:
             except Exception as exc:
                 _log.error("reconcile_failed", extra={"error": str(exc), "symbol": self.symbol})
             await asyncio.sleep(self.reconcile_interval_sec)
-
-    async def _watchdog_loop(self) -> None:
-        err_pause = float(getattr(self.settings, "AUTO_PAUSE_ERROR_RATE_5M", 0.50))
-        err_resume = float(getattr(self.settings, "AUTO_RESUME_ERROR_RATE_5M", 0.20))
-        lat_pause = float(getattr(self.settings, "AUTO_PAUSE_LATENCY_MS_5M", 2000.0))
-        lat_resume = float(getattr(self.settings, "AUTO_RESUME_LATENCY_MS_5M", 1000.0))
-        win = 5 * 60
-        while not self._stopping:
-            try:
-                async with self._flight():
-                    rep = await self.health.check(symbol=self.symbol)
-                    hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
-                    await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
-                    self._last_beat_ms = rep.ts_ms
-                    if self.dms:
-                        await self.dms.check_and_trigger()
-
-                    labels = {}
-                    er = M.error_rate(labels, win)
-                    al = M.avg_latency_ms(labels, win)
-
-                    if (er >= err_pause) or (al >= lat_pause):
-                        await self._auto_pause("sla_threshold_exceeded",
-                                               {"error_rate_5m": f"{er:.4f}", "avg_latency_ms_5m": f"{al:.2f}"})
-                    elif self._auto_hold and (er <= err_resume) and (al <= lat_resume) and (budget_check(self.storage, self.symbol, self.settings) is None):
-                        await self._auto_resume("sla_stabilized_and_budget_ok",
-                                                {"error_rate_5m": f"{er:.4f}", "avg_latency_ms_5m": f"{al:.2f}"})
-            except Exception as exc:
-                _log.error("watchdog_failed", extra={"error": str(exc), "symbol": self.symbol})
-            await asyncio.sleep(self.watchdog_interval_sec)
