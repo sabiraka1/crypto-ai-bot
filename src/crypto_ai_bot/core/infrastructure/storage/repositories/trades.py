@@ -47,11 +47,15 @@ class TradesRepository:
         )
         self.conn.commit()
 
+        # --- позиция: BUY/SELL применяем безопасно, без деления на ноль ---
         if symbol:
             if side == "sell":
                 base_amount = filled if filled > 0 else amount
             else:
-                base_amount = (cost / price) if price > 0 and cost > 0 else (filled if filled > 0 else dec("0"))
+                if price > 0 and cost > 0:
+                    base_amount = cost / price
+                else:
+                    base_amount = dec("0")  # ⚠️ защита: нет цены/стоимости — не изменяем базу
             pos_repo = PositionsRepository(self.conn)
             pos_repo.apply_trade(
                 symbol=symbol, side=side, base_amount=base_amount,
@@ -133,7 +137,10 @@ class TradesRepository:
             if side == "sell":
                 base_amount = filled if filled > 0 else amount
             else:
-                base_amount = (cost / price) if price > 0 and cost > 0 else (filled if filled > 0 else dec("0"))
+                if price > 0 and cost > 0:
+                    base_amount = cost / price
+                else:
+                    base_amount = dec("0")
             pos_repo = PositionsRepository(self.conn)
             pos_repo.apply_trade(
                 symbol=symbol, side=side, base_amount=base_amount,
@@ -152,7 +159,10 @@ class TradesRepository:
             if side == "sell":
                 base_amount = filled if filled > 0 else amount
             else:
-                base_amount = (cost / price) if price > 0 and cost > 0 else (filled if filled > 0 else dec("0"))
+                if price > 0 and cost > 0:
+                    base_amount = cost / price
+                else:
+                    base_amount = dec("0")
             trades.append({
                 "side": side,
                 "base_amount": base_amount,

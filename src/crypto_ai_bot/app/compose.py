@@ -39,8 +39,17 @@ class Container:
 
 def _open_storage(settings: Settings) -> Storage:
     os.makedirs(settings.DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(os.path.join(settings.DATA_DIR, "bot.db"))
+    conn = sqlite3.connect(
+        os.path.join(settings.DATA_DIR, "bot.db"),
+        check_same_thread=False,   # позволяет использовать соединение в разных потоках
+    )
     conn.row_factory = sqlite3.Row
+
+    # WAL + busy_timeout для конкурентных записей
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+
     run_migrations(conn)
     return Storage(conn)
 
