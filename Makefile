@@ -60,3 +60,23 @@ docker-build:
 
 docker-run:
 	docker run --rm -p $(PORT):8000 --env-file .env crypto-ai-bot:local
+
+.PHONY: run lint test format
+
+# Запуск сервера (локально)
+run:
+	uvicorn crypto_ai_bot.app.server:app --reload --host 0.0.0.0 --port 8000
+
+# Проверка импортов (Import Linter)
+lint:
+	py -m importlinter.cli --config importlinter.ini
+
+# Запуск тестов (pytest)
+test:
+	pytest -v
+
+# Форматирование кода (black + isort)
+format:
+	black src
+	isort src
+
