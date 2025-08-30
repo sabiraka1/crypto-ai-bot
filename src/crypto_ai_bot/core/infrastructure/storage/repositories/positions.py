@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 from datetime import datetime, timezone
 
 from crypto_ai_bot.utils.decimal import dec
@@ -22,7 +22,7 @@ class Position:
 
 @dataclass
 class PositionsRepository:
-    conn: Any  # sqlite3.Connection с row_factory=sqlite3.Row
+    conn: Any
 
     def get_position(self, symbol: str) -> Position:
         cur = self.conn.cursor()
@@ -45,9 +45,37 @@ class PositionsRepository:
             version=int(r["version"] or 0),
         )
 
-    # 🔹 для совместимости с PositionsReconciler
     def get_base_qty(self, symbol: str) -> Decimal:
         return self.get_position(symbol).base_qty
+
+    # 🔹 батч-доступ
+    def get_positions_many(self, symbols: List[str]) -> Dict[str, Position]:
+        if not symbols:
+            return {}
+        placeholders = ",".join(["?"] * len(symbols))
+        cur = self.conn.cursor()
+        cur.execute(
+            f"SELECT symbol, base_qty, avg_entry_price, realized_pnl, unrealized_pnl, updated_ts_ms, version FROM positions WHERE symbol IN ({placeholders})",
+            symbols,
+        )
+        out: Dict[str, Position] = {}
+        for r in cur.fetchall():
+            out[r["symbol"]] = Position(
+                symbol=r["symbol"],
+                base_qty=dec(str(r["base_qty"] or "0")),
+                avg_entry_price=dec(str(r["avg_entry_price"] or "0")),
+                realized_pnl=dec(str(r["realized_pnl"] or "0")),
+                unrealized_pnl=dec(str(r["unrealized_pnl"] or "0")),
+                updated_ts_ms=int(r["updated_ts_ms"] or 0),
+                version=int(r["version"] or 0),
+            )
+        # добиваем отсутствующие дефолтами
+        for s in symbols:
+            if s not in out:
+                out[s] = Position(symbol=s, base_qty=dec("0"), avg_entry_price=dec("0"),
+                                  realized_pnl=dec("0"), unrealized_pnl=dec("0"),
+                                  updated_ts_ms=0, version=0)
+        return out
 
     def set_base_qty(self, symbol: str, value: Decimal) -> None:
         cur = self.conn.cursor()
