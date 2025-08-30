@@ -11,45 +11,38 @@ from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.domain.risk.manager import RiskManager
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.use_cases.partial_fills import PartialFillHandler
 from crypto_ai_bot.utils.decimal import dec, q_step
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("usecase.eval_execute")
 
 
 @dataclass
 class EvalResult:
-    action: str                    # "buy" | "sell" | "hold"
+    action: str
     reason: str
-    quote_amount: Optional[Decimal] = None  # для buy (в валюте котировки)
-    base_amount: Optional[Decimal] = None   # для sell (в базовой валюте)
+    quote_amount: Optional[Decimal] = None
+    base_amount: Optional[Decimal] = None
 
 
-# ----------------------- helpers -----------------------
 def _budget_blocked(storage: Storage, symbol: str, settings: Any) -> Tuple[bool, Dict[str, str]]:
-    """Проверка safety-budget (дублирующая защита на случай вызовов вне оркестратора)."""
     max_orders_5m = float(getattr(settings, "BUDGET_MAX_ORDERS_5M", 0) or 0)
     if max_orders_5m > 0:
         cnt5 = storage.trades.count_orders_last_minutes(symbol, 5)
         if cnt5 >= max_orders_5m:
             return True, {"type": "max_orders_5m", "count_5m": str(cnt5), "limit": str(int(max_orders_5m))}
-
     max_turnover = dec(str(getattr(settings, "BUDGET_MAX_TURNOVER_DAY_QUOTE", "0") or "0"))
     if max_turnover > 0:
         day_turn = storage.trades.daily_turnover_quote(symbol)
         if day_turn >= max_turnover:
             return True, {"type": "max_turnover_day", "turnover": str(day_turn), "limit": str(max_turnover)}
-
     return False, {}
 
 
 def _deterministic_coid(exchange: str, *, symbol: str, side: str, qty: Decimal, unit: str, bucket_ms: int) -> str:
-    """
-    Делаем тот же детерминированный clientOrderId, что и брокер (на случай,
-    если захотим явно проставить coid при вызове create_order).
-    Формат: idem:{exchange}:{symbol}:{side}:{unit}:{qty_q}:{bucket}
-    """
     bucket = int(now_ms() // max(1, int(bucket_ms)))
     qty_q = str(q_step(dec(str(qty)), 8))
     return f"idem:{exchange}:{symbol}:{side}:{unit}:{qty_q}:{bucket}"
@@ -62,18 +55,9 @@ async def _emit(bus: AsyncEventBus, topic: str, payload: Dict[str, Any], key: Op
         pass
 
 
-# ----------------------- strategy stub -----------------------
 def _evaluate_strategy(*, symbol: str, storage: Storage, settings: Any,
                        risk_manager: RiskManager, fixed_quote_amount: Decimal,
                        force_action: Optional[str]) -> EvalResult:
-    """
-    Минимальный, но безопасный план действий:
-    - если передан force_action: выполнить его
-      - "buy": покупаем fixed_quote_amount котировки
-      - "sell": продаём весь базовый остаток позиции
-      - иное/None: hold
-    - если force_action нет — HOLD (логика стратегии может быть подключена позже)
-    """
     force = (force_action or "").lower().strip()
     if force == "buy":
         amt_q = dec(str(fixed_quote_amount))
@@ -84,11 +68,9 @@ def _evaluate_strategy(*, symbol: str, storage: Storage, settings: Any,
         base = dec(str(pos.base_qty or 0))
         if base > 0:
             return EvalResult(action="sell", reason="force_action", base_amount=base)
-
     return EvalResult(action="hold", reason="no_signal")
 
 
-# ----------------------- main use-case -----------------------
 async def eval_and_execute(
     *,
     symbol: str,
@@ -98,56 +80,49 @@ async def eval_and_execute(
     exchange: str,
     fixed_quote_amount: Decimal,
     idempotency_bucket_ms: int,
-    idempotency_ttl_sec: int,             # оставляем для совместимости; TTL реализуем БД-дедупом
+    idempotency_ttl_sec: int,
     force_action: Optional[str],
     risk_manager: RiskManager,
     protective_exits: ProtectiveExits,
     settings: Any,
     fee_estimate_pct: Decimal = dec("0"),
 ) -> Optional[OrderDTO]:
-    """
-    Единый сценарий: оценка -> проверка рисков/бюджета -> исполнение (идемпотентно) -> запись/события.
-    - Жёсткая идемпотентность обеспечивается UNIQUE(client_order_id) на trades, плюс детерминированным coid.
-    - Дублирующий safety-budget на случай вызова вне оркестратора.
-    """
-    # 1) стратегия / решение
+    # 1) стратегия
     plan = _evaluate_strategy(
-        symbol=symbol,
-        storage=storage,
-        settings=settings,
-        risk_manager=risk_manager,
-        fixed_quote_amount=fixed_quote_amount,
-        force_action=force_action,
+        symbol=symbol, storage=storage, settings=settings, risk_manager=risk_manager,
+        fixed_quote_amount=fixed_quote_amount, force_action=force_action,
     )
-
     if plan.action == "hold":
         _log.info("hold", extra={"symbol": symbol, "reason": plan.reason})
         return None
 
-    # 2) дублирующий budget guard
+    # 2) budget gate
     blocked, info = _budget_blocked(storage, symbol, settings)
     if blocked:
         payload = {"symbol": symbol, "reason": "budget_exceeded", **info, "ts_ms": now_ms()}
         _log.warning("trade_blocked_budget", extra=payload)
+        inc("budget_block_total", symbol=symbol, kind=info.get("type", ""))
         await _emit(bus, "trade.blocked", payload, key=symbol)
         return None
 
-    # 3) валидация RiskManager (например, max_position, stop-switch)
+    # 3) risk gate
     try:
         ok, why = risk_manager.allow(symbol=symbol, action=plan.action,
                                      quote_amount=plan.quote_amount, base_amount=plan.base_amount)
         if not ok:
             payload = {"symbol": symbol, "reason": f"risk_block:{why or ''}", "ts_ms": now_ms()}
             _log.warning("trade_blocked_risk", extra=payload)
+            inc("risk_block_total", symbol=symbol, why=str(why or ""))
             await _emit(bus, "trade.blocked", payload, key=symbol)
             return None
     except Exception as exc:
         payload = {"symbol": symbol, "reason": "risk_exception", "error": str(exc), "ts_ms": now_ms()}
         _log.error("trade_blocked_risk_exception", extra=payload)
+        inc("risk_block_total", symbol=symbol, why="exception")
         await _emit(bus, "trade.blocked", payload, key=symbol)
         return None
 
-    # 4) исполнение (детерминированный clientOrderId на случай ретраев)
+    # 4) исполнение (детерминированный clientOrderId)
     quote_ccy = parse_symbol(symbol).quote
     order: Optional[OrderDTO] = None
 
@@ -174,21 +149,23 @@ async def eval_and_execute(
     except Exception as exc:
         payload = {"symbol": symbol, "reason": "broker_exception", "error": str(exc), "ts_ms": now_ms()}
         _log.error("trade_failed_broker", extra=payload)
+        inc("broker_exception_total", symbol=symbol)
         await _emit(bus, "trade.failed", payload, key=symbol)
         return None
 
     if not order:
         payload = {"symbol": symbol, "reason": "no_order_returned", "ts_ms": now_ms()}
         _log.error("trade_failed_empty", extra=payload)
+        inc("broker_exception_total", symbol=symbol)
         await _emit(bus, "trade.failed", payload, key=symbol)
         return None
 
-    # 5) запись в БД (UPSERT по client_order_id; без падений на дубликате)
+    # 5) запись (UPSERT по client_order_id)
     try:
         storage.trades.add_from_order(order)
     except Exception as exc:
-        # даже если запись не удалась — сам ордер создан; по шине сообщим как completed с пометкой
         _log.error("trade_persist_error", extra={"symbol": symbol, "error": str(exc)})
+        inc("persist_error_total", symbol=symbol)
 
     # 6) событие об успешной сделке
     payload = {
@@ -204,6 +181,19 @@ async def eval_and_execute(
         "ts_ms": now_ms(),
     }
     _log.info("trade_completed", extra=payload)
+    inc("trade_completed_total", symbol=symbol, side=order.side)
     await _emit(bus, "trade.completed", payload, key=symbol)
+
+    # 7) обработка частичного исполнения (wire-up)
+    try:
+        if (order.filled or dec("0")) < (order.amount or dec("0")):
+            handler = PartialFillHandler(bus)
+            follow = await handler.handle(order, broker)
+            if follow:
+                storage.trades.add_from_order(follow)
+                inc("partial_followup_total", symbol=symbol, side=follow.side)
+    except Exception as exc:
+        _log.error("partial_followup_failed", extra={"error": str(exc)})
+        inc("partial_followup_errors_total", symbol=symbol)
 
     return order

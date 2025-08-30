@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  lint-and-smoke:
+  lint-test-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,16 +15,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install minimal tools
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install ruff isort
+          pip install ruff isort mypy pytest
 
-      - name: Lint (ruff)
+      - name: Ruff (lint)
         run: ruff check .
 
-      - name: Import order (isort check only)
+      - name: isort (imports)
         run: isort --check-only .
+
+      - name: mypy (types; узкий слой)
+        run: |
+          mypy --config-file mypy.ini
 
       - name: Smoke run (paper mode, no network)
         env:
@@ -41,13 +45,13 @@ jobs:
           os.environ.setdefault("MODE","paper")
           from crypto_ai_bot.app.compose import build_container
           from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+          from crypto_ai_bot.utils.decimal import dec
           async def main():
               c = build_container()
-              # один dry-run тик (force buy с фиксированной суммой)
               order = await eval_and_execute(
                   symbol=os.getenv("SYMBOL","BTC/USDT"),
                   storage=c.storage, broker=c.broker, bus=c.bus, exchange=c.settings.EXCHANGE,
-                  fixed_quote_amount=c.settings.FIXED_AMOUNT,
+                  fixed_quote_amount=dec("25"),
                   idempotency_bucket_ms=c.settings.IDEMPOTENCY_BUCKET_MS,
                   idempotency_ttl_sec=c.settings.IDEMPOTENCY_TTL_SEC,
                   force_action="buy",
@@ -58,3 +62,11 @@ jobs:
               print("smoke_ok", order.client_order_id)
           asyncio.run(main())
           PY
+
+      - name: Pytest (unit only)
+        env:
+          MODE: paper
+          EXCHANGE: gateio
+          SYMBOL: BTC/USDT
+        run: |
+          pytest -q -m "not live" || pytest -q

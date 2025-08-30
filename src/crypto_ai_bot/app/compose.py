@@ -105,7 +105,8 @@ def _open_storage(settings: Settings) -> Storage:
     os.makedirs(settings.DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(os.path.join(settings.DATA_DIR, "bot.db"))
     conn.row_factory = sqlite3.Row
-    run_migrations(conn)
+    run_migrations(conn)  # индексы теперь создаёт миграция 006
+    return Storage(conn)
 
     # UNIQUE client_order_id (для дедупликации) + полезные индексы
     try:
