@@ -1,14 +1,13 @@
 ﻿from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional, Dict, Any, Tuple
 
-from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
-from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
-from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.application.ports import (
+    BrokerPort, StoragePort, EventBusPort, OrderLike
+)
+from crypto_ai_bot.core.application.symbols import parse_symbol
 from crypto_ai_bot.core.domain.risk.manager import RiskManager
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.utils.decimal import dec, q_step
@@ -20,6 +19,7 @@ from crypto_ai_bot.utils.exceptions import IdempotencyError
 
 _log = get_logger("usecase.eval_execute")
 
+
 @dataclass
 class EvalResult:
     action: str
@@ -27,19 +27,21 @@ class EvalResult:
     quote_amount: Optional[Decimal] = None
     base_amount: Optional[Decimal] = None
 
-async def _emit(bus: AsyncEventBus, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None:
+
+async def _emit(bus: EventBusPort, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None:
     try:
         await bus.publish(topic, payload, key=key or payload.get("symbol"))
     except Exception:
         pass
 
+
 def _deterministic_coid(exchange: str, *, symbol: str, side: str, qty: Decimal, unit: str, bucket_ms: int) -> str:
-    from crypto_ai_bot.utils.time import now_ms
     bucket = int(now_ms() // max(1, int(bucket_ms)))
     qty_q = str(q_step(dec(str(qty)), 8))
     return f"idem:{exchange}:{symbol}:{side}:{unit}:{qty_q}:{bucket}"
 
-def _evaluate_strategy(*, symbol: str, storage: Storage, settings: Any,
+
+def _evaluate_strategy(*, symbol: str, storage: StoragePort, settings: Any,
                        risk_manager: RiskManager, fixed_quote_amount: Decimal,
                        force_action: Optional[str]) -> EvalResult:
     force = (force_action or "").lower().strip()
@@ -54,12 +56,13 @@ def _evaluate_strategy(*, symbol: str, storage: Storage, settings: Any,
             return EvalResult(action="sell", reason="force_action", base_amount=base)
     return EvalResult(action="hold", reason="no_signal")
 
+
 async def eval_and_execute(
     *,
     symbol: str,
-    storage: Storage,
-    broker: IBroker,
-    bus: AsyncEventBus,
+    storage: StoragePort,
+    broker: BrokerPort,
+    bus: EventBusPort,
     exchange: str,
     fixed_quote_amount: Decimal,
     idempotency_bucket_ms: int,
@@ -69,7 +72,7 @@ async def eval_and_execute(
     protective_exits: ProtectiveExits,
     settings: Any,
     fee_estimate_pct: Decimal = dec("0"),
-) -> Optional[OrderDTO]:
+) -> Optional[OrderLike]:
     # 0) риск по комиссии (если задан верхний порог)
     try:
         max_fee = dec(str(getattr(settings, "RISK_MAX_FEE_PCT", "0") or "0"))
@@ -91,17 +94,17 @@ async def eval_and_execute(
         _log.info("hold", extra={"symbol": symbol, "reason": plan.reason})
         return None
 
-    # 2) budget gate (единый guard)
+    # 2) budget gate
     over = budget_check(storage, symbol, settings)
     if over:
         payload = {"symbol": symbol, "reason": "budget_exceeded", **over, "ts_ms": now_ms()}
         _log.warning("trade_blocked_budget", extra=payload)
         inc("budget_block_total", symbol=symbol, kind=over.get("type", ""))
-        await _emit(bus, "budget.exceeded", payload, key=symbol)  # NEW: отдельное событие
+        await _emit(bus, "budget.exceeded", payload, key=symbol)
         await _emit(bus, "trade.blocked", payload, key=symbol)
         return None
 
-    # 3) risk gate (позиционный и дневной PnL)
+    # 3) risk gate
     try:
         ok, why = risk_manager.allow(symbol=symbol, action=plan.action,
                                      quote_amount=plan.quote_amount, base_amount=plan.base_amount)
@@ -120,7 +123,6 @@ async def eval_and_execute(
 
     # 4) подготовка и идемпотентность
     quote_ccy = parse_symbol(symbol).quote
-    order: Optional[OrderDTO] = None
     side = plan.action
 
     if side == "buy":
@@ -138,14 +140,13 @@ async def eval_and_execute(
     else:
         return None
 
-    # explicit idempotency check
-    idem = getattr(storage, "idempotency", None)
     try:
+        idem = getattr(storage, "idempotency", None)
         if idem and hasattr(idem, "check_and_store"):
             ok = idem.check_and_store(coid, ttl=int(idempotency_ttl_sec))
             if not ok:
                 raise IdempotencyError("duplicate clientOrderId")
-    except IdempotencyError as exc:
+    except IdempotencyError:
         payload = {"symbol": symbol, "reason": "idempotent_duplicate", "client_order_id": coid, "ts_ms": now_ms()}
         _log.warning("trade_blocked_idem", extra=payload)
         inc("idempotency_block_total", symbol=symbol)
@@ -165,14 +166,7 @@ async def eval_and_execute(
         await _emit(bus, "trade.failed", payload, key=symbol)
         return None
 
-    if not order:
-        payload = {"symbol": symbol, "reason": "no_order_returned", "ts_ms": now_ms()}
-        _log.error("trade_failed_empty", extra=payload)
-        inc("broker_exception_total", symbol=symbol)
-        await _emit(bus, "trade.failed", payload, key=symbol)
-        return None
-
-    # 6) запись сделки
+    # 6) запись
     try:
         storage.trades.add_from_order(order)
     except Exception as exc:
@@ -184,16 +178,20 @@ async def eval_and_execute(
         audit = getattr(storage, "audit", None)
         if audit and hasattr(audit, "log"):
             audit.log("trade", {
-                "symbol": symbol, "side": order.side, "amount": str(order.amount),
-                "price": str(order.price or ""), "cost": str(order.cost or ""),
+                "symbol": symbol,
+                "side": order.side,
+                "amount": str(order.amount),
+                "price": str(order.price or ""),
+                "cost": str(order.cost or ""),
                 "fee_quote": str(getattr(order, "fee_quote", "")),
-                "client_order_id": order.client_order_id, "broker_order_id": order.id,
+                "client_order_id": order.client_order_id,
+                "broker_order_id": order.id,
                 "ts_ms": now_ms(),
             })
     except Exception:
         pass
 
-    # 7) событие об успехе
+    # 7) событие — успех
     payload = {
         "symbol": symbol,
         "side": order.side,
@@ -215,8 +213,7 @@ async def eval_and_execute(
     try:
         if (order.filled or dec("0")) < (order.amount or dec("0")):
             from crypto_ai_bot.core.application.use_cases.partial_fills import PartialFillHandler
-            handler = PartialFillHandler(bus)
-            follow = await handler.handle(order, broker)
+            follow = await PartialFillHandler(bus).handle(order, broker)  # type: ignore[arg-type]
             if follow:
                 storage.trades.add_from_order(follow)
                 inc("partial_followup_total", symbol=symbol, side=follow.side)

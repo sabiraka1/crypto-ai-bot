@@ -6,30 +6,29 @@ from decimal import Decimal
 from typing import Dict, Optional, TYPE_CHECKING
 
 from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
-from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.application.ports import (
+    EventBusPort, StoragePort, BrokerPort, SafetySwitchPort
+)
 from crypto_ai_bot.core.domain.risk.manager import RiskManager
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
-from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
-from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
 from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
 from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
-from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
+from crypto_ai_bot.core.application.symbols import parse_symbol
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils import metrics as M
 from crypto_ai_bot.utils.metrics import inc
-from crypto_ai_bot.utils.budget_guard import check as budget_check  # NEW
+from crypto_ai_bot.utils.budget_guard import check as budget_check
 
 if TYPE_CHECKING:
-    from crypto_ai_bot.core.infrastructure.settings import Settings
+    from crypto_ai_bot.core.infrastructure.settings import Settings  # тип только для аннотаций
 
 _log = get_logger("orchestrator")
 
+
 def _fixed_amount_for(settings: "Settings", symbol: str) -> Decimal:
-    from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
     p = parse_symbol(symbol)
     key = f"AMOUNT_{p.base}_{p.quote}".upper().replace("-", "_")
     raw = os.getenv(key) or getattr(settings, key, None)
@@ -40,16 +39,20 @@ def _fixed_amount_for(settings: "Settings", symbol: str) -> Decimal:
     except Exception:
         return dec(str(getattr(settings, "FIXED_AMOUNT", "0")))
 
+
 @dataclass
 class Orchestrator:
     symbol: str
-    storage: Storage
-    broker: IBroker
-    bus: AsyncEventBus
+    storage: StoragePort
+    broker: BrokerPort
+    bus: EventBusPort
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
     settings: "Settings"
+
+    # внедряем реализацию переключателя безопасности снаружи (infra), но через порт
+    dms: Optional[SafetySwitchPort] = None
 
     eval_interval_sec: float = 60.0
     exits_interval_sec: float = 5.0
@@ -57,7 +60,6 @@ class Orchestrator:
     watchdog_interval_sec: float = 15.0
 
     force_eval_action: Optional[str] = None
-    dms_timeout_ms: int = 120_000
 
     _tasks: Dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
@@ -65,7 +67,6 @@ class Orchestrator:
     _paused: bool = field(default=False, init=False)
     _auto_hold: bool = field(default=False, init=False)
 
-    _dms: Optional[DeadMansSwitch] = field(default=None, init=False)
     _recon_orders: Optional[OrdersReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
@@ -79,28 +80,25 @@ class Orchestrator:
         try:
             loop = asyncio.get_running_loop()
             self._stopping = False
+
             def _safe_float(v, default):
-                try: x = float(v); return x if x > 0 else default
-                except Exception: return default
+                try:
+                    x = float(v)
+                    return x if x > 0 else default
+                except Exception:
+                    return default
+
             self.eval_interval_sec = _safe_float(getattr(self.settings, "EVAL_INTERVAL_SEC", self.eval_interval_sec), self.eval_interval_sec)
             self.exits_interval_sec = _safe_float(getattr(self.settings, "EXITS_INTERVAL_SEC", self.exits_interval_sec), self.exits_interval_sec)
             self.reconcile_interval_sec = _safe_float(getattr(self.settings, "RECONCILE_INTERVAL_SEC", self.reconcile_interval_sec), self.reconcile_interval_sec)
             self.watchdog_interval_sec = _safe_float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", self.watchdog_interval_sec), self.watchdog_interval_sec)
 
             try:
-                self.risk.attach_storage(self.storage)
+                self.risk.attach_storage(self.storage)     # duck-typing
                 self.risk.attach_settings(self.settings)
             except Exception:
                 pass
 
-            self._dms = DeadMansSwitch(
-                self.storage, self.broker, self.symbol,
-                timeout_ms=int(getattr(self.settings, "DMS_TIMEOUT_MS", self.dms_timeout_ms) or self.dms_timeout_ms),
-                rechecks=int(getattr(self.settings, "DMS_RECHECKS", 2) or 2),
-                recheck_delay_sec=float(getattr(self.settings, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-                max_impact_pct=dec(str(getattr(self.settings, "DMS_MAX_IMPACT_PCT", "0") or "0")),
-                bus=self.bus,
-            )
             self._recon_orders = OrdersReconciler(self.broker, self.symbol)
             self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
@@ -189,10 +187,10 @@ class Orchestrator:
                 if self._paused:
                     await asyncio.sleep(min(1.0, self.eval_interval_sec))
                 else:
-                    over = budget_check(self.storage, self.symbol, self.settings)  # NEW: общий guard
+                    over = budget_check(self.storage, self.symbol, self.settings)
                     if over:
                         payload = {"symbol": self.symbol, **over, "ts_ms": now_ms()}
-                        await self.bus.publish("budget.exceeded", payload, key=self.symbol)  # NEW
+                        await self.bus.publish("budget.exceeded", payload, key=self.symbol)
                         await self._auto_pause("budget_exceeded", over)
                         await asyncio.sleep(self.eval_interval_sec)
                         continue
@@ -214,8 +212,8 @@ class Orchestrator:
                             settings=self.settings,
                             fee_estimate_pct=self.settings.FEE_PCT_ESTIMATE,
                         )
-                        if getattr(self, "_dms", None):
-                            self._dms.beat()
+                        if self.dms:
+                            self.dms.beat()
             except Exception as exc:
                 _log.error("tick_failed", extra={"error": str(exc), "symbol": self.symbol})
             await asyncio.sleep(self.eval_interval_sec)
@@ -247,17 +245,21 @@ class Orchestrator:
             try:
                 async with self._flight():
                     try:
-                        prune = getattr(self.storage.idempotency, "prune_older_than", None)
-                        if callable(prune): prune(self.settings.IDEMPOTENCY_TTL_SEC * 10)
-                    except Exception: pass
+                        idem = getattr(self.storage, "idempotency", None)
+                        if idem and hasattr(idem, "prune_older_than"):
+                            idem.prune_older_than(self.settings.IDEMPOTENCY_TTL_SEC * 10)
+                    except Exception:
+                        pass
                     try:
-                        prune_audit = getattr(self.storage.audit, "prune_older_than", None)
-                        if callable(prune_audit): prune_audit(days=7)
-                    except Exception: pass
+                        audit = getattr(self.storage, "audit", None)
+                        if audit and hasattr(audit, "prune_older_than"):
+                            audit.prune_older_than(days=7)
+                    except Exception:
+                        pass
 
                     if not self._paused:
-                        if getattr(self, "_recon_orders", None): await self._recon_orders.run_once()
-                        if getattr(self, "_recon_bal", None):    await self._recon_bal.run_once()
+                        if self._recon_orders: await self._recon_orders.run_once()
+                        if self._recon_bal:    await self._recon_bal.run_once()
             except Exception as exc:
                 _log.error("reconcile_failed", extra={"error": str(exc), "symbol": self.symbol})
             await asyncio.sleep(self.reconcile_interval_sec)
@@ -275,8 +277,8 @@ class Orchestrator:
                     hb = parse_symbol(self.symbol).base + "/" + parse_symbol(self.symbol).quote
                     await self.bus.publish("watchdog.heartbeat", {"ok": rep.ok, "symbol": hb}, key=hb)
                     self._last_beat_ms = rep.ts_ms
-                    if getattr(self, "_dms", None):
-                        await self._dms.check_and_trigger()
+                    if self.dms:
+                        await self.dms.check_and_trigger()
 
                     labels = {}
                     er = M.error_rate(labels, win)
