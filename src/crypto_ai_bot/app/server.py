@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, List
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from contextlib import asynccontextmanager
 
 from crypto_ai_bot.app.compose import build_container
 from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
@@ -21,11 +22,41 @@ from crypto_ai_bot.utils.exceptions import (
 
 _log = get_logger("server")
 
-app = FastAPI(title="crypto-ai-bot", version="1.0.0")
+app = FastAPI(title="crypto-ai-bot", version="1.0.0", lifespan=lifespan)
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
 
 _container = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _container
+    _container = await build_container_async()
+    try:
+        yield
+    finally:
+        # стопаем все оркестраторы
+        try:
+            await asyncio.gather(*(orch.stop() for orch in _container.orchestrators.values()), return_exceptions=True)
+        except Exception:
+            pass
+
+        # закрываем bus (например RedisEventBus)
+        bus = getattr(_container, "bus", None)
+        if bus and hasattr(bus, "close"):
+            try:
+                await bus.close()
+            except Exception:
+                pass
+
+        # закрываем ccxt exchange
+        broker = getattr(_container, "broker", None)
+        exch = getattr(broker, "exchange", None) if broker else None
+        if exch and hasattr(exch, "close"):
+            try:
+                await exch.close()
+            except Exception:
+                pass
 _startup_blocked_reason: Optional[str] = None
 _ip_allow: List[str] = []
 
