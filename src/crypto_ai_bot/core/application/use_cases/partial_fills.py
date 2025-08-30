@@ -1,4 +1,5 @@
-﻿from __future__ import annotations
+﻿# src/crypto_ai_bot/core/application/use_cases/partial_fills.py
+from __future__ import annotations
 
 from decimal import Decimal
 from typing import Optional
@@ -24,21 +25,30 @@ class PartialFillHandler:
         try:
             if order.amount <= 0:
                 return None
-            filled_pct = float(order.filled / order.amount) if order.amount > 0 else 1.0
 
+            amount = dec(str(order.amount or 0))
+            filled = dec(str(order.filled or 0))
+            if amount <= 0:
+                return None
+
+            filled_pct = float(filled / amount) if amount > 0 else 1.0
+
+            # ≥95%: принимаем остаток как есть
             if filled_pct >= 0.95:
                 await self._emit("order.partial_accepted", {"order_id": order.id, "filled_pct": filled_pct})
                 return None
 
-            # 50–95%: дозаявить остаток
+            # 50–95%: дозаявить ИМЕННО ОСТАТОК
             if filled_pct >= 0.50:
-                remaining = max(order.amount - order.filled, dec("0"))
+                remaining = amount - filled
                 if remaining <= 0:
                     return None
 
-                if order.side == "buy":
+                if (order.side or "").lower() == "buy":
                     t = await broker.fetch_ticker(order.symbol)
-                    px = t.ask or t.last
+                    px = t.ask or t.last or dec("0")
+                    if px <= 0:
+                        return None
                     remaining_quote = remaining * px
                     new_order = await broker.create_market_buy_quote(
                         symbol=order.symbol,
@@ -52,10 +62,14 @@ class PartialFillHandler:
                         client_order_id=make_client_order_id("partial", order.symbol),
                     )
 
-                await self._emit("order.partial_topped_up", {"original": order.id, "new": new_order.id, "filled_pct": filled_pct})
+                await self._emit("order.partial_topped_up", {
+                    "original": order.id,
+                    "new": getattr(new_order, "id", None),
+                    "filled_pct": filled_pct
+                })
                 return new_order
 
-            # <50%: отменить и переразместить
+            # <50%: отменить и переразместить ТОЛЬКО ОСТАТОК
             cancel = getattr(broker, "cancel_order", None)
             if callable(cancel):
                 try:
@@ -63,23 +77,33 @@ class PartialFillHandler:
                 except Exception:
                     pass
 
-            if order.side == "buy":
+            remaining = amount - filled
+            if remaining <= 0:
+                return None
+
+            if (order.side or "").lower() == "buy":
                 t = await broker.fetch_ticker(order.symbol)
-                px = t.ask or t.last
-                full_quote = order.amount * px
+                px = t.ask or t.last or dec("0")
+                if px <= 0:
+                    return None
+                quote_amt = remaining * px
                 new_order = await broker.create_market_buy_quote(
                     symbol=order.symbol,
-                    quote_amount=full_quote,
+                    quote_amount=quote_amt,
                     client_order_id=f"reorder-{now_ms()}",
                 )
             else:
                 new_order = await broker.create_market_sell_base(
                     symbol=order.symbol,
-                    base_amount=order.amount,
+                    base_amount=remaining,
                     client_order_id=f"reorder-{now_ms()}",
                 )
 
-            await self._emit("order.partial_reordered", {"original": order.id, "new": new_order.id, "filled_pct": filled_pct})
+            await self._emit("order.partial_reordered", {
+                "original": order.id,
+                "new": getattr(new_order, "id", None),
+                "filled_pct": filled_pct
+            })
             return new_order
 
         except Exception as exc:
