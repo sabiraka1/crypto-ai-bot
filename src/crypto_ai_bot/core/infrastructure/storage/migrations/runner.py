@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional, Tuple
 
-# ------------------------ PRAGMAS / LOCKING ------------------------
-
 def _apply_pragmas(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL;")
@@ -19,8 +17,6 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
 
 def _begin_immediate(conn: sqlite3.Connection) -> None:
     conn.execute("BEGIN IMMEDIATE;")
-
-# ------------------------ UTILITIES ------------------------
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (name,))
@@ -41,11 +37,9 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_def
 def _ensure_index(conn: sqlite3.Connection, create_index_sql: str) -> None:
     conn.execute(create_index_sql)
 
-# ------------------------ BASELINE SCHEMA ------------------------
-
-# ↑↑ ВЕРСИЮ ПОВЫСИЛИ, ЧТОБЫ ДОП. КОЛОНКИ ДОЕХАЛИ И НА УЖЕ ПРОИНИЦИАЛИЗИРОВАННЫЕ БД
-BASELINE_VERSION = "2025-08-29-02-baseline"
-BASELINE_CHECKSUM = "sha256:baseline_v2_with_positions_last_trade_ts"
+# ↑ новая версия (включает fee_quote в trades)
+BASELINE_VERSION = "2025-08-30-01-fee"
+BASELINE_CHECKSUM = "sha256:baseline_with_fee_and_last_trade_ts"
 
 def _ensure_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.execute("""
@@ -66,8 +60,6 @@ def _record_migration(conn: sqlite3.Connection, version: str, applied_at_ms: int
         (version, applied_at_ms, checksum),
     )
 
-# ------------------------ BACKUP ------------------------
-
 def _backup_sqlite(src_path: str, out_dir: str, retention_days: int = 30) -> Optional[str]:
     try:
         os.makedirs(out_dir, exist_ok=True)
@@ -75,18 +67,14 @@ def _backup_sqlite(src_path: str, out_dir: str, retention_days: int = 30) -> Opt
         base = os.path.basename(src_path)
         name = os.path.splitext(base)[0]
         out_path = os.path.join(out_dir, f"{name}-backup-{ts}.sqlite3")
-
         src = sqlite3.connect(src_path)
         dst = sqlite3.connect(out_path)
         with dst:
             src.backup(dst)  # type: ignore[attr-defined]
-        src.close()
-        dst.close()
-
+        src.close(); dst.close()
         cutoff = datetime.now(timezone.utc) - timedelta(days=int(retention_days))
         for f in os.listdir(out_dir):
-            if not f.endswith(".sqlite3"):
-                continue
+            if not f.endswith(".sqlite3"): continue
             full = os.path.join(out_dir, f)
             try:
                 mtime = datetime.fromtimestamp(os.path.getmtime(full), tz=timezone.utc)
@@ -94,22 +82,17 @@ def _backup_sqlite(src_path: str, out_dir: str, retention_days: int = 30) -> Opt
                     os.remove(full)
             except Exception:
                 pass
-
         return out_path
     except Exception:
         return None
 
-# ------------------------ MIGRATION STEPS (IDEMPOTENT) ------------------------
-
 def _baseline(conn: sqlite3.Connection) -> None:
-    # positions
     _ensure_table(conn, """
         CREATE TABLE IF NOT EXISTS positions(
             symbol TEXT PRIMARY KEY,
             base_qty NUMERIC NOT NULL DEFAULT 0
         );
     """)
-    # trades
     _ensure_table(conn, """
         CREATE TABLE IF NOT EXISTS trades(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,8 +109,6 @@ def _baseline(conn: sqlite3.Connection) -> None:
         );
     """)
     _ensure_index(conn, "CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts_ms);")
-
-    # audit
     _ensure_table(conn, """
         CREATE TABLE IF NOT EXISTS audit(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,8 +118,6 @@ def _baseline(conn: sqlite3.Connection) -> None:
         );
     """)
     _ensure_index(conn, "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts_ms);")
-
-    # idempotency
     _ensure_table(conn, """
         CREATE TABLE IF NOT EXISTS idempotency(
             bucket_ms INTEGER NOT NULL,
@@ -147,8 +126,6 @@ def _baseline(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(bucket_ms, key)
         );
     """)
-
-    # market_data
     _ensure_table(conn, """
         CREATE TABLE IF NOT EXISTS market_data(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,8 +135,6 @@ def _baseline(conn: sqlite3.Connection) -> None:
         );
     """)
     _ensure_index(conn, "CREATE INDEX IF NOT EXISTS idx_md_symbol_ts ON market_data(symbol, ts_ms);")
-
-    # instance_lock
     _ensure_table(conn, """
         CREATE TABLE IF NOT EXISTS instance_lock(
             app TEXT PRIMARY KEY,
@@ -167,20 +142,18 @@ def _baseline(conn: sqlite3.Connection) -> None:
             expires_at_ms INTEGER NOT NULL
         );
     """)
-
-    # дополнительные колонки к positions — гарантируем идемпотентно
+    # доп. колонки (идемпотентно)
     for col, col_def in [
         ("avg_entry_price", "NUMERIC DEFAULT 0"),
         ("realized_pnl",   "NUMERIC DEFAULT 0"),
         ("unrealized_pnl", "NUMERIC DEFAULT 0"),
         ("opened_at",      "INTEGER DEFAULT 0"),
         ("updated_at",     "INTEGER DEFAULT 0"),
-        # НОВОЕ: для cooldown/аудита операций
         ("last_trade_ts_ms", "INTEGER DEFAULT 0"),
     ]:
         _ensure_column(conn, "positions", col, col_def)
-
-# ------------------------ PUBLIC API ------------------------
+    # НОВОЕ: комиссии по сделкам
+    _ensure_column(conn, "trades", "fee_quote", "NUMERIC DEFAULT 0")
 
 def run_migrations(
     conn: sqlite3.Connection,
@@ -190,21 +163,14 @@ def run_migrations(
     do_backup: bool = True,
     backup_retention_days: int = 30,
 ) -> str:
-    """
-    Запускает миграции атомарно. Если db_path передан и do_backup=True — перед миграцией делает бэкап.
-    Возвращает применённую версию схемы (последнюю).
-    """
     _apply_pragmas(conn)
     _ensure_schema_migrations(conn)
-
     applied = set(_applied_versions(conn))
     if BASELINE_VERSION in applied:
         return BASELINE_VERSION
-
     if do_backup and db_path and os.path.exists(db_path):
         out_dir = os.path.join(os.path.dirname(db_path), "backups")
         _backup_sqlite(db_path, out_dir, retention_days=backup_retention_days)
-
     _begin_immediate(conn)
     try:
         _baseline(conn)
