@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 from crypto_ai_bot.core.application.ports import (
     BrokerPort, StoragePort, EventBusPort, OrderLike
@@ -104,7 +104,27 @@ async def eval_and_execute(
         await _emit(bus, "trade.blocked", payload, key=symbol)
         return None
 
-    # 3) risk gate
+    # 3) контроль спреда/проска (грубая защита для маркетов)
+    try:
+        max_spread = dec(str(getattr(settings, "MAX_SPREAD_PCT", "0") or "0"))
+        if max_spread > 0:
+            t = await broker.fetch_ticker(symbol)
+            bid = dec(str(getattr(t, "bid", "0") or "0"))
+            ask = dec(str(getattr(t, "ask", "0") or "0"))
+            last = dec(str(getattr(t, "last", "0") or "0"))
+            mid = (bid + ask) / dec("2") if bid > 0 and ask > 0 else (last if last > 0 else dec("0"))
+            spread = ((ask - bid) / mid) * dec("100") if (bid > 0 and ask > 0 and mid > 0) else dec("0")
+            if spread > max_spread:
+                payload = {"symbol": symbol, "reason": f"slippage_block:spread>{max_spread}%", "spread_pct": str(spread), "ts_ms": now_ms()}
+                _log.warning("trade_blocked_spread", extra=payload)
+                inc("risk_block_total", symbol=symbol, why="max_spread_pct")
+                await _emit(bus, "trade.blocked", payload, key=symbol)
+                return None
+    except Exception:
+        # защита не критична: если тики не получены — не блокируем
+        pass
+
+    # 4) risk gate
     try:
         ok, why = risk_manager.allow(symbol=symbol, action=plan.action,
                                      quote_amount=plan.quote_amount, base_amount=plan.base_amount)
@@ -121,7 +141,7 @@ async def eval_and_execute(
         await _emit(bus, "trade.blocked", payload, key=symbol)
         return None
 
-    # 4) подготовка и идемпотентность
+    # 5) подготовка и идемпотентность
     quote_ccy = parse_symbol(symbol).quote
     side = plan.action
 
@@ -140,10 +160,17 @@ async def eval_and_execute(
     else:
         return None
 
+    # совместимость с двумя сигнатурами check_and_store:
+    # (coid, ttl=...) ИЛИ (coid, ttl_sec=..., default_bucket_ms=...)
+    idem = getattr(storage, "idempotency", None)
     try:
-        idem = getattr(storage, "idempotency", None)
         if idem and hasattr(idem, "check_and_store"):
-            ok = idem.check_and_store(coid, ttl=int(idempotency_ttl_sec))
+            try:
+                ok = idem.check_and_store(coid, ttl=int(idempotency_ttl_sec))  # новая сигнатура
+            except TypeError:
+                ok = idem.check_and_store(  # старая сигнатура
+                    coid, ttl_sec=int(idempotency_ttl_sec), default_bucket_ms=int(idempotency_bucket_ms)
+                )
             if not ok:
                 raise IdempotencyError("duplicate clientOrderId")
     except IdempotencyError:
@@ -153,7 +180,7 @@ async def eval_and_execute(
         await _emit(bus, "trade.blocked", payload, key=symbol)
         return None
 
-    # 5) исполнение
+    # 6) исполнение
     try:
         if side == "buy":
             order = await broker.create_market_buy_quote(symbol=symbol, quote_amount=amt_q, client_order_id=coid)
@@ -166,32 +193,34 @@ async def eval_and_execute(
         await _emit(bus, "trade.failed", payload, key=symbol)
         return None
 
-    # 6) запись
+    if not order:
+        payload = {"symbol": symbol, "reason": "no_order_returned", "ts_ms": now_ms()}
+        _log.error("trade_failed_empty", extra=payload)
+        inc("broker_exception_total", symbol=symbol)
+        await _emit(bus, "trade.failed", payload, key=symbol)
+        return None
+
+    # 7) запись сделки
     try:
         storage.trades.add_from_order(order)
     except Exception as exc:
         _log.error("trade_persist_error", extra={"symbol": symbol, "error": str(exc)})
         inc("persist_error_total", symbol=symbol)
 
-    # 6.1 аудит (best-effort)
+    # 7.1 аудит (best-effort)
     try:
         audit = getattr(storage, "audit", None)
         if audit and hasattr(audit, "log"):
             audit.log("trade", {
-                "symbol": symbol,
-                "side": order.side,
-                "amount": str(order.amount),
-                "price": str(order.price or ""),
-                "cost": str(order.cost or ""),
+                "symbol": symbol, "side": order.side, "amount": str(order.amount),
+                "price": str(order.price or ""), "cost": str(order.cost or ""),
                 "fee_quote": str(getattr(order, "fee_quote", "")),
-                "client_order_id": order.client_order_id,
-                "broker_order_id": order.id,
-                "ts_ms": now_ms(),
+                "client_order_id": order.client_order_id, "broker_order_id": order.id, "ts_ms": now_ms(),
             })
     except Exception:
         pass
 
-    # 7) событие — успех
+    # 8) событие об успехе
     payload = {
         "symbol": symbol,
         "side": order.side,
@@ -209,7 +238,7 @@ async def eval_and_execute(
     inc("trade_completed_total", symbol=symbol, side=order.side)
     await _emit(bus, "trade.completed", payload, key=symbol)
 
-    # 8) частичные исполнения (как было)
+    # 9) частичные исполнения — как было
     try:
         if (order.filled or dec("0")) < (order.amount or dec("0")):
             from crypto_ai_bot.core.application.use_cases.partial_fills import PartialFillHandler

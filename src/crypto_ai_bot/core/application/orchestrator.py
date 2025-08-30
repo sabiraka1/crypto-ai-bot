@@ -20,10 +20,9 @@ from crypto_ai_bot.core.application.watchdog_loop import WatchdogLoop
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.budget_guard import check as budget_check
 
 if TYPE_CHECKING:
-    from crypto_ai_bot.core.infrastructure.settings import Settings  # только для типов
+    from crypto_ai_bot.core.infrastructure.settings import Settings  # только типы
 
 _log = get_logger("orchestrator")
 
@@ -68,10 +67,13 @@ class Orchestrator:
     _recon_orders: Optional[OrdersReconciler] = field(default=None, init=False)
     _recon_bal: Optional[BalancesReconciler] = field(default=None, init=False)
 
-    _inflight: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(0), init=False)
+    # собственный счётчик in-flight вместо частного Semaphore._value
+    _inflight_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(0), init=False)
+    _inflight_count: int = field(default=0, init=False)
+    _inflight_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+
     _starting: bool = field(default=False, init=False)
 
-    # ---------- public control ----------
     def start(self) -> None:
         if self._starting or self._tasks:
             return
@@ -101,7 +103,6 @@ class Orchestrator:
             self._recon_orders = OrdersReconciler(self.broker, self.symbol)
             self._recon_bal = BalancesReconciler(self.broker, self.symbol)
 
-            # loop instances
             self._eval_loop = EvalLoop(
                 symbol=self.symbol,
                 storage=self.storage,
@@ -156,7 +157,6 @@ class Orchestrator:
             await asyncio.wait_for(self._wait_drain(), timeout=5.0)
         except asyncio.TimeoutError:
             _log.warning("orchestrator_drain_timeout")
-        # остановить внутренние лупы
         self._eval_loop.stop()
         self._exits_loop.stop()
         self._watchdog_loop.stop()
@@ -191,7 +191,6 @@ class Orchestrator:
         self._auto_hold = False
         await self.bus.publish("orchestrator.resumed", {"symbol": self.symbol, "ts_ms": now_ms()}, key=self.symbol)
 
-    # ---------- helpers ----------
     def is_paused(self) -> bool:
         return self._paused
 
@@ -216,23 +215,32 @@ class Orchestrator:
         await self._auto_pause("budget_exceeded", {k: v for k, v in payload.items() if k != "symbol"})
 
     async def _wait_drain(self) -> None:
-        while self._inflight._value < 0:  # type: ignore[attr-defined]
+        # Ждём, пока не завершатся все секции flight
+        while True:
+            async with self._inflight_lock:
+                if self._inflight_count <= 0:
+                    return
             await asyncio.sleep(0.05)
 
     from contextlib import asynccontextmanager
     @asynccontextmanager
     async def _flight(self):
-        self._inflight.release()
+        # указываем «в полёте»
+        async with self._inflight_lock:
+            self._inflight_count += 1
+        self._inflight_sem.release()
         try:
             yield
         finally:
             try:
-                await self._inflight.acquire()
-            except Exception:
-                pass
+                await self._inflight_sem.acquire()
+            finally:
+                async with self._inflight_lock:
+                    self._inflight_count -= 1
+                    if self._inflight_count < 0:
+                        self._inflight_count = 0
 
     def _flight_cm(self) -> Awaitable:
-        # удобный фабричный вызов для передачи в лупы
         return self._flight()
 
     async def _reconcile_loop(self) -> None:

@@ -1,132 +1,86 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Optional, Any
 
-from crypto_ai_bot.core.infrastructure.brokers.base import IBroker, OrderDTO
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
-from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
-from crypto_ai_bot.core.infrastructure.settings import Settings
-from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.ids import make_client_order_id
-from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort, OrderLike
 from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.time import now_ms
 
-_log = get_logger("risk.exits")
-
-
-@dataclass
-class ExitsPlan:
-    symbol: str
-    entry_price: Decimal
-    sl_price: Decimal
-    tp_price: Optional[Decimal]
-    ts_ms: int
+_log = get_logger("protective_exits")
 
 
 @dataclass
 class ProtectiveExits:
-    storage: Storage
-    bus: AsyncEventBus
-    broker: IBroker
-    settings: Settings
+    storage: StoragePort
+    broker: BrokerPort
+    bus: EventBusPort
+    settings: Any
 
-    _state: Dict[str, Dict[str, Decimal]] = field(default_factory=dict, init=False)
-    _plans: Dict[str, ExitsPlan] = field(default_factory=dict, init=False)
-
-    async def ensure(self, *, symbol: str) -> Optional[dict]:
-        try:
-            pos = self.storage.positions.get_position(symbol)
-            base_qty: Decimal = pos.base_qty or dec("0")
-        except Exception as exc:
-            _log.error("exits_read_position_failed", extra={"error": str(exc)})
-            return {"error": str(exc)}
-
-        if base_qty <= 0:
-            self._state.pop(symbol, None)
-            return None
-
-        if not getattr(self.settings, "EXITS_ENABLED", True):
-            return None
-        mode = (getattr(self.settings, "EXITS_MODE", "both") or "both").lower()
-        hard_pct = dec(getattr(self.settings, "EXITS_HARD_STOP_PCT", 0.05))
-        trail_pct = dec(getattr(self.settings, "EXITS_TRAILING_PCT", 0.03))
-        min_base = dec(getattr(self.settings, "EXITS_MIN_BASE_TO_EXIT", "0.00000000"))
-        bucket_ms = int(getattr(self.settings, "IDEMPOTENCY_BUCKET_MS", 60_000))
-
-        if min_base and base_qty < min_base:
-            return None
-
-        t = await self.broker.fetch_ticker(symbol)
-        last = t.last
-
-        st = self._state.setdefault(symbol, {})
-        if "entry" not in st:
-            st["entry"] = dec(last)
-            st["peak"] = dec(last)
-        st["peak"] = max(dec(last), st.get("peak", dec(last)))
-
-        should_sell = False
-        reason = None
-
-        if mode in ("hard", "both"):
-            hard_stop_price = st["entry"] * (dec("1") - hard_pct)
-            if last <= hard_stop_price:
-                should_sell = True
-                reason = f"hard_stop_{hard_pct}"
-
-        if not should_sell and mode in ("trailing", "both"):
-            trail_price = st["peak"] * (dec("1") - trail_pct)
-            if last <= trail_price:
-                should_sell = True
-                reason = f"trailing_{trail_pct}"
-
-        if not should_sell:
-            return None
-
-        bucket = (now_ms() // bucket_ms) * bucket_ms
-        client_id = make_client_order_id("exits", f"{symbol}:{reason}:{bucket}")
-
-        try:
-            order = await self.broker.create_market_sell_base(
-                symbol=symbol,
-                base_amount=base_qty,
-                client_order_id=client_id,
-            )
-            payload = {
-                "symbol": symbol,
-                "base_sold": str(base_qty),
-                "price": str(last),
-                "reason": reason,
-                "order_id": getattr(order, "id", None),
-                "client_order_id": client_id,
-                "ts": now_ms(),
-            }
-            inc("exits_triggered_total", reason=(reason or "na"))
-            await self.bus.publish("protective_exit.triggered", payload, key=symbol)
-            _log.warning("protective_exit_triggered", extra=payload)
-            self._state.pop(symbol, None)
-            return payload
-        except Exception as exc:
-            _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(exc)})
-            return {"error": str(exc)}
-
-    async def check_and_execute(self, *, symbol: str) -> Optional[OrderDTO]:
-        plan = self._plans.get(symbol)
-        if not plan:
-            return None
-        pos = self.storage.positions.get_position(symbol)
-        base_qty = pos.base_qty or dec("0")
-        if base_qty <= 0:
-            return None
-        t = await self.broker.fetch_ticker(symbol)
-        last = t.last or t.bid or t.ask
-        if not last or last <= 0:
-            return None
-        if plan.sl_price and last <= plan.sl_price:
-            return await self.broker.create_market_sell_base(symbol=symbol, base_amount=base_qty, client_order_id=make_client_order_id("sl", symbol))
-        if plan.tp_price and last >= plan.tp_price:
-            return await self.broker.create_market_sell_base(symbol=symbol, base_amount=base_qty, client_order_id=make_client_order_id("tp", symbol))
+    async def ensure(self, *, symbol: str) -> None:
+        """
+        Поддерживающая логика: может выставлять защитные уровни (если появятся).
+        Пока — no-op, чтобы не создавать скрытых зависимостей.
+        """
         return None
+
+    async def check_and_execute(self, *, symbol: str) -> Optional[OrderLike]:
+        """
+        Простой TP/SL long-only: при наличии позиции и настроек порогов.
+        - TAKE_PROFIT_PCT / STOP_LOSS_PCT (число, проценты)
+        """
+        pos = self.storage.positions.get_position(symbol)
+        base = dec(str(getattr(pos, "base_qty", 0) or 0))
+        if base <= 0:
+            return None
+
+        entry = dec(str(getattr(pos, "avg_entry_price", 0) or 0))
+        if entry <= 0:
+            return None
+
+        try:
+            tp = dec(str(getattr(self.settings, "TAKE_PROFIT_PCT", "0") or "0"))
+            sl = dec(str(getattr(self.settings, "STOP_LOSS_PCT", "0") or "0"))
+        except Exception:
+            tp = sl = dec("0")
+
+        if tp <= 0 and sl <= 0:
+            return None
+
+        # Текущая рыночная цена
+        t = await self.broker.fetch_ticker(symbol)
+        last = dec(str(getattr(t, "last", 0) or 0))
+        if last <= 0:
+            return None
+
+        should_exit = False
+        reason = ""
+
+        if tp > 0:
+            target = entry * (dec("1") + tp / dec("100"))
+            if last >= target:
+                should_exit = True
+                reason = f"take_profit_{tp}%"
+
+        if (not should_exit) and sl > 0:
+            floor = entry * (dec("1") - sl / dec("100"))
+            if last <= floor:
+                should_exit = True
+                reason = f"stop_loss_{sl}%"
+
+        if not should_exit:
+            return None
+
+        coid = f"exit:{symbol}:{int(now_ms() // 1000)}"
+        try:
+            od = await self.broker.create_market_sell_base(symbol=symbol, base_amount=base, client_order_id=coid)
+            await self.bus.publish("exit.executed", {
+                "symbol": symbol, "reason": reason, "amount": str(base),
+                "price": str(od.price or ""), "client_order_id": od.client_order_id, "ts_ms": now_ms()
+            }, key=symbol)
+            return od
+        except Exception as exc:
+            _log.error("exit_execute_failed", extra={"symbol": symbol, "error": str(exc)})
+            return None
