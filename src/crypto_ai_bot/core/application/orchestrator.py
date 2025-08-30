@@ -21,14 +21,15 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils import metrics as M
 from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.budget_guard import check as budget_check  # NEW
 
 if TYPE_CHECKING:
     from crypto_ai_bot.core.infrastructure.settings import Settings
 
 _log = get_logger("orchestrator")
 
-
 def _fixed_amount_for(settings: "Settings", symbol: str) -> Decimal:
+    from crypto_ai_bot.core.infrastructure.brokers.symbols import parse_symbol
     p = parse_symbol(symbol)
     key = f"AMOUNT_{p.base}_{p.quote}".upper().replace("-", "_")
     raw = os.getenv(key) or getattr(settings, key, None)
@@ -38,19 +39,6 @@ def _fixed_amount_for(settings: "Settings", symbol: str) -> Decimal:
         return dec(str(raw))
     except Exception:
         return dec(str(getattr(settings, "FIXED_AMOUNT", "0")))
-
-
-def _per_symbol_num(settings: "Settings", symbol: str, name: str, default: Decimal | int) -> Decimal | int:
-    p = parse_symbol(symbol)
-    key = f"{name}_{p.base}_{p.quote}".upper().replace("-", "_")
-    v = getattr(settings, key, None)
-    if v in (None, ""):
-        return default
-    try:
-        return type(default)(v)  # Decimal или int
-    except Exception:
-        return default
-
 
 @dataclass
 class Orchestrator:
@@ -91,20 +79,14 @@ class Orchestrator:
         try:
             loop = asyncio.get_running_loop()
             self._stopping = False
-
             def _safe_float(v, default):
-                try:
-                    x = float(v)
-                    return x if x > 0 else default
-                except Exception:
-                    return default
-
+                try: x = float(v); return x if x > 0 else default
+                except Exception: return default
             self.eval_interval_sec = _safe_float(getattr(self.settings, "EVAL_INTERVAL_SEC", self.eval_interval_sec), self.eval_interval_sec)
             self.exits_interval_sec = _safe_float(getattr(self.settings, "EXITS_INTERVAL_SEC", self.exits_interval_sec), self.exits_interval_sec)
             self.reconcile_interval_sec = _safe_float(getattr(self.settings, "RECONCILE_INTERVAL_SEC", self.reconcile_interval_sec), self.reconcile_interval_sec)
             self.watchdog_interval_sec = _safe_float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", self.watchdog_interval_sec), self.watchdog_interval_sec)
 
-            # риск знает хранилище + настройки (для пер-символьных override'ов)
             try:
                 self.risk.attach_storage(self.storage)
                 self.risk.attach_settings(self.settings)
@@ -117,6 +99,7 @@ class Orchestrator:
                 rechecks=int(getattr(self.settings, "DMS_RECHECKS", 2) or 2),
                 recheck_delay_sec=float(getattr(self.settings, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
                 max_impact_pct=dec(str(getattr(self.settings, "DMS_MAX_IMPACT_PCT", "0") or "0")),
+                bus=self.bus,
             )
             self._recon_orders = OrdersReconciler(self.broker, self.symbol)
             self._recon_bal = BalancesReconciler(self.broker, self.symbol)
@@ -200,34 +183,16 @@ class Orchestrator:
             except Exception:
                 pass
 
-    # ---- budget guard c пер-символьными overrides ----
-    def _budget_exceeded(self) -> Optional[Dict[str, str]]:
-        max_orders_5m = int(_per_symbol_num(self.settings, self.symbol, "BUDGET_MAX_ORDERS_5M",
-                                            int(getattr(self.settings, "BUDGET_MAX_ORDERS_5M", 0) or 0)))
-        if max_orders_5m > 0:
-            cnt5 = self.storage.trades.count_orders_last_minutes(self.symbol, 5)
-            if cnt5 >= max_orders_5m:
-                return {"type": "max_orders_5m", "count_5m": str(cnt5), "limit": str(int(max_orders_5m))}
-        max_turnover = dec(str(_per_symbol_num(self.settings, self.symbol, "BUDGET_MAX_TURNOVER_DAY_QUOTE",
-                                               dec(str(getattr(self.settings, "BUDGET_MAX_TURNOVER_DAY_QUOTE", "0") or "0")))))
-        if max_turnover > 0:
-            day_turn = self.storage.trades.daily_turnover_quote(self.symbol)
-            if day_turn >= max_turnover:
-                return {"type": "max_turnover_day", "turnover": str(day_turn), "limit": str(max_turnover)}
-        return None
-
-    def _budget_ok(self) -> bool:
-        return self._budget_exceeded() is None
-
-    # ------------ loops ------------
     async def _eval_loop(self) -> None:
         while not self._stopping:
             try:
                 if self._paused:
                     await asyncio.sleep(min(1.0, self.eval_interval_sec))
                 else:
-                    over = self._budget_exceeded()
+                    over = budget_check(self.storage, self.symbol, self.settings)  # NEW: общий guard
                     if over:
+                        payload = {"symbol": self.symbol, **over, "ts_ms": now_ms()}
+                        await self.bus.publish("budget.exceeded", payload, key=self.symbol)  # NEW
                         await self._auto_pause("budget_exceeded", over)
                         await asyncio.sleep(self.eval_interval_sec)
                         continue
@@ -320,7 +285,7 @@ class Orchestrator:
                     if (er >= err_pause) or (al >= lat_pause):
                         await self._auto_pause("sla_threshold_exceeded",
                                                {"error_rate_5m": f"{er:.4f}", "avg_latency_ms_5m": f"{al:.2f}"})
-                    elif self._auto_hold and (er <= err_resume) and (al <= lat_resume) and self._budget_ok():
+                    elif self._auto_hold and (er <= err_resume) and (al <= lat_resume) and (budget_check(self.storage, self.symbol, self.settings) is None):
                         await self._auto_resume("sla_stabilized_and_budget_ok",
                                                 {"error_rate_5m": f"{er:.4f}", "avg_latency_ms_5m": f"{al:.2f}"})
             except Exception as exc:

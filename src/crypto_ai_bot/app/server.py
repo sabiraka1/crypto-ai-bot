@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import signal
 from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Query
@@ -12,7 +13,7 @@ from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_e
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.metrics import render_prometheus, render_metrics_json, inc
+from crypto_ai_bot.utils.metrics import render_prometheus, render_metrics_json
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.exceptions import (
     TradingError, RateLimitError, IdempotencyError, BrokerError, TransientError, CircuitOpenError,
@@ -28,7 +29,7 @@ _container = None
 _startup_blocked_reason: Optional[str] = None
 _ip_allow: List[str] = []
 
-# ---------- middleware: IP allowlist ----------
+
 @app.middleware("http")
 async def ip_allowlist_mw(request: Request, call_next):
     global _ip_allow
@@ -41,7 +42,6 @@ async def ip_allowlist_mw(request: Request, call_next):
     return await call_next(request)
 
 
-# ---------- auth ----------
 async def _auth(_: Request, credentials: HTTPAuthorizationCredentials = Depends(security)) -> None:
     if not _container:
         raise HTTPException(status_code=503, detail="Service Unavailable")
@@ -52,18 +52,17 @@ async def _auth(_: Request, credentials: HTTPAuthorizationCredentials = Depends(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# ---------- app lifecycle ----------
 @app.on_event("startup")
 async def _startup() -> None:
     global _container, _startup_blocked_reason, _ip_allow
     _container = build_container()
     _startup_blocked_reason = None
 
-    # IP allowlist
+    # allowlist
     raw = (getattr(_container.settings, "API_IP_ALLOWLIST", "") or "").strip()
     _ip_allow = [x.strip() for x in raw.split(",") if x.strip()]
 
-    # требование токена в live-режиме (при флаге)
+    # live-token
     require_token = False
     try:
         require_token = bool(int(getattr(_container.settings, "REQUIRE_API_TOKEN_IN_LIVE", 0)))
@@ -75,7 +74,7 @@ async def _startup() -> None:
             _log.error("startup_blocked_no_api_token")
             raise RuntimeError(_startup_blocked_reason)
 
-    # стартовая сверка позиций (dec)
+    # reconcile barrier
     try:
         symbols: List[str] = list(_container.orchestrators.keys()) or [_container.settings.SYMBOL]
         for sym in symbols:
@@ -87,16 +86,23 @@ async def _startup() -> None:
                 if bool(getattr(_container.settings, "RECONCILE_AUTOFIX", 0)):
                     add_rec = getattr(_container.storage.trades, "add_reconciliation_trade", None)
                     if callable(add_rec):
-                        add_rec({"symbol": sym,"side": ("buy" if diff > 0 else "sell"),"amount": str(abs(diff)),
-                                 "status": "reconciliation","ts_ms": now_ms(),"client_order_id": f"reconcile-start-{sym}-{now_ms()}"})
+                        add_rec({
+                            "symbol": sym, "side": ("buy" if diff > 0 else "sell"),
+                            "amount": str(abs(diff)), "status": "reconciliation",
+                            "ts_ms": now_ms(), "client_order_id": f"reconcile-start-{sym}-{now_ms()}",
+                        })
                     _container.storage.positions.set_base_qty(sym, bal.free_base or dec("0"))
-                    _log.info("startup_reconcile_autofix_applied", extra={"symbol": sym, "exchange": str(bal.free_base), "local": str(pos.base_qty), "diff": str(diff)})
+                    _log.info("startup_reconcile_autofix_applied", extra={
+                        "symbol": sym, "exchange": str(bal.free_base), "local": str(pos.base_qty), "diff": str(diff)
+                    })
                 else:
                     _startup_blocked_reason = (
                         f"Position mismatch at startup for {sym}: exchange={bal.free_base} local={pos.base_qty}. "
                         f"Enable RECONCILE_AUTOFIX=1 or fix manually."
                     )
-                    _log.error("startup_reconcile_blocked", extra={"symbol": sym, "exchange": str(bal.free_base), "local": str(pos.base_qty), "diff": str(diff)})
+                    _log.error("startup_reconcile_blocked", extra={
+                        "symbol": sym, "exchange": str(bal.free_base), "local": str(pos.base_qty), "diff": str(diff)
+                    })
                     raise RuntimeError(_startup_blocked_reason)
             else:
                 _log.info("startup_reconcile_ok", extra={"symbol": sym, "position": str(pos.base_qty), "diff": str(diff)})
@@ -114,6 +120,23 @@ async def _startup() -> None:
             loop.call_soon(orch.start)
         _log.info("orchestrators_autostarted", extra={"symbols": list(_container.orchestrators.keys())})
 
+    # graceful: явная подписка на сигналы (на случай не-uvicorn запуска)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(_graceful_shutdown(s)))
+        except NotImplementedError:
+            # windows / нестандартная среда
+            pass
+
+async def _graceful_shutdown(sig: signal.Signals) -> None:
+    _log.warning("signal_received", extra={"signal": str(sig)})
+    try:
+        if _container:
+            await asyncio.gather(*(orch.stop() for orch in _container.orchestrators.values()), return_exceptions=True)
+    finally:
+        _log.info("graceful_shutdown_done")
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     if not _container:
@@ -130,7 +153,6 @@ async def _shutdown() -> None:
     _log.info("shutdown_ok")
 
 
-# ---------- error mapping ----------
 @app.exception_handler(TradingError)
 async def trading_error_handler(_: Request, exc: TradingError):
     if isinstance(exc, RateLimitError):
@@ -151,7 +173,6 @@ async def unhandled_error_handler(_: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"ok": False, "error": "InternalServerError"})
 
 
-# ---------- health / metrics ----------
 @router.get("/")
 async def root() -> Dict[str, Any]:
     return {"name": "crypto-ai-bot", "version": "1.0.0"}
@@ -175,8 +196,6 @@ async def metrics() -> str:
         data = render_metrics_json()
         return "#metrics_fallback\n" + str(data) + "\n"
 
-
-# ---------- orchestrators ----------
 def _pick_symbols(symbol: Optional[str]) -> List[str]:
     if not _container:
         return []
@@ -216,8 +235,6 @@ async def orchestrator_resume(symbol: Optional[str] = Query(default=None), _: An
     await asyncio.gather(*(_container.orchestrators[s].resume() for s in _pick_symbols(symbol)))
     return {"ok": True, "message": "resumed", "symbols": _pick_symbols(symbol)}
 
-
-# ---------- positions & pnl ----------
 @router.get("/positions")
 async def get_positions(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
     syms = _pick_symbols(symbol)
@@ -254,8 +271,6 @@ async def pnl_today(symbol: Optional[str] = Query(default=None), _: Any = Depend
         }
     return {"ok": True, "pnl": res}
 
-
-# ---------- manual trade trigger ----------
 @router.post("/trade/force")
 async def trade_force(
     action: str = Query(..., regex="^(buy|sell|hold)$"),
