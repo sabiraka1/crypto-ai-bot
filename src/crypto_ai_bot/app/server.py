@@ -253,22 +253,36 @@ async def get_positions(symbol: Optional[str] = Query(default=None), _: Any = De
 
 @router.get("/pnl/today")
 async def pnl_today(symbol: Optional[str] = Query(default=None), _: Any = Depends(_auth)) -> Dict[str, Any]:
+    """
+    Получение PnL за сегодня через FIFO расчет из репозитория.
+    Поддерживает мульти-символы.
+    """
+    if not _container:
+        raise HTTPException(status_code=503, detail="Service Unavailable")
+    
     syms = _pick_symbols(symbol)
     res: Dict[str, Dict[str, str]] = {}
+    
     for s in syms:
-        rows = _container.storage.trades.list_today(s)
-        from crypto_ai_bot.utils.decimal import dec
-        buys = sum(dec(str(r["cost"])) for r in rows if str(r["side"]).lower() == "buy")
-        sells = sum(dec(str(r["cost"])) for r in rows if str(r["side"]).lower() == "sell")
-        fees = sum(dec(str(r.get("fee_quote", 0))) for r in rows)
-        realized = (sells - buys) - fees
-        res[s] = {
-            "total_trades": str(len(rows)),
-            "buys_quote": str(buys),
-            "sells_quote": str(sells),
-            "fees_quote": str(fees),
-            "realized_quote": str(realized),
-        }
+        try:
+            # Используем FIFO расчет из репозитория - единая точка истины
+            realized = _container.storage.trades.daily_pnl_quote(s)
+            
+            # Получаем список сделок для статистики
+            rows = _container.storage.trades.list_today(s)
+            
+            res[s] = {
+                "total_trades": str(len(rows)),
+                "realized_quote": str(realized),
+            }
+        except Exception as exc:
+            _log.error("pnl_today_failed", extra={"symbol": s, "error": str(exc)})
+            res[s] = {
+                "error": f"PnL calculation failed: {str(exc)}",
+                "total_trades": "0",
+                "realized_quote": "0",
+            }
+    
     return {"ok": True, "pnl": res}
 
 @router.post("/trade/force")
