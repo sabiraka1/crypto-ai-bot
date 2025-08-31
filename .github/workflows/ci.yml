@@ -1,32 +1,64 @@
-name: ci
+name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "**" ]
   pull_request:
+    branches: [ "**" ]
 
 jobs:
-  lint-test:
+  build:
     runs-on: ubuntu-latest
+
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install deps
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-          pip install ruff mypy import-linter
+          if [ -f "requirements.txt" ]; then pip install -r requirements.txt; fi
+          if [ -f "requirements-dev.txt" ]; then pip install -r requirements-dev.txt; fi
+          # на всякий случай: установить инструменты, если не включены в requirements
+          pip install ruff mypy import-linter pytest
 
-      - name: Ruff
-        run: ruff check .
+      - name: Static checks (ruff)
+        run: |
+          ruff --version
+          ruff check src
 
-      - name: MyPy (src/* only)
-        run: mypy src
+      - name: Type checks (mypy)
+        run: |
+          mypy --version
+          mypy src
 
-      - name: Import Linter
-        run: lint-imports --config importlinter.ini
+      - name: Import Linter (architecture)
+        run: |
+          lint-imports --config importlinter.ini
+
+      - name: Run tests (pytest)
+        env:
+          # окружение по умолчанию; можно дополнить при необходимости
+          MODE: paper
+          EXCHANGE: gateio
+          SYMBOL: BTC/USDT
+          DB_PATH: /home/runner/work/db/crypto-ai-bot.sqlite
+        run: |
+          pytest -q
