@@ -9,6 +9,7 @@ from typing import Any
 
 try:
     from redis.asyncio import Redis
+    from redis.asyncio.client import PubSub
 except Exception as exc:  # pragma: no cover
     raise RuntimeError("redis.asyncio is required for RedisEventBus") from exc
 
@@ -16,15 +17,15 @@ try:
     from crypto_ai_bot.utils.logging import get_logger
 except Exception:  # pragma: no cover
     import logging
-    def get_logger(name: str) -> logging.Logger:
+    def get_logger(name: str, *, level: int = 20) -> logging.Logger:  # Исправлено: добавили параметр level
         return logging.getLogger(name)
 
 try:
     from crypto_ai_bot.utils.metrics import inc, observe
 except Exception:  # pragma: no cover
-    def inc(_name: str, **_labels: Any) -> None:
+    def inc(name: str, **labels: Any) -> None:  # Исправлено: убрали подчеркивания
         pass
-    def observe(_name: str, _value: float, _labels: dict[str, str] | None = None) -> None:
+    def observe(name: str, value: float, labels: dict[str, str] | None = None) -> None:  # Исправлено: убрали подчеркивания
         pass
 
 _log = get_logger("events.redis_bus")
@@ -47,7 +48,7 @@ class RedisEventBus:
         self._dlq: list[Handler] = []
         self._listener_task: asyncio.Task | None = None
         self._started: bool = False
-        self._active_pubsub = None  # type: ignore
+        self._active_pubsub: PubSub | None = None  # Исправлено: указали правильный тип
 
     # ------------------ API совместимый с AsyncEventBus ------------------
 
@@ -60,7 +61,7 @@ class RedisEventBus:
     def subscribe_dlq(self, handler: Handler) -> None:
         self._dlq.append(handler)
 
-    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None) -> dict[str, Any]:
+    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None) -> None:  # Исправлено: возвращаем None
         if not self._pub:
             raise RuntimeError("RedisEventBus not started")
         msg = json.dumps({"topic": topic, "payload": payload, "key": key})
@@ -70,7 +71,6 @@ class RedisEventBus:
         dt_ms = (asyncio.get_event_loop().time() - t0) * 1000.0
         observe("redis_bus.publish.ms", dt_ms, {"topic": topic})
         inc("redis_bus_publish_total", topic=topic)
-        return {"ok": True, "topic": topic}
 
     async def start(self) -> None:
         if self._started:

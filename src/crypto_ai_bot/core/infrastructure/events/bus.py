@@ -10,7 +10,7 @@ from typing import Any
 try:
     from crypto_ai_bot.utils.metrics import inc  # type: ignore
 except Exception:  # pragma: no cover
-    def inc(_name: str, **_labels: Any) -> None:  # no-op
+    def inc(name: str, **labels: Any) -> None:  # Исправлено: убрали подчеркивания
         pass
 
 try:
@@ -24,7 +24,7 @@ try:
     from crypto_ai_bot.utils.logging import get_logger  # type: ignore
 except Exception:  # pragma: no cover
     import logging
-    def get_logger(name: str) -> logging.Logger:
+    def get_logger(name: str, *, level: int = 20) -> logging.Logger:  # Исправлено: добавили параметр level
         return logging.getLogger(name)
 
 _log = get_logger("events.bus")
@@ -134,6 +134,17 @@ class AsyncEventBus:
         inc("bus_publish_ok_total", topic=topic, delivered=delivered)
         _log.info("bus_published", extra={"topic": topic, "delivered": delivered, "key": key})
         return {"ok": True, "delivered": delivered, "topic": topic}
+
+    # -------------------------
+    # Методы для совместимости с протоколом
+    # -------------------------
+    async def start(self) -> None:
+        """Для совместимости с EventBusPort"""
+        pass
+    
+    async def close(self) -> None:
+        """Для совместимости с EventBusPort"""
+        pass
 
     # -------------------------
     # Внутреннее: отправка в DLQ
