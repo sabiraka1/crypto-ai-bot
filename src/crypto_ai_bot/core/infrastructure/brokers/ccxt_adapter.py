@@ -3,9 +3,9 @@
 import asyncio
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, Callable, Awaitable
 
-from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker  # ← используем уже существующий файл
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
@@ -57,11 +57,11 @@ class CcxtBroker:
         self._sym_to_gate: dict[str, str] = {}
         self._gate_to_sym: dict[str, str] = {}
 
-        # circuit breakers (используем твой utils/circuit_breaker.API)
-        self._cb_ticker = CircuitBreaker(failures_threshold=5, open_timeout_ms=10_000, half_open_successes_to_close=1)
-        self._cb_balance = CircuitBreaker(failures_threshold=5, open_timeout_ms=10_000, half_open_successes_to_close=1)
-        self._cb_create = CircuitBreaker(failures_threshold=3, open_timeout_ms=15_000, half_open_successes_to_close=1)
-        self._cb_order = CircuitBreaker(failures_threshold=5, open_timeout_ms=10_000, half_open_successes_to_close=1)
+        # circuit breakers
+        self._cb_ticker = CircuitBreaker(name="ticker", failure_threshold=5, reset_timeout_sec=10.0)
+        self._cb_balance = CircuitBreaker(name="balance", failure_threshold=5, reset_timeout_sec=10.0)
+        self._cb_create = CircuitBreaker(name="create", failure_threshold=3, reset_timeout_sec=15.0)
+        self._cb_order = CircuitBreaker(name="order", failure_threshold=5, reset_timeout_sec=10.0)
 
     # ----- нормализация символов для gate -----
     @staticmethod
@@ -155,11 +155,10 @@ class CcxtBroker:
         if min_notional and min_notional > 0 and notional < min_notional:
             raise ValidationError(f"minNotional:{notional}<{min_notional}")
 
-    # ----- вспомогательная обёртка под твой CircuitBreaker.run_async -----
-    async def _with_cb(self, cb: CircuitBreaker, coro_fn):
-        async def _runner():
+    # ----- вспомогательная обёртка под CircuitBreaker -----
+    async def _with_cb(self, cb: CircuitBreaker, coro_fn: Callable[[], Awaitable[Any]]) -> Any:
+        async with cb:
             return await coro_fn()
-        return await cb.run_async(_runner)
 
     # ----- wrapped calls with CB & rate limiting -----
     async def fetch_ticker(self, symbol: str) -> Any:
@@ -172,7 +171,7 @@ class CcxtBroker:
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"})
             return res
         except Exception as exc:
-            inc("broker.request.error", {"fn": "fetch_ticker"})
+            inc("broker.request.error", fn="fetch_ticker")
             raise self._map_error(exc) from exc
 
     async def fetch_balance(self, symbol: str) -> Any:
@@ -190,7 +189,7 @@ class CcxtBroker:
                 "free_quote": dec(str(acct_quote.get("free", 0) or 0)),
             }
         except Exception as exc:
-            inc("broker.request.error", {"fn": "fetch_balance"})
+            inc("broker.request.error", fn="fetch_balance")
             raise self._map_error(exc) from exc
 
     async def create_market_buy_quote(
@@ -205,6 +204,8 @@ class CcxtBroker:
 
         base_amount = quote_amount / ask
         base_amount, _ = self._apply_precision(symbol, amount=base_amount, price=None)
+        if base_amount is None:
+            raise ValidationError("precision_application_failed")
         self._check_min_notional(symbol, amount=base_amount, price=ask)
 
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
@@ -221,7 +222,7 @@ class CcxtBroker:
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})
             return order
         except Exception as exc:
-            inc("broker.request.error", {"fn": "create_buy"})
+            inc("broker.request.error", fn="create_buy")
             raise self._map_error(exc) from exc
 
     async def create_market_sell_base(
@@ -234,6 +235,8 @@ class CcxtBroker:
             raise ValidationError("ticker_bid_invalid")
 
         b_amt, _ = self._apply_precision(symbol, amount=base_amount, price=None)
+        if b_amt is None:
+            raise ValidationError("precision_application_failed")
         self._check_min_notional(symbol, amount=b_amt, price=bid)
 
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
@@ -250,7 +253,7 @@ class CcxtBroker:
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"})
             return order
         except Exception as exc:
-            inc("broker.request.error", {"fn": "create_sell"})
+            inc("broker.request.error", fn="create_sell")
             raise self._map_error(exc) from exc
 
     async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any:
@@ -263,5 +266,5 @@ class CcxtBroker:
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_order"})
             return res
         except Exception as exc:
-            inc("broker.request.error", {"fn": "fetch_order"})
+            inc("broker.request.error", fn="fetch_order")
             raise self._map_error(exc) from exc

@@ -81,7 +81,11 @@ class DeadMansSwitch:
             pos = self.storage.positions.get_position(self.symbol)
             base = dec(str(pos.base_qty or 0))
             if base > 0:
-                od = await self.broker.create_market_sell_base(symbol=self.symbol, base_amount=base)
+                od = await self.broker.create_market_sell_base(
+                    symbol=self.symbol, 
+                    base_amount=base,
+                    client_order_id=f"dms_{self.symbol}_{now_ms()}"
+                )
                 self.storage.trades.add_from_order(od)
                 inc("dms_trigger_total", symbol=self.symbol)
                 payload = {"symbol": self.symbol, "amount": str(base), "order_id": od.id, "ts_ms": now_ms()}

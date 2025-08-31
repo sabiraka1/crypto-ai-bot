@@ -31,8 +31,8 @@ async def async_retry(
 from crypto_ai_bot.utils.http_client import aget, apost
 
 
-async def aget_retry(*args, **kwargs):
+async def aget_retry(*args: Any, **kwargs: Any) -> Any:
     return await async_retry(lambda: aget(*args, **kwargs))
 
-async def apost_retry(*args, **kwargs):
+async def apost_retry(*args: Any, **kwargs: Any) -> Any:
     return await async_retry(lambda: apost(*args, **kwargs))

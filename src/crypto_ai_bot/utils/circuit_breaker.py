@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Any
 
 
 class CircuitBreaker:
@@ -17,7 +18,7 @@ class CircuitBreaker:
         self._opened_at: float | None = None
         self._lock = asyncio.Lock()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> None:
         async with self._lock:
             if self._state == "open":
                 if self._opened_at and (time.time() - self._opened_at) >= self.reset_timeout:
@@ -27,7 +28,7 @@ class CircuitBreaker:
                     raise RuntimeError(f"{self.name}: open")
             # closed or half-open — разрешаем попытку
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None:
         async with self._lock:
             if exc is None:
                 self._state = "closed"
