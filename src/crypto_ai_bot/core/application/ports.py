@@ -46,8 +46,8 @@ class NoopInstanceLock(InstanceLockPort):
 
 
 __all__ = [
-    "SafetySwitchPort",
     "InstanceLockPort",
-    "NoopSafetySwitch",
     "NoopInstanceLock",
+    "NoopSafetySwitch",
+    "SafetySwitchPort",
 ]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional, Any
-from pydantic import BaseModel, Field, ValidationError, PositiveInt, NonNegativeInt, PositiveFloat
+from typing import Any
+
+from pydantic import BaseModel, Field, NonNegativeInt, PositiveFloat, PositiveInt
+
 
 class TradingConfig(BaseModel):
     SYMBOL: str = Field("BTC/USDT", min_length=3)

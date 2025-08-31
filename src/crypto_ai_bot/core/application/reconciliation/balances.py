@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-from decimal import Decimal
+
 from crypto_ai_bot.core.application.ports import BrokerPort
 from crypto_ai_bot.utils.decimal import dec
+
 
 @dataclass
 class BalancesReconciler:

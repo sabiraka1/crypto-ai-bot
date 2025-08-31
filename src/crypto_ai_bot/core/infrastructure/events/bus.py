@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
 
 # Мягкая интеграция с метриками (без обязательной зависимости)
 try:
@@ -42,8 +43,8 @@ class Event:
     ts_ms   — отметка времени отправки события
     """
     topic: str
-    payload: Dict[str, Any]
-    key: Optional[str] = None
+    payload: dict[str, Any]
+    key: str | None = None
     ts_ms: int = 0
 
 
@@ -66,8 +67,8 @@ class AsyncEventBus:
         self.max_attempts = int(max_attempts)
         self.backoff_base_ms = int(backoff_base_ms)
         self.backoff_factor = float(backoff_factor)
-        self._subs: DefaultDict[str, List[Handler]] = defaultdict(list)
-        self._dlq: List[Handler] = []
+        self._subs: defaultdict[str, list[Handler]] = defaultdict(list)
+        self._dlq: list[Handler] = []
 
     # -------------------------
     # Подписки
@@ -89,7 +90,7 @@ class AsyncEventBus:
     # -------------------------
     # Публикация
     # -------------------------
-    async def publish(self, topic: str, payload: Dict[str, Any], *, key: Optional[str] = None) -> Dict[str, Any]:
+    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None) -> dict[str, Any]:
         """
         Публикация события с синхронной доставкой локальным подписчикам.
         Если обработчик падает — N ретраев с экспоненциальным бэкоффом,

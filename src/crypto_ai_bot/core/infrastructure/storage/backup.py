@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 
-def backup_db(db_path: str, out_dir: Optional[str] = None, retention_days: int = 30) -> Optional[str]:
+def backup_db(db_path: str, out_dir: str | None = None, retention_days: int = 30) -> str | None:
     """
     Делает бэкап SQLite-файла через API backup(). Возвращает путь к бэкапу или None.
     """
@@ -16,7 +15,7 @@ def backup_db(db_path: str, out_dir: Optional[str] = None, retention_days: int =
         out_dir = os.path.join(os.path.dirname(db_path), "backups")
     os.makedirs(out_dir, exist_ok=True)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     base = os.path.basename(db_path)
     name = os.path.splitext(base)[0]
     out_path = os.path.join(out_dir, f"{name}-backup-{ts}.sqlite3")
@@ -29,13 +28,13 @@ def backup_db(db_path: str, out_dir: Optional[str] = None, retention_days: int =
     dst.close()
 
     # ротация
-    cutoff = datetime.now(timezone.utc) - timedelta(days=int(retention_days))
+    cutoff = datetime.now(UTC) - timedelta(days=int(retention_days))
     for f in os.listdir(out_dir):
         if not f.endswith(".sqlite3"):
             continue
         full = os.path.join(out_dir, f)
         try:
-            mtime = datetime.fromtimestamp(os.path.getmtime(full), tz=timezone.utc)
+            mtime = datetime.fromtimestamp(os.path.getmtime(full), tz=UTC)
             if mtime < cutoff:
                 os.remove(full)
         except Exception:

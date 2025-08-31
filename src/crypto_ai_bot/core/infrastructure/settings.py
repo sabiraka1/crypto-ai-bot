@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import base64, json, os
+import base64
+import json
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
 from crypto_ai_bot.utils.decimal import dec
+
 
 def _get(name: str, default: str) -> str:
     return os.getenv(name, default)
@@ -36,7 +39,7 @@ def _secret(name: str, default: str = "") -> str:
         try:
             data = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
             key = name.lower()
-            if key in data and data[key]:
+            if data.get(key):
                 return str(data[key]).strip()
         except Exception:
             pass
@@ -98,7 +101,7 @@ class Settings:
     HOSTNAME: str
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls) -> Settings:
         mode = _get("MODE", "paper")
         base, quote = (_get("SYMBOL", "BTC/USDT").split("/") + ["USDT"])[:2]
         db_default = f"./data/trader-{_get('EXCHANGE','gateio')}-{base}{quote}-{mode}{'-sandbox' if _get('SANDBOX','0') in ('1','true','yes') else ''}.sqlite3"

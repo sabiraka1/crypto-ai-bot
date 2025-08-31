@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Tuple, Optional, Dict
+from typing import Any
 
-from .base import BaseStrategy, StrategyContext, MarketData
-from .ema_cross import EmaCrossStrategy
-from .rsi_momentum import RSIMomentumStrategy
+from .base import BaseStrategy, MarketData, StrategyContext
 from .bollinger_bands import BollingerBandsStrategy
 from .ema_atr import EmaAtrStrategy
+from .ema_cross import EmaCrossStrategy
+from .rsi_momentum import RSIMomentumStrategy
 from .signals_policy_strategy import SignalsPolicyStrategy
 
 
@@ -18,11 +19,11 @@ class Decision:
     score: float = 1.0
 
 
-def _parse_scores(s: str) -> Dict[str, float]:
+def _parse_scores(s: str) -> dict[str, float]:
     """
     Пример: "ema_cross:1.0,ema_atr:1.2,signals_policy:1.5"
     """
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     if not s:
         return out
     for part in s.split(","):
@@ -53,13 +54,13 @@ class StrategyManager:
         *,
         settings: Any,
         strategies: Iterable[BaseStrategy] | None = None,
-        regime_provider: Optional[Callable[[], str]] = None,
+        regime_provider: Callable[[], str] | None = None,
     ) -> None:
         self._settings = settings
         self._mode: str = str(getattr(settings, "STRATEGY_MODE", "first") or "first").lower()
-        self._strategies: List[BaseStrategy] = list(strategies or [])
+        self._strategies: list[BaseStrategy] = list(strategies or [])
         self._regime_provider = regime_provider
-        self._scores_map: Dict[str, float] = _parse_scores(str(getattr(settings, "STRATEGY_SCORES", "") or ""))
+        self._scores_map: dict[str, float] = _parse_scores(str(getattr(settings, "STRATEGY_SCORES", "") or ""))
 
         if not self._strategies:
             self._strategies = list(self._build_from_settings(settings))
@@ -86,11 +87,11 @@ class StrategyManager:
             for cand in (key,):
                 if cand in self._scores_map:
                     try:
-                        setattr(s, "score", float(self._scores_map[cand]))
+                        s.score = float(self._scores_map[cand])
                     except Exception:
                         pass
 
-    def _apply_regime_first(self, action: str, explain: str) -> Tuple[str, str]:
+    def _apply_regime_first(self, action: str, explain: str) -> tuple[str, str]:
         if not int(getattr(self._settings, "REGIME_ENABLED", 1) or 1):
             return action, explain
         regime = self._regime_provider() if self._regime_provider else "range"
@@ -107,7 +108,7 @@ class StrategyManager:
             return float(getattr(self._settings, "REGIME_WEIGHT_MULT_RISK_OFF", 0.5) or 0.5)
         return 1.0
 
-    async def decide(self, *, ctx: StrategyContext, md: MarketData) -> Tuple[str, str]:
+    async def decide(self, *, ctx: StrategyContext, md: MarketData) -> tuple[str, str]:
         if self._mode not in ("first", "vote", "weighted"):
             self._mode = "first"
 
@@ -118,7 +119,7 @@ class StrategyManager:
                     return self._apply_regime_first(action, explain)
             return "hold", "all_hold"
 
-        votes: List[Decision] = []
+        votes: list[Decision] = []
         for s in self._strategies:
             action, explain = await s.decide(ctx=ctx, md=md)
             score = float(getattr(s, "score", 1.0) or 1.0)

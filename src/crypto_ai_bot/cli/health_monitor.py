@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import os
-from typing import Any, Dict
+from typing import Any
 
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
@@ -16,7 +16,7 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-async def _fetch_health(url: str, timeout: float) -> Dict[str, Any]:
+async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:
     try:
         resp = await aget(url, timeout=timeout)
         return {

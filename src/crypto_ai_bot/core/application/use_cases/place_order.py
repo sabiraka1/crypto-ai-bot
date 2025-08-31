@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
-from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
+from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -19,14 +19,14 @@ class PlaceOrderInputs:
     side: str                  # "buy" | "sell"
     quote_amount: Decimal = dec("0")   # для buy
     base_amount: Decimal = dec("0")    # для sell
-    client_order_id: Optional[str] = None
+    client_order_id: str | None = None
 
 
 @dataclass
 class PlaceOrderResult:
     ok: bool
     reason: str = ""
-    order: Optional[Any] = None
+    order: Any | None = None
 
 
 def _derive_idem_key(inputs: PlaceOrderInputs, settings: Any) -> str:

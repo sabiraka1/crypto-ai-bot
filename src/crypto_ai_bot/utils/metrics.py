@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Tuple
+from typing import Any
 
-from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
 _REGISTRY = CollectorRegistry()
-_COUNTERS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Counter] = {}
-_GAUGES: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Gauge] = {}
-_HISTS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Histogram] = {}
+_COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Counter] = {}
+_GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}
+_HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
 
-def _key(name: str, labels: Dict[str, str] | None) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+def _key(name: str, labels: dict[str, str] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
     pairs = tuple(sorted((labels or {}).items()))
     return (name, pairs)
 
-def _buckets_ms() -> Tuple[float, ...]:
+def _buckets_ms() -> tuple[float, ...]:
     env = os.environ.get("METRICS_BUCKETS_MS", "5,10,25,50,100,250,500,1000")
     try:
         vals = [float(x.strip()) for x in env.split(",") if x.strip()]

@@ -1,15 +1,16 @@
 from __future__ import annotations
+
 import time
-from datetime import datetime, timezone
-from typing import Callable, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 __all__ = [
-    "now_ms",
-    "monotonic_ms",
-    "sleep_ms",
-    "iso_utc",
     "bucket_ms",
     "check_sync",
+    "iso_utc",
+    "monotonic_ms",
+    "now_ms",
+    "sleep_ms",
 ]
 
 _MS = 1000
@@ -28,13 +29,13 @@ def sleep_ms(ms: int) -> None:
         return
     time.sleep(ms / _MS)
 
-def iso_utc(ts_ms: Optional[int] = None) -> str:
+def iso_utc(ts_ms: int | None = None) -> str:
     """Return ISO-8601 UTC string for given ms timestamp (or now)."""
     if ts_ms is None:
         ts_ms = now_ms()
-    return datetime.fromtimestamp(ts_ms / _MS, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts_ms / _MS, tz=UTC).isoformat()
 
-def bucket_ms(ts_ms: Optional[int], window_ms: int) -> int:
+def bucket_ms(ts_ms: int | None, window_ms: int) -> int:
     """Floor timestamp to a bucket of size window_ms (in ms).
     If ts_ms is None, current time is used.
     """
@@ -44,7 +45,7 @@ def bucket_ms(ts_ms: Optional[int], window_ms: int) -> int:
         ts_ms = now_ms()
     return (ts_ms // window_ms) * window_ms
 
-def check_sync(remote_now_ms: Optional[Callable[[], int]] = None) -> Optional[int]:
+def check_sync(remote_now_ms: Callable[[], int] | None = None) -> int | None:
     """Return drift (local_now_ms - remote_now_ms) if provider is given, else None.
     Positive value means local clock is ahead of remote.
     This function is best-effort and must not raise.

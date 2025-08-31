@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any
 
-from .base import BaseStrategy, StrategyContext, Decision
 from crypto_ai_bot.utils.decimal import dec
+
+from .base import BaseStrategy, Decision, StrategyContext
 
 
 class EmaCrossStrategy(BaseStrategy):
@@ -33,9 +34,9 @@ class EmaCrossStrategy(BaseStrategy):
         self.max_vol = float(max_volatility_pct)
         self.min_vol = float(min_volatility_pct)
 
-        self._prices: Deque[Decimal] = deque(maxlen=slow_period * 2)
-        self._ema_fast: Optional[Decimal] = None
-        self._ema_slow: Optional[Decimal] = None
+        self._prices: deque[Decimal] = deque(maxlen=slow_period * 2)
+        self._ema_fast: Decimal | None = None
+        self._ema_slow: Decimal | None = None
 
     def _update_ema(self, price: Decimal) -> None:
         """EMA(t) = price*alpha + EMA(t-1)*(1-alpha)"""
@@ -54,7 +55,7 @@ class EmaCrossStrategy(BaseStrategy):
             self._ema_fast = price * alpha_f + self._ema_fast * (dec(1) - alpha_f)
             self._ema_slow = price * alpha_s + self._ema_slow * (dec(1) - alpha_s)
 
-    def _filters_ok(self, d: Dict[str, Any]) -> Tuple[bool, str]:
+    def _filters_ok(self, d: dict[str, Any]) -> tuple[bool, str]:
         spread = float(d.get("spread", 0.0))
         if spread > self.max_spread:
             return False, f"high_spread:{spread:.4f}%>{self.max_spread}%"
@@ -66,10 +67,10 @@ class EmaCrossStrategy(BaseStrategy):
                 return False, f"low_volatility:{vol:.2f}%<{self.min_vol}%"
         return True, "ok"
 
-    def decide(self, ctx: StrategyContext) -> Tuple[Decision, Dict[str, Any]]:
+    def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
         d = ctx.data
         last = dec(d.get("ticker", {}).get("last", "0"))
-        explain: Dict[str, Any] = {
+        explain: dict[str, Any] = {
             "strategy": "ema_cross",
             "params": {
                 "fast": self.fast_period,

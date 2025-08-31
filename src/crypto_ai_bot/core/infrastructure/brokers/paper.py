@@ -3,7 +3,7 @@
 import random
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
@@ -34,7 +34,7 @@ class PaperBroker:
         return {"free_base": free_base, "free_quote": free_quote}
 
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal,
-                                      client_order_id: Optional[str] = None) -> Any:
+                                      client_order_id: str | None = None) -> Any:
         symbol = canonical(symbol)
         t = await self.fetch_ticker(symbol)
         price = t["ask"]
@@ -56,7 +56,7 @@ class PaperBroker:
         return order
 
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal,
-                                      client_order_id: Optional[str] = None) -> Any:
+                                      client_order_id: str | None = None) -> Any:
         symbol = canonical(symbol)
         t = await self.fetch_ticker(symbol)
         price = t["bid"]

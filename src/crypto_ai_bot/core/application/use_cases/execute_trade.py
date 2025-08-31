@@ -4,10 +4,10 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Any, List, Dict
+from typing import Any
 
-from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
-from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
+from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
+from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 
@@ -29,12 +29,12 @@ _log = get_logger("usecase.execute_trade")
 class ExecuteTradeResult:
     action: str
     executed: bool
-    order: Optional[Any] = None
+    order: Any | None = None
     reason: str = ""
     why: str = ""  # доп. пояснение (для причин блокировки)
 
 
-async def _recent_trades(storage: Any, symbol: str, n: int) -> List[Dict[str, Any]]:
+async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, Any]]:
     """Безопасно достаём последние N сделок, если storage поддерживает."""
     try:
         repo = getattr(storage, "trades", None)
@@ -63,7 +63,7 @@ async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
     return dec("0")
 
 
-async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> List[Decimal]:
+async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
     """История балансов для оценки просадки (если есть репозиторий метрик/балансов)."""
     try:
         repo = getattr(storage, "balances", None)
@@ -90,8 +90,8 @@ async def execute_trade(
     base_amount: Decimal = dec("0"),
     idempotency_bucket_ms: int = 60000,
     idempotency_ttl_sec: int = 3600,
-    risk_manager: Optional[RiskManager] = None,
-    protective_exits: Optional[Any] = None,
+    risk_manager: RiskManager | None = None,
+    protective_exits: Any | None = None,
 ) -> dict:
     """Исполняет торговое решение (покупку или продажу) с учетом идемпотентности и риск-лимитов."""
     sym = symbol
@@ -120,7 +120,7 @@ async def execute_trade(
         if getattr(settings, "RISK_USE_LOSS_STREAK", 0) and LossStreakRule:
             max_streak = int(getattr(settings, "RISK_LOSS_STREAK_MAX", 3) or 3)
             lookback = int(getattr(settings, "RISK_LOSS_STREAK_LOOKBACK", 10) or 10)
-            rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)  # noqa
+            rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)
             trades = await _recent_trades(storage, sym, n=max(lookback, 10))
             allowed, reason = rule.check(trades)
             if not allowed:
@@ -135,7 +135,7 @@ async def execute_trade(
         if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0) and MaxDrawdownRule:
             max_dd = dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", "10.0") or "10.0"))
             max_daily = dec(str(getattr(settings, "RISK_MAX_DAILY_LOSS_QUOTE", "0") or "0"))
-            rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)  # noqa
+            rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)
 
             balances = await _balances_series(storage, sym, limit=int(getattr(settings, "RISK_BALS_LOOKBACK", 48) or 48))
             current = balances[-1] if balances else dec("0")

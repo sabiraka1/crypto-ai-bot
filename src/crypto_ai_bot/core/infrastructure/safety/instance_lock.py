@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 import sqlite3
+import time
 from dataclasses import dataclass
 
 from crypto_ai_bot.utils.logging import get_logger

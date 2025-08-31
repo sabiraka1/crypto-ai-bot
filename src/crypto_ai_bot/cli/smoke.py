@@ -4,10 +4,9 @@ import argparse
 import asyncio
 import importlib
 import os
-from typing import Optional
 
-from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.http_client import aget
+from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("cli.smoke")
 

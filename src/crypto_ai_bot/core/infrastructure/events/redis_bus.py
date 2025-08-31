@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 try:
     from redis.asyncio import Redis
@@ -23,7 +24,7 @@ try:
 except Exception:  # pragma: no cover
     def inc(_name: str, **_labels: Any) -> None:
         pass
-    def observe(_name: str, _value: float, _labels: Optional[Dict[str, str]] = None) -> None:
+    def observe(_name: str, _value: float, _labels: dict[str, str] | None = None) -> None:
         pass
 
 _log = get_logger("events.redis_bus")
@@ -40,11 +41,11 @@ class RedisEventBus:
 
     def __init__(self, url: str) -> None:
         self._url = url
-        self._redis: Optional[Redis] = None
-        self._pub: Optional[Redis] = None
-        self._subs: DefaultDict[str, List[Handler]] = defaultdict(list)
-        self._dlq: List[Handler] = []
-        self._listener_task: Optional[asyncio.Task] = None
+        self._redis: Redis | None = None
+        self._pub: Redis | None = None
+        self._subs: defaultdict[str, list[Handler]] = defaultdict(list)
+        self._dlq: list[Handler] = []
+        self._listener_task: asyncio.Task | None = None
         self._started: bool = False
         self._active_pubsub = None  # type: ignore
 
@@ -59,7 +60,7 @@ class RedisEventBus:
     def subscribe_dlq(self, handler: Handler) -> None:
         self._dlq.append(handler)
 
-    async def publish(self, topic: str, payload: Dict[str, Any], *, key: Optional[str] = None) -> Dict[str, Any]:
+    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None) -> dict[str, Any]:
         if not self._pub:
             raise RuntimeError("RedisEventBus not started")
         msg = json.dumps({"topic": topic, "payload": payload, "key": key})
@@ -113,7 +114,7 @@ class RedisEventBus:
         except Exception:
             _log.error("redis_bus_resubscribe_failed", extra={"topics": topics}, exc_info=True)
 
-    async def _emit_dlq(self, evt: Dict[str, Any], *, error: str, failed_handler: str) -> None:
+    async def _emit_dlq(self, evt: dict[str, Any], *, error: str, failed_handler: str) -> None:
         # Локальные DLQ-хендлеры
         for d in self._dlq:
             try:

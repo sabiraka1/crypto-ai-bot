@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Protocol, Any, Sequence
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -16,8 +17,8 @@ class Signal:
     """
     action: str = "hold"
     confidence: float = 0.0
-    quote_amount: Optional[str] = None
-    base_amount: Optional[str] = None
+    quote_amount: str | None = None
+    base_amount: str | None = None
     reason: str = ""
 
 

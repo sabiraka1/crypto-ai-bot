@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Sequence, Tuple, Dict
+from collections.abc import Sequence
+from typing import Any
 
 from crypto_ai_bot.core.domain.strategy.base import MarketDataPort
-from crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter import CcxtBroker  # или ваш адаптер
-from crypto_ai_bot.core.infrastructure.brokers.paper_adapter import PaperBroker  # если есть
 from crypto_ai_bot.core.infrastructure.market_data.cache import TTLCache
 
 
@@ -41,7 +40,7 @@ class CcxtMarketData(MarketDataPort):
             return data
         return []
 
-    async def get_ticker(self, symbol: str) -> Dict[str, Any]:
+    async def get_ticker(self, symbol: str) -> dict[str, Any]:
         # Используем уже существующий метод брокера
         if hasattr(self._broker, "fetch_ticker"):
             key = ("ticker", symbol)

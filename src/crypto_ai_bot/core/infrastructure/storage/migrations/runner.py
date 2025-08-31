@@ -3,14 +3,15 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Iterable, List, Optional, Tuple
+
 
 # Лёгкие утилиты (без жёстких зависимостей)
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
-def _backup_file(src: str, *, dest_dir: str, now_ms: int) -> Optional[str]:
+def _backup_file(src: str, *, dest_dir: str, now_ms: int) -> str | None:
     if not src or not os.path.exists(src):
         return None
     _ensure_dir(dest_dir)
@@ -64,8 +65,8 @@ def _mark_applied(conn: sqlite3.Connection, version: int, name: str, now_ms: int
 # -------------------------
 # Программные миграции (источник истины)
 # -------------------------
-def _pymigrations() -> List[PyMigration]:
-    migs: List[PyMigration] = []
+def _pymigrations() -> list[PyMigration]:
+    migs: list[PyMigration] = []
 
     # V0001 — базовая схема (если у вас уже была, оператор IF NOT EXISTS всё равно безопасен)
     def _v1(conn: sqlite3.Connection) -> None:

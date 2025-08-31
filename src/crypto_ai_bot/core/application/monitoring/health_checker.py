@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 try:
     from crypto_ai_bot.utils.logging import get_logger
@@ -30,7 +30,7 @@ class HealthChecker:
     def get_snapshot(self) -> dict[str, Any]:
         return dict(self._last)
 
-    async def tick(self, symbol: str, *, dms: Optional[Any] = None) -> None:
+    async def tick(self, symbol: str, *, dms: Any | None = None) -> None:
         ok_storage = self._check_storage()
         ok_broker = await self._check_broker(symbol)
         ok_bus = await self._check_bus()

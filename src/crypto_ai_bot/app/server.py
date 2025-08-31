@@ -1,25 +1,26 @@
 ﻿from __future__ import annotations
 
-import time
 import asyncio
+import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Optional, Dict
+from typing import Any
 
-from fastapi import FastAPI, APIRouter, Request, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import export_text, inc, hist
+from crypto_ai_bot.utils.metrics import export_text, hist, inc
 
 _log = get_logger("app.server")
-_container: Optional[Any] = None
+_container: Any | None = None
 
 # -------- rate limiter (как раньше) --------
 class RateLimiter:
     def __init__(self, limit_per_min: int = 10) -> None:
         self.limit = int(limit_per_min)
-        self.bucket: Dict[str, list[float]] = {}
+        self.bucket: dict[str, list[float]] = {}
 
     def _key(self, request: Request) -> str:
         ip = request.client.host if request.client else "unknown"
@@ -41,7 +42,7 @@ _rl = RateLimiter(limit_per_min=10)
 
 def limit(fn: Callable):
     async def wrapper(*args, **kwargs):
-        request: Optional[Request] = None
+        request: Request | None = None
         for a in args:
             if isinstance(a, Request):
                 request = a; break
@@ -112,7 +113,7 @@ def _ctx_or_500():
         raise HTTPException(status_code=503, detail="Container not ready")
     return _container
 
-def _get_orchestrator(symbol: Optional[str]) -> Any:
+def _get_orchestrator(symbol: str | None) -> Any:
     c = _ctx_or_500()
     s = getattr(c, "settings", None)
     default_symbol = getattr(s, "SYMBOL", "BTC/USDT") if s else "BTC/USDT"
@@ -148,7 +149,7 @@ async def metrics():
         return PlainTextResponse("", status_code=500)
 
 @router.get("/orchestrator/status")
-async def orch_status(symbol: Optional[str] = Query(default=None)):
+async def orch_status(symbol: str | None = Query(default=None)):
     orch, sym = _get_orchestrator(symbol)
     try:
         st = orch.status(); st["symbol"] = sym
@@ -159,7 +160,7 @@ async def orch_status(symbol: Optional[str] = Query(default=None)):
 
 @router.post("/orchestrator/start")
 @limit
-async def orch_start(request: Request, symbol: Optional[str] = Query(default=None)):
+async def orch_start(request: Request, symbol: str | None = Query(default=None)):
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.start()
@@ -171,7 +172,7 @@ async def orch_start(request: Request, symbol: Optional[str] = Query(default=Non
 
 @router.post("/orchestrator/stop")
 @limit
-async def orch_stop(request: Request, symbol: Optional[str] = Query(default=None)):
+async def orch_stop(request: Request, symbol: str | None = Query(default=None)):
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.stop()
@@ -183,7 +184,7 @@ async def orch_stop(request: Request, symbol: Optional[str] = Query(default=None
 
 @router.post("/orchestrator/pause")
 @limit
-async def orch_pause(request: Request, symbol: Optional[str] = Query(default=None)):
+async def orch_pause(request: Request, symbol: str | None = Query(default=None)):
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.pause()
@@ -195,7 +196,7 @@ async def orch_pause(request: Request, symbol: Optional[str] = Query(default=Non
 
 @router.post("/orchestrator/resume")
 @limit
-async def orch_resume(request: Request, symbol: Optional[str] = Query(default=None)):
+async def orch_resume(request: Request, symbol: str | None = Query(default=None)):
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.resume()
@@ -206,7 +207,7 @@ async def orch_resume(request: Request, symbol: Optional[str] = Query(default=No
         raise HTTPException(status_code=500, detail="resume_failed")
 
 @router.get("/pnl/today")
-async def pnl_today(symbol: Optional[str] = Query(default=None)):
+async def pnl_today(symbol: str | None = Query(default=None)):
     c = _ctx_or_500()
     try:
         _, sym = _get_orchestrator(symbol)

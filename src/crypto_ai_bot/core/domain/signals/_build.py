@@ -1,15 +1,17 @@
 # src/crypto_ai_bot/core/domain/signals/_build.py
 from __future__ import annotations
+
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Any
+
 
 @dataclass(frozen=True)
 class SignalInputs:
     # Чистые входы, без внешних зависимостей:
     last: Decimal
-    bid: Optional[Decimal]
-    ask: Optional[Decimal]
+    bid: Decimal | None
+    ask: Decimal | None
     spread_frac: Decimal
     position_base: Decimal
     free_quote: Decimal
@@ -19,7 +21,7 @@ class SignalInputs:
 class Signal:
     action: str              # 'buy' | 'sell' | 'hold'
     strength: Decimal        # 0..1
-    meta: Dict[str, Any]
+    meta: dict[str, Any]
 
 def build_signal(inp: SignalInputs) -> Signal:
     """

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
@@ -20,7 +21,7 @@ class LoopSpec:
     interval_sec: float
     enabled: bool
     runner: LoopFn
-    task: Optional[asyncio.Task] = None
+    task: asyncio.Task | None = None
     paused: bool = False
 
 
@@ -36,7 +37,7 @@ class Orchestrator:
     settings: Any
     dms: Any
 
-    _loops: Dict[str, LoopSpec] = field(default_factory=dict)
+    _loops: dict[str, LoopSpec] = field(default_factory=dict)
     _started: bool = False
     _paused: bool = False
 
@@ -104,7 +105,7 @@ class Orchestrator:
         await self.bus.publish("orchestrator.auto_resumed", payload)
         _log.info("orchestrator_resumed", extra={"symbol": self.symbol})
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         return {
             "started": self._started,
             "paused": self._paused,
@@ -171,8 +172,8 @@ class Orchestrator:
 
     async def _reconcile_loop(self) -> None:
         try:
-            from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
             from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances
+            from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
             await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, self.settings)
             await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, self.settings)
         except Exception as exc:

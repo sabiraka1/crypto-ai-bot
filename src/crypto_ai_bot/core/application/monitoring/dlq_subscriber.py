@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 # мягкие зависимости
 try:
@@ -28,7 +28,7 @@ async def _log_dlq(evt: Any) -> None:
     """
     try:
         topic = getattr(evt, "topic", None) or (evt.get("topic") if isinstance(evt, dict) else "__unknown__")
-        payload: Dict[str, Any] = getattr(evt, "payload", None) or (evt.get("payload") if isinstance(evt, dict) else {})
+        payload: dict[str, Any] = getattr(evt, "payload", None) or (evt.get("payload") if isinstance(evt, dict) else {})
         original = payload.get("original_topic") or topic
         _log.error("DLQ_EVENT", extra={"original_topic": original, "payload": payload})
         inc("bus_dlq_events_total", original_topic=str(original))

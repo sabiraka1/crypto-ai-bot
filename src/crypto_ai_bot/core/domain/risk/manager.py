@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
@@ -27,7 +27,7 @@ class RiskConfig:
     safety_max_turnover_quote_per_day: Decimal = dec("0")
 
     @classmethod
-    def from_settings(cls, s: Any) -> "RiskConfig":
+    def from_settings(cls, s: Any) -> RiskConfig:
         """
         Без чтения ENV напрямую — только из объекта Settings.
         Любые отсутствующие поля интерпретируются как «лимит отключён».

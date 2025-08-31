@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.retry import apost_retry
@@ -50,7 +50,7 @@ class TelegramAlerts:
         if cid:
             text = f"{text}\n<code>[#CID:{cid}]</code>"
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "chat_id": self._chat_id,
             "text": str(text or ""),
             "parse_mode": self._parse_mode,

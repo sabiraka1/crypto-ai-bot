@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
-from crypto_ai_bot.core.domain.strategy.base import StrategyPort, MarketDataPort, Signal
-from crypto_ai_bot.core.domain.strategy.strategies.ema_atr import EmaAtrStrategy, EmaAtrConfig
+from crypto_ai_bot.core.domain.strategy.base import MarketDataPort, Signal, StrategyPort
+from crypto_ai_bot.core.domain.strategy.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
 from crypto_ai_bot.utils.decimal import dec
 
 
@@ -17,7 +17,7 @@ class StrategyManager:
     def __init__(self, *, md: MarketDataPort, settings: Any) -> None:
         self._md = md
         self._settings = settings
-        self._strategies: List[StrategyPort] = []
+        self._strategies: list[StrategyPort] = []
         self._load_strategies()
 
     def _load_strategies(self) -> None:

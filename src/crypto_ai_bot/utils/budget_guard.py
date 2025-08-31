@@ -1,9 +1,12 @@
 from __future__ import annotations
-from typing import Optional, Dict, Any
+
+from typing import Any
+
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.settings_keys import per_symbol_override
 
-def check(storage, symbol: str, settings: Any) -> Optional[Dict[str, str]]:
+
+def check(storage, symbol: str, settings: Any) -> dict[str, str] | None:
     # max orders / 5m
     max_orders_5m = per_symbol_override(settings, symbol, "BUDGET_MAX_ORDERS_5M", lambda s: int(float(s)), 0)
     if max_orders_5m > 0:

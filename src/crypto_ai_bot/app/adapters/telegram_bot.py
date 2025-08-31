@@ -4,11 +4,11 @@ import asyncio
 import html
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.http_client import aget  # для getUpdates
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
+from crypto_ai_bot.utils.http_client import aget  # для getUpdates
+from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
 
 _log = get_logger("adapters.telegram_bot")
@@ -21,7 +21,7 @@ except Exception:  # fallback
     _THR_N, _THR_WIN = 3, 5
 
 
-def _split_symbol(sym: str) -> Tuple[str, str]:
+def _split_symbol(sym: str) -> tuple[str, str]:
     try:
         b, q = sym.split("/", 1)
         return b.upper(), q.upper()
@@ -38,7 +38,7 @@ class TelegramBotCommands:
         self,
         *,
         bot_token: str,
-        allowed_users: List[int],
+        allowed_users: list[int],
         container: Any,
         default_symbol: str,
         long_poll_sec: int = 30,
@@ -50,13 +50,13 @@ class TelegramBotCommands:
         self._default_symbol = canonical(default_symbol)
         self._offset = 0
         self._lp_sec = max(3, int(long_poll_sec))
-        self._chat_symbol: Dict[int, str] = {}  # chat_id -> symbol
-        self._cache: Dict[Tuple[int, str], Tuple[float, str]] = {}  # (chat,cmd) -> (ts, text)
-        self._recent: Dict[int, List[float]] = {}  # user_id -> ts[]
+        self._chat_symbol: dict[int, str] = {}  # chat_id -> symbol
+        self._cache: dict[tuple[int, str], tuple[float, str]] = {}  # (chat,cmd) -> (ts, text)
+        self._recent: dict[int, list[float]] = {}  # user_id -> ts[]
 
     # --------------------- утилиты ---------------------
 
-    def _allow(self, user_id: Optional[int]) -> bool:
+    def _allow(self, user_id: int | None) -> bool:
         if not self._allowed:
             return True
         try:
@@ -74,7 +74,7 @@ class TelegramBotCommands:
         q.append(now)
         return True
 
-    def _cache_get(self, chat_id: int, key: str) -> Optional[str]:
+    def _cache_get(self, chat_id: int, key: str) -> str | None:
         k = (chat_id, key)
         v = self._cache.get(k)
         if not v:
@@ -91,7 +91,7 @@ class TelegramBotCommands:
     def _endpoint(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self._token}/{method}"
 
-    async def _get_updates(self) -> Dict[str, Any]:
+    async def _get_updates(self) -> dict[str, Any]:
         try:
             params = {"timeout": self._lp_sec, "offset": self._offset}
             resp = await aget(self._endpoint("getUpdates"), params=params, timeout=self._lp_sec + 5)
@@ -118,7 +118,7 @@ class TelegramBotCommands:
             return sym
         return self._chat_symbol.get(chat_id, self._default_symbol)
 
-    def _get_orchestrator(self, symbol: str) -> Optional[Any]:
+    def _get_orchestrator(self, symbol: str) -> Any | None:
         orchs = getattr(self._container, "orchestrators", {}) or {}
         return orchs.get(symbol) or orchs.get(symbol.replace("-", "/").upper())
 

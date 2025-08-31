@@ -1,7 +1,8 @@
 from __future__ import annotations
+
 import asyncio
 import time
-from typing import Optional
+
 
 class CircuitBreaker:
     """
@@ -13,7 +14,7 @@ class CircuitBreaker:
         self.reset_timeout = float(reset_timeout_sec)
         self._state = "closed"
         self._failures = 0
-        self._opened_at: Optional[float] = None
+        self._opened_at: float | None = None
         self._lock = asyncio.Lock()
 
     async def __aenter__(self):

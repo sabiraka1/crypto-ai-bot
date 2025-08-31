@@ -1,18 +1,19 @@
 from __future__ import annotations
+
 import json
 import logging
 import sys
-from typing import Any, Dict, Optional
+from typing import Any
 
-__all__ = ["get_logger", "set_correlation_id", "get_correlation_id"]
+__all__ = ["get_correlation_id", "get_logger", "set_correlation_id"]
 
-_CORRELATION_ID: Optional[str] = None
+_CORRELATION_ID: str | None = None
 
-def set_correlation_id(value: Optional[str]) -> None:
+def set_correlation_id(value: str | None) -> None:
     global _CORRELATION_ID
     _CORRELATION_ID = value
 
-def get_correlation_id() -> Optional[str]:
+def get_correlation_id() -> str | None:
     return _CORRELATION_ID
 
 
@@ -20,7 +21,7 @@ class JsonFormatter(logging.Formatter):
     SENSITIVE_KEYS = {"api_key", "api_secret", "password", "token", "authorization"}
 
     def format(self, record: logging.LogRecord) -> str:
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "ts": record.created,
             "level": record.levelname,
             "logger": record.name,

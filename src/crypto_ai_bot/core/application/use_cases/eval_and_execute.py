@@ -4,18 +4,18 @@ import math
 from decimal import Decimal
 from typing import Any
 
+from crypto_ai_bot.core.application.macro.regime_detector import RegimeConfig, RegimeDetector
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
-from crypto_ai_bot.core.domain.strategies import StrategyManager, StrategyContext, MarketData
+from crypto_ai_bot.core.domain.strategies import MarketData, StrategyContext, StrategyManager
 from crypto_ai_bot.core.domain.strategies.position_sizing import (
     SizeConstraints,
-    fixed_quote_amount,
     fixed_fractional,
-    volatility_target_size,
+    fixed_quote_amount,
     kelly_sized_quote,
+    volatility_target_size,
 )
-from crypto_ai_bot.core.application.macro.regime_detector import RegimeDetector, RegimeConfig
-from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxySource
 from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceSource
+from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxySource
 from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcSource
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger

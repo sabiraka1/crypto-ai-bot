@@ -2,10 +2,11 @@
 
 from collections import deque
 from decimal import Decimal
-from crypto_ai_bot.utils.decimal import dec
-from typing import Any, Deque, Dict, Tuple
+from typing import Any
 
-from .base import BaseStrategy, StrategyContext, Decision
+from crypto_ai_bot.utils.decimal import dec
+
+from .base import BaseStrategy, Decision, StrategyContext
 
 
 class BollingerBandsStrategy(BaseStrategy):
@@ -15,9 +16,9 @@ class BollingerBandsStrategy(BaseStrategy):
         self.period = int(period)
         self.std_dev = dec(str(std_dev))
         self.squeeze_threshold = dec(str(squeeze_threshold))
-        self._prices: Deque[Decimal] = deque(maxlen=self.period)
+        self._prices: deque[Decimal] = deque(maxlen=self.period)
 
-    def decide(self, ctx: StrategyContext) -> Tuple[Decision, Dict[str, Any]]:
+    def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
         price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
         self._prices.append(price)
 
@@ -33,7 +34,7 @@ class BollingerBandsStrategy(BaseStrategy):
         lower = sma - std * self.std_dev
         width = (upper - lower) / sma if sma > 0 else dec("0")
 
-        explain: Dict[str, Any] = {"price": float(price), "upper": float(upper), "middle": float(sma), "lower": float(lower), "width": float(width)}
+        explain: dict[str, Any] = {"price": float(price), "upper": float(upper), "middle": float(sma), "lower": float(lower), "width": float(width)}
 
         if width < self.squeeze_threshold:
             explain["signal"] = "squeeze"

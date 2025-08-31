@@ -5,7 +5,6 @@ import shutil
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 # ВАЖНО: новый путь до Settings после стратификации:
 from crypto_ai_bot.core.infrastructure.settings import Settings
@@ -85,7 +84,7 @@ def _list() -> None:
         print(p.name)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     settings = Settings.load()
     parser = argparse.ArgumentParser(prog="cab-maintenance", description="DB maintenance")
     sub = parser.add_subparsers(dest="cmd", required=True)

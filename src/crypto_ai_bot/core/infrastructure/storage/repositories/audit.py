@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
 import json
+from typing import Any
 
 
 def _json_dumps_safe(obj: Any) -> str:
@@ -21,7 +21,7 @@ class AuditRepo:
     def __init__(self, conn) -> None:
         self._conn = conn
 
-    def write(self, event: str, payload: Dict[str, Any]) -> None:
+    def write(self, event: str, payload: dict[str, Any]) -> None:
         cur = self._conn.cursor()
         cur.execute(
             "INSERT INTO audit (event, payload_json, ts_ms) "
@@ -31,5 +31,5 @@ class AuditRepo:
         self._conn.commit()
 
     # Для обратной совместимости со старым именем:
-    def add(self, event: str, payload: Dict[str, Any]) -> None:
+    def add(self, event: str, payload: dict[str, Any]) -> None:
         self.write(event, payload)

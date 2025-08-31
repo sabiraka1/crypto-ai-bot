@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import subprocess, sys
+
+import subprocess
+import sys
+
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]

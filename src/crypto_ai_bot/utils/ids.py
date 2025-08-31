@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import time
 import secrets
-import hashlib
+import time
 
 
 def make_client_order_id(exchange_id: str, tag: str) -> str:

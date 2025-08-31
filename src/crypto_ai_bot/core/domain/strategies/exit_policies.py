@@ -2,20 +2,20 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
+
 from crypto_ai_bot.utils.decimal import dec
-from typing import Optional
 
 
 @dataclass
 class ExitPlan:
     entry_price: Decimal
-    sl_price: Optional[Decimal] = None
-    tp_price: Optional[Decimal] = None
-    trailing_pct: Optional[float] = None
-    trail_max_price: Optional[Decimal] = None
+    sl_price: Decimal | None = None
+    tp_price: Decimal | None = None
+    trailing_pct: float | None = None
+    trail_max_price: Decimal | None = None
 
 
-def make_fixed_sl_tp(*, entry_price: Decimal, sl_pct: float, tp_pct: Optional[float] = None) -> ExitPlan:
+def make_fixed_sl_tp(*, entry_price: Decimal, sl_pct: float, tp_pct: float | None = None) -> ExitPlan:
     """Фиксированный SL/TP в процентах от входа."""
     e = dec(str(entry_price))
     sl = e * (dec("1") - dec(str(sl_pct)) / dec("100"))

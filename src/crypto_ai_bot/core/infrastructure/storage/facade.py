@@ -4,12 +4,13 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from .repositories.audit import AuditRepo as _AuditRepository
+from .repositories.idempotency import IdempotencyRepository as _IdempotencyRepository
+from .repositories.market_data import MarketDataRepo as _MarketDataRepository
+from .repositories.positions import PositionsRepository as _PositionsRepository
+
 # Импорты ровно под реальные классы в репозиториях
 from .repositories.trades import TradesRepository as _TradesRepository
-from .repositories.positions import PositionsRepository as _PositionsRepository
-from .repositories.idempotency import IdempotencyRepository as _IdempotencyRepository
-from .repositories.audit import AuditRepo as _AuditRepository
-from .repositories.market_data import MarketDataRepo as _MarketDataRepository
 
 
 @dataclass
@@ -22,7 +23,7 @@ class Storage:
     market_data: _MarketDataRepository
 
     @classmethod
-    def from_connection(cls, conn: sqlite3.Connection) -> "Storage":
+    def from_connection(cls, conn: sqlite3.Connection) -> Storage:
         return cls(
             conn=conn,
             trades=_TradesRepository(conn),

@@ -3,21 +3,21 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import uuid
-from typing import Iterator, Optional
+from collections.abc import Iterator
 
 _cid: contextvars.ContextVar[str | None] = contextvars.ContextVar("cid", default=None)
 
 def new_cid() -> str:
     return uuid.uuid4().hex
 
-def get_cid() -> Optional[str]:
+def get_cid() -> str | None:
     return _cid.get()
 
-def set_cid(value: Optional[str]) -> None:
+def set_cid(value: str | None) -> None:
     _cid.set(value)
 
 @contextlib.contextmanager
-def cid_context(value: Optional[str] = None) -> Iterator[None]:
+def cid_context(value: str | None = None) -> Iterator[None]:
     token = _cid.set(value or new_cid())
     try:
         yield

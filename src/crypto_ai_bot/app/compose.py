@@ -4,27 +4,27 @@ import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional
+from typing import Any
 
-from crypto_ai_bot.core.infrastructure.settings import Settings
-from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
-from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
-from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
-from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
-from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
-from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
-from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
-from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
-from crypto_ai_bot.core.application.orchestrator import Orchestrator
-from crypto_ai_bot.utils.symbols import canonical
-from crypto_ai_bot.core.application.ports import SafetySwitchPort
-from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
-from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.metrics import inc, hist
+from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
+from crypto_ai_bot.core.application.orchestrator import Orchestrator
+from crypto_ai_bot.core.application.ports import SafetySwitchPort
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
+from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
+from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
+from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
+from crypto_ai_bot.core.infrastructure.settings import Settings
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import hist, inc
 from crypto_ai_bot.utils.retry import async_retry
+from crypto_ai_bot.utils.symbols import canonical
+from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("compose")
 
@@ -37,8 +37,8 @@ class Container:
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
-    orchestrators: Dict[str, Orchestrator]
-    tg_bot_task: Optional[asyncio.Task] = None
+    orchestrators: dict[str, Orchestrator]
+    tg_bot_task: asyncio.Task | None = None
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -204,8 +204,8 @@ async def build_container_async() -> Container:
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
 
-    symbols: List[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
-    orchs: Dict[str, Orchestrator] = {}
+    symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
+    orchs: dict[str, Orchestrator] = {}
 
     def _make_dms(sym: str) -> SafetySwitchPort:
         return DeadMansSwitch(
@@ -248,10 +248,10 @@ async def build_container_async() -> Container:
             bus.on("trade.completed", _on_trade_completed_hint)
 
     # ---- Командный Telegram-бот ----
-    tg_task: Optional[asyncio.Task] = None
+    tg_task: asyncio.Task | None = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
-        users: List[int] = []
+        users: list[int] = []
         if raw_users:
             try:
                 users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Hashable, Tuple
+from collections.abc import Callable, Hashable
+from typing import Any
 
 
 class TTLCache:
@@ -9,12 +10,12 @@ class TTLCache:
 
     def __init__(self, ttl_sec: float = 30.0) -> None:
         self._ttl = float(ttl_sec)
-        self._data: Dict[Tuple[Hashable, ...], Tuple[float, Any]] = {}
+        self._data: dict[tuple[Hashable, ...], tuple[float, Any]] = {}
 
     def _now(self) -> float:
         return time.time()
 
-    def get(self, key: Tuple[Hashable, ...]) -> Any | None:
+    def get(self, key: tuple[Hashable, ...]) -> Any | None:
         rec = self._data.get(key)
         if not rec:
             return None
@@ -24,7 +25,7 @@ class TTLCache:
         self._data.pop(key, None)
         return None
 
-    def put(self, key: Tuple[Hashable, ...], value: Any) -> None:
+    def put(self, key: tuple[Hashable, ...], value: Any) -> None:
         self._data[key] = (self._now(), value)
 
     def wrap(self, func: Callable[..., Any]) -> Callable[..., Any]:

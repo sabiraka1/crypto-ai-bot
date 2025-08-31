@@ -1,16 +1,14 @@
 ﻿# src/crypto_ai_bot/core/domain/strategies/signals_policy_strategy.py
 from __future__ import annotations
 
-from typing import Any, Tuple
-
-from .base import BaseStrategy, StrategyContext, MarketData
+from .base import BaseStrategy, MarketData, StrategyContext
 
 # Подсистема signals (готовая, но ранее не включённая в рантайм)
 try:
-    from crypto_ai_bot.core.domain.signals.policy import SignalsPolicy
-    from crypto_ai_bot.core.domain.signals._fusion import fuse_signals
     from crypto_ai_bot.core.domain.signals._build import build_signals
-except Exception as e:  # если кто-то удалил подсистему
+    from crypto_ai_bot.core.domain.signals._fusion import fuse_signals
+    from crypto_ai_bot.core.domain.signals.policy import SignalsPolicy
+except Exception:  # если кто-то удалил подсистему
     SignalsPolicy = None  # type: ignore
     fuse_signals = None   # type: ignore
     build_signals = None  # type: ignore
@@ -32,7 +30,7 @@ class SignalsPolicyStrategy(BaseStrategy):
         # Здесь мы не навязываем реализацию — используем то, что уже в модуле.
         self.score = 1.0  # для weighted-режима менеджера
 
-    async def decide(self, *, ctx: StrategyContext, md: MarketData) -> Tuple[str, str]:
+    async def decide(self, *, ctx: StrategyContext, md: MarketData) -> tuple[str, str]:
         if not (SignalsPolicy and fuse_signals and build_signals):
             return "hold", "signals_subsystem_unavailable"
 

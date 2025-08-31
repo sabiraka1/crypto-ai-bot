@@ -1,9 +1,10 @@
 ﻿## `core/signals/_fusion.py`
 from __future__ import annotations
-from decimal import Decimal
+
 from crypto_ai_bot.utils.decimal import dec
-from typing import Dict, Tuple
-def fuse_score(features: Dict[str, object]) -> Tuple[float, str]:
+
+
+def fuse_score(features: dict[str, object]) -> tuple[float, str]:
     """Простая эвристика: сравниваем last с SMA и EMA.
     Возвращает (score [0..1], explain).
     """

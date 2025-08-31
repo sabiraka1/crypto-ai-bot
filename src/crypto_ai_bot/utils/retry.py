@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 import asyncio
 import random
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 
 async def async_retry(
     func: Callable[[], Awaitable[Any]],
@@ -11,7 +14,7 @@ async def async_retry(
     max_delay: float = 3.0,
     jitter: bool = True,
 ) -> Any:
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     for attempt in range(retries):
         try:
             return await func()
@@ -26,6 +29,7 @@ async def async_retry(
 
 # Удобные обёртки поверх http_client
 from crypto_ai_bot.utils.http_client import aget, apost
+
 
 async def aget_retry(*args, **kwargs):
     return await async_retry(lambda: aget(*args, **kwargs))

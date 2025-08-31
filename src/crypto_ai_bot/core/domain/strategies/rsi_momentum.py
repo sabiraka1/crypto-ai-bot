@@ -2,10 +2,11 @@
 
 from collections import deque
 from decimal import Decimal
-from crypto_ai_bot.utils.decimal import dec
-from typing import Any, Deque, Dict, Tuple
+from typing import Any
 
-from .base import BaseStrategy, StrategyContext, Decision
+from crypto_ai_bot.utils.decimal import dec
+
+from .base import BaseStrategy, Decision, StrategyContext
 
 
 class RSIMomentumStrategy(BaseStrategy):
@@ -17,7 +18,7 @@ class RSIMomentumStrategy(BaseStrategy):
         self.rsi_overbought = float(rsi_overbought)
         self.momentum_period = momentum_period
 
-        self._prices: Deque[Decimal] = deque(maxlen=max(rsi_period, momentum_period) + 1)
+        self._prices: deque[Decimal] = deque(maxlen=max(rsi_period, momentum_period) + 1)
 
     def _calc_rsi(self) -> Decimal:
         gains = dec("0")
@@ -46,7 +47,7 @@ class RSIMomentumStrategy(BaseStrategy):
             return dec("0")
         return ((cur - past) / past) * dec("100")
 
-    def decide(self, ctx: StrategyContext) -> Tuple[Decision, Dict[str, Any]]:
+    def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
         price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
         if price <= 0:
             return "hold", {"reason": "no_price"}
@@ -57,7 +58,7 @@ class RSIMomentumStrategy(BaseStrategy):
 
         rsi = self._calc_rsi()
         mom = self._calc_momentum()
-        explain: Dict[str, Any] = {"rsi": float(rsi), "momentum_pct": float(mom), "oversold": self.rsi_oversold, "overbought": self.rsi_overbought}
+        explain: dict[str, Any] = {"rsi": float(rsi), "momentum_pct": float(mom), "oversold": self.rsi_oversold, "overbought": self.rsi_overbought}
 
         if float(rsi) < self.rsi_oversold and mom > 0:
             explain["signal"] = "oversold_with_positive_momentum"

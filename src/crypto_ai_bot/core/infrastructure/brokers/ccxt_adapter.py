@@ -2,13 +2,13 @@
 
 import asyncio
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
-from typing import Any, Dict, Optional, Tuple
+from decimal import ROUND_DOWN, Decimal
+from typing import Any
 
+from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker  # ← используем уже существующий файл
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
-from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker  # ← используем уже существующий файл
 
 _log = get_logger("broker.ccxt")
 
@@ -53,9 +53,9 @@ class CcxtBroker:
         rps = float(getattr(self.settings, "BROKER_RATE_RPS", 8))
         cap = int(getattr(self.settings, "BROKER_RATE_BURST", 16))
         self._bucket = _TokenBucket(rps, cap)
-        self._markets: Dict[str, dict] = {}
-        self._sym_to_gate: Dict[str, str] = {}
-        self._gate_to_sym: Dict[str, str] = {}
+        self._markets: dict[str, dict] = {}
+        self._sym_to_gate: dict[str, str] = {}
+        self._gate_to_sym: dict[str, str] = {}
 
         # circuit breakers (используем твой utils/circuit_breaker.API)
         self._cb_ticker = CircuitBreaker(failures_threshold=5, open_timeout_ms=10_000, half_open_successes_to_close=1)
@@ -96,14 +96,14 @@ class CcxtBroker:
         return self._markets.get(gate) or self._markets.get(can) or {}
 
     @staticmethod
-    def _quant(x: Decimal, step: Optional[Decimal]) -> Decimal:
+    def _quant(x: Decimal, step: Decimal | None) -> Decimal:
         if not step or step <= 0:
             return x
         return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
 
     def _apply_precision(
-        self, sym: str, *, amount: Optional[Decimal], price: Optional[Decimal]
-    ) -> Tuple[Optional[Decimal], Optional[Decimal]]:
+        self, sym: str, *, amount: Decimal | None, price: Decimal | None
+    ) -> tuple[Decimal | None, Decimal | None]:
         md = self._market_desc(sym)
         p_amt = amount
         p_pr = price
@@ -112,7 +112,7 @@ class CcxtBroker:
                 step = None
                 prec = md.get("precision", {}) or {}
                 limits = md.get("limits", {}) or {}
-                if "amount" in prec and prec["amount"]:
+                if prec.get("amount"):
                     step = dec(str(prec["amount"]))
                 elif "amount" in limits and "min" in limits["amount"]:
                     step = dec(str(limits["amount"]["min"]))
@@ -120,7 +120,7 @@ class CcxtBroker:
             if price is not None:
                 step = None
                 prec = md.get("precision", {}) or {}
-                if "price" in prec and prec["price"]:
+                if prec.get("price"):
                     step = dec(str(prec["price"]))
                 p_pr = self._quant(price, step)
         except Exception:
@@ -194,7 +194,7 @@ class CcxtBroker:
             raise self._map_error(exc)
 
     async def create_market_buy_quote(
-        self, *, symbol: str, quote_amount: Decimal, client_order_id: Optional[str] = None
+        self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None
     ) -> Any:
         await self._ensure_markets()
         # ask для расчёта базового amount
@@ -225,7 +225,7 @@ class CcxtBroker:
             raise self._map_error(exc)
 
     async def create_market_sell_base(
-        self, *, symbol: str, base_amount: Decimal, client_order_id: Optional[str] = None
+        self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None
     ) -> Any:
         await self._ensure_markets()
         t = await self.fetch_ticker(symbol)

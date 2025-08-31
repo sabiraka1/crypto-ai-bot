@@ -1,24 +1,23 @@
 ﻿from __future__ import annotations
 
 import asyncio
-from typing import List, Tuple
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.core.application.symbols import canonical
 from crypto_ai_bot.utils.decimal import dec
 
 
-def _symbols_from_settings(settings) -> List[str]:
+def _symbols_from_settings(settings) -> list[str]:
     raw = (getattr(settings, "SYMBOLS", "") or "").strip()
     if raw:
         return [canonical(s.strip()) for s in raw.split(",") if s.strip()]
-    return [canonical(getattr(settings, "SYMBOL"))]
+    return [canonical(settings.SYMBOL)]
 
 
 async def main() -> None:
     c = await build_container_async()
     symbols = _symbols_from_settings(c.settings)
-    rows: List[Tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
 
     total_realized = dec("0")
     total_turnover = dec("0")

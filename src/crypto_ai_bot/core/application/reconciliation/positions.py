@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import time
-from decimal import Decimal
-from typing import List
-
-from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
+from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("application.reconcile.positions")
 
 
-async def reconcile_positions_batch(*, symbols: List[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort) -> None:
+async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort) -> None:
     """
     Простая сверка: подтягиваем текущую цену и обновляем нереализованный PnL.
     """

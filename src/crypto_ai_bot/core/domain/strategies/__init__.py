@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 # Базовые контракты/типы
-from .base import BaseStrategy, StrategyContext, MarketData
+from .base import BaseStrategy, MarketData, StrategyContext
+from .bollinger_bands import BollingerBandsStrategy
+from .ema_atr import EmaAtrStrategy
 
 # Стратегии
 from .ema_cross import EmaCrossStrategy
-from .rsi_momentum import RSIMomentumStrategy
-from .bollinger_bands import BollingerBandsStrategy
-from .ema_atr import EmaAtrStrategy
-from .signals_policy_strategy import SignalsPolicyStrategy
+from .exit_policies import (
+    StopLossPolicy,
+    TakeProfitPolicy,
+    TrailingStopPolicy,
+)
 
 # Менеджер
 from .manager import StrategyManager
@@ -17,31 +20,28 @@ from .manager import StrategyManager
 # Позиционирование / выходы
 from .position_sizing import (
     SizeConstraints,
-    fixed_quote_amount,
     fixed_fractional,
+    fixed_quote_amount,
     naive_kelly,
 )
-from .exit_policies import (
-    StopLossPolicy,
-    TakeProfitPolicy,
-    TrailingStopPolicy,
-)
+from .rsi_momentum import RSIMomentumStrategy
+from .signals_policy_strategy import SignalsPolicyStrategy
 
 __all__ = [
     "BaseStrategy",
-    "StrategyContext",
-    "MarketData",
-    "EmaCrossStrategy",
-    "RSIMomentumStrategy",
     "BollingerBandsStrategy",
     "EmaAtrStrategy",
+    "EmaCrossStrategy",
+    "MarketData",
+    "RSIMomentumStrategy",
     "SignalsPolicyStrategy",
-    "StrategyManager",
     "SizeConstraints",
-    "fixed_quote_amount",
-    "fixed_fractional",
-    "naive_kelly",
     "StopLossPolicy",
+    "StrategyContext",
+    "StrategyManager",
     "TakeProfitPolicy",
     "TrailingStopPolicy",
+    "fixed_fractional",
+    "fixed_quote_amount",
+    "naive_kelly",
 ]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Dict, Any
+from typing import Any
 
 from ...brokers.base import TickerDTO
 
@@ -30,7 +30,7 @@ class MarketDataRepository:
         )
         self._c.commit()
 
-    def list_recent(self, symbol: str, limit: int = 100) -> list[Dict[str, Any]]:
+    def list_recent(self, symbol: str, limit: int = 100) -> list[dict[str, Any]]:
         cur = self._c.execute(
             "SELECT symbol,last,bid,ask,ts_ms FROM market_data WHERE symbol=? ORDER BY ts_ms DESC LIMIT ?",
             (symbol, limit),

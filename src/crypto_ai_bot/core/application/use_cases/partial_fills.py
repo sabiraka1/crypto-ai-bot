@@ -1,8 +1,6 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, OrderLike
 from crypto_ai_bot.utils.decimal import dec
@@ -15,7 +13,7 @@ _log = get_logger("usecase.partial_fills")
 class PartialFillHandler:
     bus: EventBusPort
 
-    async def handle(self, order: OrderLike, broker: BrokerPort) -> Optional[OrderLike]:
+    async def handle(self, order: OrderLike, broker: BrokerPort) -> OrderLike | None:
         """
         Если частично исполнилось меньше порогового процента — добиваем остаток по рынку (long-only).
         Порог берём консервативный 95% от объёма исходного ордера.

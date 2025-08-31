@@ -3,15 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+
 
 @dataclass
 class TickerDTO:
     symbol: str
     last: Decimal
-    bid: Optional[Decimal] = None
-    ask: Optional[Decimal] = None
-    timestamp: Optional[int] = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    timestamp: int | None = None
 
 @dataclass
 class OrderDTO:
@@ -22,9 +22,9 @@ class OrderDTO:
     amount: Decimal
     status: str  # "open" | "closed" | "canceled" | ...
     filled: Decimal
-    timestamp: Optional[int] = None
-    price: Optional[Decimal] = None
-    cost: Optional[Decimal] = None
+    timestamp: int | None = None
+    price: Decimal | None = None
+    cost: Decimal | None = None
     fee_quote: Decimal = Decimal("0")  # ← НОВОЕ, комиссия в валюте котировки
 
 class BalanceDTO:

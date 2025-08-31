@@ -1,14 +1,15 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Optional, Dict, List
-from datetime import datetime, timezone
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
+
 def _now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+    return int(datetime.now(UTC).timestamp() * 1000)
 
 @dataclass
 class Position:
@@ -49,7 +50,7 @@ class PositionsRepository:
         return self.get_position(symbol).base_qty
 
     # 🔹 батч-доступ
-    def get_positions_many(self, symbols: List[str]) -> Dict[str, Position]:
+    def get_positions_many(self, symbols: list[str]) -> dict[str, Position]:
         if not symbols:
             return {}
         placeholders = ",".join(["?"] * len(symbols))
@@ -58,7 +59,7 @@ class PositionsRepository:
             f"SELECT symbol, base_qty, avg_entry_price, realized_pnl, unrealized_pnl, updated_ts_ms, version FROM positions WHERE symbol IN ({placeholders})",
             symbols,
         )
-        out: Dict[str, Position] = {}
+        out: dict[str, Position] = {}
         for r in cur.fetchall():
             out[r["symbol"]] = Position(
                 symbol=r["symbol"],
@@ -92,7 +93,7 @@ class PositionsRepository:
 
     def apply_trade(self, *, symbol: str, side: str, base_amount: Decimal,
                     price: Decimal, fee_quote: Decimal = dec("0"),
-                    last_price: Optional[Decimal] = None) -> None:
+                    last_price: Decimal | None = None) -> None:
         side = (side or "").lower().strip()
         if side not in ("buy", "sell"):
             return

@@ -1,6 +1,7 @@
 # src/crypto_ai_bot/utils/decimal.py
 from __future__ import annotations
-from decimal import Decimal, getcontext, ROUND_HALF_EVEN, ROUND_DOWN
+
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, getcontext
 from typing import Any
 
 CTX = getcontext()

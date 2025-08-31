@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from crypto_ai_bot.core.domain.macro.types import MacroSnapshot, Regime
 
@@ -25,7 +24,7 @@ class RegimeDetector:
     Источники опциональны: если какого-то нет, он не влияет.
     """
 
-    def __init__(self, *, dxy_source, btc_dom_source, fomc_source, cfg: Optional[RegimeConfig] = None) -> None:
+    def __init__(self, *, dxy_source, btc_dom_source, fomc_source, cfg: RegimeConfig | None = None) -> None:
         self._dxy = dxy_source
         self._btc = btc_dom_source
         self._fomc = fomc_source

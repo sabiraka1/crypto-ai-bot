@@ -3,15 +3,14 @@
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Any
 
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.brokers.base import IBroker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("safety.dms")
 
@@ -29,10 +28,10 @@ class DeadMansSwitch:
     max_impact_pct: Decimal = dec("0")  # 0 = выключено
 
     # опциональная шина событий — чтобы можно было алертить без доп. зависимостей
-    bus: Optional[AsyncEventBus] = None
+    bus: AsyncEventBus | None = None
 
     _last_beat_ms: int = 0
-    _last_healthy_price: Optional[Decimal] = None
+    _last_healthy_price: Decimal | None = None
 
     def beat(self) -> None:
         self._last_beat_ms = now_ms()

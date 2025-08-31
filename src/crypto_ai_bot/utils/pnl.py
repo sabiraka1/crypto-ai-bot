@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable, List, Optional, Dict, Any, Tuple
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
@@ -13,7 +14,7 @@ class PnLItem:
     base_qty: Decimal       # количество в базовой валюте
     price: Decimal          # цена (quote/base)
     fee_quote: Decimal      # комиссия в котируемой валюте
-    ts_ms: Optional[int] = None
+    ts_ms: int | None = None
 
 
 @dataclass
@@ -22,8 +23,8 @@ class PnLResult:
     remaining_base: Decimal
 
 
-def _normalize(trades: Iterable[Dict[str, Any]]) -> List[PnLItem]:
-    items: List[PnLItem] = []
+def _normalize(trades: Iterable[dict[str, Any]]) -> list[PnLItem]:
+    items: list[PnLItem] = []
     for t in trades:
         side = str(t.get("side", "")).lower().strip()
         if side not in ("buy", "sell"):
@@ -49,9 +50,9 @@ def _normalize(trades: Iterable[Dict[str, Any]]) -> List[PnLItem]:
     return items
 
 
-def fifo_pnl(trades: Iterable[Dict[str, Any]]) -> PnLResult:
+def fifo_pnl(trades: Iterable[dict[str, Any]]) -> PnLResult:
     items = _normalize(trades)
-    fifo: List[Tuple[Decimal, Decimal]] = []
+    fifo: list[tuple[Decimal, Decimal]] = []
     realized = dec("0")
     remaining = dec("0")
 

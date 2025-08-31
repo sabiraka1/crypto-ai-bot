@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.pnl import fifo_pnl
+
 from .positions import PositionsRepository
 
 
-def _today_bounds_utc() -> Tuple[int, int]:
-    now = datetime.now(timezone.utc)
+def _today_bounds_utc() -> tuple[int, int]:
+    now = datetime.now(UTC)
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
     return int(start.timestamp() * 1000), int(end.timestamp() * 1000)
@@ -62,7 +63,7 @@ class TradesRepository:
                 price=price, fee_quote=fee_quote, last_price=price,
             )
 
-    def list_today(self, symbol: str) -> List[Dict[str, Any]]:
+    def list_today(self, symbol: str) -> list[dict[str, Any]]:
         ts_from, ts_to = _today_bounds_utc()
         cur = self.conn.cursor()
         cur.execute(
@@ -75,7 +76,7 @@ class TradesRepository:
             (symbol, ts_from, ts_to),
         )
         rows = cur.fetchall()
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for r in rows:
             out.append({
                 "symbol": r["symbol"],
@@ -98,7 +99,7 @@ class TradesRepository:
 
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
         cur = self.conn.cursor()
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
         from_ms = now_ms - int(minutes * 60 * 1000)
         cur.execute(
             "SELECT COUNT(*) AS cnt FROM trades WHERE symbol = ? AND ts_ms >= ?",
@@ -107,7 +108,7 @@ class TradesRepository:
         row = cur.fetchone()
         return int(row["cnt"] if row and "cnt" in row.keys() else 0)
 
-    def add_reconciliation_trade(self, data: Dict[str, Any]) -> None:
+    def add_reconciliation_trade(self, data: dict[str, Any]) -> None:
         symbol = data.get("symbol")
         side = (data.get("side", "") or "").lower()
         amount = dec(str(data.get("amount", "") or "0"))
@@ -149,7 +150,7 @@ class TradesRepository:
 
     def realized_pnl_day_quote(self, symbol: str) -> Decimal:
         rows = self.list_today(symbol)
-        trades: List[dict] = []
+        trades: list[dict] = []
         for r in rows:
             side = str(r.get("side", "")).lower()
             price = dec(str(r.get("price", "0") or "0"))

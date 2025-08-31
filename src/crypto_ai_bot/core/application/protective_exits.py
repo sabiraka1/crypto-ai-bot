@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
@@ -60,7 +60,7 @@ class ProtectiveExits:
         """Остановка фоновой работы."""
         _log.debug("protective_exits.stop")
 
-    async def evaluate(self, *, symbol: str) -> Optional[dict]:
+    async def evaluate(self, *, symbol: str) -> dict | None:
         """
         Основная точка входа из оркестратора: проверить, нужна ли защитная
         фиксация позиции (SL/TP/Trailing). Возвращает dict-результат или None.
