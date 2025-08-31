@@ -1,43 +1,50 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+# ==== Совместимый публичный API для стратегий ====
+
 @dataclass(frozen=True)
-class Signal:
+class Decision:
     """
-    Торговый сигнал от стратегии.
-    action: 'buy' | 'sell' | 'hold'
-    confidence: 0..1 (вес сигнала)
-    quote_amount: желаемая сумма в котируемой валюте (для buy)
-    base_amount: желаемое количество базовой валюты (для sell)
-    reason: текстовая причина (для логов/алёртов)
+    Решение стратегии:
+    - action: 'buy' | 'sell' | 'hold'
+    - confidence: 0..1 (вес)
+    - quote_amount/base_amount: желаемые объёмы
+    - reason: пояснение (для логов/уведомлений)
     """
-    action: str = "hold"
+    action: str
     confidence: float = 0.0
     quote_amount: str | None = None
     base_amount: str | None = None
     reason: str = ""
 
 
-class MarketDataPort(Protocol):
+@dataclass(frozen=True)
+class StrategyContext:
+    """Контекст генерации сигнала."""
+    symbol: str
+    settings: Any
+
+
+class MarketData(Protocol):
+    """Порт для получения рыночных данных."""
     async def get_ohlcv(
         self, symbol: str, timeframe: str = "1m", limit: int = 200
-    ) -> Sequence[tuple]:
-        """
-        Возвращает последовательность свечей: (ts_ms, open, high, low, close, volume)
-        Значения числовые (float/str приводимые к Decimal).
-        """
-        ...
-
-    async def get_ticker(self, symbol: str) -> dict:
-        """Возвращает тикер с полями bid/ask/last и т.п."""
-        ...
+    ) -> Sequence[tuple[Any, ...]]: ...
+    async def get_ticker(self, symbol: str) -> dict[str, Any]: ...
 
 
-class StrategyPort(Protocol):
-    async def generate(self, *, symbol: str, md: MarketDataPort, settings: Any) -> Signal:
-        """Вернуть торговый сигнал для symbol, используя md и настройки."""
-        ...
+# Для совместимости со старым именованием:
+MarketDataPort = MarketData
+
+
+class BaseStrategy(ABC):
+    """Базовый контракт стратегии."""
+
+    @abstractmethod
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision: ...

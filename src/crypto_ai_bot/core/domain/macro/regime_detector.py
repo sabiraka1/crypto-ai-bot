@@ -1,27 +1,24 @@
-# src/crypto_ai_bot/core/application/macro/regime_detector.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from crypto_ai_bot.core.domain.macro.types import MacroSnapshot, Regime
+from .types import MacroSnapshot, Regime
 
 
 @dataclass
 class RegimeConfig:
-    dxy_up_pct: float = 0.5         # рост DXY > +0.5% => риск-офф
-    dxy_down_pct: float = -0.2      # падение DXY < -0.2% => сигнал риск-он
-    btc_dom_up_pct: float = 0.5     # рост доминации BTC > +0.5% => риск-офф для альтов
-    btc_dom_down_pct: float = -0.5  # падение доминации BTC < -0.5% => риск-он
-    fomc_block_minutes: int = 60    # окно перед/после FOMC (если источник так помечает)
+    dxy_up_pct: float = 0.5
+    dxy_down_pct: float = -0.2
+    btc_dom_up_pct: float = 0.5
+    btc_dom_down_pct: float = -0.5
+    fomc_block_minutes: int = 60
 
 
 class RegimeDetector:
     """
     Агрегирует макро-сигналы (DXY/BTC.D/FOMC) и решает режим:
-      - "risk_off" — избегаем новых лонгов, снижаем агрессию
-      - "risk_on"  — допускаем лонги, breakout и т.п.
-      - "range"    — нейтрально
-    Источники опциональны: если какого-то нет, он не влияет.
+    'risk_off' | 'risk_on' | 'range'.
+    Источники опциональны.
     """
 
     def __init__(self, *, dxy_source, btc_dom_source, fomc_source, cfg: RegimeConfig | None = None) -> None:
@@ -38,7 +35,7 @@ class RegimeDetector:
 
     async def regime(self) -> Regime:
         snap = await self.snapshot()
-        # FOMC — всегда осторожность
+
         if snap.fomc_event_today:
             return "risk_off"
 
