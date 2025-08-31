@@ -1,84 +1,53 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol
-from decimal import Decimal
+from typing import Protocol, runtime_checkable
 
-# ========== TRADES ==========
-class ITradesReader(Protocol):
-    def list_today(self, symbol: str) -> List[Dict[str, Any]]: ...
-    def daily_turnover_quote(self, symbol: str) -> Decimal: ...
-    def realized_pnl_day_quote(self, symbol: str) -> Decimal: ...
-    def daily_pnl_quote(self, symbol: str) -> Decimal: ...
-    def count_orders_last_minutes(self, symbol: str, minutes: int) -> int: ...
 
-class ITradesWriter(Protocol):
-    def add_from_order(self, order: Any) -> None: ...
-    def add_reconciliation_trade(self, data: Dict[str, Any]) -> None: ...
+@runtime_checkable
+class SafetySwitchPort(Protocol):
+    """
+    Порт Dead Man's Switch: сервис обязан периодически вызывать ping()
+    (например, раз в N секунд). Если пингов нет — внешняя система может
+    остановить торги/закрыть позиции. В нашем коде допускается no-op.
+    """
+    async def start(self) -> None: ...
+    async def ping(self) -> None: ...
+    async def stop(self) -> None: ...
 
-class ITradesRepository(ITradesReader, ITradesWriter, Protocol):
-    pass
 
-# ========== POSITIONS ==========
-class PositionLike(Protocol):
-    symbol: str
-    base_qty: Decimal
-    avg_entry_price: Decimal
-    realized_pnl: Decimal
-    unrealized_pnl: Decimal
-    updated_ts_ms: int
-    version: int
+@runtime_checkable
+class InstanceLockPort(Protocol):
+    """
+    Порт эксклюзивного лок-инстанса: чтобы не запустить два робота на один символ.
+    """
+    async def acquire(self) -> bool: ...
+    async def release(self) -> None: ...
 
-class IPositionsRepository(Protocol):
-    def get_position(self, symbol: str) -> PositionLike: ...
-    def get_positions_many(self, symbols: List[str]) -> Dict[str, PositionLike]: ...
-    def get_base_qty(self, symbol: str) -> Decimal: ...
-    def set_base_qty(self, symbol: str, value: Decimal) -> None: ...
-    def apply_trade(self, *, symbol: str, side: str, base_amount: Decimal,
-                    price: Decimal, fee_quote: Decimal = Decimal("0"),
-                    last_price: Optional[Decimal] = None) -> None: ...
 
-# ========== IDEMPOTENCY / AUDIT ==========
-class IIdempotencyRepository(Protocol):
-    def check_and_store(self, key: str, ttl_sec: int) -> bool: ...
-    def prune_older_than(self, seconds: int) -> None: ...
+# ---- Безопасные заглушки (используются, когда DMS/LOCK выключены) ----
 
-class IAuditRepository(Protocol):
-    def write(self, event: str, payload: Dict[str, Any]) -> None: ...
+class NoopSafetySwitch(SafetySwitchPort):
+    async def start(self) -> None:
+        return None
 
-# ========== STORAGE FACADE ==========
-class StoragePort(Protocol):
-    @property
-    def trades(self) -> ITradesRepository: ...
-    @property
-    def positions(self) -> IPositionsRepository: ...
-    def idempotency(self) -> Optional[IIdempotencyRepository]: ...
-    def audit(self) -> Optional[IAuditRepository]: ...
+    async def ping(self) -> None:
+        return None
 
-# ========== ORDER (для use-case ссылок) ==========
-class OrderLike(Protocol):
-    id: str
-    client_order_id: Optional[str]
-    symbol: str
-    side: str
-    amount: Decimal
-    filled: Decimal
-    price: Decimal
-    cost: Decimal
-    fee_quote: Decimal
-    ts_ms: int
+    async def stop(self) -> None:
+        return None
 
-# ========== BROKER ==========
-class BrokerPort(Protocol):
-    async def fetch_ticker(self, symbol: str) -> Any: ...
-    async def fetch_balance(self, symbol: str) -> Any: ...
-    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal,
-                                      client_order_id: Optional[str] = None) -> Any: ...
-    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal,
-                                      client_order_id: Optional[str] = None) -> Any: ...
-    async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any: ...
 
-# ========== EVENT BUS ==========
-class EventBusPort(Protocol):
-    async def publish(self, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None: ...
-    def on(self, topic: str, coro) -> None: ...
-    def subscribe(self, topic: str, coro) -> None: ...
+class NoopInstanceLock(InstanceLockPort):
+    async def acquire(self) -> bool:
+        return True  # позволяем запуск (нет фактической блокировки)
+
+    async def release(self) -> None:
+        return None
+
+
+__all__ = [
+    "SafetySwitchPort",
+    "InstanceLockPort",
+    "NoopSafetySwitch",
+    "NoopInstanceLock",
+]
