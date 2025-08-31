@@ -17,8 +17,6 @@ from crypto_ai_bot.utils.metrics import inc, observe
 _log = get_logger("application.orchestrator")
 
 
-# ========== МАЛЫЕ КЛАССЫ ЦИКЛОВ (внутри файла, без новых пакетов) ==========
-
 class _EvalLoop:
     def __init__(self, *, symbol: str, storage: StoragePort, broker: BrokerPort,
                  bus: EventBusPort, risk: RiskManager, settings: Any) -> None:
@@ -32,7 +30,7 @@ class _EvalLoop:
     async def tick(self) -> None:
         q = dec(str(getattr(self.settings, "FIXED_AMOUNT", 0) or 0))
         t0 = asyncio.get_event_loop().time()
-        res = await eval_and_execute(
+        _ = await eval_and_execute(
             storage=self.storage,
             broker=self.broker,
             bus=self.bus,
@@ -41,12 +39,8 @@ class _EvalLoop:
             inputs=EvalInputs(symbol=self.symbol, quote_amount=q),
         )
         observe("loop.eval.ms", (asyncio.get_event_loop().time() - t0) * 1000.0)
-        if res.ok:
-            inc("loop.eval.ok", {"symbol": self.symbol})
-
 
 class _ExitsLoop:
-    """Заглушка под защитные выходы/стопы; оставляем лёгкий каркас."""
     def __init__(self, *, symbol: str, storage: StoragePort, broker: BrokerPort,
                  bus: EventBusPort, settings: Any) -> None:
         self.symbol = symbol
@@ -56,9 +50,7 @@ class _ExitsLoop:
         self.settings = settings
 
     async def tick(self) -> None:
-        # здесь может быть trailing stop / hard stop в будущем
-        await asyncio.sleep(0)  # no-op
-
+        await asyncio.sleep(0)
 
 class _ReconcileLoop:
     def __init__(self, *, symbols: List[str], storage: StoragePort, broker: BrokerPort,
@@ -70,14 +62,8 @@ class _ReconcileLoop:
 
     async def tick(self) -> None:
         t0 = asyncio.get_event_loop().time()
-        await reconcile_positions_batch(
-            symbols=self.symbols,
-            storage=self.storage,
-            broker=self.broker,
-            bus=self.bus,
-        )
+        await reconcile_positions_batch(symbols=self.symbols, storage=self.storage, broker=self.broker, bus=self.bus)
         observe("loop.reconcile.ms", (asyncio.get_event_loop().time() - t0) * 1000.0)
-
 
 class _WatchdogLoop:
     def __init__(self, *, symbol: str, storage: StoragePort, broker: BrokerPort,
@@ -87,8 +73,35 @@ class _WatchdogLoop:
     async def tick(self) -> None:
         await self._hc.check()
 
+class _SettlementLoop:
+    """Фоновая проверка статуса заявок по broker_order_id (если есть)."""
+    def __init__(self, *, symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
+        self.symbol = symbol
+        self.storage = storage
+        self.broker = broker
+        self.bus = bus
+        self.settings = settings
 
-# ========== ОРКЕСТРАТОР (тонкий координатор) ==========
+    async def tick(self) -> None:
+        # если твой trades-репозиторий хранит broker_order_id и статус — перебери «висящие» ордера
+        # здесь упрощённо: ничего не делаем, показан каркас на будущее
+        await asyncio.sleep(0)
+
+class _MaintenanceLoop:
+    """Периодический GC: чистим идемпотенси-ключи и т.п."""
+    def __init__(self, *, storage: StoragePort, settings: Any) -> None:
+        self.storage = storage
+        self.settings = settings
+
+    async def tick(self) -> None:
+        try:
+            idem = getattr(self.storage, "idempotency", None)
+            idem_repo = idem() if callable(idem) else None
+            if idem_repo is not None:
+                ttl = int(getattr(self.settings, "IDEMPOTENCY_TTL_SEC", 60) or 60)
+                idem_repo.prune_older_than(max(ttl * 4, 300))
+        except Exception as exc:
+            _log.warning("idem_prune_failed", extra={"error": str(exc)})
 
 @dataclass
 class Orchestrator:
@@ -106,7 +119,6 @@ class Orchestrator:
     def __post_init__(self) -> None:
         self._tasks = []
 
-    # ---- управление ----
     async def start(self) -> None:
         if self._running:
             return
@@ -118,12 +130,16 @@ class Orchestrator:
         exits_loop = _ExitsLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus, settings=self.settings)
         reconcile_loop = _ReconcileLoop(symbols=[self.symbol], storage=self.storage, broker=self.broker, bus=self.bus)
         watchdog_loop = _WatchdogLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus)
+        settlement_loop = _SettlementLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus, settings=self.settings)
+        maintenance_loop = _MaintenanceLoop(storage=self.storage, settings=self.settings)
 
         self._tasks = [
             asyncio.create_task(self._runner(eval_loop.tick, float(getattr(self.settings, "EVAL_INTERVAL_SEC", 3) or 3)), name="eval-loop"),
             asyncio.create_task(self._runner(exits_loop.tick, float(getattr(self.settings, "EXITS_INTERVAL_SEC", 5) or 5)), name="exits-loop"),
             asyncio.create_task(self._runner(reconcile_loop.tick, float(getattr(self.settings, "RECONCILE_INTERVAL_SEC", 10) or 10)), name="reconcile-loop"),
             asyncio.create_task(self._runner(watchdog_loop.tick, float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", 3) or 3)), name="watchdog-loop"),
+            asyncio.create_task(self._runner(settlement_loop.tick, float(getattr(self.settings, "SETTLEMENT_INTERVAL_SEC", 7) or 7)), name="settlement-loop"),
+            asyncio.create_task(self._runner(maintenance_loop.tick, float(getattr(self.settings, "MAINTENANCE_INTERVAL_SEC", 600) or 600)), name="maintenance-loop"),
         ]
         _log.info("orchestrator_started", extra={"symbol": self.symbol})
 
@@ -163,7 +179,6 @@ class Orchestrator:
             "tasks": [t.get_name() for t in self._tasks if not t.done()],
         }
 
-    # ---- внутренний исполнитель цикла ----
     async def _runner(self, tick_coro, every_sec: float) -> None:
         while self._running:
             if not self._paused:

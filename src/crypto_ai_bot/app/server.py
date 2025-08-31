@@ -6,21 +6,23 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Optional, Dict
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
-from crypto_ai_bot.app.compose import build_container_async  # композиция зависимостей
-from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import export_text
+
+# (опционально) валидируем настройки через pydantic-схему из infra
+try:
+    from crypto_ai_bot.core.infrastructure.settings_schema import validate_settings
+except Exception:
+    validate_settings = None
 
 _log = get_logger("app.server")
 
-# Глобальная ссылка на контейнер, который собирает compose
 _container: Optional[Any] = None
 
-# ========================== Rate limiter (мягкий) ===========================
-
 class RateLimiter:
-    """Простой in-memory лимитер: N запросов в минуту на ключ (IP|Authorization)."""
     def __init__(self, limit_per_min: int = 10) -> None:
         self.limit = int(limit_per_min)
         self.bucket: Dict[str, list[float]] = {}
@@ -34,7 +36,6 @@ class RateLimiter:
         now = time.time()
         k = self._key(request)
         q = self.bucket.setdefault(k, [])
-        # удалить старые записи (старше 60с)
         while q and q[0] < now - 60.0:
             q.pop(0)
         if len(q) >= self.limit:
@@ -42,13 +43,10 @@ class RateLimiter:
         q.append(now)
         return True
 
-
 _rl = RateLimiter(limit_per_min=10)
-
 
 def limit(fn: Callable):
     async def wrapper(*args, **kwargs):
-        # попытка найти Request в позиционных/именованных аргументах
         request: Optional[Request] = None
         for a in args:
             if isinstance(a, Request):
@@ -60,22 +58,24 @@ def limit(fn: Callable):
         if isinstance(request, Request) and not _rl.allow(request):
             raise HTTPException(status_code=429, detail="Too Many Requests")
         return await fn(*args, **kwargs)
-
     return wrapper
-
-
-# ========================== Lifespan (инициализация/закрытие) ===============
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _container
     _log.info("lifespan_start")
-    _container = await build_container_async()  # собираем DI: storage/broker/bus/orchestrator/settings
+    _container = await build_container_async()
+    # валидация настроек (если доступна)
+    try:
+        if validate_settings:
+            validate_settings(getattr(_container, "settings", None))
+    except Exception as exc:
+        _log.error("settings_validation_failed", extra={"error": str(exc)})
+        # продолжаем работу, но health покажет ошибку
     try:
         yield
     finally:
         _log.info("lifespan_shutdown_begin")
-        # Остановка оркестратора
         try:
             orch = getattr(_container, "orchestrator", None)
             if orch is not None:
@@ -83,15 +83,13 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             _log.error("orchestrator_stop_failed", extra={"error": str(exc)})
 
-        # Закрытие event bus (Redis) если поддерживает close()
         try:
             bus = getattr(_container, "bus", None)
             if bus and hasattr(bus, "close"):
-                await bus.close()  # RedisEventBus.close()
+                await bus.close()
         except Exception as exc:
             _log.error("bus_close_failed", extra={"error": str(exc)})
 
-        # Закрытие ccxt exchange, если есть
         try:
             broker = getattr(_container, "broker", None)
             exch = getattr(broker, "exchange", None) if broker else None
@@ -99,23 +97,15 @@ async def lifespan(app: FastAPI):
                 await exch.close()
         except Exception as exc:
             _log.error("exchange_close_failed", extra={"error": str(exc)})
-
         _log.info("lifespan_shutdown_end")
-
 
 app = FastAPI(lifespan=lifespan)
 router = APIRouter()
-
-
-# ========================== Вспомогательные геттеры =========================
 
 def _ctx_or_500():
     if _container is None:
         raise HTTPException(status_code=503, detail="Container not ready")
     return _container
-
-
-# ========================== Health & Info ===================================
 
 @router.get("/health")
 async def health():
@@ -130,8 +120,13 @@ async def health():
         _log.error("health_failed", extra={"error": str(exc)})
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
-
-# ========================== Orchestrator controls ===========================
+@router.get("/metrics")
+async def metrics():
+    try:
+        return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
+    except Exception as exc:
+        _log.error("metrics_failed", extra={"error": str(exc)})
+        return PlainTextResponse("", status_code=500)
 
 @router.get("/orchestrator/status")
 async def orch_status():
@@ -144,7 +139,6 @@ async def orch_status():
     except Exception as exc:
         _log.error("orch_status_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="status_failed")
-
 
 @router.post("/orchestrator/start")
 @limit
@@ -160,7 +154,6 @@ async def orch_start(request: Request):
         _log.error("orch_start_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="start_failed")
 
-
 @router.post("/orchestrator/stop")
 @limit
 async def orch_stop(request: Request):
@@ -174,7 +167,6 @@ async def orch_stop(request: Request):
     except Exception as exc:
         _log.error("orch_stop_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="stop_failed")
-
 
 @router.post("/orchestrator/pause")
 @limit
@@ -190,7 +182,6 @@ async def orch_pause(request: Request):
         _log.error("orch_pause_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="pause_failed")
 
-
 @router.post("/orchestrator/resume")
 @limit
 async def orch_resume(request: Request):
@@ -204,8 +195,5 @@ async def orch_resume(request: Request):
     except Exception as exc:
         _log.error("orch_resume_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="resume_failed")
-
-
-# ========================== Регистрация роутера =============================
 
 app.include_router(router)

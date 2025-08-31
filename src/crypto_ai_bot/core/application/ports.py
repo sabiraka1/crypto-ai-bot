@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Protocol
 from decimal import Decimal
 
-
 # ========== TRADES ==========
 class ITradesReader(Protocol):
     def list_today(self, symbol: str) -> List[Dict[str, Any]]: ...
@@ -12,16 +11,12 @@ class ITradesReader(Protocol):
     def daily_pnl_quote(self, symbol: str) -> Decimal: ...
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int: ...
 
-
 class ITradesWriter(Protocol):
     def add_from_order(self, order: Any) -> None: ...
     def add_reconciliation_trade(self, data: Dict[str, Any]) -> None: ...
 
-
 class ITradesRepository(ITradesReader, ITradesWriter, Protocol):
-    """Совмещённый порт — можно подменить раздельными при необходимости."""
     pass
-
 
 # ========== POSITIONS ==========
 class PositionLike(Protocol):
@@ -33,44 +28,31 @@ class PositionLike(Protocol):
     updated_ts_ms: int
     version: int
 
-
 class IPositionsRepository(Protocol):
     def get_position(self, symbol: str) -> PositionLike: ...
     def get_positions_many(self, symbols: List[str]) -> Dict[str, PositionLike]: ...
     def get_base_qty(self, symbol: str) -> Decimal: ...
     def set_base_qty(self, symbol: str, value: Decimal) -> None: ...
-    def apply_trade(
-        self,
-        *,
-        symbol: str,
-        side: str,
-        base_amount: Decimal,
-        price: Decimal,
-        fee_quote: Decimal = Decimal("0"),
-        last_price: Optional[Decimal] = None,
-    ) -> None: ...
+    def apply_trade(self, *, symbol: str, side: str, base_amount: Decimal,
+                    price: Decimal, fee_quote: Decimal = Decimal("0"),
+                    last_price: Optional[Decimal] = None) -> None: ...
 
-
-# ========== IDEMPOTENCY / AUDIT (опционально, по месту) ==========
+# ========== IDEMPOTENCY / AUDIT ==========
 class IIdempotencyRepository(Protocol):
     def check_and_store(self, key: str, ttl_sec: int) -> bool: ...
     def prune_older_than(self, seconds: int) -> None: ...
 
-
 class IAuditRepository(Protocol):
     def write(self, event: str, payload: Dict[str, Any]) -> None: ...
 
-
-# ========== STORAGE FACADE (только как контейнер портов) ==========
+# ========== STORAGE FACADE ==========
 class StoragePort(Protocol):
     @property
     def trades(self) -> ITradesRepository: ...
     @property
     def positions(self) -> IPositionsRepository: ...
-    # опциональные фасады
     def idempotency(self) -> Optional[IIdempotencyRepository]: ...
     def audit(self) -> Optional[IAuditRepository]: ...
-
 
 # ========== BROKER ==========
 class BrokerPort(Protocol):
@@ -80,7 +62,7 @@ class BrokerPort(Protocol):
                                       client_order_id: Optional[str] = None) -> Any: ...
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal,
                                       client_order_id: Optional[str] = None) -> Any: ...
-
+    async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any: ...  # <— добавлено
 
 # ========== EVENT BUS ==========
 class EventBusPort(Protocol):
