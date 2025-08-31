@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/core/domain/signals/_build.py
 from __future__ import annotations
 
 from dataclasses import dataclass

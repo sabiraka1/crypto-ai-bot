@@ -1,5 +1,4 @@
-﻿## `core/signals/_fusion.py`
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from crypto_ai_bot.utils.decimal import dec
 
