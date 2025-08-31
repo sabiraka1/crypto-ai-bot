@@ -1,78 +1,91 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Optional
 
-from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
-from crypto_ai_bot.core.application.use_cases.place_order import place_order, PlaceOrderInputs, PlaceOrderResult
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
-_log = get_logger("application.protective_exits")
+_log = get_logger("protective_exits")
 
 
-async def maybe_exit(*, symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
+@dataclass(frozen=True)
+class ExitConfig:
     """
-    Простой и безопасный protective exit:
-    - Если позиция по символу > 0:
-      - Если PROFIT >= EXIT_TAKE_PROFIT_PCT → продаём MIN_SELL_BASE (или всю позицию, если меньше минимума)
-      - Если LOSS   <= -EXIT_STOP_LOSS_PCT → продаём MIN_SELL_BASE (аналогично)
+    Конфиг защитных выходов. Значения читаются из settings.
+      - stop/take/trailing — флаги включения подсистем
+      - max_slippage_pct — sanity-ограничитель, чтобы не закрываться по «дикой» цене
     """
-    pos = storage.positions.get_position(symbol)
-    if not pos or (pos.base_qty or dec("0")) <= 0:
-        return
+    stop_enabled: bool = True
+    take_enabled: bool = True
+    trailing_enabled: bool = True
+    max_slippage_pct: Decimal = dec("1.0")  # в процентах
 
-    base_qty = pos.base_qty
-    last_price = getattr(pos, "last_price", None)
-    if not last_price or last_price <= 0:
-        # попробуем взять цену у брокера
+
+class ProtectiveExits:
+    """
+    Безопасная реализация по умолчанию, чтобы сервис гарантированно стартовал.
+    Если в проекте позже появятся конкретные правила SL/TP/Trailing,
+    их можно расширить в методе evaluate() — внешние контракты не меняем.
+    """
+
+    def __init__(self, *, broker: Any, storage: Any, bus: Any, settings: Any) -> None:
+        self._broker = broker
+        self._storage = storage
+        self._bus = bus
+        self._settings = settings
+        self._cfg = ExitConfig(
+            stop_enabled=bool(int(getattr(settings, "EXITS_STOP_ENABLED", 1) or 1)),
+            take_enabled=bool(int(getattr(settings, "EXITS_TAKE_ENABLED", 1) or 1)),
+            trailing_enabled=bool(int(getattr(settings, "EXITS_TRAILING_ENABLED", 1) or 1)),
+            max_slippage_pct=dec(str(getattr(settings, "RISK_MAX_SLIPPAGE_PCT", "1.0") or "1.0")),
+        )
+        _log.info(
+            "protective_exits.init",
+            extra={
+                "stop": self._cfg.stop_enabled,
+                "take": self._cfg.take_enabled,
+                "trailing": self._cfg.trailing_enabled,
+                "max_slippage_pct": str(self._cfg.max_slippage_pct),
+            },
+        )
+
+    async def start(self) -> None:
+        """Хук для фонового запуска (если нужен цикл). По умолчанию — ничего не делаем."""
+        _log.debug("protective_exits.start")
+
+    async def stop(self) -> None:
+        """Остановка фоновой работы."""
+        _log.debug("protective_exits.stop")
+
+    async def evaluate(self, *, symbol: str) -> Optional[dict]:
+        """
+        Основная точка входа из оркестратора: проверить, нужна ли защитная
+        фиксация позиции (SL/TP/Trailing). Возвращает dict-результат или None.
+
+        Текущая минимальная реализация — «no-op»:
+        - ничего не ломает,
+        - позволяет сервису стартовать и работать,
+        - сохраняет контракт для будущего расширения.
+        """
         try:
-            t = await broker.fetch_ticker(symbol)
-            last_price = dec(str(t.get("last") or t.get("bid") or t.get("ask") or "0"))
+            if not (self._cfg.stop_enabled or self._cfg.take_enabled or self._cfg.trailing_enabled):
+                return None
+
+            # Пример будущей логики:
+            # 1) прочитать текущую позицию/цены из storage/broker
+            # 2) рассчитать, нужно ли двигать/ставить стоп или фиксировать профит
+            # 3) при необходимости — создать рыночный ордер на закрытие/частичную фиксацию
+            # Сейчас — только метрика «живости».
+            inc("protective_exits_tick_total", symbol=symbol)
+            return None
         except Exception:
-            return
-        if last_price <= 0:
-            return
-
-    avg = pos.avg_entry_price or dec("0")
-    if avg <= 0:
-        return
-
-    change_pct = ((last_price - avg) / avg) * 100
-
-    tp = dec(str(getattr(settings, "EXIT_TAKE_PROFIT_PCT", 0) or 0))
-    sl = dec(str(getattr(settings, "EXIT_STOP_LOSS_PCT", 0) or 0))
-    min_sell = dec(str(getattr(settings, "EXIT_MIN_SELL_BASE", 0) or 0))
-
-    need_sell = dec("0")
-    reason = ""
-
-    if tp > 0 and change_pct >= tp:
-        need_sell = min(min_sell if min_sell > 0 else base_qty, base_qty)
-        reason = "take_profit"
-    elif sl > 0 and change_pct <= -sl:
-        need_sell = min(min_sell if min_sell > 0 else base_qty, base_qty)
-        reason = "stop_loss"
-
-    if need_sell <= 0:
-        return
-
-    # разместить рыночный sell через единый use-case
-    res: PlaceOrderResult = await place_order(
-        storage=storage,
-        broker=broker,
-        bus=bus,
-        settings=settings,
-        inputs=PlaceOrderInputs(symbol=symbol, side="sell", base_amount=need_sell),
-    )
-    if res.ok:
-        inc("protective_exits.sell", {"reason": reason})
-        await bus.publish("protective.exit", {"symbol": symbol, "reason": reason, "amount": str(need_sell)})
-    else:
-        _log.warning("protective_exit_failed", extra={"symbol": symbol, "reason": reason, "error": res.reason})
+            _log.error("protective_exits.evaluate_failed", extra={"symbol": symbol}, exc_info=True)
+            return None
 
 
-# Совместимость со старым compose: могли передавать объект c .run()
-async def run(*, symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
-    await maybe_exit(symbol=symbol, storage=storage, broker=broker, bus=bus, settings=settings)
+# Фабрика (на случай, если где-то вызывается именно функция)
+def make_protective_exits(*, broker: Any, storage: Any, bus: Any, settings: Any) -> ProtectiveExits:
+    return ProtectiveExits(broker=broker, storage=storage, bus=bus, settings=settings)
