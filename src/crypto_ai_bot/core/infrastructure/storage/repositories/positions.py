@@ -7,6 +7,9 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
+# Константа для дефолтного значения B008
+_DEFAULT_FEE_ZERO = dec("0")
+
 
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
@@ -92,8 +95,12 @@ class PositionsRepository:
         self.conn.commit()
 
     def apply_trade(self, *, symbol: str, side: str, base_amount: Decimal,
-                    price: Decimal, fee_quote: Decimal = dec("0"),
+                    price: Decimal, fee_quote: Decimal | None = None,
                     last_price: Decimal | None = None) -> None:
+        # Обработка дефолтного значения для B008
+        if fee_quote is None:
+            fee_quote = _DEFAULT_FEE_ZERO
+            
         side = (side or "").lower().strip()
         if side not in ("buy", "sell"):
             return

@@ -173,7 +173,7 @@ class CcxtBroker:
             return res
         except Exception as exc:
             inc("broker.request.error", {"fn": "fetch_ticker"})
-            raise self._map_error(exc)
+            raise self._map_error(exc) from exc
 
     async def fetch_balance(self, symbol: str) -> Any:
         await self._ensure_markets()
@@ -191,7 +191,7 @@ class CcxtBroker:
             }
         except Exception as exc:
             inc("broker.request.error", {"fn": "fetch_balance"})
-            raise self._map_error(exc)
+            raise self._map_error(exc) from exc
 
     async def create_market_buy_quote(
         self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None
@@ -222,7 +222,7 @@ class CcxtBroker:
             return order
         except Exception as exc:
             inc("broker.request.error", {"fn": "create_buy"})
-            raise self._map_error(exc)
+            raise self._map_error(exc) from exc
 
     async def create_market_sell_base(
         self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None
@@ -251,7 +251,7 @@ class CcxtBroker:
             return order
         except Exception as exc:
             inc("broker.request.error", {"fn": "create_sell"})
-            raise self._map_error(exc)
+            raise self._map_error(exc) from exc
 
     async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any:
         await self._ensure_markets()
@@ -264,4 +264,4 @@ class CcxtBroker:
             return res
         except Exception as exc:
             inc("broker.request.error", {"fn": "fetch_order"})
-            raise self._map_error(exc)
+            raise self._map_error(exc) from exc

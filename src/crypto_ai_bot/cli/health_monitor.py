@@ -68,7 +68,7 @@ def main() -> None:
             asyncio.run(_watch(args.url, args.timeout, args.interval))
         except KeyboardInterrupt:
             print("\nstopped by user")
-            raise SystemExit(0)
+            raise SystemExit(0) from None
 
 
 if __name__ == "__main__":

@@ -154,9 +154,9 @@ async def orch_status(symbol: str | None = Query(default=None)):
     try:
         st = orch.status(); st["symbol"] = sym
         return JSONResponse(st)
-    except Exception:
+    except Exception as e:
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="status_failed")
+        raise HTTPException(status_code=500, detail="status_failed") from e
 
 @router.post("/orchestrator/start")
 @limit
@@ -166,9 +166,9 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
         await orch.start()
         st = orch.status(); st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception:
+    except Exception as e:
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="start_failed")
+        raise HTTPException(status_code=500, detail="start_failed") from e
 
 @router.post("/orchestrator/stop")
 @limit
@@ -178,9 +178,9 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)):
         await orch.stop()
         st = orch.status(); st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception:
+    except Exception as e:
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="stop_failed")
+        raise HTTPException(status_code=500, detail="stop_failed") from e
 
 @router.post("/orchestrator/pause")
 @limit
@@ -190,9 +190,9 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
         await orch.pause()
         st = orch.status(); st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception:
+    except Exception as e:
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="pause_failed")
+        raise HTTPException(status_code=500, detail="pause_failed") from e
 
 @router.post("/orchestrator/resume")
 @limit
@@ -202,9 +202,9 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
         await orch.resume()
         st = orch.status(); st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception:
+    except Exception as e:
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="resume_failed")
+        raise HTTPException(status_code=500, detail="resume_failed") from e
 
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)):
@@ -241,8 +241,8 @@ async def pnl_today(symbol: str | None = Query(default=None)):
         )
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
         _log.error("pnl_today_failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="pnl_today_failed")
+        raise HTTPException(status_code=500, detail="pnl_today_failed") from e
 
 app.include_router(router)

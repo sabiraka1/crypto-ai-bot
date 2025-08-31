@@ -24,6 +24,10 @@ except Exception:
 
 _log = get_logger("usecase.execute_trade")
 
+# Константы для дефолтных значений B008
+_DEFAULT_ZERO = dec("0")
+_DEFAULT_KELLY_CAP = dec("0.5")
+
 
 @dataclass
 class ExecuteTradeResult:
@@ -86,14 +90,20 @@ async def execute_trade(
     bus: EventBusPort,
     settings: Any,
     exchange: str = "",
-    quote_amount: Decimal = dec("0"),
-    base_amount: Decimal = dec("0"),
+    quote_amount: Decimal | None = None,
+    base_amount: Decimal | None = None,
     idempotency_bucket_ms: int = 60000,
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
     protective_exits: Any | None = None,
 ) -> dict:
     """Исполняет торговое решение (покупку или продажу) с учетом идемпотентности и риск-лимитов."""
+    # Обработка дефолтных значений для B008
+    if quote_amount is None:
+        quote_amount = _DEFAULT_ZERO
+    if base_amount is None:
+        base_amount = _DEFAULT_ZERO
+        
     sym = symbol
     act = side.lower()
 
