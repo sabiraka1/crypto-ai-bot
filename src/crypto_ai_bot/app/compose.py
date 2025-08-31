@@ -208,7 +208,7 @@ async def build_container_async() -> Container:
     symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
     orchs: dict[str, Orchestrator] = {}
 
-    def _make_dms(sym: str) -> DeadMansSwitch:  # ИЗМЕНЕН тип возврата
+    def _make_dms(sym: str) -> SafetySwitchPort:  # Используем импортированный тип
         return DeadMansSwitch(
             storage=st,
             broker=br,
@@ -216,7 +216,7 @@ async def build_container_async() -> Container:
             timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-            max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),  # ИСПРАВЛЕНО на Decimal
+            max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
             bus=bus,
         )
 
