@@ -1,38 +1,34 @@
 ﻿from __future__ import annotations
-"""
-DEPRECATED: совместимость.
-Маршрутизируем в eval_and_execute, чтобы не дублировать бизнес-логику и не тянуть infra-импорты.
-"""
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional, Any
-from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
-from crypto_ai_bot.core.application.ports import BrokerPort, StoragePort, EventBusPort, OrderLike
-from crypto_ai_bot.core.domain.risk.manager import RiskManager
-from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+
+from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
+from crypto_ai_bot.core.application.use_cases.place_order import place_order, PlaceOrderInputs, PlaceOrderResult
 from crypto_ai_bot.utils.decimal import dec
 
+@dataclass
+class ExecuteInputs:
+    symbol: str
+    side: str
+    quote_amount: Decimal = dec("0")
+    base_amount: Decimal = dec("0")
+    client_order_id: Optional[str] = None
 
 async def execute_trade(
-    *,
-    symbol: str,
-    storage: StoragePort,
-    broker: BrokerPort,
-    bus: EventBusPort,
-    exchange: str,
-    fixed_quote_amount: Decimal,
-    idempotency_bucket_ms: int,
-    idempotency_ttl_sec: int,
-    force_action: Optional[str],
-    risk_manager: RiskManager,
-    protective_exits: ProtectiveExits,
-    settings: Any,
-    fee_estimate_pct: Decimal = dec("0"),
-) -> Optional[OrderLike]:
-    return await eval_and_execute(
-        symbol=symbol, storage=storage, broker=broker, bus=bus, exchange=exchange,
-        fixed_quote_amount=fixed_quote_amount, idempotency_bucket_ms=idempotency_bucket_ms,
-        idempotency_ttl_sec=idempotency_ttl_sec, force_action=force_action,
-        risk_manager=risk_manager, protective_exits=protective_exits,
-        settings=settings, fee_estimate_pct=fee_estimate_pct,
+    *, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any, inputs: ExecuteInputs
+) -> PlaceOrderResult:
+    return await place_order(
+        storage=storage,
+        broker=broker,
+        bus=bus,
+        settings=settings,
+        inputs=PlaceOrderInputs(
+            symbol=inputs.symbol,
+            side=inputs.side,
+            quote_amount=inputs.quote_amount,
+            base_amount=inputs.base_amount,
+            client_order_id=inputs.client_order_id,
+        ),
     )

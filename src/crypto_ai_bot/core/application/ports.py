@@ -54,6 +54,19 @@ class StoragePort(Protocol):
     def idempotency(self) -> Optional[IIdempotencyRepository]: ...
     def audit(self) -> Optional[IAuditRepository]: ...
 
+# ========== ORDER (для use-case ссылок) ==========
+class OrderLike(Protocol):
+    id: str
+    client_order_id: Optional[str]
+    symbol: str
+    side: str
+    amount: Decimal
+    filled: Decimal
+    price: Decimal
+    cost: Decimal
+    fee_quote: Decimal
+    ts_ms: int
+
 # ========== BROKER ==========
 class BrokerPort(Protocol):
     async def fetch_ticker(self, symbol: str) -> Any: ...
@@ -62,7 +75,7 @@ class BrokerPort(Protocol):
                                       client_order_id: Optional[str] = None) -> Any: ...
     async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal,
                                       client_order_id: Optional[str] = None) -> Any: ...
-    async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any: ...  # <— добавлено
+    async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any: ...
 
 # ========== EVENT BUS ==========
 class EventBusPort(Protocol):

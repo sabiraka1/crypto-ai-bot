@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, List, Optional, Dict, Set
+from typing import Any, List, Optional, Dict, Set, Callable
 
 from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
 from crypto_ai_bot.core.domain.risk.manager import RiskManager
@@ -43,11 +43,28 @@ class _EvalLoop:
 
 class _ExitsLoop:
     def __init__(self, *, symbol: str, storage: StoragePort, broker: BrokerPort,
-                 bus: EventBusPort, settings: Any) -> None:
+                 bus: EventBusPort, settings: Any, exits_callable: Optional[Callable] = None) -> None:
         self.symbol = symbol
+        self.storage = storage
+        self.broker = broker
+        self.bus = bus
+        self.settings = settings
+        self._exits_callable = exits_callable  # совместимость: может быть None
 
     async def tick(self) -> None:
-        await asyncio.sleep(0)
+        if self._exits_callable is None:
+            await asyncio.sleep(0)
+            return
+        try:
+            await self._exits_callable(
+                symbol=self.symbol,
+                storage=self.storage,
+                broker=self.broker,
+                bus=self.bus,
+                settings=self.settings,
+            )
+        except Exception as exc:
+            _log.warning("protective_exits_failed", extra={"error": str(exc)})
 
 
 class _ReconcileLoop:
@@ -75,7 +92,6 @@ class _WatchdogLoop:
 
 
 class _SettlementLoop:
-    """Подтверждение сделок: поллинг fetch_order по полученным order_id из события trade.completed."""
     def __init__(self, *, symbol: str, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
         self.symbol = symbol
         self.broker = broker
@@ -84,7 +100,6 @@ class _SettlementLoop:
         self._pending: Set[str] = set()
         self._max_retries = int(getattr(settings, "SETTLEMENT_MAX_RETRIES", 10) or 10)
         self._retry_delay = float(getattr(settings, "SETTLEMENT_RETRY_DELAY_SEC", 2.0) or 2.0)
-        # подписка на завершённые сделки (в момент размещения)
         bus.subscribe("trade.completed", self._on_trade_completed)
 
     async def _on_trade_completed(self, payload: Dict[str, Any]) -> None:
@@ -98,7 +113,6 @@ class _SettlementLoop:
         if not self._pending:
             await asyncio.sleep(0)
             return
-        # копия, чтобы можно было модифицировать set по ходу
         to_check = list(self._pending)
         for oid in to_check:
             settled = await self._poll_one(oid)
@@ -120,19 +134,16 @@ class _SettlementLoop:
                     inc("settlement.rejected")
                     await self.bus.publish("trade.failed_settlement", {"symbol": self.symbol, "order_id": oid, "status": status})
                     return True
-            except Exception as exc:
-                # сетевые/временные — попробуем ещё
+            except Exception:
                 await asyncio.sleep(self._retry_delay)
                 continue
             await asyncio.sleep(self._retry_delay)
-        # не смогли подтвердить
         inc("settlement.timeout")
         await self.bus.publish("trade.settlement_timeout", {"symbol": self.symbol, "order_id": oid})
-        return True  # снимаем из очереди, чтобы не зависало
+        return True
 
 
 class _MaintenanceLoop:
-    """GC идемпотенции и прочее обслуживание."""
     def __init__(self, *, storage: StoragePort, settings: Any) -> None:
         self.storage = storage
         self.settings = settings
@@ -148,7 +159,6 @@ class _MaintenanceLoop:
             _log.warning("idem_prune_failed", extra={"error": str(exc)})
 
 
-# ========== Оркестратор ==========
 @dataclass
 class Orchestrator:
     symbol: str
@@ -157,6 +167,10 @@ class Orchestrator:
     bus: EventBusPort
     risk: RiskManager
     settings: Any
+    # ↓↓↓ для совместимости со старым compose: если передадут — не упадём
+    exits: Optional[Any] = None
+    health: Optional[Any] = None
+    dms: Optional[Any] = None
 
     _running: bool = False
     _paused: bool = False
@@ -172,8 +186,16 @@ class Orchestrator:
         self._paused = False
         inc("orchestrator.start", {"symbol": self.symbol})
 
+        exits_callable = None
+        # если из compose передали модуль/объект с async-функцией run/maybe_exit — используем
+        if self.exits:
+            if hasattr(self.exits, "run") and asyncio.iscoroutinefunction(self.exits.run):
+                exits_callable = self.exits.run
+            elif hasattr(self.exits, "maybe_exit") and asyncio.iscoroutinefunction(self.exits.maybe_exit):
+                exits_callable = self.exits.maybe_exit
+
         eval_loop = _EvalLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus, risk=self.risk, settings=self.settings)
-        exits_loop = _ExitsLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus, settings=self.settings)
+        exits_loop = _ExitsLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus, settings=self.settings, exits_callable=exits_callable)
         reconcile_loop = _ReconcileLoop(symbols=[self.symbol], storage=self.storage, broker=self.broker, bus=self.bus)
         watchdog_loop = _WatchdogLoop(symbol=self.symbol, storage=self.storage, broker=self.broker, bus=self.bus)
         settlement_loop = _SettlementLoop(symbol=self.symbol, broker=self.broker, bus=self.bus, settings=self.settings)
@@ -186,7 +208,7 @@ class Orchestrator:
             asyncio.create_task(self._runner(watchdog_loop.tick, float(getattr(self.settings, "WATCHDOG_INTERVAL_SEC", 3) or 3)), name="watchdog-loop"),
             asyncio.create_task(self._runner(settlement_loop.tick, float(getattr(self.settings, "SETTLEMENT_INTERVAL_SEC", 7) or 7)), name="settlement-loop"),
             asyncio.create_task(self._runner(maintenance_loop.tick, float(getattr(self.settings, "MAINTENANCE_INTERVAL_SEC", 600) or 600)), name="maintenance-loop"),
-        )
+        ]
         _log.info("orchestrator_started", extra={"symbol": self.symbol})
 
     async def stop(self) -> None:
