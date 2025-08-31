@@ -10,7 +10,7 @@ from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
-from crypto_ai_bot.core.application.ports import SafetySwitchPort
+from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort, BrokerPort, StoragePort
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
@@ -32,9 +32,9 @@ _log = get_logger("compose")
 @dataclass
 class Container:
     settings: Settings
-    storage: Storage
-    broker: Any
-    bus: Any
+    storage: Storage  # Можно оставить конкретный тип т.к. это наша реализация
+    broker: BrokerPort  # Используем протокол
+    bus: EventBusPort  # Используем протокол
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
@@ -58,9 +58,9 @@ def _open_storage(settings: Settings) -> Storage:
         do_backup=True,
         backup_retention_days=int(getattr(settings, "BACKUP_RETENTION_DAYS", 30) or 30),
     )
-    return Storage.from_connection(conn)  # ИСПРАВЛЕНО
+    return Storage.from_connection(conn)
 
-def _build_event_bus(settings: Settings) -> AsyncEventBus | RedisEventBus:  # ИСПРАВЛЕНО тип
+def _build_event_bus(settings: Settings) -> EventBusPort:  # Используем протокол
     redis_url = getattr(settings, "EVENT_BUS_URL", "") or ""
     if redis_url:
         return RedisEventBus(redis_url)
@@ -75,7 +75,7 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
 
     async def _publish(topic: str, payload: dict[str, Any]) -> None:
         t = hist("bus_publish_latency_seconds", topic=topic)
-        async def call() -> Any:  # ДОБАВЛЕНА аннотация
+        async def call() -> Any:
             with t.time():
                 return await _orig(topic, payload)
         await async_retry(call, retries=3, base_delay=0.2)
@@ -100,7 +100,7 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         except Exception:
             _log.error("telegram_send_exception", exc_info=True)
 
-    def _sub(topic: str, coro: Callable[[dict[str, Any]], Awaitable[None]]) -> None:  # ДОБАВЛЕНЫ типы
+    def _sub(topic: str, coro: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
         for attr in ("subscribe", "on"):
             if hasattr(bus, attr):
                 try:
@@ -110,7 +110,7 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
-    # ======= Обработчики алертов (ДОБАВЛЕНЫ типы) =======
+    # ======= Обработчики алертов =======
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
@@ -208,7 +208,12 @@ async def build_container_async() -> Container:
     symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
     orchs: dict[str, Orchestrator] = {}
 
-    def _make_dms(sym: str) -> SafetySwitchPort:  # Используем импортированный тип
+    def _make_dms(sym: str) -> SafetySwitchPort:
+        # Проверка совместимости bus для DeadMansSwitch
+        dms_bus = None
+        if isinstance(bus, AsyncEventBus):
+            dms_bus = bus
+        
         return DeadMansSwitch(
             storage=st,
             broker=br,
@@ -217,7 +222,7 @@ async def build_container_async() -> Container:
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=bus,
+            bus=dms_bus,  # Передаем None если не AsyncEventBus
         )
 
     for sym in symbols:
@@ -230,7 +235,7 @@ async def build_container_async() -> Container:
             exits=exits,
             health=health,
             settings=s,
-            dms=_make_dms(sym),  # type: ignore[arg-type] # DeadMansSwitch наследует SafetySwitchPort
+            dms=_make_dms(sym),  # Теперь типы совместимы
         )
 
     attach_alerts(bus, s)
@@ -240,13 +245,13 @@ async def build_container_async() -> Container:
         if hasattr(bus, "on"):
             bus.on("exits.hint", exits.on_hint)
         # Переиспользуем существующие события
-        async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:  # ДОБАВЛЕН тип
+        async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
             try:
                 await exits.on_hint(evt)
             except Exception:
                 _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol","")}, exc_info=True)
         if hasattr(bus, "on"):
-            bus.on("trade.completed", _on_trade_completed_hint)
+            bus.on("trade.completed", _on_trade_completed_hint)  # type: ignore[arg-type]
 
     # ---- Командный Telegram-бот ----
     tg_task: asyncio.Task | None = None

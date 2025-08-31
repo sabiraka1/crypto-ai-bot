@@ -90,3 +90,19 @@ class DeadMansSwitch:
         except Exception as exc:
             _log.error("dms_trigger_failed", extra={"error": str(exc), "symbol": self.symbol})
             inc("dms_trigger_errors_total", symbol=self.symbol)
+
+    # Методы для соответствия SafetySwitchPort протоколу
+    async def start(self) -> None:
+        """Запуск DMS - инициализируем первый beat."""
+        self.beat()
+        _log.info("dms_started", extra={"symbol": self.symbol})
+    
+    async def ping(self) -> None:
+        """Пинг для сброса таймера DMS."""
+        self.beat()
+    
+    async def stop(self) -> None:
+        """Остановка DMS - сбрасываем состояние."""
+        self._last_beat_ms = 0
+        self._last_healthy_price = None
+        _log.info("dms_stopped", extra={"symbol": self.symbol})
