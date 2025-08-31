@@ -1,83 +1,38 @@
-# -----------------------------
-# Python cache / bytecode
-# -----------------------------
+# ---- Python bytecode / caches ----
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-# -----------------------------
-# Virtual environments
-# -----------------------------
+# ---- Coverage / test artifacts ----
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Virtual envs ----
 .venv/
 venv/
 ENV/
 env/
 
-# -----------------------------
-# Jupyter
-# -----------------------------
-.ipynb_checkpoints/
-
-# -----------------------------
-# C extensions
-# -----------------------------
-*.so
-
-# -----------------------------
-# Build / Packaging
-# -----------------------------
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# -----------------------------
-# Logs / Dumps
-# -----------------------------
-*.log
-*.out
-*.err
-logs/
-*.pid
-
-# -----------------------------
-# SQLite / Databases
-# -----------------------------
-*.db
-*.sqlite
-*.sqlite3
-*.sqlite-journal
-/data/backups/
-backups/
-
-# -----------------------------
-# Coverage / Testing
-# -----------------------------
-.coverage
-.tox/
-.nox/
-.cache/
-.pytest_cache/
-htmlcov/
-coverage.xml
-
-# -----------------------------
-# Editors / IDEs
-# -----------------------------
+# ---- Editors/IDE ----
 .vscode/
 .idea/
-*.sublime-workspace
-*.sublime-project
 
-# -----------------------------
-# OS generated files
-# -----------------------------
+# ---- OS ----
 .DS_Store
 Thumbs.db
-desktop.ini
+
+# ---- Project-specific ----
+/data/
+*.db
+backups/
+.backups/
+logs/
+*.log
+
+# Migrations history (архивные SQL, если используешь archive/)
+src/crypto_ai_bot/core/infrastructure/storage/migrations/archive/
