@@ -2,11 +2,11 @@
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Awaitable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
@@ -16,7 +16,7 @@ from crypto_ai_bot.utils.metrics import export_text, hist, inc
 _log = get_logger("app.server")
 _container: Any | None = None
 
-# -------- rate limiter (как раньше) --------
+# -------- rate limiter --------
 class RateLimiter:
     def __init__(self, limit_per_min: int = 10) -> None:
         self.limit = int(limit_per_min)
@@ -40,12 +40,13 @@ class RateLimiter:
 
 _rl = RateLimiter(limit_per_min=10)
 
-def limit(fn: Callable):
-    async def wrapper(*args, **kwargs):
+def limit(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
         request: Request | None = None
         for a in args:
             if isinstance(a, Request):
-                request = a; break
+                request = a
+                break
         if request is None:
             request = kwargs.get("request")
         if isinstance(request, Request) and not _rl.allow(request):
@@ -56,7 +57,7 @@ def limit(fn: Callable):
 
 # -------- lifespan --------
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _container
     _log.info("lifespan_start")
     _container = await build_container_async()
@@ -99,7 +100,7 @@ router = APIRouter()
 
 # -------- HTTP metrics middleware --------
 @app.middleware("http")
-async def _metrics_middleware(request: Request, call_next):
+async def _metrics_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     path = request.url.path
     method = request.method
     t = hist("http_request_latency_seconds", path=path, method=method)
@@ -108,12 +109,12 @@ async def _metrics_middleware(request: Request, call_next):
     inc("http_requests_total", path=path, method=method, code=str(response.status_code))
     return response
 
-def _ctx_or_500():
+def _ctx_or_500() -> Any:
     if _container is None:
         raise HTTPException(status_code=503, detail="Container not ready")
     return _container
 
-def _get_orchestrator(symbol: str | None) -> Any:
+def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
     c = _ctx_or_500()
     s = getattr(c, "settings", None)
     default_symbol = getattr(s, "SYMBOL", "BTC/USDT") if s else "BTC/USDT"
@@ -127,7 +128,7 @@ def _get_orchestrator(symbol: str | None) -> Any:
     return orch, sym
 
 @router.get("/health")
-async def health():
+async def health() -> JSONResponse:
     try:
         c = _ctx_or_500()
         settings = getattr(c, "settings", None)
@@ -141,7 +142,7 @@ async def health():
         return JSONResponse({"ok": False, "error": "internal_error"}, status_code=500)
 
 @router.get("/metrics")
-async def metrics():
+async def metrics() -> PlainTextResponse:
     try:
         return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
     except Exception:
@@ -149,10 +150,11 @@ async def metrics():
         return PlainTextResponse("", status_code=500)
 
 @router.get("/orchestrator/status")
-async def orch_status(symbol: str | None = Query(default=None)):
+async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
     orch, sym = _get_orchestrator(symbol)
     try:
-        st = orch.status(); st["symbol"] = sym
+        st = orch.status()
+        st["symbol"] = sym
         return JSONResponse(st)
     except Exception as e:
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
@@ -160,11 +162,12 @@ async def orch_status(symbol: str | None = Query(default=None)):
 
 @router.post("/orchestrator/start")
 @limit
-async def orch_start(request: Request, symbol: str | None = Query(default=None)):
+async def orch_start(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.start()
-        st = orch.status(); st["symbol"] = sym
+        st = orch.status()
+        st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
     except Exception as e:
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
@@ -172,11 +175,12 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
 
 @router.post("/orchestrator/stop")
 @limit
-async def orch_stop(request: Request, symbol: str | None = Query(default=None)):
+async def orch_stop(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.stop()
-        st = orch.status(); st["symbol"] = sym
+        st = orch.status()
+        st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
     except Exception as e:
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
@@ -184,11 +188,12 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)):
 
 @router.post("/orchestrator/pause")
 @limit
-async def orch_pause(request: Request, symbol: str | None = Query(default=None)):
+async def orch_pause(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.pause()
-        st = orch.status(); st["symbol"] = sym
+        st = orch.status()
+        st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
     except Exception as e:
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
@@ -196,18 +201,19 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
 
 @router.post("/orchestrator/resume")
 @limit
-async def orch_resume(request: Request, symbol: str | None = Query(default=None)):
+async def orch_resume(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
     orch, sym = _get_orchestrator(symbol)
     try:
         await orch.resume()
-        st = orch.status(); st["symbol"] = sym
+        st = orch.status()
+        st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
     except Exception as e:
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed") from e
 
 @router.get("/pnl/today")
-async def pnl_today(symbol: str | None = Query(default=None)):
+async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
     c = _ctx_or_500()
     try:
         _, sym = _get_orchestrator(symbol)
@@ -217,21 +223,29 @@ async def pnl_today(symbol: str | None = Query(default=None)):
 
         pnl_quote = None
         if hasattr(st, "trades") and hasattr(st.trades, "pnl_today_quote"):
-            try: pnl_quote = st.trades.pnl_today_quote(sym)
-            except Exception: _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+            try: 
+                pnl_quote = st.trades.pnl_today_quote(sym)
+            except Exception: 
+                _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
 
         turnover_quote = None
         if hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
-            try: turnover_quote = st.trades.daily_turnover_quote(sym)
-            except Exception: _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+            try: 
+                turnover_quote = st.trades.daily_turnover_quote(sym)
+            except Exception: 
+                _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
 
         orders_count = None
         if hasattr(st, "trades") and hasattr(st.trades, "count_orders_today"):
-            try: orders_count = st.trades.count_orders_today(sym)
-            except Exception: _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
+            try: 
+                orders_count = st.trades.count_orders_today(sym)
+            except Exception: 
+                _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
         if orders_count is None and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
-            try: orders_count = st.trades.count_orders_last_minutes(sym, 1440)
-            except Exception: _log.error("orders_1440m_count_failed", extra={"symbol": sym}, exc_info=True)
+            try: 
+                orders_count = st.trades.count_orders_last_minutes(sym, 1440)
+            except Exception: 
+                _log.error("orders_1440m_count_failed", extra={"symbol": sym}, exc_info=True)
 
         return JSONResponse(
             {"symbol": sym,
