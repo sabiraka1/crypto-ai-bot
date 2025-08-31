@@ -2,120 +2,176 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, DefaultDict, Dict, List, Optional
+from collections import defaultdict
 
-from crypto_ai_bot.utils.logging import get_logger
+try:
+    from redis.asyncio import Redis
+except Exception as exc:  # pragma: no cover
+    raise RuntimeError("redis.asyncio is required for RedisEventBus") from exc
 
-_log = get_logger("events.redis")
+try:
+    from crypto_ai_bot.utils.logging import get_logger
+except Exception:  # pragma: no cover
+    import logging
+    def get_logger(name: str) -> logging.Logger:
+        return logging.getLogger(name)
+
+try:
+    from crypto_ai_bot.utils.metrics import inc
+except Exception:  # pragma: no cover
+    def inc(_name: str, **_labels: Any) -> None:
+        pass
+
+_log = get_logger("events.redis_bus")
+
+Handler = Callable[[Any], Awaitable[None]]
 
 
 class RedisEventBus:
     """
-    Durable pub/sub через Redis. Совместим по API с AsyncEventBus: publish(), subscribe()/on().
-    Фикс: новые подписки после start() немедленно оформляются в Redis.
+    Durable event bus поверх Redis Pub/Sub.
+    Хранит реестр подписок и пере-подписывается при старте/реконнекте.
+    Формат сообщения: {"topic": "...", "payload": {...}, "ts_ms": int, "key": str?}
     """
 
-    def __init__(self, url: str, *, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-        self.url = url
-        self._loop = loop or asyncio.get_event_loop()
-        self._redis = None
-        self._pub = None
-        self._sub = None
-        self._subs: Dict[str, Callable[[dict], Awaitable[None]]] = {}
-        self._task: Optional[asyncio.Task] = None
-        self._stopping = False
-        self._ready = asyncio.Event()
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self._redis: Optional[Redis] = None
+        self._pub: Optional[Redis] = None
+        self._subs: DefaultDict[str, List[Handler]] = defaultdict(list)
+        self._dlq: List[Handler] = []
+        self._listener_task: Optional[asyncio.Task] = None
+        self._started: bool = False
+        self._active_pubsub = None  # type: ignore
+
+    # ------------------ API совместимый с AsyncEventBus ------------------
+
+    def subscribe(self, topic: str, handler: Handler) -> None:
+        self._subs[topic].append(handler)
+
+    def on(self, topic: str, handler: Handler) -> None:
+        self.subscribe(topic, handler)
+
+    def subscribe_dlq(self, handler: Handler) -> None:
+        self._dlq.append(handler)
+
+    async def publish(self, topic: str, payload: Dict[str, Any], *, key: Optional[str] = None) -> Dict[str, Any]:
+        if not self._pub:
+            raise RuntimeError("RedisEventBus not started")
+        msg = json.dumps({"topic": topic, "payload": payload, "key": key})
+        ch = f"evt:{topic}"
+        await self._pub.publish(ch, msg)
+        inc("redis_bus_publish_total", topic=topic)
+        return {"ok": True, "topic": topic}
 
     async def start(self) -> None:
-        try:
-            import redis.asyncio as redis  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("redis-py is not installed. pip install redis>=4") from exc
-
-        self._redis = redis.from_url(self.url, decode_responses=True)
-        self._pub = self._redis
-        self._sub = self._redis.pubsub()
-        # подписываем то, что уже накоплено
-        if self._subs:
-            await self._sub.subscribe(*list(self._subs.keys()))
-        self._stopping = False
-        self._task = self._loop.create_task(self._worker(), name="redis-bus-worker")
-        self._ready.set()
-        _log.info("redis_event_bus_started", extra={"url": self.url})
+        if self._started:
+            return
+        self._redis = Redis.from_url(self._url, decode_responses=True)
+        self._pub = Redis.from_url(self._url, decode_responses=True)
+        self._listener_task = asyncio.create_task(self._listen_loop())
+        self._started = True
+        await self._resubscribe_all()
+        _log.info("redis_bus_started")
 
     async def close(self) -> None:
-        self._stopping = True
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except Exception:
-                pass
-        try:
-            if self._sub:
-                await self._sub.close()
-        except Exception:
-            pass
+        self._started = False
+        if self._listener_task:
+            self._listener_task.cancel()
         try:
             if self._redis:
                 await self._redis.close()
-        except Exception:
-            pass
-        _log.info("redis_event_bus_closed")
+        finally:
+            if self._pub:
+                await self._pub.close()
+        _log.info("redis_bus_closed")
 
-    def subscribe(self, topic: str, coro: Callable[[dict], Awaitable[None]]) -> None:
-        """API совместимый, синхронный. Фактическая подписка в Redis — асинхронно."""
-        self._subs[topic] = coro
-        # если bus уже запущен — оформим подписку немедленно
-        if self._ready.is_set():
-            self._loop.create_task(self._subscribe_runtime(topic))
+    # ------------------ Внутреннее ------------------
 
-    def on(self, topic: str, coro: Callable[[dict], Awaitable[None]]) -> None:
-        self.subscribe(topic, coro)
-
-    async def _subscribe_runtime(self, topic: str) -> None:
-        try:
-            if self._sub is not None:
-                await self._sub.subscribe(topic)
-                _log.info("redis_subscribed", extra={"topic": topic})
-        except Exception as exc:
-            _log.error("redis_subscribe_failed", extra={"topic": topic, "error": str(exc)})
-
-    async def publish(self, topic: str, payload: Dict[str, Any], key: Optional[str] = None) -> None:
-        if not self._pub:
-            _log.warning("redis_bus_not_started_fallback_noop", extra={"topic": topic})
+    async def _resubscribe_all(self) -> None:
+        """
+        Подписываемся на все каналы evt:* согласно сохранённым топикам.
+        """
+        if not self._redis:
             return
-        msg = json.dumps({"topic": topic, "key": key, "payload": payload}, ensure_ascii=False)
+        topics = list(self._subs.keys())
+        if not topics:
+            return
+        channels = [f"evt:{t}" for t in topics] + ["evt:__dlq__"]
         try:
-            await self._pub.publish(topic, msg)
-        except Exception as exc:
-            _log.error("redis_publish_failed", extra={"topic": topic, "error": str(exc)})
+            pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
+            await pubsub.subscribe(*channels)
+            self._active_pubsub = pubsub
+            _log.info("redis_bus_resubscribed", extra={"topics": topics})
+        except Exception:
+            _log.error("redis_bus_resubscribe_failed", extra={"topics": topics}, exc_info=True)
 
-    async def _worker(self) -> None:
-        assert self._sub is not None
-        while not self._stopping:
+    async def _emit_dlq(self, evt: Dict[str, Any], *, error: str, failed_handler: str) -> None:
+        # Локальные DLQ-хендлеры
+        for d in self._dlq:
             try:
-                raw = await self._sub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if not raw:
-                    await asyncio.sleep(0.05)
-                    continue
-                topic = raw.get("channel")
-                data = raw.get("data")
-                if not topic or not data:
-                    continue
-                try:
-                    obj = json.loads(data)
-                    evt = obj.get("payload") or {}
-                except Exception:
-                    evt = {}
-                handler = self._subs.get(topic)
-                if handler:
+                await d({"topic": "__dlq__", "payload": {**evt.get("payload", {}), "original_topic": evt.get("topic"), "error": error, "failed_handler": failed_handler}})
+            except Exception:
+                _log.debug("redis_bus_local_dlq_handler_failed", extra={"topic": evt.get("topic")}, exc_info=True)
+        # И в общий канал
+        try:
+            if self._pub:
+                await self._pub.publish("evt:__dlq__", json.dumps({"topic": "__dlq__", "payload": {**evt.get("payload", {}), "original_topic": evt.get("topic"), "error": error, "failed_handler": failed_handler}}))
+        except Exception:
+            _log.error("redis_bus_publish_dlq_failed", exc_info=True)
+
+    async def _listen_loop(self) -> None:
+        """
+        Основной цикл приёма сообщений.
+        При разрыве соединения пытается переподключиться и пере-подписаться.
+        """
+        backoff = 0.5
+        while True:
+            try:
+                if not self._redis:
+                    self._redis = Redis.from_url(self._url, decode_responses=True)
+                pubsub = self._redis.pubsub(ignore_subscribe_messages=True)
+                topics = [f"evt:{t}" for t in self._subs.keys()] + ["evt:__dlq__"]
+                if topics:
+                    await pubsub.subscribe(*topics)
+                self._active_pubsub = pubsub
+                _log.info("redis_bus_listen_started", extra={"topics": topics or ["<none>"]})
+                backoff = 0.5
+
+                async for msg in pubsub.listen():
+                    if msg is None:
+                        await asyncio.sleep(0.01)
+                        continue
+                    if msg["type"] != "message":
+                        continue
                     try:
-                        await handler(evt)
-                    except Exception as exc:
-                        _log.error("redis_handler_failed", extra={"topic": topic, "error": str(exc)})
+                        data = json.loads(msg["data"])
+                    except Exception:
+                        continue
+                    topic = data.get("topic")
+                    if not topic:
+                        continue
+                    if topic == "__dlq__":
+                        for d in self._dlq:
+                            try:
+                                await d(data)
+                            except Exception:
+                                _log.debug("redis_bus_dlq_handler_failed", exc_info=True)
+                        continue
+                    handlers = list(self._subs.get(topic, []))
+                    delivered = 0
+                    for h in handlers:
+                        try:
+                            await h(data)
+                            delivered += 1
+                        except Exception as exc:
+                            await self._emit_dlq(data, error=str(exc), failed_handler=getattr(h, "__name__", "handler"))
+                    inc("redis_bus_delivered_total", topic=topic, delivered=str(delivered))
             except asyncio.CancelledError:
                 break
-            except Exception as exc:
-                _log.error("redis_worker_error", extra={"error": str(exc)})
-                await asyncio.sleep(0.2)
+            except Exception:
+                _log.error("redis_bus_listen_error", extra={"next_backoff": backoff}, exc_info=True)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
+                continue

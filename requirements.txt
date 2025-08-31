@@ -1,3 +1,5 @@
+# `requirements.txt`  _(замена 1:1; добавлены dev/infra инструменты, redis)_
+```txt
 # CORE WEB
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<0.31
@@ -14,6 +16,15 @@ ccxt>=4.2,<5
 # MONITORING
 prometheus-client>=0.20,<0.21
 
+# STORAGE / BUS
+redis>=5.0,<6
+
 # UTIL
 requests>=2.31,<3
 python-dotenv>=1.0,<2
+
+# DEV (можно вынести в requirements-dev.txt, но оставим вместе для удобства CI)
+ruff>=0.6,<1
+mypy>=1.11,<2
+pytest>=8.2,<9
+import-linter>=2.0,<3

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Awaitable, Optional, Dict
+from typing import Any, Dict
 
 # мягкие зависимости
 try:
@@ -33,8 +33,7 @@ async def _log_dlq(evt: Any) -> None:
         _log.error("DLQ_EVENT", extra={"original_topic": original, "payload": payload})
         inc("bus_dlq_events_total", original_topic=str(original))
     except Exception:
-        # не эскалируем, DLQ — best effort
-        pass
+        _log.debug("dlq_handler_log_failed", exc_info=True)
 
 
 def attach_dlq_subscriber(bus: Any) -> None:
@@ -44,16 +43,14 @@ def attach_dlq_subscriber(bus: Any) -> None:
       2) иначе пробуем подписаться на спец-топики "__dlq__" и "dlq"
          (через bus.on(...) или bus.subscribe(...)).
     """
-    # 1) нативная поддержка DLQ
     if hasattr(bus, "subscribe_dlq"):
         try:
             bus.subscribe_dlq(_log_dlq)  # type: ignore[arg-type]
             _log.info("dlq_subscriber_attached", extra={"mode": "subscribe_dlq"})
             return
-        except Exception as exc:
-            _log.error("dlq_subscribe_failed", extra={"error": str(exc)})
+        except Exception:
+            _log.error("dlq_subscribe_failed", exc_info=True)
 
-    # 2) через топики "__dlq__" или "dlq"
     def _attach_by_topic(topic: str) -> bool:
         for method in ("on", "subscribe"):
             if hasattr(bus, method):
@@ -61,8 +58,8 @@ def attach_dlq_subscriber(bus: Any) -> None:
                     getattr(bus, method)(topic, _log_dlq)  # type: ignore[misc]
                     _log.info("dlq_subscriber_attached", extra={"mode": f"{method}:{topic}"})
                     return True
-                except Exception as exc:
-                    _log.error("dlq_subscribe_via_topic_failed", extra={"topic": topic, "error": str(exc)})
+                except Exception:
+                    _log.error("dlq_subscribe_via_topic_failed", extra={"topic": topic}, exc_info=True)
         return False
 
     if _attach_by_topic("__dlq__"):

@@ -58,6 +58,11 @@ def limit(fn: Callable):
             request = kwargs.get("request")
 
         if isinstance(request, Request) and not _rl.allow(request):
+            try:
+                client_key = _rl._key(request)  # noqa: SLF001 (внутренний ключ только для логов)
+            except Exception:
+                client_key = "<unknown>"
+            _log.warning("rate_limit_denied", extra={"client": client_key})
             raise HTTPException(status_code=429, detail="Too Many Requests")
         return await fn(*args, **kwargs)
     return wrapper
@@ -70,10 +75,12 @@ async def lifespan(app: FastAPI):
     _container = await build_container_async()
     try:
         if validate_settings:
-            validate_settings(getattr(_container, "settings", None))
-    except Exception as exc:
-        _log.error("settings_validation_failed", extra={"error": str(exc)})
-
+            try:
+                validate_settings(getattr(_container, "settings", None))
+            except Exception:
+                _log.error("settings_validation_failed", exc_info=True)
+    except Exception:
+        _log.error("lifespan_init_failed", exc_info=True)
     try:
         yield
     finally:
@@ -81,32 +88,31 @@ async def lifespan(app: FastAPI):
         try:
             orchs = getattr(_container, "orchestrators", None)
             if isinstance(orchs, dict):
-                # Останавливаем все оркестраторы
                 tasks = []
                 for oc in orchs.values():
                     try:
                         tasks.append(asyncio.create_task(oc.stop()))
                     except Exception:
-                        pass
+                        _log.error("orchestrator_stop_schedule_failed", exc_info=True)
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-        except Exception as exc:
-            _log.error("orchestrators_stop_failed", extra={"error": str(exc)})
+        except Exception:
+            _log.error("orchestrators_stop_failed", exc_info=True)
 
         try:
             bus = getattr(_container, "bus", None)
             if bus and hasattr(bus, "close"):
                 await bus.close()
-        except Exception as exc:
-            _log.error("bus_close_failed", extra={"error": str(exc)})
+        except Exception:
+            _log.error("bus_close_failed", exc_info=True)
 
         try:
             broker = getattr(_container, "broker", None)
             exch = getattr(broker, "exchange", None) if broker else None
             if exch and hasattr(exch, "close"):
                 await exch.close()
-        except Exception as exc:
-            _log.error("exchange_close_failed", extra={"error": str(exc)})
+        except Exception:
+            _log.error("exchange_close_failed", exc_info=True)
         _log.info("lifespan_shutdown_end")
 
 
@@ -130,7 +136,6 @@ def _get_orchestrator(symbol: Optional[str]) -> Any:
         raise HTTPException(status_code=500, detail="orchestrators_missing")
     orch = orchs.get(sym)
     if orch is None:
-        # пробуем нормализовать как в compose.canonical (не импортируем, чтобы не тянуть utils в app)
         sym2 = sym.replace("-", "/").upper()
         orch = orchs.get(sym2)
     if orch is None:
@@ -148,17 +153,17 @@ async def health():
                              "symbols": symbols})
     except HTTPException:
         raise
-    except Exception as exc:
-        _log.error("health_failed", extra={"error": str(exc)})
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    except Exception:
+        _log.error("health_failed", exc_info=True)
+        return JSONResponse({"ok": False, "error": "internal_error"}, status_code=500)
 
 
 @router.get("/metrics")
 async def metrics():
     try:
         return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
-    except Exception as exc:
-        _log.error("metrics_failed", extra={"error": str(exc)})
+    except Exception:
+        _log.error("metrics_failed", exc_info=True)
         return PlainTextResponse("", status_code=500)
 
 
@@ -169,8 +174,8 @@ async def orch_status(symbol: Optional[str] = Query(default=None)):
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse(st)
-    except Exception as exc:
-        _log.error("orch_status_failed", extra={"error": str(exc)})
+    except Exception:
+        _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="status_failed")
 
 
@@ -183,8 +188,10 @@ async def orch_start(request: Request, symbol: Optional[str] = Query(default=Non
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as exc:
-        _log.error("orch_start_failed", extra={"error": str(exc)})
+    except HTTPException:
+        raise
+    except Exception:
+        _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="start_failed")
 
 
@@ -197,8 +204,10 @@ async def orch_stop(request: Request, symbol: Optional[str] = Query(default=None
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as exc:
-        _log.error("orch_stop_failed", extra={"error": str(exc)})
+    except HTTPException:
+        raise
+    except Exception:
+        _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="stop_failed")
 
 
@@ -211,8 +220,10 @@ async def orch_pause(request: Request, symbol: Optional[str] = Query(default=Non
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as exc:
-        _log.error("orch_pause_failed", extra={"error": str(exc)})
+    except HTTPException:
+        raise
+    except Exception:
+        _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="pause_failed")
 
 
@@ -225,8 +236,10 @@ async def orch_resume(request: Request, symbol: Optional[str] = Query(default=No
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as exc:
-        _log.error("orch_resume_failed", extra={"error": str(exc)})
+    except HTTPException:
+        raise
+    except Exception:
+        _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed")
 
 

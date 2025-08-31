@@ -98,8 +98,8 @@ class AsyncEventBus:
         evt = Event(topic=topic, payload=payload, key=key, ts_ms=now_ms())
         handlers = list(self._subs.get(topic, []))
         if not handlers:
-            # Нет подписчиков — это не ошибка
             inc("bus_publish_no_subscribers_total", topic=topic)
+            _log.info("bus_published_no_subscribers", extra={"topic": topic})
             return {"ok": True, "delivered": 0, "topic": topic}
 
         delivered = 0
@@ -112,16 +112,20 @@ class AsyncEventBus:
                     delivered += 1
                     inc("bus_handler_ok_total", topic=topic, handler=getattr(h, "__name__", "handler"))
                     break
-                except Exception as exc:  # pragma: no cover (путь деградации)
+                except Exception:
                     if attempt >= self.max_attempts:
                         _log.error(
                             "bus_handler_failed",
-                            extra={"topic": topic, "handler": getattr(h, "__name__", "handler"), "error": str(exc)},
+                            extra={"topic": topic, "handler": getattr(h, "__name__", "handler"), "attempt": attempt},
+                            exc_info=True,
                         )
                         inc("bus_handler_failed_total", topic=topic, handler=getattr(h, "__name__", "handler"))
-                        await self._emit_to_dlq(evt, error=str(exc), failed_handler=getattr(h, "__name__", "handler"))
+                        await self._emit_to_dlq(evt, failed_handler=getattr(h, "__name__", "handler"))
                         break
-                    # экспоненциальный бэкофф
+                    _log.debug(
+                        "bus_handler_retry",
+                        extra={"topic": topic, "handler": getattr(h, "__name__", "handler"), "attempt": attempt, "next_delay_ms": delay_ms},
+                    )
                     await asyncio.sleep(max(0.001, delay_ms / 1000))
                     attempt += 1
                     delay_ms = int(delay_ms * self.backoff_factor)
@@ -133,12 +137,12 @@ class AsyncEventBus:
     # -------------------------
     # Внутреннее: отправка в DLQ
     # -------------------------
-    async def _emit_to_dlq(self, evt: Event, *, error: str, failed_handler: str) -> None:
+    async def _emit_to_dlq(self, evt: Event, *, failed_handler: str) -> None:
         if not self._dlq:
             return
         dlq_evt = Event(
             topic="__dlq__",
-            payload={"original_topic": evt.topic, "error": error, "failed_handler": failed_handler, **evt.payload},
+            payload={"original_topic": evt.topic, "failed_handler": failed_handler, **evt.payload},
             key=evt.key,
             ts_ms=now_ms(),
         )
@@ -147,8 +151,7 @@ class AsyncEventBus:
                 await d(dlq_evt)
                 inc("bus_dlq_delivered_total", original_topic=evt.topic)
             except Exception:
-                # DLQ — best-effort; не эскалируем
-                inc("bus_dlq_handler_failed_total", original_topic=evt.topic)
+                _log.debug("bus_dlq_handler_failed", extra={"original_topic": evt.topic}, exc_info=True)
 
     # -------------------------
     # Утилиты для простого подключения
