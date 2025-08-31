@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 from crypto_ai_bot.utils.decimal import dec
@@ -47,7 +47,7 @@ class TradesRepository:
         )
         self.conn.commit()
 
-        # --- позиция: BUY/SELL применяем безопасно, без деления на ноль ---
+        # --- позиция: обновляем безопасно (BUY/SELL) ---
         if symbol:
             if side == "sell":
                 base_amount = filled if filled > 0 else amount
