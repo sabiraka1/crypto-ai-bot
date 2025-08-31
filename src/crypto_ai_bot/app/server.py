@@ -59,7 +59,7 @@ def limit(fn: Callable):
 
         if isinstance(request, Request) and not _rl.allow(request):
             try:
-                client_key = _rl._key(request)  # noqa: SLF001 (внутренний ключ только для логов)
+                client_key = _rl._key(request)  # noqa: SLF001
             except Exception:
                 client_key = "<unknown>"
             _log.warning("rate_limit_denied", extra={"client": client_key})
@@ -241,6 +241,66 @@ async def orch_resume(request: Request, symbol: Optional[str] = Query(default=No
     except Exception:
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed")
+
+
+@router.get("/pnl/today")
+async def pnl_today(symbol: Optional[str] = Query(default=None)):
+    """
+    Сводка за сегодня по символу:
+      - pnl_quote: PnL в котируемой валюте (если доступен агрегатор),
+      - turnover_quote: дневной оборот (если доступен),
+      - orders_count: количество ордеров (по возможности из репозитория; иначе оценка за 1440 минут).
+    """
+    c = _ctx_or_500()
+    try:
+        # определяем символ и доступ к storage
+        _, sym = _get_orchestrator(symbol)
+        st = getattr(c, "storage", None)
+        if not st:
+            raise HTTPException(status_code=500, detail="storage_missing")
+
+        # безопасные вызовы с graceful fallback
+        pnl_quote = None
+        if hasattr(st, "trades") and hasattr(st.trades, "pnl_today_quote"):
+            try:
+                pnl_quote = st.trades.pnl_today_quote(sym)
+            except Exception:
+                _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+
+        turnover_quote = None
+        if hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
+            try:
+                turnover_quote = st.trades.daily_turnover_quote(sym)
+            except Exception:
+                _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+
+        orders_count = None
+        # предпочтительно — прямой метод, если есть:
+        if hasattr(st, "trades") and hasattr(st.trades, "count_orders_today"):
+            try:
+                orders_count = st.trades.count_orders_today(sym)  # type: ignore[attr-defined]
+            except Exception:
+                _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
+        # fallback — считаем за 1440 минут
+        if orders_count is None and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
+            try:
+                orders_count = st.trades.count_orders_last_minutes(sym, 1440)
+            except Exception:
+                _log.error("orders_1440m_count_failed", extra={"symbol": sym}, exc_info=True)
+
+        return JSONResponse(
+            {
+                "symbol": sym,
+                "pnl_quote": str(pnl_quote) if pnl_quote is not None else None,
+                "turnover_quote": str(turnover_quote) if turnover_quote is not None else None,
+                "orders_count": int(orders_count) if orders_count is not None else None,
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        _log.error("pnl_today_failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="pnl_today_failed")
 
 
 app.include_router(router)

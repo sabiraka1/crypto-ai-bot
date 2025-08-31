@@ -4,7 +4,7 @@ import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
@@ -21,6 +21,7 @@ from crypto_ai_bot.utils.symbols import canonical
 from crypto_ai_bot.core.application.ports import SafetySwitchPort
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
+from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.utils.time import now_ms
 from crypto_ai_bot.utils.metrics import inc
 
@@ -37,6 +38,7 @@ class Container:
     exits: ProtectiveExits
     health: HealthChecker
     orchestrators: Dict[str, Orchestrator]
+    tg_bot_task: Optional[asyncio.Task] = None
 
 
 def _open_storage(settings: Settings) -> Storage:
@@ -217,4 +219,26 @@ async def build_container_async() -> Container:
         )
 
     attach_alerts(bus, s)
-    return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs)
+
+    # ---- Командный Telegram-бот (входящие команды) ----
+    tg_task: Optional[asyncio.Task] = None
+    if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
+        raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
+        users: List[int] = []
+        if raw_users:
+            try:
+                users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
+            except Exception:
+                _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
+        bot = TelegramBotCommands(
+            bot_token=s.TELEGRAM_BOT_TOKEN,
+            allowed_users=users,
+            container=None if not (st and br) else type("C", (), {  # маленький агрегатор ссылок
+                "storage": st, "broker": br, "risk": risk, "orchestrators": orchs
+            })(),
+            default_symbol=symbols[0],
+        )
+        tg_task = asyncio.create_task(bot.run())
+        _log.info("telegram_bot_enabled")
+
+    return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
