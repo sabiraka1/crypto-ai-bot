@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Optional, Dict
 
-from fastapi import FastAPI, APIRouter, Request, HTTPException
+from fastapi import FastAPI, APIRouter, Request, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async  # ВАЖНО: именно *_async
@@ -79,11 +79,19 @@ async def lifespan(app: FastAPI):
     finally:
         _log.info("lifespan_shutdown_begin")
         try:
-            orch = getattr(_container, "orchestrator", None)
-            if orch is not None:
-                await orch.stop()
+            orchs = getattr(_container, "orchestrators", None)
+            if isinstance(orchs, dict):
+                # Останавливаем все оркестраторы
+                tasks = []
+                for oc in orchs.values():
+                    try:
+                        tasks.append(asyncio.create_task(oc.stop()))
+                    except Exception:
+                        pass
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as exc:
-            _log.error("orchestrator_stop_failed", extra={"error": str(exc)})
+            _log.error("orchestrators_stop_failed", extra={"error": str(exc)})
 
         try:
             bus = getattr(_container, "bus", None)
@@ -112,13 +120,32 @@ def _ctx_or_500():
     return _container
 
 
+def _get_orchestrator(symbol: Optional[str]) -> Any:
+    c = _ctx_or_500()
+    s = getattr(c, "settings", None)
+    default_symbol = getattr(s, "SYMBOL", "BTC/USDT") if s else "BTC/USDT"
+    sym = (symbol or default_symbol)
+    orchs = getattr(c, "orchestrators", None)
+    if not isinstance(orchs, dict):
+        raise HTTPException(status_code=500, detail="orchestrators_missing")
+    orch = orchs.get(sym)
+    if orch is None:
+        # пробуем нормализовать как в compose.canonical (не импортируем, чтобы не тянуть utils в app)
+        sym2 = sym.replace("-", "/").upper()
+        orch = orchs.get(sym2)
+    if orch is None:
+        raise HTTPException(status_code=404, detail=f"orchestrator_not_found_for_{sym}")
+    return orch, sym
+
+
 @router.get("/health")
 async def health():
     try:
         c = _ctx_or_500()
         settings = getattr(c, "settings", None)
-        symbol = getattr(settings, "SYMBOL", "BTC/USDT") if settings else "BTC/USDT"
-        return JSONResponse({"ok": True, "symbol": symbol})
+        symbols = list(getattr(c, "orchestrators", {}).keys())
+        return JSONResponse({"ok": True, "default_symbol": getattr(settings, "SYMBOL", "BTC/USDT") if settings else "BTC/USDT",
+                             "symbols": symbols})
     except HTTPException:
         raise
     except Exception as exc:
@@ -136,13 +163,12 @@ async def metrics():
 
 
 @router.get("/orchestrator/status")
-async def orch_status():
-    c = _ctx_or_500()
-    orch = getattr(c, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(status_code=500, detail="orchestrator_missing")
+async def orch_status(symbol: Optional[str] = Query(default=None)):
+    orch, sym = _get_orchestrator(symbol)
     try:
-        return JSONResponse(orch.status())
+        st = orch.status()
+        st["symbol"] = sym
+        return JSONResponse(st)
     except Exception as exc:
         _log.error("orch_status_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="status_failed")
@@ -150,14 +176,13 @@ async def orch_status():
 
 @router.post("/orchestrator/start")
 @limit
-async def orch_start(request: Request):
-    c = _ctx_or_500()
-    orch = getattr(c, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(status_code=500, detail="orchestrator_missing")
+async def orch_start(request: Request, symbol: Optional[str] = Query(default=None)):
+    orch, sym = _get_orchestrator(symbol)
     try:
         await orch.start()
-        return JSONResponse({"ok": True, "status": orch.status()})
+        st = orch.status()
+        st["symbol"] = sym
+        return JSONResponse({"ok": True, "status": st})
     except Exception as exc:
         _log.error("orch_start_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="start_failed")
@@ -165,14 +190,13 @@ async def orch_start(request: Request):
 
 @router.post("/orchestrator/stop")
 @limit
-async def orch_stop(request: Request):
-    c = _ctx_or_500()
-    orch = getattr(c, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(status_code=500, detail="orchestrator_missing")
+async def orch_stop(request: Request, symbol: Optional[str] = Query(default=None)):
+    orch, sym = _get_orchestrator(symbol)
     try:
         await orch.stop()
-        return JSONResponse({"ok": True, "status": orch.status()})
+        st = orch.status()
+        st["symbol"] = sym
+        return JSONResponse({"ok": True, "status": st})
     except Exception as exc:
         _log.error("orch_stop_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="stop_failed")
@@ -180,14 +204,13 @@ async def orch_stop(request: Request):
 
 @router.post("/orchestrator/pause")
 @limit
-async def orch_pause(request: Request):
-    c = _ctx_or_500()
-    orch = getattr(c, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(status_code=500, detail="orchestrator_missing")
+async def orch_pause(request: Request, symbol: Optional[str] = Query(default=None)):
+    orch, sym = _get_orchestrator(symbol)
     try:
         await orch.pause()
-        return JSONResponse({"ok": True, "status": orch.status()})
+        st = orch.status()
+        st["symbol"] = sym
+        return JSONResponse({"ok": True, "status": st})
     except Exception as exc:
         _log.error("orch_pause_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="pause_failed")
@@ -195,14 +218,13 @@ async def orch_pause(request: Request):
 
 @router.post("/orchestrator/resume")
 @limit
-async def orch_resume(request: Request):
-    c = _ctx_or_500()
-    orch = getattr(c, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(status_code=500, detail="orchestrator_missing")
+async def orch_resume(request: Request, symbol: Optional[str] = Query(default=None)):
+    orch, sym = _get_orchestrator(symbol)
     try:
         await orch.resume()
-        return JSONResponse({"ok": True, "status": orch.status()})
+        st = orch.status()
+        st["symbol"] = sym
+        return JSONResponse({"ok": True, "status": st})
     except Exception as exc:
         _log.error("orch_resume_failed", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail="resume_failed")

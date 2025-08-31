@@ -77,6 +77,10 @@ class AsyncEventBus:
         self._subs[topic].append(handler)
         _log.info("bus_subscribed", extra={"topic": topic, "handler": getattr(handler, "__name__", "handler")})
 
+    # Новый алиас для совместимости с EventBusPort и кодом, вызывающим bus.on(...)
+    def on(self, topic: str, handler: Handler) -> None:
+        self.subscribe(topic, handler)
+
     def subscribe_dlq(self, handler: Handler) -> None:
         """Подписка на DLQ — получает события, не доставленные обработчикам после ретраев."""
         self._dlq.append(handler)

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+﻿﻿from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
@@ -33,7 +33,7 @@ async def execute_trade(
     exchange: str = "",
     quote_amount: Decimal = dec("0"),
     base_amount: Decimal = dec("0"),
-    idempotency_bucket_ms: int = 60000,   # не используется напрямую, оставлен для совместимости
+    idempotency_bucket_ms: int = 60000,
     idempotency_ttl_sec: int = 3600,
     risk_manager: Optional[RiskManager] = None,
     protective_exits: Optional[Any] = None,
@@ -58,45 +58,41 @@ async def execute_trade(
         _log.error("idempotency_check_failed", extra={"error": str(e)})
 
     # ---- риск-менеджер: лимиты и спред ----
-    if risk_manager is not None:
-        # 1) Ограничение на спред (макс. допустимый спред в %)
-        max_spread_pct = getattr(risk_manager, "config", risk_manager).max_spread_pct if hasattr(risk_manager, "config") else Decimal("0")
-        if max_spread_pct and max_spread_pct > dec("0"):
-            try:
-                t = await broker.fetch_ticker(sym)
-                bid = dec(str(getattr(t, "bid", t.get("bid", "0")) or "0"))
-                ask = dec(str(getattr(t, "ask", t.get("ask", "0")) or "0"))
-                if bid > 0 and ask > 0:
-                    mid = (bid + ask) / 2
-                    spread_pct = (ask - bid) / mid * 100
-                    if spread_pct > max_spread_pct:
-                        reason = f"spread_exceeds:{spread_pct:.4f}%>{max_spread_pct}%"
-                        await bus.publish("trade.blocked", {"symbol": sym, "reason": "spread"})
-                        _log.warning("execute_blocked_spread", extra={"spread_pct": f"{spread_pct:.4f}"})
-                        return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
-            except Exception as exc:
-                _log.error("spread_check_failed", extra={"error": str(exc)})
+    # Берём конфиг из RM, либо строим из Settings (fallback для совместимости)
+    cfg: RiskConfig = risk_manager.config if isinstance(risk_manager, RiskManager) else RiskConfig.from_settings(settings)
 
-        # 2) Ограничение частоты ордеров (например, не более N сделок за 5 минут)
-        max_count_5m = getattr(risk_manager, "config", risk_manager).max_orders_5m if hasattr(risk_manager, "config") else 0
-        if max_count_5m and max_count_5m > 0:
-            recent_count = storage.trades.count_orders_last_minutes(sym, 5)
-            if recent_count >= max_count_5m:
-                await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_orders_5m", "count_5m": recent_count, "limit": max_count_5m})
-                _log.warning("execute_blocked_max_orders", extra={"count_5m": recent_count})
-                return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
+    # 1) Ограничение на спред (макс. допустимый спред в %)
+    if cfg.max_spread_pct and cfg.max_spread_pct > dec("0"):
+        try:
+            t = await broker.fetch_ticker(sym)
+            bid = dec(str(getattr(t, "bid", t.get("bid", "0")) or "0"))
+            ask = dec(str(getattr(t, "ask", t.get("ask", "0")) or "0"))
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2
+                spread_pct = (ask - bid) / mid * 100
+                if spread_pct > cfg.max_spread_pct:
+                    reason = f"spread_exceeds:{spread_pct:.4f}%>{cfg.max_spread_pct}%"
+                    await bus.publish("trade.blocked", {"symbol": sym, "reason": "spread"})
+                    _log.warning("execute_blocked_spread", extra={"spread_pct": f"{spread_pct:.4f}"})
+                    return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+        except Exception as exc:
+            _log.error("spread_check_failed", extra={"error": str(exc)})
 
-        # 3) Ограничение дневного оборота (не превышать лимит по сумме сделок в quote)
-        max_turnover = getattr(risk_manager, "config", risk_manager).max_turnover_day if hasattr(risk_manager, "config") else Decimal("0")
-        if max_turnover and max_turnover > dec("0"):
-            current_turnover = storage.trades.daily_turnover_quote(sym)
-            # для buy учитываем внесение новой суммы, для sell тоже можно учитывать (оборот считает общий объем)
-            if current_turnover >= max_turnover:
-                await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(max_turnover)})
-                _log.warning("execute_blocked_max_turnover", extra={"turnover": str(current_turnover)})
-                return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
+    # 2) Ограничение частоты ордеров за 5 минут (если задано)
+    if cfg.max_orders_5m and cfg.max_orders_5m > 0:
+        recent_count = storage.trades.count_orders_last_minutes(sym, 5)
+        if recent_count >= cfg.max_orders_5m:
+            await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_orders_5m", "count_5m": recent_count, "limit": cfg.max_orders_5m})
+            _log.warning("execute_blocked_max_orders", extra={"count_5m": recent_count})
+            return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
 
-        # (Дополнительно: можно проверить дневной лимит убытка, просадки и пр., если задано в конфигурации)
+    # 3) Ограничение дневного оборота по котируемой (если задано)
+    if cfg.max_turnover_day and cfg.max_turnover_day > dec("0"):
+        current_turnover = storage.trades.daily_turnover_quote(sym)
+        if current_turnover >= cfg.max_turnover_day:
+            await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(cfg.max_turnover_day)})
+            _log.warning("execute_blocked_max_turnover", extra={"turnover": str(current_turnover)})
+            return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
 
     # ---- исполнение ордера через брокера ----
     try:

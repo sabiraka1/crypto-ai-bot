@@ -21,6 +21,7 @@ from crypto_ai_bot.utils.symbols import canonical
 from crypto_ai_bot.core.application.ports import SafetySwitchPort
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
+from crypto_ai_bot.utils.time import now_ms  # <— для миграций
 
 _log = get_logger("compose")
 
@@ -38,19 +39,21 @@ class Container:
 
 
 def _open_storage(settings: Settings) -> Storage:
-    os.makedirs(settings.DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(
-        os.path.join(settings.DATA_DIR, "bot.db"),
-        check_same_thread=False,
-    )
+    # Путь БД берём из настроек; каталог создаём, если его нет
+    db_path = settings.DB_PATH
+    db_dir = os.path.dirname(db_path) or "."
+    os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Параметры производительности SQLite
+    # PRAGMA частично применяются в раннере, но дополнительные здесь не мешают
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout = 5000;")
 
-    run_migrations(conn)
+    # Важно: сигнатура runner требует now_ms и db_path
+    run_migrations(conn, now_ms=now_ms(), db_path=db_path, do_backup=True,
+                   backup_retention_days=int(getattr(settings, "BACKUP_RETENTION_DAYS", 30) or 30))
     return Storage(conn)
 
 
