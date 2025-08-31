@@ -1,16 +1,11 @@
 ﻿from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Any
+from typing import Any, Optional
 
-from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
-from crypto_ai_bot.core.domain.risk.manager import RiskManager
-from crypto_ai_bot.core.application.use_cases.place_order import (
-    place_order,
-    PlaceOrderInputs,
-    PlaceOrderResult,
-)
+from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
+from crypto_ai_bot.core.application.strategy_manager import StrategyManager
+from crypto_ai_bot.core.infrastructure.market_data.ccxt_market_data import CcxtMarketData
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -18,75 +13,79 @@ from crypto_ai_bot.utils.metrics import inc
 _log = get_logger("usecase.eval_and_execute")
 
 
-@dataclass
-class EvalInputs:
-    symbol: str
-    quote_amount: Decimal
-
-
-@dataclass
-class EvalResult:
-    ok: bool
-    reason: str = ""
-    order: Optional[Any] = None
+async def _choose_amounts(*, settings: Any, signal: str, quote_balance: Decimal | None) -> tuple[Decimal, Decimal]:
+    """
+    Возвращает (quote_amount, base_amount)
+    - Для buy: используем FIXED_AMOUNT (если задан), иначе долю свободного quote_balance по STRAT_QUOTE_FRACTION.
+    - Для sell: базовый размер вне стратегии — оставляем 0 (пусть sell сигнал означает «готовность к продаже»,
+      а конкретное количество задаётся выше по логике/позиции; если есть метод position → можно сюда интегрировать).
+    """
+    if signal == "buy":
+        fixed = dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
+        if fixed > 0:
+            return fixed, dec("0")
+        frac = dec(str(getattr(settings, "STRAT_QUOTE_FRACTION", "0.05") or "0.05"))  # 5% по умолчанию
+        qa = (quote_balance or dec("0")) * frac
+        return (qa if qa > 0 else dec("0")), dec("0")
+    if signal == "sell":
+        # базовый размер можно расширить после подключения PositionSizer/позиции
+        return dec("0"), dec("0")
+    return dec("0"), dec("0")
 
 
 async def eval_and_execute(
     *,
-    storage: StoragePort,
-    broker: BrokerPort,
-    bus: EventBusPort,
-    risk: RiskManager,
+    symbol: str,
+    storage: Any,
+    broker: Any,
+    bus: Any,
+    risk: Any,
+    exits: Any,
     settings: Any,
-    inputs: EvalInputs,
-) -> EvalResult:
+) -> dict:
     """
-    Единая точка решения + исполнение.
-    1) Лимиты в день (UTC): кол-во ордеров и дневной оборот в котируемой валюте.
-    2) Бюджет/риск (RiskManager.allow).
-    3) Исполнение через place_order (внутри — slippage gate).
+    Единая точка принятия решения:
+    1) Получить сигнал стратегии (через StrategyManager).
+    2) Если hold — ничего не делаем.
+    3) Если buy/sell — вычислить сумму и делегировать в execute_trade (все лимиты/риски там).
     """
-    sym = inputs.symbol
-    q_amt = inputs.quote_amount
-
-    # ---- Safety budget (UTC day) ----
     try:
-        max_orders = int(getattr(settings, "SAFETY_MAX_ORDERS_PER_DAY", 0) or 0)
-        if max_orders > 0:
-            n = storage.trades.count_orders_last_minutes(sym, 24 * 60)  # близкая оценка «за 24 часа»
-            if n >= max_orders:
-                reason = f"day_orders_limit:{n}>={max_orders}"
-                inc("trade.blocked", {"reason": "day_orders_limit"})
-                await bus.publish("trade.blocked", {"symbol": sym, "reason": reason})
-                return EvalResult(ok=False, reason=reason)
+        md = CcxtMarketData(broker=broker, cache_ttl_sec=float(getattr(settings, "MARKETDATA_CACHE_TTL_S", 30) or 30))
+        sm = StrategyManager(md=md, settings=settings)
+        sig = await sm.decide(symbol)
+
+        if sig.action not in ("buy", "sell"):
+            inc("strategy_hold_total", symbol=symbol, reason=sig.reason or "")
+            return {"ok": True, "action": "hold", "reason": sig.reason}
+
+        # Баланс в котируемой валюте (для buy sizing)
+        quote_balance: Decimal | None = None
+        try:
+            bal = await broker.fetch_balance()
+            quote_ccy = symbol.split("/")[1]
+            if isinstance(bal, dict):
+                info = bal.get(quote_ccy, {})
+                q = info.get("free") or info.get("total")
+                quote_balance = dec(str(q)) if q is not None else None
+        except Exception:
+            _log.error("fetch_balance_failed", extra={"symbol": symbol}, exc_info=True)
+
+        qa, ba = await _choose_amounts(settings=settings, signal=sig.action, quote_balance=quote_balance)
+
+        res = await execute_trade(
+            symbol=symbol,
+            side=sig.action,
+            storage=storage,
+            broker=broker,
+            bus=bus,
+            settings=settings,
+            exchange=getattr(settings, "EXCHANGE", ""),
+            quote_amount=qa,
+            base_amount=ba,
+            risk_manager=risk,
+            protective_exits=exits,
+        )
+        return {"ok": True, "action": sig.action, "result": res}
     except Exception as exc:
-        _log.warning("safety_orders_check_failed", extra={"error": str(exc)})
-
-    try:
-        day_turnover_limit = Decimal(str(getattr(settings, "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "") or "0"))
-        if day_turnover_limit > 0:
-            spent = storage.trades.daily_turnover_quote(sym)  # ожидаем UTC
-            if spent + q_amt > day_turnover_limit:
-                reason = f"day_turnover_limit:{spent + q_amt}>{day_turnover_limit}"
-                inc("trade.blocked", {"reason": "day_turnover_limit"})
-                await bus.publish("trade.blocked", {"symbol": sym, "reason": reason})
-                return EvalResult(ok=False, reason=reason)
-    except Exception as exc:
-        _log.warning("safety_turnover_check_failed", extra={"error": str(exc)})
-
-    # ---- ЕДИНЫЙ бюджет/риск-гейт ----
-    ok, reason = risk.allow(symbol=sym, action="buy", quote_amount=q_amt, base_amount=None)
-    if not ok:
-        inc("trade.blocked", {"reason": reason})
-        await bus.publish("trade.blocked", {"symbol": sym, "reason": reason})
-        return EvalResult(ok=False, reason=reason)
-
-    # ---- Исполнение через единый исполнитель ----
-    res: PlaceOrderResult = await place_order(
-        storage=storage,
-        broker=broker,
-        bus=bus,
-        settings=settings,
-        inputs=PlaceOrderInputs(symbol=sym, side="buy", quote_amount=q_amt),
-    )
-    return EvalResult(ok=res.ok, reason=res.reason, order=res.order)
+        _log.error("eval_and_execute_failed", extra={"symbol": symbol}, exc_info=True)
+        return {"ok": False, "error": str(exc)}
