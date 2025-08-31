@@ -12,7 +12,7 @@ class RegimeConfig:
     fomc_block_minutes: int = 60
 
 class RegimeDetector:
-    """Инференс режима рынка по DXY/BTC.D/FOMC."""
+    """Инференс режима рынка по DXY/BTC.D/FOMC (чистая доменная логика)."""
     def __init__(self, *, dxy: DxyPort | None, btc_dom: BtcDomPort | None, fomc: FomcCalendarPort | None, cfg: RegimeConfig | None = None) -> None:
         self._dxy = dxy
         self._btc = btc_dom

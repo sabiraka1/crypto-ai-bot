@@ -1,26 +1,23 @@
-# src/crypto_ai_bot/core/infrastructure/macro/sources/http_fomc.py
 from __future__ import annotations
-
-from collections.abc import Callable
 from typing import Any
+import httpx
 
+from crypto_ai_bot.core.domain.macro.ports import FomcCalendarPort
 
-class FomcSource:
-    """
-    Источник календаря ФРС по HTTP.
-    Ожидаемый формат ответа: {"event_today": true|false}
-    """
-
-    def __init__(self, *, http_get_json: Callable[[str], Any], url: str | None) -> None:
-        self._get = http_get_json
-        self._url = url
+class FomcHttp(FomcCalendarPort):
+    def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
+        self._url = url.strip()
+        self._timeout = timeout_sec
 
     async def event_today(self) -> bool:
         if not self._url:
             return False
-        try:
-            data: dict[str, Any] = await self._get(self._url)
-            v = data.get("event_today")
-            return bool(v)
-        except Exception:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            r = await client.get(self._url)
+            r.raise_for_status()
+            data: Any = r.json()
+            # ожидаем либо {"event_today": true}, либо {"today": true}
+            for k in ("event_today", "today", "fomc_today"):
+                if isinstance(data, dict) and isinstance(data.get(k), bool):
+                    return bool(data[k])
             return False

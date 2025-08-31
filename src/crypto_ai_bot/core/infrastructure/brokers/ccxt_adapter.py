@@ -13,7 +13,6 @@ from crypto_ai_bot.utils.metrics import inc, observe
 _log = get_logger("broker.ccxt")
 
 
-# ----- ошибки брокера -----
 class BrokerError(Exception): ...
 class InsufficientFunds(BrokerError): ...
 class RateLimited(BrokerError): ...
@@ -22,7 +21,6 @@ class ValidationError(BrokerError): ...
 class ExchangeUnavailable(BrokerError): ...
 
 
-# ----- простой токен-бакет для RPS -----
 class _TokenBucket:
     def __init__(self, rate_per_sec: float, capacity: int) -> None:
         self._rate = float(rate_per_sec)
@@ -57,13 +55,11 @@ class CcxtBroker:
         self._sym_to_gate: dict[str, str] = {}
         self._gate_to_sym: dict[str, str] = {}
 
-        # circuit breakers
         self._cb_ticker = CircuitBreaker(name="ticker", failure_threshold=5, reset_timeout_sec=10.0)
         self._cb_balance = CircuitBreaker(name="balance", failure_threshold=5, reset_timeout_sec=10.0)
         self._cb_create = CircuitBreaker(name="create", failure_threshold=3, reset_timeout_sec=15.0)
         self._cb_order = CircuitBreaker(name="order", failure_threshold=5, reset_timeout_sec=10.0)
 
-    # ----- нормализация символов для gate -----
     @staticmethod
     def _to_gate(sym: str) -> str:
         base, quote = sym.split("/")
@@ -155,12 +151,10 @@ class CcxtBroker:
         if min_notional and min_notional > 0 and notional < min_notional:
             raise ValidationError(f"minNotional:{notional}<{min_notional}")
 
-    # ----- вспомогательная обёртка под CircuitBreaker -----
     async def _with_cb(self, cb: CircuitBreaker, coro_fn: Callable[[], Awaitable[Any]]) -> Any:
         async with cb:
             return await coro_fn()
 
-    # ----- wrapped calls with CB & rate limiting -----
     async def fetch_ticker(self, symbol: str) -> Any:
         await self._ensure_markets()
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
@@ -192,64 +186,49 @@ class CcxtBroker:
             inc("broker.request.error", fn="fetch_balance")
             raise self._map_error(exc) from exc
 
-    async def create_market_buy_quote(
-        self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None
-    ) -> Any:
+    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None) -> Any:
         await self._ensure_markets()
-        # ask для расчёта базового amount
         t = await self.fetch_ticker(symbol)
         ask = dec(str(t.get("ask") or "0")) or dec(str(t.get("last") or "0"))
         if ask <= 0:
             raise ValidationError("ticker_ask_invalid")
-
         base_amount = quote_amount / ask
         base_amount, _ = self._apply_precision(symbol, amount=base_amount, price=None)
         if base_amount is None:
             raise ValidationError("precision_application_failed")
         self._check_min_notional(symbol, amount=base_amount, price=ask)
-
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         params = {"type": "market", "timeInForce": "IOC"}
         if client_order_id:
             params["clientOrderId"] = client_order_id
-
         await self._bucket.acquire()
         try:
             t0 = asyncio.get_event_loop().time()
-            order = await self._with_cb(
-                self._cb_create, lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params)
-            )
+            order = await self._with_cb(self._cb_create, lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params))
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})
             return order
         except Exception as exc:
             inc("broker.request.error", fn="create_buy")
             raise self._map_error(exc) from exc
 
-    async def create_market_sell_base(
-        self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None
-    ) -> Any:
+    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None) -> Any:
         await self._ensure_markets()
         t = await self.fetch_ticker(symbol)
         bid = dec(str(t.get("bid") or "0")) or dec(str(t.get("last") or "0"))
         if bid <= 0:
             raise ValidationError("ticker_bid_invalid")
-
         b_amt, _ = self._apply_precision(symbol, amount=base_amount, price=None)
         if b_amt is None:
             raise ValidationError("precision_application_failed")
         self._check_min_notional(symbol, amount=b_amt, price=bid)
-
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         params = {"type": "market", "timeInForce": "IOC"}
         if client_order_id:
             params["clientOrderId"] = client_order_id
-
         await self._bucket.acquire()
         try:
             t0 = asyncio.get_event_loop().time()
-            order = await self._with_cb(
-                self._cb_create, lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params)
-            )
+            order = await self._with_cb(self._cb_create, lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params))
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"})
             return order
         except Exception as exc:
