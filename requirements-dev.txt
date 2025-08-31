@@ -1,18 +1,23 @@
-# Include runtime deps
+# Подключение боевых зависимостей
 -r requirements.txt
 
 # TEST
-pytest>=8.2,<9
-pytest-asyncio>=0.23,<1
-pytest-mock>=3.12,<4
-coverage>=7.4,<8
+pytest
+pytest-asyncio
+httpx
+pytest-mock
+coverage
 
 # LINT / STYLE / ARCH
-ruff>=0.6,<0.7
-mypy>=1.8,<2
-black>=24.0,<25
-isort>=5.13,<6
-import-linter>=2.0,<3
+ruff
+mypy
+import-linter
+black
+isort
+
+# Типы (минимальный набор)
+types-requests
+types-protobuf
 
 # DEV
-pre-commit>=3.6,<4
+pre-commit
