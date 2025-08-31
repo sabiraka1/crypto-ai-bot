@@ -1,8 +1,7 @@
-# src/crypto_ai_bot/core/domain/strategies/manager.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Tuple, Optional
+from typing import Any, Callable, Iterable, List, Tuple, Optional, Dict
 
 from .base import BaseStrategy, StrategyContext, MarketData
 from .ema_cross import EmaCrossStrategy
@@ -19,15 +18,34 @@ class Decision:
     score: float = 1.0
 
 
+def _parse_scores(s: str) -> Dict[str, float]:
+    """
+    Пример: "ema_cross:1.0,ema_atr:1.2,signals_policy:1.5"
+    """
+    out: Dict[str, float] = {}
+    if not s:
+        return out
+    for part in s.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        name, val = part.split(":", 1)
+        name = name.strip().lower()
+        try:
+            out[name] = float(val.strip())
+        except Exception:
+            continue
+    return out
+
+
 class StrategyManager:
     """
-    Агрегатор стратегий с поддержкой Regime-политики.
-    Параметры (из settings):
-      - STRATEGY_SET: список стратегий через запятую (по умолчанию: ema_cross,ema_atr,signals_policy)
-      - STRATEGY_MODE: first|vote|weighted (по умолчанию: first)
-      - REGIME_ENABLED: 0|1 (по умолчанию: 1)
-      - REGIME_BLOCK_BUY: 0|1 (по умолчанию: 1) — в risk_off блокируем новые buy
-      - REGIME_WEIGHT_MULT_RISK_OFF: float (по умолчанию: 0.5) — для weighted уменьшаем общий вес
+    Агрегатор стратегий с поддержкой Regime-политики и weighted-режима.
+    Настройки:
+      - STRATEGY_SET: "ema_cross,ema_atr,signals_policy"
+      - STRATEGY_MODE: "first" | "vote" | "weighted"
+      - STRATEGY_SCORES: "ema_cross:1.0,ema_atr:1.2"
+      - REGIME_ENABLED, REGIME_BLOCK_BUY, REGIME_WEIGHT_MULT_RISK_OFF
     """
 
     def __init__(
@@ -41,8 +59,11 @@ class StrategyManager:
         self._mode: str = str(getattr(settings, "STRATEGY_MODE", "first") or "first").lower()
         self._strategies: List[BaseStrategy] = list(strategies or [])
         self._regime_provider = regime_provider
+        self._scores_map: Dict[str, float] = _parse_scores(str(getattr(settings, "STRATEGY_SCORES", "") or ""))
+
         if not self._strategies:
             self._strategies = list(self._build_from_settings(settings))
+        self._apply_scores()
 
     def _build_from_settings(self, settings: Any) -> Iterable[BaseStrategy]:
         names = str(getattr(settings, "STRATEGY_SET", "ema_cross,ema_atr,signals_policy") or "ema_cross,ema_atr,signals_policy")
@@ -57,6 +78,17 @@ class StrategyManager:
                 yield EmaAtrStrategy()
             elif name in ("signals", "signals_policy"):
                 yield SignalsPolicyStrategy()
+
+    def _apply_scores(self) -> None:
+        for s in self._strategies:
+            key = type(s).__name__.replace("Strategy", "").lower()
+            # допустим и по short-имени из списка
+            for cand in (key,):
+                if cand in self._scores_map:
+                    try:
+                        setattr(s, "score", float(self._scores_map[cand]))
+                    except Exception:
+                        pass
 
     def _apply_regime_first(self, action: str, explain: str) -> Tuple[str, str]:
         if not int(getattr(self._settings, "REGIME_ENABLED", 1) or 1):
@@ -86,7 +118,6 @@ class StrategyManager:
                     return self._apply_regime_first(action, explain)
             return "hold", "all_hold"
 
-        # собираем все решения
         votes: List[Decision] = []
         for s in self._strategies:
             action, explain = await s.decide(ctx=ctx, md=md)
@@ -96,7 +127,6 @@ class StrategyManager:
         if self._mode == "vote":
             buy = sum(1 for v in votes if v.action == "buy")
             sell = sum(1 for v in votes if v.action == "sell")
-            # применим простую блокировку buy при risk_off
             action = "buy" if buy > sell and buy > 0 else "sell" if sell > buy and sell > 0 else "hold"
             action, explain = (action, f"vote:{buy}>{sell}") if action != "hold" else ("hold", "vote_tie_or_all_hold")
             return self._apply_regime_first(action, explain)
