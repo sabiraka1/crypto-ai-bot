@@ -1,52 +1,75 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
-import time
-import urllib.request
-from typing import Optional
+import os
+from typing import Any, Dict
 
-from crypto_ai_bot.app.compose import build_container
+from crypto_ai_bot.utils.http_client import aget
+from crypto_ai_bot.utils.logging import get_logger
 
-
-def _check_internal() -> dict:
-    c = build_container()
-    rep = c.health
-    # health.check() — async; используем HTTP, либо вызывать из CLI не будем.
-    return {"ok": True, "note": "internal mode only ensures composition OK"}
+_log = get_logger("cli.health_monitor")
 
 
-def _fetch(url: str, timeout: float = 5.0) -> dict:
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default)
+
+
+async def _fetch_health(url: str, timeout: float) -> Dict[str, Any]:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            data = r.read().decode("utf-8", errors="ignore")
-            try:
-                return json.loads(data)
-            except Exception:
-                return {"raw": data}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        resp = await aget(url, timeout=timeout)
+        return {
+            "status_code": resp.status_code,
+            "ok": resp.status_code == 200,
+            "text": resp.text,
+            "json": (resp.json() if resp.headers.get("content-type", "").startswith("application/json") else None),
+        }
+    except Exception:
+        _log.error("health_fetch_failed", extra={"url": url}, exc_info=True)
+        return {"status_code": 0, "ok": False, "text": "", "json": None}
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    p = argparse.ArgumentParser(prog="cab-health", description="Health monitor")
-    p.add_argument("--url", help="Health/ready URL, e.g. http://127.0.0.1:8000/health")
-    p.add_argument("--interval", type=float, default=10.0)
-    p.add_argument("--oneshot", action="store_true")
-    args = p.parse_args(argv)
+async def _oneshot(url: str, timeout: float) -> int:
+    res = await _fetch_health(url, timeout)
+    pretty = res.get("json") or res.get("text")
+    try:
+        out = json.dumps(pretty, ensure_ascii=False, indent=2) if isinstance(pretty, (dict, list)) else str(pretty)
+    except Exception:
+        out = str(pretty)
+    print(out)
+    return 0 if res.get("ok") else 1
 
-    if not args.url:
-        print(json.dumps(_check_internal(), ensure_ascii=False))
-        return 0
 
+async def _watch(url: str, timeout: float, interval: float) -> int:
     while True:
-        rep = _fetch(args.url)
-        print(json.dumps(rep, ensure_ascii=False))
-        if args.oneshot:
-            break
-        time.sleep(max(1.0, args.interval))
-    return 0
+        code = await _oneshot(url, timeout)
+        await asyncio.sleep(max(0.5, interval))
+        if code != 0:
+            # продолжаем наблюдение, но пишем предупреждение
+            _log.warning("health_not_ok", extra={"url": url})
+    # недостижимо
+    # return 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="HTTP health monitor")
+    parser.add_argument("--url", default=_env("HEALTH_URL", "http://127.0.0.1:8000/health"))
+    parser.add_argument("--oneshot", action="store_true", help="single check and exit with code")
+    parser.add_argument("--timeout", type=float, default=float(_env("HTTP_TIMEOUT_SEC", "30")))
+    parser.add_argument("--interval", type=float, default=5.0)
+    args = parser.parse_args()
+
+    if args.oneshot:
+        raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
+    else:
+        # вечное наблюдение
+        try:
+            asyncio.run(_watch(args.url, args.timeout, args.interval))
+        except KeyboardInterrupt:
+            print("\nstopped by user")
+            raise SystemExit(0)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

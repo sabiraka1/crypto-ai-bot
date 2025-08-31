@@ -1,51 +1,81 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Optional
-import httpx
+from typing import Any, Dict
 
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.http_client import apost  # единый слой HTTP
 
 _log = get_logger("adapters.telegram")
 
 
 class TelegramAlerts:
-    def __init__(self, bot_token: str = "", chat_id: str | int = "", *, timeout_sec: float = 5.0, retries: int = 2):
+    """
+    Минимальная асинхронная обёртка над Telegram Bot API.
+
+    Поведение:
+      - Если token/chat_id не заданы — объект "выключен" (enabled() == False), send() возвращает False без ошибок.
+      - Отправка сообщений HTML-разметкой; предпросмотр ссылок выключен.
+      - Ошибки логируем со стеком, но не роняем процесс.
+    """
+
+    def __init__(
+        self,
+        *,
+        bot_token: str = "",
+        chat_id: str = "",
+        request_timeout_sec: float = 30.0,
+        parse_mode: str = "HTML",
+        disable_web_page_preview: bool = True,
+        disable_notification: bool = False,
+    ) -> None:
         self._token = (bot_token or "").strip()
-        self._chat = str(chat_id or "").strip()
-        self._timeout = float(timeout_sec)
-        self._retries = int(retries)
-        self._client: Optional[httpx.AsyncClient] = None
+        self._chat_id = (chat_id or "").strip()
+        self._timeout = float(request_timeout_sec)
+        self._parse_mode = parse_mode
+        self._disable_web_page_preview = bool(disable_web_page_preview)
+        self._disable_notification = bool(disable_notification)
 
     def enabled(self) -> bool:
-        return bool(self._token and self._chat)
+        return bool(self._token and self._chat_id)
 
-    async def _client_lazy(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-        return self._client
-
-    async def close(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.aclose()
-            except Exception:
-                pass
-            self._client = None
+    def _endpoint(self) -> str:
+        return f"https://api.telegram.org/bot{self._token}/sendMessage"
 
     async def send(self, text: str) -> bool:
+        """
+        Возвращает True, если получили HTTP 200 + {"ok": true}.
+        Ошибки не пробрасываем (best-effort), но логируем со стеком.
+        """
         if not self.enabled():
+            _log.info("telegram_disabled")
             return False
-        url = f"https://api.telegram.org/bot{self._token}/sendMessage"
-        payload = {"chat_id": self._chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        cli = await self._client_lazy()
-        for attempt in range(self._retries + 1):
+
+        payload: Dict[str, Any] = {
+            "chat_id": self._chat_id,
+            "text": str(text or ""),
+            "parse_mode": self._parse_mode,
+            "disable_web_page_preview": self._disable_web_page_preview,
+            "disable_notification": self._disable_notification,
+        }
+
+        try:
+            resp = await apost(self._endpoint(), json=payload, timeout=self._timeout)
+            if resp.status_code != 200:
+                _log.warning(
+                    "telegram_send_non_200",
+                    extra={"status": resp.status_code, "reason": getattr(resp, "reason_phrase", "")},
+                )
+                return False
             try:
-                r = await cli.post(url, json=payload)
-                if r.status_code == 200 and (r.json().get("ok") is True):
-                    return True
-                _log.warning("telegram_send_non_200", extra={"status": r.status_code, "body": r.text[:256]})
-            except Exception as exc:
-                _log.error("telegram_send_exception", extra={"error": str(exc), "attempt": attempt})
-            await asyncio.sleep(0.2 * (attempt + 1))
-        return False
+                data = resp.json()
+            except Exception:
+                _log.error("telegram_send_invalid_json", exc_info=True)
+                return False
+
+            ok = bool(data.get("ok"))
+            if not ok:
+                _log.warning("telegram_send_not_ok", extra={"response": str(data)})
+            return ok
+        except Exception:
+            _log.error("telegram_send_exception", exc_info=True)
+            return False
