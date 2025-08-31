@@ -20,29 +20,36 @@ def _buckets_ms() -> Tuple[float, ...]:
         vals = [float(x.strip()) for x in env.split(",") if x.strip()]
     except Exception:
         vals = [5, 10, 25, 50, 100, 250, 500, 1000]
-    # преобразуем в секунды
+    # гистограмма в секундах
     return tuple(v / 1000.0 for v in vals)
 
 def inc(name: str, **labels: Any) -> None:
-    """Счётчик +1. Пример: inc("trade_completed_total", symbol="BTC/USDT", side="buy")"""
-    k = _key(name, {k: str(v) for k, v in labels.items()})
+    """Counter +1"""
+    labs = {k: str(v) for k, v in labels.items()}
+    k = _key(name, labs)
     if k not in _COUNTERS:
         _COUNTERS[k] = Counter(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
     _COUNTERS[k].labels(**dict(k[1])).inc()
 
 def gauge(name: str, **labels: Any) -> Gauge:
-    """Гейдж (возвращает объект, чтобы .set())"""
-    k = _key(name, {k: str(v) for k, v in labels.items()})
+    """Gauge (вернёт объект, чтобы .set())"""
+    labs = {k: str(v) for k, v in labels.items()}
+    k = _key(name, labs)
     if k not in _GAUGES:
         _GAUGES[k] = Gauge(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
     return _GAUGES[k].labels(**dict(k[1]))
 
 def hist(name: str, **labels: Any) -> Histogram:
-    """Гистограмма (секунды)"""
-    k = _key(name, {k: str(v) for k, v in labels.items()})
+    """Histogram (секунды)"""
+    labs = {k: str(v) for k, v in labels.items()}
+    k = _key(name, labs)
     if k not in _HISTS:
         _HISTS[k] = Histogram(name, name, list(dict(k[1]).keys()), buckets=_buckets_ms(), registry=_REGISTRY)
     return _HISTS[k].labels(**dict(k[1]))
+
+def observe(name: str, value: float, labels: dict[str, str] | None = None) -> None:
+    """Шорткат для наблюдения значения (секунды)"""
+    (hist(name, **(labels or {}))).observe(float(value))
 
 def export_text() -> str:
     """Для /metrics в FastAPI"""
