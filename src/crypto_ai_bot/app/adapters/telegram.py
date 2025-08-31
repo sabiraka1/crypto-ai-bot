@@ -3,19 +3,15 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.http_client import apost  # единый слой HTTP
+from crypto_ai_bot.utils.retry import apost_retry
+from crypto_ai_bot.utils.trace import get_cid
 
 _log = get_logger("adapters.telegram")
 
 
 class TelegramAlerts:
     """
-    Минимальная асинхронная обёртка над Telegram Bot API.
-
-    Поведение:
-      - Если token/chat_id не заданы — объект "выключен" (enabled() == False), send() возвращает False без ошибок.
-      - Отправка сообщений HTML-разметкой; предпросмотр ссылок выключен.
-      - Ошибки логируем со стеком, но не роняем процесс.
+    Исходящие уведомления в Telegram (Bot API).
     """
 
     def __init__(
@@ -43,12 +39,16 @@ class TelegramAlerts:
 
     async def send(self, text: str) -> bool:
         """
-        Возвращает True, если получили HTTP 200 + {"ok": true}.
-        Ошибки не пробрасываем (best-effort), но логируем со стеком.
+        Возвращает True, если HTTP 200 и {"ok":true}.
+        Ретраи по сети → см. utils.retry.apost_retry.
         """
         if not self.enabled():
             _log.info("telegram_disabled")
             return False
+
+        cid = get_cid()
+        if cid:
+            text = f"{text}\n<code>[#CID:{cid}]</code>"
 
         payload: Dict[str, Any] = {
             "chat_id": self._chat_id,
@@ -59,19 +59,11 @@ class TelegramAlerts:
         }
 
         try:
-            resp = await apost(self._endpoint(), json=payload, timeout=self._timeout)
+            resp = await apost_retry(self._endpoint(), json=payload, timeout=self._timeout)
             if resp.status_code != 200:
-                _log.warning(
-                    "telegram_send_non_200",
-                    extra={"status": resp.status_code, "reason": getattr(resp, "reason_phrase", "")},
-                )
+                _log.warning("telegram_send_non_200", extra={"status": resp.status_code})
                 return False
-            try:
-                data = resp.json()
-            except Exception:
-                _log.error("telegram_send_invalid_json", exc_info=True)
-                return False
-
+            data = resp.json()
             ok = bool(data.get("ok"))
             if not ok:
                 _log.warning("telegram_send_not_ok", extra={"response": str(data)})

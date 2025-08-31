@@ -23,10 +23,10 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.metrics import inc, hist
+from crypto_ai_bot.utils.retry import async_retry
 
 _log = get_logger("compose")
-
 
 @dataclass
 class Container:
@@ -39,7 +39,6 @@ class Container:
     health: HealthChecker
     orchestrators: Dict[str, Orchestrator]
     tg_bot_task: Optional[asyncio.Task] = None
-
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -60,7 +59,6 @@ def _open_storage(settings: Settings) -> Storage:
     )
     return Storage(conn)
 
-
 def _build_event_bus(settings: Settings) -> Any:
     redis_url = getattr(settings, "EVENT_BUS_URL", "") or ""
     if redis_url:
@@ -69,6 +67,21 @@ def _build_event_bus(settings: Settings) -> Any:
         bus = AsyncEventBus()
     return bus
 
+def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
+    """Мягко оборачиваем publish ретраями и гистограммой, не меняя интерфейса."""
+    if not hasattr(bus, "publish"):
+        return
+    _orig = bus.publish
+
+    async def _publish(topic: str, payload: dict) -> None:
+        t = hist("bus_publish_latency_seconds", topic=topic)
+        async def call():
+            with t.time():
+                return await _orig(topic, payload)
+        await async_retry(call, retries=3, base_delay=0.2)
+        inc("bus_publish_total", topic=topic)
+
+    bus.publish = _publish  # type: ignore[attr-defined]
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -97,7 +110,7 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
-    # ======= Обработчики =======
+    # ======= Обработчики алёртов =======
     async def on_auto_paused(evt: dict):
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
@@ -159,7 +172,6 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
         await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
-    # ======= Подписки =======
     for topic, handler in [
         ("orchestrator.auto_paused", on_auto_paused),
         ("orchestrator.auto_resumed", on_auto_resumed),
@@ -178,12 +190,14 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
 
     _log.info("telegram_alerts_enabled")
 
-
 async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
     bus = _build_event_bus(s)
     await bus.start() if hasattr(bus, "start") else None
+
+    # обёртка publish ретраями + метрики
+    _wrap_bus_publish_with_metrics_and_retry(bus)
 
     br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
     risk = RiskManager(RiskConfig.from_settings(s))
@@ -220,7 +234,20 @@ async def build_container_async() -> Container:
 
     attach_alerts(bus, s)
 
-    # ---- Командный Telegram-бот (входящие команды) ----
+    # ==== Hint для ProtectiveExits: слушаем trade.completed и передаём в exits ====
+    if hasattr(exits, "on_hint"):
+        if hasattr(bus, "on"):
+            bus.on("exits.hint", exits.on_hint)  # на будущее, если кто-то публикует напрямую
+        # Переиспользуем существующие события: при trade.completed отправляем мягкий hint
+        async def _on_trade_completed_hint(evt: dict):
+            try:
+                await exits.on_hint(evt)
+            except Exception:
+                _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol","")}, exc_info=True)
+        if hasattr(bus, "on"):
+            bus.on("trade.completed", _on_trade_completed_hint)
+
+    # ---- Командный Telegram-бот ----
     tg_task: Optional[asyncio.Task] = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
@@ -230,12 +257,13 @@ async def build_container_async() -> Container:
                 users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
             except Exception:
                 _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
+        container_view = type("C", (), {
+            "storage": st, "broker": br, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health
+        })()
         bot = TelegramBotCommands(
             bot_token=s.TELEGRAM_BOT_TOKEN,
             allowed_users=users,
-            container=None if not (st and br) else type("C", (), {  # маленький агрегатор ссылок
-                "storage": st, "broker": br, "risk": risk, "orchestrators": orchs
-            })(),
+            container=container_view,
             default_symbol=symbols[0],
         )
         tg_task = asyncio.create_task(bot.run())

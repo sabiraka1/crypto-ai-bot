@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from crypto_ai_bot.utils.logging import get_logger
@@ -10,6 +12,13 @@ from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.utils.symbols import canonical
 
 _log = get_logger("adapters.telegram_bot")
+
+_TTL = float(os.environ.get("TELEGRAM_BOT_TTL_SECS", "30") or 30.0)
+_THR = os.environ.get("TELEGRAM_BOT_THROTTLE", "3/5")
+try:
+    _THR_N, _THR_WIN = [int(x) for x in _THR.split("/", 1)]
+except Exception:  # fallback
+    _THR_N, _THR_WIN = 3, 5
 
 
 def _split_symbol(sym: str) -> Tuple[str, str]:
@@ -22,15 +31,7 @@ def _split_symbol(sym: str) -> Tuple[str, str]:
 
 class TelegramBotCommands:
     """
-    Лёгкий long-poll бот команд (входящие сообщения → действия).
-    Требует: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (для исходящих алёртов не обязателен),
-             TELEGRAM_ALLOWED_USERS (csv id; пусто => разрешены все),
-             TELEGRAM_BOT_COMMANDS_ENABLED=1.
-
-    Архитектура:
-      - получение апдейтов: getUpdates (long polling)
-      - ответы: через TelegramAlerts (единый HTTP слой)
-      - доступ к оркестраторам/хранилищу/брокеру — через контейнер
+    Long-poll командный бот.
     """
 
     def __init__(
@@ -45,11 +46,15 @@ class TelegramBotCommands:
         self._token = (bot_token or "").strip()
         self._allowed = set(int(x) for x in allowed_users if str(x).strip())
         self._container = container
-        self._alerts = TelegramAlerts(bot_token=bot_token, chat_id="")  # будем указывать chat_id в send()
+        self._alerts = TelegramAlerts(bot_token=bot_token, chat_id="")  # укажем chat_id в send()
         self._default_symbol = canonical(default_symbol)
         self._offset = 0
         self._lp_sec = max(3, int(long_poll_sec))
         self._chat_symbol: Dict[int, str] = {}  # chat_id -> symbol
+        self._cache: Dict[Tuple[int, str], Tuple[float, str]] = {}  # (chat,cmd) -> (ts, text)
+        self._recent: Dict[int, List[float]] = {}  # user_id -> ts[]
+
+    # --------------------- утилиты ---------------------
 
     def _allow(self, user_id: Optional[int]) -> bool:
         if not self._allowed:
@@ -58,6 +63,30 @@ class TelegramBotCommands:
             return int(user_id or 0) in self._allowed
         except Exception:
             return False
+
+    def _throttle(self, user_id: int) -> bool:
+        now = time.time()
+        q = self._recent.setdefault(user_id, [])
+        while q and q[0] < now - _THR_WIN:
+            q.pop(0)
+        if len(q) >= _THR_N:
+            return False
+        q.append(now)
+        return True
+
+    def _cache_get(self, chat_id: int, key: str) -> Optional[str]:
+        k = (chat_id, key)
+        v = self._cache.get(k)
+        if not v:
+            return None
+        ts, text = v
+        if time.time() - ts <= _TTL:
+            return text
+        self._cache.pop(k, None)
+        return None
+
+    def _cache_put(self, chat_id: int, key: str, text: str) -> None:
+        self._cache[(chat_id, key)] = (time.time(), text)
 
     def _endpoint(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self._token}/{method}"
@@ -82,20 +111,25 @@ class TelegramBotCommands:
             _log.error("tg_reply_failed", extra={"chat_id": chat_id}, exc_info=True)
 
     def _pick_symbol(self, chat_id: int, text: str) -> str:
-        # попытка извлечь символ из аргумента команды: "/status ETH/USDT"
         parts = text.strip().split()
         if len(parts) >= 2 and "/" in parts[1]:
             sym = canonical(parts[1])
             self._chat_symbol[chat_id] = sym
             return sym
-        # иначе берём из привязки чата или дефолт
         return self._chat_symbol.get(chat_id, self._default_symbol)
 
     def _get_orchestrator(self, symbol: str) -> Optional[Any]:
         orchs = getattr(self._container, "orchestrators", {}) or {}
         return orchs.get(symbol) or orchs.get(symbol.replace("-", "/").upper())
 
+    # --------------------- команды ---------------------
+
     async def _cmd_help(self, chat_id: int) -> None:
+        key = "help"
+        cached = self._cache_get(chat_id, key)
+        if cached:
+            await self._reply(chat_id, cached)
+            return
         txt = (
             "📋 <b>Команды</b>\n"
             "/help — список команд\n"
@@ -116,14 +150,25 @@ class TelegramBotCommands:
             "/pause [SYM] — пауза\n"
             "/resume [SYM] — продолжить\n"
             "/stop [SYM] — остановить\n"
+            "/pause_all — пауза по всем символам\n"
+            "/resume_all — продолжить по всем символам\n"
+            "/exit_all — защитное закрытие позиций по всем символам\n"
         )
+        self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
 
     async def _cmd_symbols(self, chat_id: int) -> None:
+        key = "symbols"
+        cached = self._cache_get(chat_id, key)
+        if cached:
+            await self._reply(chat_id, cached)
+            return
         orchs = getattr(self._container, "orchestrators", {}) or {}
         syms = ", ".join(sorted(orchs.keys())) or "—"
         cur = self._chat_symbol.get(chat_id, self._default_symbol)
-        await self._reply(chat_id, f"🔣 <b>Символы</b>\nДоступно: <code>{html.escape(syms)}</code>\nТекущий: <code>{html.escape(cur)}</code>")
+        txt = f"🔣 <b>Символы</b>\nДоступно: <code>{html.escape(syms)}</code>\nТекущий: <code>{html.escape(cur)}</code>"
+        self._cache_put(chat_id, key, txt)
+        await self._reply(chat_id, txt)
 
     async def _cmd_set(self, chat_id: int, text: str) -> None:
         parts = text.strip().split()
@@ -178,6 +223,11 @@ class TelegramBotCommands:
         await self._cmd_status(chat_id, symbol)
 
     async def _cmd_limits(self, chat_id: int) -> None:
+        key = "limits"
+        cached = self._cache_get(chat_id, key)
+        if cached:
+            await self._reply(chat_id, cached)
+            return
         risk = getattr(self._container, "risk", None)
         cfg = getattr(risk, "config", None)
         if not cfg:
@@ -192,29 +242,25 @@ class TelegramBotCommands:
             f"daily_loss_limit_quote: <code>{getattr(cfg, 'daily_loss_limit_quote', 0)}</code>\n"
             f"max_fee_pct: <code>{getattr(cfg, 'max_fee_pct', 0)}</code>%  slippage: <code>{getattr(cfg, 'max_slippage_pct', 0)}</code>%\n"
         )
+        self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
 
     async def _cmd_risk(self, chat_id: int, symbol: str) -> None:
-        # легкая оценка загрузки лимитов: что найдём — покажем
         parts = ["📏 <b>Риск (оценка)</b>"]
         st = getattr(self._container, "storage", None)
         cfg = getattr(getattr(self._container, "risk", None), "config", None)
-
-        # дневной оборот/убыток — если есть методы
         try:
-            if st and hasattr(st, "trades"):
-                if hasattr(st.trades, "daily_turnover_quote"):
-                    tq = st.trades.daily_turnover_quote(symbol)
-                    parts.append(f"turnover_today: <code>{tq}</code>")
+            if st and hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
+                tq = st.trades.daily_turnover_quote(symbol)
+                parts.append(f"turnover_today: <code>{tq}</code>")
         except Exception:
             _log.error("risk_calc_turnover_failed", exc_info=True)
 
         try:
-            if cfg and getattr(cfg, "max_orders_per_hour", 0):
-                if hasattr(st.trades, "count_orders_last_minutes"):
-                    cnt = st.trades.count_orders_last_minutes(symbol, 60)
-                    mx = getattr(cfg, "max_orders_per_hour", 0)
-                    parts.append(f"orders_60m: <code>{cnt}/{mx}</code>")
+            if cfg and getattr(cfg, "max_orders_per_hour", 0) and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
+                cnt = st.trades.count_orders_last_minutes(symbol, 60)
+                mx = getattr(cfg, "max_orders_per_hour", 0)
+                parts.append(f"orders_60m: <code>{cnt}/{mx}</code>")
         except Exception:
             _log.error("risk_calc_orders_failed", exc_info=True)
 
@@ -284,16 +330,92 @@ class TelegramBotCommands:
                 return
         except Exception:
             _log.error("pnl_today_failed", exc_info=True)
-        await self._reply(chat_id, "ℹ️ PnL сегодня: <code>N/A</code> (нет агрегатора)")
+        await self._reply(chat_id, "ℹ️ PnL сегодня: <code>N/A</code>")
 
     async def _cmd_stats(self, chat_id: int, symbol: str) -> None:
-        # тонкий placeholder, т.к. агрегаторов может не быть
         await self._reply(chat_id, "ℹ️ Статистика 7d: <code>N/A</code>")
 
     async def _cmd_health(self, chat_id: int, symbol: str) -> None:
-        # Отдаём быструю эвристику: ping storage/broker/bus в рантайме здесь не дублируем.
-        await self._reply(chat_id, "❤️ <b>Health</b>: используется периодическая проверка внутри бота\n"
-                                   "Если будут проблемы — придёт алёрт (broker.error / dms).")
+        health = getattr(self._container, "health", None)
+        if health and hasattr(health, "get_snapshot"):
+            snap = health.get_snapshot()
+            txt = (
+                f"❤️ <b>Health</b> <code>{html.escape(symbol)}</code>\n"
+                f"storage: <code>{'OK' if snap.get('ok_storage') else 'FAIL'}</code>\n"
+                f"broker: <code>{'OK' if snap.get('ok_broker') else 'FAIL'}</code>\n"
+                f"bus: <code>{'OK' if snap.get('ok_bus') else 'FAIL'}</code>\n"
+                f"ts: <code>{snap.get('ts','')}</code>"
+            )
+            await self._reply(chat_id, txt)
+        else:
+            await self._reply(chat_id, "❤️ Health: snapshot недоступен (используется периодическая проверка)")
+
+    async def _cmd_pause_all(self, chat_id: int) -> None:
+        orchs = getattr(self._container, "orchestrators", {}) or {}
+        if not orchs:
+            await self._reply(chat_id, "❌ Оркестраторы не найдены")
+            return
+        ok, fail = [], []
+        for sym, orch in orchs.items():
+            try:
+                await orch.pause()
+                ok.append(sym)
+            except Exception:
+                _log.error("pause_all_failed", extra={"symbol": sym}, exc_info=True)
+                fail.append(sym)
+        msg = "⏸ <b>Пауза</b>\n"
+        if ok: msg += "✅ " + ", ".join(ok) + "\n"
+        if fail: msg += "❌ " + ", ".join(fail)
+        await self._reply(chat_id, msg.strip())
+
+    async def _cmd_resume_all(self, chat_id: int) -> None:
+        orchs = getattr(self._container, "orchestrators", {}) or {}
+        if not orchs:
+            await self._reply(chat_id, "❌ Оркестраторы не найдены")
+            return
+        ok, fail = [], []
+        for sym, orch in orchs.items():
+            try:
+                await orch.resume()
+                ok.append(sym)
+            except Exception:
+                _log.error("resume_all_failed", extra={"symbol": sym}, exc_info=True)
+                fail.append(sym)
+        msg = "▶️ <b>Продолжить</b>\n"
+        if ok: msg += "✅ " + ", ".join(ok) + "\n"
+        if fail: msg += "❌ " + ", ".join(fail)
+        await self._reply(chat_id, msg.strip())
+
+    async def _cmd_exit_all(self, chat_id: int) -> None:
+        orchs = getattr(self._container, "orchestrators", {}) or {}
+        if not orchs:
+            await self._reply(chat_id, "❌ Оркестраторы не найдены")
+            return
+        ok, fail = [], []
+        exits = getattr(self._container, "exits", None)
+        for sym in orchs.keys():
+            try:
+                if exits:
+                    for name in ("exit_all_for_symbol", "liquidate_symbol", "liquidate", "close_position", "request_close", "trigger_close"):
+                        fn = getattr(exits, name, None)
+                        if callable(fn):
+                            res = fn(sym)
+                            if asyncio.iscoroutine(res):
+                                await res
+                            ok.append(sym); break
+                    else:
+                        fail.append(sym)
+                else:
+                    fail.append(sym)
+            except Exception:
+                _log.error("exit_all_iter_failed", extra={"symbol": sym}, exc_info=True)
+                fail.append(sym)
+        msg = "🛑 <b>Exit All</b>\n"
+        if ok: msg += "✅ " + ", ".join(ok) + "\n"
+        if fail: msg += "❌ " + ", ".join(fail)
+        await self._reply(chat_id, msg.strip())
+
+    # --------------------- цикл ---------------------
 
     async def run(self) -> None:
         if not self._token:
@@ -323,19 +445,25 @@ class TelegramBotCommands:
                     if not self._allow(user_id):
                         await self._reply(chat_id, "⛔ Доступ запрещён")
                         continue
+                    if not self._throttle(user_id):
+                        await self._reply(chat_id, "⏳ Слишком часто. Повторите позже.")
+                        continue
 
                     cmd = text.split()[0].lower()
 
                     # --- маршрутизация команд ---
                     if cmd in ("/help", "/start"):
-                        await self._cmd_help(chat_id)
-                        continue
+                        await self._cmd_help(chat_id); continue
                     if cmd == "/symbols":
-                        await self._cmd_symbols(chat_id)
-                        continue
+                        await self._cmd_symbols(chat_id); continue
                     if cmd == "/set":
-                        await self._cmd_set(chat_id, text)
-                        continue
+                        await self._cmd_set(chat_id, text); continue
+                    if cmd == "/pause_all":
+                        await self._cmd_pause_all(chat_id); continue
+                    if cmd == "/resume_all":
+                        await self._cmd_resume_all(chat_id); continue
+                    if cmd == "/exit_all":
+                        await self._cmd_exit_all(chat_id); continue
 
                     sym = self._pick_symbol(chat_id, text)
 

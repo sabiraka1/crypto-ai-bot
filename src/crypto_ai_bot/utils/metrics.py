@@ -1,47 +1,49 @@
 from __future__ import annotations
 
-import threading
-import time
-from typing import Dict, Tuple
+import os
+from typing import Any, Dict, Tuple
 
-_lock = threading.Lock()
-_counters: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], float] = {}
-_hist: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], list] = {}
+from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest
 
-def _labels_dict(labels) -> Tuple[Tuple[str, str], ...]:
-    if not labels:
-        return tuple()
-    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
+_REGISTRY = CollectorRegistry()
+_COUNTERS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Counter] = {}
+_GAUGES: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Gauge] = {}
+_HISTS: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], Histogram] = {}
 
-def inc(name: str, labels: Dict[str, str] | None = None, value: float = 1.0) -> None:
-    key = (name, _labels_dict(labels))
-    with _lock:
-        _counters[key] = _counters.get(key, 0.0) + float(value)
+def _key(name: str, labels: Dict[str, str] | None) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+    pairs = tuple(sorted((labels or {}).items()))
+    return (name, pairs)
 
-def observe(name: str, value: float, labels: Dict[str, str] | None = None) -> None:
-    key = (name, _labels_dict(labels))
-    with _lock:
-        _hist.setdefault(key, []).append(float(value))
+def _buckets_ms() -> Tuple[float, ...]:
+    env = os.environ.get("METRICS_BUCKETS_MS", "5,10,25,50,100,250,500,1000")
+    try:
+        vals = [float(x.strip()) for x in env.split(",") if x.strip()]
+    except Exception:
+        vals = [5, 10, 25, 50, 100, 250, 500, 1000]
+    # преобразуем в секунды
+    return tuple(v / 1000.0 for v in vals)
+
+def inc(name: str, **labels: Any) -> None:
+    """Счётчик +1. Пример: inc("trade_completed_total", symbol="BTC/USDT", side="buy")"""
+    k = _key(name, {k: str(v) for k, v in labels.items()})
+    if k not in _COUNTERS:
+        _COUNTERS[k] = Counter(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
+    _COUNTERS[k].labels(**dict(k[1])).inc()
+
+def gauge(name: str, **labels: Any) -> Gauge:
+    """Гейдж (возвращает объект, чтобы .set())"""
+    k = _key(name, {k: str(v) for k, v in labels.items()})
+    if k not in _GAUGES:
+        _GAUGES[k] = Gauge(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
+    return _GAUGES[k].labels(**dict(k[1]))
+
+def hist(name: str, **labels: Any) -> Histogram:
+    """Гистограмма (секунды)"""
+    k = _key(name, {k: str(v) for k, v in labels.items()})
+    if k not in _HISTS:
+        _HISTS[k] = Histogram(name, name, list(dict(k[1]).keys()), buckets=_buckets_ms(), registry=_REGISTRY)
+    return _HISTS[k].labels(**dict(k[1]))
 
 def export_text() -> str:
-    lines = []
-    with _lock:
-        for (name, labels), val in _counters.items():
-            label_txt = ""
-            if labels:
-                label_txt = "{" + ",".join(f'{k}="{v}"' for k, v in labels) + "}"
-            lines.append(f"{name}{label_txt} {val}")
-        for (name, labels), arr in _hist.items():
-            if not arr:
-                continue
-            label_txt = ""
-            if labels:
-                label_txt = "{" + ",".join(f'{k}="{v}"' for k, v in labels) + "}"
-            # простые сводки: count/sum/last
-            count = len(arr)
-            s = sum(arr)
-            last = arr[-1]
-            lines.append(f"{name}_count{label_txt} {count}")
-            lines.append(f"{name}_sum{label_txt} {s}")
-            lines.append(f"{name}_last{label_txt} {last}")
-    return "\n".join(lines) + "\n"
+    """Для /metrics в FastAPI"""
+    return generate_latest(_REGISTRY).decode("utf-8")
