@@ -16,6 +16,7 @@ from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
+from crypto_ai_bot.core.infrastructure.events.bus_adapter import UnifiedEventBus  # ⬅ адаптер
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
@@ -29,6 +30,7 @@ from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("compose")
 
+
 @dataclass
 class Container:
     settings: Settings
@@ -40,6 +42,7 @@ class Container:
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
     tg_bot_task: asyncio.Task | None = None
+
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -60,12 +63,16 @@ def _open_storage(settings: Settings) -> Storage:
     )
     return Storage.from_connection(conn)
 
-def _build_event_bus(settings: Settings) -> EventBusPort:  # Используем протокол
+
+def _build_event_bus(settings: Settings) -> EventBusPort:
+    """
+    Создаём реализацию шины (Redis или локальную Async) и оборачиваем её в UnifiedEventBus,
+    чтобы снаружи везде был единый API EventBusPort, не зависящий от конкретной реализации.
+    """
     redis_url = getattr(settings, "EVENT_BUS_URL", "") or ""
-    if redis_url:
-        return RedisEventBus(redis_url)
-    else:
-        return AsyncEventBus()
+    impl = RedisEventBus(redis_url) if redis_url else AsyncEventBus()
+    return UnifiedEventBus(impl)
+
 
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
     """Мягко оборачиваем publish ретраями и гистограммой, не меняя интерфейса."""
@@ -75,13 +82,16 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
 
     async def _publish(topic: str, payload: dict[str, Any]) -> None:
         t = hist("bus_publish_latency_seconds", topic=topic)
+
         async def call() -> Any:
             with t.time():
                 return await _orig(topic, payload)
+
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
     bus.publish = _publish  # type: ignore[attr-defined]
+
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -190,9 +200,12 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
 
     _log.info("telegram_alerts_enabled")
 
+
 async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
+
+    # Шина событий: единый порт через адаптер, реализация (Redis/Async) скрыта внутри
     bus = _build_event_bus(s)
     if hasattr(bus, "start"):
         await bus.start()
@@ -209,11 +222,11 @@ async def build_container_async() -> Container:
     orchs: dict[str, Orchestrator] = {}
 
     def _make_dms(sym: str) -> SafetySwitchPort:
-        # Проверка совместимости bus для DeadMansSwitch
-        dms_bus = None
-        if isinstance(bus, AsyncEventBus):
-            dms_bus = bus
-        
+        # DeadMansSwitch работает только с локальной Async-шиной.
+        # Если bus — адаптер, достаём внутреннюю реализацию (если это AsyncEventBus).
+        inner = getattr(bus, "_impl", None)  # UnifiedEventBus может хранить _impl
+        dms_bus = inner if isinstance(inner, AsyncEventBus) else (bus if isinstance(bus, AsyncEventBus) else None)
+
         return DeadMansSwitch(
             storage=st,
             broker=br,
@@ -222,7 +235,7 @@ async def build_container_async() -> Container:
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=dms_bus,  # Передаем None если не AsyncEventBus
+            bus=dms_bus,  # None если не AsyncEventBus
         )
 
     for sym in symbols:
@@ -235,7 +248,7 @@ async def build_container_async() -> Container:
             exits=exits,
             health=health,
             settings=s,
-            dms=_make_dms(sym),  # Теперь типы совместимы
+            dms=_make_dms(sym),
         )
 
     attach_alerts(bus, s)
@@ -244,12 +257,14 @@ async def build_container_async() -> Container:
     if hasattr(exits, "on_hint"):
         if hasattr(bus, "on"):
             bus.on("exits.hint", exits.on_hint)
-        # Переиспользуем существующие события
+
+        # Переиспользуем существующие события, чтобы прокидывать хинты
         async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
             try:
                 await exits.on_hint(evt)
             except Exception:
-                _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol","")}, exc_info=True)
+                _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol", "")}, exc_info=True)
+
         if hasattr(bus, "on"):
             bus.on("trade.completed", _on_trade_completed_hint)  # type: ignore[arg-type]
 
@@ -263,9 +278,12 @@ async def build_container_async() -> Container:
                 users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
             except Exception:
                 _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
-        container_view = type("C", (), {
-            "storage": st, "broker": br, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health
-        })()
+
+        container_view = type(
+            "C",
+            (),
+            {"storage": st, "broker": br, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health},
+        )()
         bot = TelegramBotCommands(
             bot_token=s.TELEGRAM_BOT_TOKEN,
             allowed_users=users,
@@ -275,4 +293,14 @@ async def build_container_async() -> Container:
         tg_task = asyncio.create_task(bot.run())
         _log.info("telegram_bot_enabled")
 
-    return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
+    return Container(
+        settings=s,
+        storage=st,
+        broker=br,
+        bus=bus,
+        risk=risk,
+        exits=exits,
+        health=health,
+        orchestrators=orchs,
+        tg_bot_task=tg_task,
+    )
