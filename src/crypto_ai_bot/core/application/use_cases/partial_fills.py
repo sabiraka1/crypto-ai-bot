@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, OrderLike
 from crypto_ai_bot.utils.decimal import dec
@@ -52,3 +53,16 @@ class PartialFillHandler:
     def _symbol_from(self, order: OrderLike) -> str:
         # В большинстве реализаций OrderDTO хранит символ; если нет — публиковать без ключа.
         return getattr(order, "symbol", "") or ""
+
+
+# Функция-обертка для совместимости с orchestrator
+async def settle_orders(symbol: str, storage: Any, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
+    """
+    Функция-обертка для проверки и обработки частично исполненных ордеров.
+    В текущей версии - заглушка, так как нужна логика получения открытых ордеров.
+    """
+    # TODO: Реализовать когда будет хранилище открытых ордеров
+    # 1. Получить список открытых ордеров из storage для symbol
+    # 2. Проверить их статус через broker.fetch_order()
+    # 3. Для частично исполненных создать PartialFillHandler и вызвать handle()
+    _log.debug("settle_orders_check", extra={"symbol": symbol})

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
@@ -34,3 +36,14 @@ async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort,
             _log.debug("reconcile_ok", extra={"symbol": sym, "unrealized": str(unreal)})
         except Exception as exc:
             _log.warning("reconcile_error", extra={"symbol": sym, "error": str(exc)})
+
+
+# Функция-обертка для совместимости с orchestrator
+async def reconcile_positions(symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
+    """Функция-обертка для совместимости с orchestrator."""
+    await reconcile_positions_batch(
+        symbols=[symbol],
+        storage=storage,
+        broker=broker,
+        bus=bus
+    )
