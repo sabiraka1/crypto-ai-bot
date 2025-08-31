@@ -1,14 +1,26 @@
-﻿from __future__ import annotations
+﻿# src/crypto_ai_bot/core/application/use_cases/execute_trade.py
+from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 
 from crypto_ai_bot.core.application.ports import StoragePort, BrokerPort, EventBusPort
 from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+
+# Доп. правила риска (опционально)
+try:
+    from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
+except Exception:
+    LossStreakRule = None  # type: ignore
+
+try:
+    from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
+except Exception:
+    MaxDrawdownRule = None  # type: ignore
 
 _log = get_logger("usecase.execute_trade")
 
@@ -20,6 +32,49 @@ class ExecuteTradeResult:
     order: Optional[Any] = None
     reason: str = ""
     why: str = ""  # доп. пояснение (для причин блокировки)
+
+
+async def _recent_trades(storage: Any, symbol: str, n: int) -> List[Dict[str, Any]]:
+    """Безопасно достаём последние N сделок, если storage поддерживает."""
+    try:
+        repo = getattr(storage, "trades", None)
+        if not repo:
+            return []
+        if hasattr(repo, "last_trades"):
+            return list(repo.last_trades(symbol, n) or [])
+        if hasattr(repo, "list_recent"):
+            return list(repo.list_recent(symbol=symbol, limit=n) or [])
+    except Exception:
+        pass
+    return []
+
+
+async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
+    """Безопасно читаем дневной PnL в котируемой валюте (если доступно)."""
+    try:
+        repo = getattr(storage, "trades", None)
+        if not repo:
+            return dec("0")
+        if hasattr(repo, "daily_pnl_quote"):
+            v = repo.daily_pnl_quote(symbol)
+            return dec(str(v))
+    except Exception:
+        return dec("0")
+    return dec("0")
+
+
+async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> List[Decimal]:
+    """История балансов для оценки просадки (если есть репозиторий метрик/балансов)."""
+    try:
+        repo = getattr(storage, "balances", None)
+        if not repo:
+            return []
+        if hasattr(repo, "recent_total_quote"):
+            xs = repo.recent_total_quote(symbol=symbol, limit=limit)
+            return [dec(str(x)) for x in (xs or [])]
+    except Exception:
+        return []
+    return []
 
 
 async def execute_trade(
@@ -57,10 +112,45 @@ async def execute_trade(
     except Exception:
         _log.error("idempotency_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- риск-менеджер: лимиты и спред ----
+    # ---- риск-менеджер: конфиг ----
     cfg: RiskConfig = risk_manager.config if isinstance(risk_manager, RiskManager) else RiskConfig.from_settings(settings)
 
-    # 1) Ограничение на спред (макс. допустимый спред в %)
+    # ---- (опционально) правило: серия убыточных сделок ----
+    try:
+        if getattr(settings, "RISK_USE_LOSS_STREAK", 0) and LossStreakRule:
+            max_streak = int(getattr(settings, "RISK_LOSS_STREAK_MAX", 3) or 3)
+            lookback = int(getattr(settings, "RISK_LOSS_STREAK_LOOKBACK", 10) or 10)
+            rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)  # noqa
+            trades = await _recent_trades(storage, sym, n=max(lookback, 10))
+            allowed, reason = rule.check(trades)
+            if not allowed:
+                await bus.publish("budget.exceeded", {"symbol": sym, "type": "loss_streak", "reason": reason})
+                _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "loss_streak", "reason": reason})
+                return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+    except Exception:
+        _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
+
+    # ---- (опционально) правило: просадка/дневной лимит убытков ----
+    try:
+        if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0) and MaxDrawdownRule:
+            max_dd = dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", "10.0") or "10.0"))
+            max_daily = dec(str(getattr(settings, "RISK_MAX_DAILY_LOSS_QUOTE", "0") or "0"))
+            rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)  # noqa
+
+            balances = await _balances_series(storage, sym, limit=int(getattr(settings, "RISK_BALS_LOOKBACK", 48) or 48))
+            current = balances[-1] if balances else dec("0")
+            peak = max(balances) if balances else dec("0")
+            daily_pnl = await _daily_pnl_quote(storage, sym)
+
+            allowed, reason = rule.check(current_balance=current, peak_balance=peak, daily_pnl=daily_pnl)
+            if not allowed:
+                await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_drawdown", "reason": reason})
+                _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "max_drawdown", "reason": reason})
+                return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+    except Exception:
+        _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
+
+    # ---- ограничение на спред (макс. допустимый спред в %) ----
     if cfg.max_spread_pct and cfg.max_spread_pct > dec("0"):
         try:
             t = await broker.fetch_ticker(sym)
@@ -79,7 +169,7 @@ async def execute_trade(
         except Exception:
             _log.error("spread_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # 2) Ограничение частоты ордеров за 5 минут (если задано)
+    # ---- ограничение частоты ордеров за 5 минут (если задано) ----
     if cfg.max_orders_5m and cfg.max_orders_5m > 0:
         try:
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
@@ -93,7 +183,7 @@ async def execute_trade(
         except Exception:
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # 3) Ограничение дневного оборота по котируемой (если задано)
+    # ---- ограничение дневного оборота по котируемой (если задано) ----
     if cfg.max_turnover_day and cfg.max_turnover_day > dec("0"):
         try:
             current_turnover = storage.trades.daily_turnover_quote(sym)

@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/infrastructure/events/redis_bus.py
 from __future__ import annotations
 
 import asyncio
@@ -18,9 +19,11 @@ except Exception:  # pragma: no cover
         return logging.getLogger(name)
 
 try:
-    from crypto_ai_bot.utils.metrics import inc
+    from crypto_ai_bot.utils.metrics import inc, observe
 except Exception:  # pragma: no cover
     def inc(_name: str, **_labels: Any) -> None:
+        pass
+    def observe(_name: str, _value: float, _labels: Optional[Dict[str, str]] = None) -> None:
         pass
 
 _log = get_logger("events.redis_bus")
@@ -61,7 +64,10 @@ class RedisEventBus:
             raise RuntimeError("RedisEventBus not started")
         msg = json.dumps({"topic": topic, "payload": payload, "key": key})
         ch = f"evt:{topic}"
+        t0 = asyncio.get_event_loop().time()
         await self._pub.publish(ch, msg)
+        dt_ms = (asyncio.get_event_loop().time() - t0) * 1000.0
+        observe("redis_bus.publish.ms", dt_ms, {"topic": topic})
         inc("redis_bus_publish_total", topic=topic)
         return {"ok": True, "topic": topic}
 
@@ -118,6 +124,7 @@ class RedisEventBus:
         try:
             if self._pub:
                 await self._pub.publish("evt:__dlq__", json.dumps({"topic": "__dlq__", "payload": {**evt.get("payload", {}), "original_topic": evt.get("topic"), "error": error, "failed_handler": failed_handler}}))
+                inc("redis_bus_dlq_published_total")
         except Exception:
             _log.error("redis_bus_publish_dlq_failed", exc_info=True)
 
@@ -137,7 +144,8 @@ class RedisEventBus:
                     await pubsub.subscribe(*topics)
                 self._active_pubsub = pubsub
                 _log.info("redis_bus_listen_started", extra={"topics": topics or ["<none>"]})
-                backoff = 0.5
+                observe("redis_bus.listen.backoff_ms", backoff * 1000.0, {"phase": "started"})
+                backoff = 0.5  # <- сбросим бэкофф после успешного старта
 
                 async for msg in pubsub.listen():
                     if msg is None:
@@ -145,9 +153,12 @@ class RedisEventBus:
                         continue
                     if msg["type"] != "message":
                         continue
+                    t0 = asyncio.get_event_loop().time()
                     try:
                         data = json.loads(msg["data"])
                     except Exception:
+                        # невалидное сообщение
+                        inc("redis_bus_malformed_total")
                         continue
                     topic = data.get("topic")
                     if not topic:
@@ -168,6 +179,7 @@ class RedisEventBus:
                         except Exception as exc:
                             await self._emit_dlq(data, error=str(exc), failed_handler=getattr(h, "__name__", "handler"))
                     inc("redis_bus_delivered_total", topic=topic, delivered=str(delivered))
+                    observe("redis_bus.consume.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"topic": topic})
             except asyncio.CancelledError:
                 break
             except Exception:

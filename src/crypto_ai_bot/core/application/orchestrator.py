@@ -1,14 +1,14 @@
-﻿from __future__ import annotations
+﻿# src/crypto_ai_bot/core/application/orchestrator.py
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.metrics import inc, observe
 
 _log = get_logger("orchestrator")
-
 
 LoopFn = Callable[[], Awaitable[None]]
 
@@ -116,7 +116,10 @@ class Orchestrator:
                 await asyncio.sleep(spec.interval_sec)
                 continue
             try:
+                t0 = asyncio.get_event_loop().time()
                 await spec.runner()
+                dt_ms = (asyncio.get_event_loop().time() - t0) * 1000.0
+                observe("orchestrator.loop.ms", dt_ms, {"loop": spec.name, "symbol": self.symbol})
                 inc("orchestrator_loop_ok_total", loop=spec.name, symbol=self.symbol)
             except asyncio.CancelledError:
                 break
@@ -127,7 +130,7 @@ class Orchestrator:
             await asyncio.sleep(max(0.001, spec.interval_sec))
 
     # ---------------------------
-    # Конкретные циклы (логика не менялась)
+    # Конкретные циклы
     # ---------------------------
     async def _eval_loop(self) -> None:
         """
