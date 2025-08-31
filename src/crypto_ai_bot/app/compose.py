@@ -4,7 +4,7 @@ import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
@@ -20,6 +20,7 @@ from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSw
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import hist, inc
 from crypto_ai_bot.utils.retry import async_retry
@@ -57,15 +58,14 @@ def _open_storage(settings: Settings) -> Storage:
         do_backup=True,
         backup_retention_days=int(getattr(settings, "BACKUP_RETENTION_DAYS", 30) or 30),
     )
-    return Storage(conn)
+    return Storage.from_connection(conn)  # ИСПРАВЛЕНО
 
-def _build_event_bus(settings: Settings) -> Any:
+def _build_event_bus(settings: Settings) -> AsyncEventBus | RedisEventBus:  # ИСПРАВЛЕНО тип
     redis_url = getattr(settings, "EVENT_BUS_URL", "") or ""
     if redis_url:
-        bus = RedisEventBus(redis_url)
+        return RedisEventBus(redis_url)
     else:
-        bus = AsyncEventBus()
-    return bus
+        return AsyncEventBus()
 
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
     """Мягко оборачиваем publish ретраями и гистограммой, не меняя интерфейса."""
@@ -73,9 +73,9 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         return
     _orig = bus.publish
 
-    async def _publish(topic: str, payload: dict) -> None:
+    async def _publish(topic: str, payload: dict[str, Any]) -> None:
         t = hist("bus_publish_latency_seconds", topic=topic)
-        async def call():
+        async def call() -> Any:  # ДОБАВЛЕНА аннотация
             with t.time():
                 return await _orig(topic, payload)
         await async_retry(call, retries=3, base_delay=0.2)
@@ -100,7 +100,7 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         except Exception:
             _log.error("telegram_send_exception", exc_info=True)
 
-    def _sub(topic: str, coro):
+    def _sub(topic: str, coro: Callable[[dict[str, Any]], Awaitable[None]]) -> None:  # ДОБАВЛЕНЫ типы
         for attr in ("subscribe", "on"):
             if hasattr(bus, attr):
                 try:
@@ -110,16 +110,16 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
-    # ======= Обработчики алёртов =======
-    async def on_auto_paused(evt: dict):
+    # ======= Обработчики алертов (ДОБАВЛЕНЫ типы) =======
+    async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
 
-    async def on_auto_resumed(evt: dict):
+    async def on_auto_resumed(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
         await _send(f"🟢 <b>AUTO-RESUME</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
 
-    async def on_pos_mm(evt: dict):
+    async def on_pos_mm(evt: dict[str, Any]) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
         await _send(
             "🔄 <b>RECONCILE</b> {s}\nБиржа: <code>{b}</code>\nЛокально: <code>{l}</code>".format(
@@ -127,15 +127,15 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
             )
         )
 
-    async def on_dms_triggered(evt: dict):
+    async def on_dms_triggered(evt: dict[str, Any]) -> None:
         inc("dms_triggered_total", symbol=evt.get("symbol", ""))
         await _send(f"🛑 <b>DMS TRIGGERED</b> {evt.get('symbol','')}\nПродано базового: <code>{evt.get('amount','')}</code>")
 
-    async def on_dms_skipped(evt: dict):
+    async def on_dms_skipped(evt: dict[str, Any]) -> None:
         inc("dms_skipped_total", symbol=evt.get("symbol", ""))
         await _send(f"⛔ <b>DMS SKIPPED</b> {evt.get('symbol','')}\nПадение: <code>{evt.get('drop_pct','')}%</code>")
 
-    async def on_trade_completed(evt: dict):
+    async def on_trade_completed(evt: dict[str, Any]) -> None:
         inc("trade_completed_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
         s = evt.get("symbol", "")
         side = evt.get("side", "")
@@ -145,30 +145,30 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         amt = evt.get("amount", "")
         await _send(f"✅ <b>TRADE</b> {s} {side.upper()}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>")
 
-    async def on_trade_failed(evt: dict):
+    async def on_trade_failed(evt: dict[str, Any]) -> None:
         inc("trade_failed_total", symbol=evt.get("symbol", ""), reason=evt.get("error", ""))
         await _send(f"❌ <b>TRADE FAILED</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
-    async def on_settled(evt: dict):
+    async def on_settled(evt: dict[str, Any]) -> None:
         inc("trade_settled_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
         await _send(f"📦 <b>SETTLED</b> {evt.get('symbol','')} {evt.get('side','').upper()} id=<code>{evt.get('order_id','')}</code>")
 
-    async def on_settlement_timeout(evt: dict):
+    async def on_settlement_timeout(evt: dict[str, Any]) -> None:
         inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
         await _send(f"⏱️ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol','')} id=<code>{evt.get('order_id','')}</code>")
 
-    async def on_budget_exceeded(evt: dict):
+    async def on_budget_exceeded(evt: dict[str, Any]) -> None:
         inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))
         s = evt.get("symbol", "")
         kind = evt.get("type", "")
         detail = f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}" if kind == "max_orders_5m" else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
         await _send(f"⏳ <b>BUDGET</b> {s} превышен ({kind})\n{detail}")
 
-    async def on_trade_blocked(evt: dict):
+    async def on_trade_blocked(evt: dict[str, Any]) -> None:
         inc("trade_blocked_total", symbol=evt.get("symbol", ""), reason=evt.get("reason", ""))
         await _send(f"🚫 <b>BLOCKED</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
 
-    async def on_broker_error(evt: dict):
+    async def on_broker_error(evt: dict[str, Any]) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
         await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
@@ -194,7 +194,8 @@ async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
     bus = _build_event_bus(s)
-    await bus.start() if hasattr(bus, "start") else None
+    if hasattr(bus, "start"):
+        await bus.start()
 
     # обёртка publish ретраями + метрики
     _wrap_bus_publish_with_metrics_and_retry(bus)
@@ -207,7 +208,7 @@ async def build_container_async() -> Container:
     symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
     orchs: dict[str, Orchestrator] = {}
 
-    def _make_dms(sym: str) -> SafetySwitchPort:
+    def _make_dms(sym: str) -> DeadMansSwitch:  # ИЗМЕНЕН тип возврата
         return DeadMansSwitch(
             storage=st,
             broker=br,
@@ -215,7 +216,7 @@ async def build_container_async() -> Container:
             timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-            max_impact_pct=getattr(s, "DMS_MAX_IMPACT_PCT", 0),
+            max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),  # ИСПРАВЛЕНО на Decimal
             bus=bus,
         )
 
@@ -229,17 +230,17 @@ async def build_container_async() -> Container:
             exits=exits,
             health=health,
             settings=s,
-            dms=_make_dms(sym),
+            dms=_make_dms(sym),  # type: ignore[arg-type] # DeadMansSwitch наследует SafetySwitchPort
         )
 
     attach_alerts(bus, s)
 
-    # ==== Hint для ProtectiveExits: слушаем trade.completed и передаём в exits ====
+    # ==== Hint для ProtectiveExits ====
     if hasattr(exits, "on_hint"):
         if hasattr(bus, "on"):
-            bus.on("exits.hint", exits.on_hint)  # на будущее, если кто-то публикует напрямую
-        # Переиспользуем существующие события: при trade.completed отправляем мягкий hint
-        async def _on_trade_completed_hint(evt: dict):
+            bus.on("exits.hint", exits.on_hint)
+        # Переиспользуем существующие события
+        async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:  # ДОБАВЛЕН тип
             try:
                 await exits.on_hint(evt)
             except Exception:
