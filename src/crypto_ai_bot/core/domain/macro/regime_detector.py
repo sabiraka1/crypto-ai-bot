@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
-
+from .ports import DxyPort, BtcDomPort, FomcCalendarPort
 from .types import MacroSnapshot, Regime
-
 
 @dataclass
 class RegimeConfig:
@@ -13,18 +11,12 @@ class RegimeConfig:
     btc_dom_down_pct: float = -0.5
     fomc_block_minutes: int = 60
 
-
 class RegimeDetector:
-    """
-    Агрегирует макро-сигналы (DXY/BTC.D/FOMC) и решает режим:
-    'risk_off' | 'risk_on' | 'range'.
-    Источники опциональны.
-    """
-
-    def __init__(self, *, dxy_source, btc_dom_source, fomc_source, cfg: RegimeConfig | None = None) -> None:
-        self._dxy = dxy_source
-        self._btc = btc_dom_source
-        self._fomc = fomc_source
+    """Инференс режима рынка по DXY/BTC.D/FOMC."""
+    def __init__(self, *, dxy: DxyPort | None, btc_dom: BtcDomPort | None, fomc: FomcCalendarPort | None, cfg: RegimeConfig | None = None) -> None:
+        self._dxy = dxy
+        self._btc = btc_dom
+        self._fomc = fomc
         self._cfg = cfg or RegimeConfig()
 
     async def snapshot(self) -> MacroSnapshot:
@@ -35,27 +27,16 @@ class RegimeDetector:
 
     async def regime(self) -> Regime:
         snap = await self.snapshot()
-
         if snap.fomc_event_today:
             return "risk_off"
-
         votes_off = 0
         votes_on = 0
-
         if snap.dxy_change_pct is not None:
-            if snap.dxy_change_pct >= self._cfg.dxy_up_pct:
-                votes_off += 1
-            elif snap.dxy_change_pct <= self._cfg.dxy_down_pct:
-                votes_on += 1
-
+            if snap.dxy_change_pct >= self._cfg.dxy_up_pct: votes_off += 1
+            elif snap.dxy_change_pct <= self._cfg.dxy_down_pct: votes_on += 1
         if snap.btc_dom_change_pct is not None:
-            if snap.btc_dom_change_pct >= self._cfg.btc_dom_up_pct:
-                votes_off += 1
-            elif snap.btc_dom_change_pct <= self._cfg.btc_dom_down_pct:
-                votes_on += 1
-
-        if votes_off > votes_on and votes_off > 0:
-            return "risk_off"
-        if votes_on > votes_off and votes_on > 0:
-            return "risk_on"
+            if snap.btc_dom_change_pct >= self._cfg.btc_dom_up_pct: votes_off += 1
+            elif snap.btc_dom_change_pct <= self._cfg.btc_dom_down_pct: votes_on += 1
+        if votes_off > votes_on and votes_off > 0: return "risk_off"
+        if votes_on > votes_off and votes_on > 0: return "risk_on"
         return "range"

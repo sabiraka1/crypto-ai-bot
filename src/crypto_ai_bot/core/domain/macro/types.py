@@ -1,10 +1,8 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 
 Regime = Literal["risk_on", "risk_off", "range"]
-
 
 @dataclass
 class MacroSnapshot:
