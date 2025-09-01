@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+﻿rom __future__ import annotations
 
 import math
 from decimal import Decimal
@@ -28,10 +28,8 @@ async def _http_get_json_factory(settings: Any):
     try:
         from crypto_ai_bot.utils.http_client import HttpClient
         client = HttpClient(timeout=float(getattr(settings, "HTTP_TIMEOUT", 5.0) or 5.0))
-
         async def _get(url: str):
             return await client.get_json(url)
-
         return _get
     except Exception:
         async def _missing(_url: str):
@@ -103,9 +101,9 @@ async def eval_and_execute(
         md = await _build_market_data(symbol=symbol, broker=broker, settings=settings)
 
         # Regime detector (мягко)
-        _ = await _http_get_json_factory(settings)  # сейчас не используется, но заводим клиента мягко
+        http_get_json = await _http_get_json_factory(settings)
         dxy = DxyHttp(getattr(settings, "DXY_SOURCE_URL", None)) if getattr(settings, "DXY_SOURCE_URL", None) else None
-        btd = BtcDominanceHttp(getattr(settings, "BTC_DOM_SOURCE_URL", None)) if getattr(settings, "BTC_DOM_SOURCE_URL", None) else None
+        btd = BtcDominanceHttp(getattr(settings, "BTC_DOM_SOURCE_URL", None)) if getattr(settings, "BTC_DOM_SOURCE_URL", None) else None  # Исправлено
         fomc = FomcHttp(getattr(settings, "FOMC_CALENDAR_URL", None)) if getattr(settings, "FOMC_CALENDAR_URL", None) else None
         cfg = RegimeConfig(
             dxy_up_pct=float(getattr(settings, "REGIME_DXY_UP_PCT", 0.5) or 0.5),
