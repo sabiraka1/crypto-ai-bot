@@ -206,6 +206,11 @@ class CcxtBroker:
             t0 = asyncio.get_event_loop().time()
             order = await self._with_cb(self._cb_create, lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params))
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})
+            order = order if isinstance(order, dict) else dict(order)
+            try:
+                order['fee_quote'] = _extract_fee_quote(order, symbol=symbol)
+            except Exception:
+                pass
             return order
         except Exception as exc:
             inc("broker.request.error", fn="create_buy")
@@ -230,6 +235,11 @@ class CcxtBroker:
             t0 = asyncio.get_event_loop().time()
             order = await self._with_cb(self._cb_create, lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params))
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"})
+            order = order if isinstance(order, dict) else dict(order)
+            try:
+                order['fee_quote'] = _extract_fee_quote(order, symbol=symbol)
+            except Exception:
+                pass
             return order
         except Exception as exc:
             inc("broker.request.error", fn="create_sell")
@@ -247,3 +257,20 @@ class CcxtBroker:
         except Exception as exc:
             inc("broker.request.error", fn="fetch_order")
             raise self._map_error(exc) from exc
+
+
+def _extract_fee_quote(order: dict, *, symbol: str) -> str:
+    """
+    Возвращает сумму комиссии в котируемой валюте (quote), если она совпадает с валютой fee.
+    Иначе возвращает "0". Безопасная best-effort логика.
+    """
+    try:
+        fee = (order or {}).get("fee") or {}
+        cost = fee.get("cost")
+        ccy = (fee.get("currency") or "") or ""
+        quote = (symbol or "").split("/")[-1] if symbol else ""
+        if cost is not None and (not ccy or ccy.upper() == quote.upper()):
+            return str(cost)
+    except Exception:
+        pass
+    return "0"
