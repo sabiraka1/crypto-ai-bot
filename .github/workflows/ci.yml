@@ -41,6 +41,7 @@ jobs:
           pip install -r requirements.txt
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           pip install mypy types-requests
+          pip install -e .  # Установка пакета для mypy
       - name: MyPy
         run: |
           mypy --version
@@ -62,6 +63,7 @@ jobs:
           pip install -r requirements.txt
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
           pip install "import-linter==2.0"
+          pip install -e .  # Установка пакета чтобы import-linter мог найти crypto_ai_bot
       - name: Lint imports (architecture)
         run: |
           lint-imports --config importlinter.ini --verbose
