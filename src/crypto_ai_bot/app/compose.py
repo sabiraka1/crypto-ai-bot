@@ -203,7 +203,7 @@ async def build_container_async() -> Container:
         btc_url = str(getattr(s, "BTC_DOM_API_URL", "") or "")
         fomc_url = str(getattr(s, "FOMC_API_URL", "") or "")
         dxy = DxyHttp(dxy_url) if dxy_url else None
-        btd = BtcDomHttp(btc_url) if btc_url else None
+        btd = BtcDominanceHttp(btc_url) if btc_url else None
         fomc = FomcHttp(fomc_url) if fomc_url else None
         regime = RegimeDetector(dxy=dxy, btc_dom=btd, fomc=fomc, cfg=RegimeConfig())
         broker = GatedBroker(inner=base_broker, regime=regime, allow_sells_when_off=True)
