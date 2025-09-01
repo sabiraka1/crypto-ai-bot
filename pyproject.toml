@@ -9,7 +9,7 @@ description = "Production-ready ASGI trading bot (Gate.io via CCXT), long-only, 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Sabir Şahbaz" }]
+authors = [{ name = "Sabir Sahbaz" }]
 
 dependencies = [
   "fastapi>=0.115,<1.0",
