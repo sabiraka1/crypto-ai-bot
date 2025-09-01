@@ -176,7 +176,18 @@ async def eval_and_execute(
                     constraints=constraints,
                 )
 
-        # ----------------- Execute trade -----------------
+# ----------------- Risk check -----------------
+try:
+    ok_risk, risk_reason = (risk.check(symbol=symbol, storage=storage)
+                            if hasattr(risk, "check")
+                            else (risk.can_execute(), "legacy_risk"))
+except Exception:
+    ok_risk, risk_reason = False, "risk_exception"
+if not ok_risk:
+    inc("risk_block_total", symbol=symbol, reason=str(risk_reason))
+    return {"ok": True, "action": "hold", "reason": f"risk:{risk_reason}", "regime": regime}
+
+# ----------------- Execute trade -----------------
         res = await execute_trade(
             symbol=symbol,
             side=decision,
