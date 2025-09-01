@@ -1,67 +1,36 @@
 from __future__ import annotations
-
-from typing import Any
-
-# мягкие зависимости
-try:
-    from crypto_ai_bot.utils.logging import get_logger  # type: ignore
-except Exception:  # pragma: no cover
-    import logging
-    def get_logger(name: str) -> logging.Logger:
-        return logging.getLogger(name)
+import logging
+from typing import Any, Awaitable, Callable
 
 try:
-    from crypto_ai_bot.utils.metrics import inc  # type: ignore
-except Exception:  # pragma: no cover
-    def inc(_name: str, **_labels: Any) -> None:  # no-op
-        pass
+    from crypto_ai_bot.utils.logging import get_logger as _get_logger
+    from crypto_ai_bot.utils.metrics import inc as _inc
+    def get_logger(name: str, *, level: int = logging.INFO) -> logging.Logger:
+        return _get_logger(name=name, level=level)
+    def inc(name: str, **labels: Any) -> None:
+        _inc(name, **labels)
+except Exception:
+    def get_logger(name: str, *, level: int = logging.INFO) -> logging.Logger:  # type: ignore[misc]
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        return logger
+    def inc(name: str, **labels: Any) -> None:  # no-op
+        return None
 
-_log = get_logger("monitoring.dlq")
+async def wire_dlq(bus: Any) -> None:
+    log = get_logger("dlq")
 
+    async def _log_dlq(evt: Any) -> None:
+        payload: dict[str, Any] = getattr(evt, "payload", None) or (evt if isinstance(evt, dict) else {})
+        log.error("dlq_event", extra={"topic": getattr(evt, "topic", "unknown"), "payload": payload})
+        inc("dlq_event", topic=str(getattr(evt, "topic", "unknown")))
 
-async def _log_dlq(evt: Any) -> None:
-    """
-    Универсальный обработчик DLQ-событий.
-    evt может быть:
-      - объект с полями .topic/.payload
-      - или dict с ключами "topic"/"payload"
-    """
     try:
-        topic = getattr(evt, "topic", None) or (evt.get("topic") if isinstance(evt, dict) else "__unknown__")
-        payload: dict[str, Any] = getattr(evt, "payload", None) or (evt.get("payload") if isinstance(evt, dict) else {})
-        original = payload.get("original_topic") or topic
-        _log.error("DLQ_EVENT", extra={"original_topic": original, "payload": payload})
-        inc("bus_dlq_events_total", original_topic=str(original))
-    except Exception:
-        _log.debug("dlq_handler_log_failed", exc_info=True)
-
-
-def attach_dlq_subscriber(bus: Any) -> None:
-    """
-    Подключает обработчик к DLQ с учётом разных реализаций шины:
-      1) если есть bus.subscribe_dlq(...) — используем её,
-      2) иначе пробуем подписаться на спец-топики "__dlq__" и "dlq"
-         (через bus.on(...) или bus.subscribe(...)).
-    """
-    if hasattr(bus, "subscribe_dlq"):
-        try:
-            bus.subscribe_dlq(_log_dlq)  # type: ignore[arg-type]
-            _log.info("dlq_subscriber_attached", extra={"mode": "subscribe_dlq"})
-            return
-        except Exception:
-            _log.error("dlq_subscribe_failed", exc_info=True)
-
-    def _attach_by_topic(topic: str) -> bool:
+        if hasattr(bus, "subscribe_dlq"):
+            bus.subscribe_dlq(_log_dlq)  # type: ignore[attr-defined]
         for method in ("on", "subscribe"):
             if hasattr(bus, method):
-                try:
-                    getattr(bus, method)(topic, _log_dlq)  # type: ignore[misc]
-                    _log.info("dlq_subscriber_attached", extra={"mode": f"{method}:{topic}"})
-                    return True
-                except Exception:
-                    _log.error("dlq_subscribe_via_topic_failed", extra={"topic": topic}, exc_info=True)
-        return False
-
-    if _attach_by_topic("__dlq__"):
-        return
-    _attach_by_topic("dlq")
+                for topic in ("error", "trade.failed", "orchestrator.error"):
+                    getattr(bus, method)(topic, _log_dlq)  # type: ignore[attr-defined]
+    except Exception:
+        log.exception("wire_dlq_failed")
