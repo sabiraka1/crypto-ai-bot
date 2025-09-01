@@ -205,6 +205,47 @@ async def build_container_async() -> Container:
     _wrap_bus_publish_with_metrics_and_retry(bus)
 
     br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
+
+    # ---- Macro Regime (DXY/BTC.D/FOMC) wiring ----
+    try:
+        # read flags/urls from ENV directly to avoid touching Settings
+        env = os.getenv
+        def _b(s: str, default: str = "1") -> bool:
+            v = (env(s, default) or "").strip().lower()
+            return v in ("1", "true", "yes", "on")
+        def _f(s: str, default: str) -> float:
+            try:
+                return float(env(s, default))
+            except Exception:
+                return float(default)
+
+        regime_enabled = _b("REGIME_ENABLED", "0")
+        regime_block_buy = _b("REGIME_BLOCK_BUY", "1")
+
+        dxy_url = (env("DXY_SOURCE_URL", "") or "").strip()
+        btc_dom_url = (env("BTC_DOM_SOURCE_URL", "") or "").strip()
+        fomc_url = (env("FOMC_CALENDAR_URL", "") or "").strip()
+
+        dxy = DxyHttp(dxy_url, timeout_sec=float(getattr(s, "HTTP_TIMEOUT_SEC", 30) or 30)) if dxy_url else None
+        btc_dom = BtcDominanceHttp(btc_dom_url, timeout_sec=float(getattr(s, "HTTP_TIMEOUT_SEC", 30) or 30)) if btc_dom_url else None
+        fomc = FomcHttp(fomc_url, timeout_sec=float(getattr(s, "HTTP_TIMEOUT_SEC", 30) or 30)) if fomc_url else None
+
+        cfg = RegimeConfig(
+            dxy_up_pct=_f("REGIME_DXY_UP_PCT", "0.5"),
+            dxy_down_pct=_f("REGIME_DXY_DOWN_PCT", "-0.2"),
+            btc_dom_up_pct=_f("REGIME_BTC_DOM_UP_PCT", "0.5"),
+            btc_dom_down_pct=_f("REGIME_BTC_DOM_DOWN_PCT", "-0.5"),
+            fomc_block_minutes=int(env("REGIME_FOMC_BLOCK_MIN", "60") or "60"),
+        )
+
+        regime = RegimeDetector(dxy=dxy, btc_dom=btc_dom, fomc=fomc, cfg=cfg) if regime_enabled else None
+        if regime and regime_block_buy:
+            br = GatedBroker(inner=br, regime=regime, allow_sells_when_off=True)
+            _log.info("regime_gated_broker_enabled")
+        else:
+            _log.info("regime_detector_enabled" if regime else "regime_disabled")
+    except Exception:
+        _log.error("regime_wiring_failed", exc_info=True)
     risk = RiskManager(RiskConfig.from_settings(s))
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)

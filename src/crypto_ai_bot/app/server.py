@@ -98,21 +98,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(lifespan=lifespan)
 router = APIRouter()
 
-# -------- Management Bearer auth (for POST orchestrator endpoints) --------
-def _require_mgmt_bearer(request: Request) -> None:
-    import os
-    token = (os.getenv("MGMT_BEARER_TOKEN", "") or "").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="mgmt_token_not_configured")
-    auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
-    prefix = "Bearer "
-    if not auth.startswith(prefix):
-        raise HTTPException(status_code=401, detail="missing_bearer")
-    provided = auth[len(prefix):].strip()
-    if provided != token:
-        raise HTTPException(status_code=401, detail="invalid_token")
-
-
 # -------- HTTP metrics middleware --------
 @app.middleware("http")
 async def _metrics_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -142,58 +127,6 @@ def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
         raise HTTPException(status_code=404, detail=f"orchestrator_not_found_for_{sym}")
     return orch, sym
 
-
-
-@router.get("/ready")
-async def ready() -> JSONResponse:
-    try:
-        c = _ctx_or_500()
-        reasons: list[str] = []
-
-        # storage ping (SQLite)
-        try:
-            st = getattr(c, "storage", None)
-            conn = None
-            for cand in ("conn", "_conn"):
-                if st is None:
-                    break
-                conn = getattr(st, cand, None)
-                if conn:
-                    break
-            if conn:
-                cur = conn.cursor()
-                cur.execute("SELECT 1")
-                cur.fetchone()
-            else:
-                reasons.append("no_storage_conn")
-        except Exception:
-            reasons.append("storage_unavailable")
-
-        # event bus existence
-        try:
-            bus = getattr(c, "bus", None)
-            if not bus:
-                reasons.append("bus_missing")
-        except Exception:
-            reasons.append("bus_unavailable")
-
-        # orchestrators presence
-        try:
-            orchs = getattr(c, "orchestrators", {})
-            if not isinstance(orchs, dict) or not orchs:
-                reasons.append("no_orchestrators")
-        except Exception:
-            reasons.append("orch_error")
-
-        ok = len(reasons) == 0
-        status = 200 if ok else 503
-        symbols = list(getattr(c, "orchestrators", {}).keys()) if isinstance(getattr(c, "orchestrators", None), dict) else []
-        return JSONResponse({"ok": ok, "symbols": symbols, "reasons": reasons}, status_code=status)
-    except HTTPException:
-        raise
-    except Exception:
-        _log.error("ready_failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="ready_failed")
 @router.get("/health")
 async def health() -> JSONResponse:
     try:
@@ -290,7 +223,6 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
 
         pnl_quote = None
         if hasattr(st, "trades") and hasattr(st.trades, "pnl_today_quote"):
-    _require_mgmt_bearer(request)
             try: 
                 pnl_quote = st.trades.pnl_today_quote(sym)
             except Exception: 
