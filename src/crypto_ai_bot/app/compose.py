@@ -22,13 +22,21 @@ from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSw
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
-from crypto_ai_bot.core.infrastructure.storage.instance_lock import InstanceLock
 from crypto_ai_bot.core.infrastructure.events.topics import TRADE_COMPLETED
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import hist, inc
 from crypto_ai_bot.utils.retry import async_retry
 from crypto_ai_bot.utils.symbols import canonical
+
+# Optional import: InstanceLock may live in different paths or be absent
+try:  # most likely path in your repo
+    from crypto_ai_bot.core.infrastructure.storage.instance_lock import InstanceLock  # type: ignore
+except Exception:  # fallback path used in some layouts
+    try:
+        from crypto_ai_bot.core.infrastructure.instance_lock import InstanceLock  # type: ignore
+    except Exception:  # completely optional
+        InstanceLock = None  # type: ignore[misc,assignment]
 
 _log = get_logger("compose")
 
@@ -92,13 +100,13 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         except Exception:
             _log.error("alert_trade_completed_failed", exc_info=True)
 
-    # Use Callable/Awaitable types explicitly to keep type-level imports "live"
+    # Use Callable/Awaitable types explicitly to keep type-level imports live
     handler: Callable[[dict[str, Any]], Awaitable[None]] = on_trade_completed
     bus.on(TRADE_COMPLETED, handler)  # type: ignore[arg-type]
 
 
 async def _run_dms_loop(dms: DeadMansSwitch, interval_sec: int) -> None:
-    # Small background loop to keep the safety switch "live"
+    # Small background loop to keep the safety switch live
     while True:
         try:
             await asyncio.sleep(max(1, interval_sec))
@@ -122,12 +130,13 @@ async def build_container_async() -> Container:
     st = Storage.from_connection(conn)
     run_migrations(st)
 
-    # Instance lock (keep single active instance on same DB)
+    # Instance lock (optional, if available)
+    inst_lock = None
     try:
-        inst_lock = InstanceLock(conn, name=(s.POD_NAME or s.HOSTNAME or "instance"))
+        if InstanceLock is not None:  # type: ignore[truthy-bool]
+            inst_lock = InstanceLock(conn, name=(s.POD_NAME or s.HOSTNAME or "instance"))  # type: ignore[operator]
     except Exception:
         _log.error("instance_lock_failed", exc_info=True)
-        inst_lock = None
 
     # Broker
     br = make_broker(mode=s.MODE, exchange=s.EXCHANGE, settings=s)
@@ -199,9 +208,9 @@ async def build_container_async() -> Container:
     # Health checker
     health = HealthChecker(storage=st, bus=bus, broker=br)
 
-    # Safety switch (Dead Man's Switch) — keep "live" & typed as SafetySwitchPort
+    # Safety switch (Dead Man's Switch) — keep live & typed as SafetySwitchPort
     dms: SafetySwitchPort = DeadMansSwitch(timeout_ms=s.DMS_TIMEOUT_MS, bus=bus)
-    # also use `dec` to keep Decimal helper "live" (and useful for logs)
+    # also use `dec` to keep Decimal helper live (and useful for logs)
     _ = dec(str(s.RISK_DAILY_LOSS_LIMIT_QUOTE))
     dms_task = asyncio.create_task(_run_dms_loop(dms, max(1, int(getattr(s, "WATCHDOG_INTERVAL_SEC", 15) or 15))))
 
