@@ -79,8 +79,6 @@ class RiskManager:
         return self.can_execute(*args, **kwargs)
 
 # --- Rule orchestration ---
-from decimal import Decimal
-from typing import Any, Tuple
 try:
     from crypto_ai_bot.core.domain.risk.rule.loss_streak import LossStreakRule
     from crypto_ai_bot.core.domain.risk.rule.max_drawdown import MaxDrawdownRule

@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
 
 from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision, StrategyContext  # Исправлен путь
 from crypto_ai_bot.utils.decimal import dec
