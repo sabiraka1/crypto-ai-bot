@@ -109,6 +109,16 @@ async def place_order(
             b = inputs.base_amount if inputs.base_amount > 0 else dec("0")
             inc("broker.order.create", {"side": "sell"})
             order = await broker.create_market_sell_base(symbol=sym, base_amount=b, client_order_id=inputs.client_order_id)
+    try:
+        _orders = getattr(storage, "orders", None)
+        if _orders is not None:
+            _o = type("OpenOrder", (), {"id": getattr(order, "id", None) if 'order' in locals() else None,
+                                         "client_order_id": locals().get("client_order_id", None) if 'client_order_id' in locals() else None,
+                                         "symbol": symbol, "side": side, "amount": str(base_amount or amount if 'base_amount' in locals() else amount),
+                                         "filled": "0", "status": "open", "ts_ms": int(__import__('time').time()*1000)})
+            _orders.upsert_open(_o)
+    except Exception:
+        pass
         else:
             return PlaceOrderResult(ok=False, reason="invalid_side")
 
