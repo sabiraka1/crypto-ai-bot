@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Tuple
 
 from crypto_ai_bot.utils.decimal import dec
 
