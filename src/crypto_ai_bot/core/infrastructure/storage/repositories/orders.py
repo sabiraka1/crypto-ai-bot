@@ -1,11 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 
 @dataclass
 class OrdersRepository:
-    conn: Any  # sqlite3.Connection
+    conn: Any
 
     def ensure_schema(self) -> None:
         cur = self.conn.cursor()
@@ -22,7 +21,6 @@ class OrdersRepository:
             " ts_ms INTEGER NOT NULL"
             ")"
         )
-        # базовые индексы
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
         self.conn.commit()
@@ -42,18 +40,11 @@ class OrdersRepository:
         return cur.fetchone() is not None
 
     def upsert_open(self, order: Any) -> None:
-        """
-        Безопасная вставка открытого ордера.
-        Если запись с таким broker_order_id или client_order_id уже есть — пропускаем.
-        (Не требует миграции с UNIQUE, не ломает существующие БД.)
-        """
         self.ensure_schema()
         broker_id = getattr(order, "id", None) or getattr(order, "order_id", None)
         client_id = getattr(order, "client_order_id", None)
-
         if self._exists_by_broker_id(broker_id) or self._exists_by_client_id(client_id):
             return
-
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO orders (broker_order_id, client_order_id, symbol, side, amount, filled, status, ts_ms) "
@@ -80,11 +71,10 @@ class OrdersRepository:
             (symbol,),
         )
         rows = cur.fetchall() or []
-        # sqlite3.Row -> dict
         result: list[dict[str, Any]] = []
         for r in rows:
             if hasattr(r, "keys"):
-                result.append(dict(r))  # type: ignore[arg-type]
+                result.append(dict(r))
             else:
                 result.append({
                     "id": r[0], "broker_order_id": r[1], "client_order_id": r[2],
@@ -101,3 +91,4 @@ class OrdersRepository:
             (str(filled), broker_order_id),
         )
         self.conn.commit()
+
