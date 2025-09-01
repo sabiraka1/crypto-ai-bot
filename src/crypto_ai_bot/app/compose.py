@@ -15,12 +15,13 @@ from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
 from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
 from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
+from crypto_ai_bot.core.infrastructure.events.bus_adapter import UnifiedEventBus
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
@@ -37,15 +38,14 @@ _log = get_logger("compose")
 @dataclass
 class Container:
     settings: Settings
-    storage: Storage
-    broker: BrokerPort
-    bus: EventBusPort
+    storage: Storage  # Можно оставить конкретный тип т.к. это наша реализация
+    broker: BrokerPort  # Используем протокол
+    bus: EventBusPort  # Используем протокол
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
     tg_bot_task: asyncio.Task | None = None
-    regime_detector: RegimeDetector | None = None  # Добавляем для доступа
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -67,11 +67,9 @@ def _open_storage(settings: Settings) -> Storage:
     return Storage.from_connection(conn)
 
 def _build_event_bus(settings: Settings) -> EventBusPort:
-    redis_url = getattr(settings, "EVENT_BUS_URL", "") or ""
-    if redis_url:
-        return RedisEventBus(redis_url)
-    else:
-        return AsyncEventBus()
+    redis_url = str(getattr(settings, "EVENT_BUS_URL", "") or "").strip()
+    impl = RedisEventBus(redis_url) if redis_url else AsyncEventBus()
+    return UnifiedEventBus(impl)
 
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
     """Мягко оборачиваем publish ретраями и гистограммой, не меняя интерфейса."""
@@ -203,44 +201,10 @@ async def build_container_async() -> Container:
     if hasattr(bus, "start"):
         await bus.start()
 
+    # обёртка publish ретраями + метрики
     _wrap_bus_publish_with_metrics_and_retry(bus)
 
-    # Создаем базовый broker
-    base_broker = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
-    
-    # Создаем regime detector ОДИН РАЗ если включен
-    regime_detector = None
-    if getattr(s, "REGIME_ENABLED", False):
-        dxy_url = getattr(s, "DXY_SOURCE_URL", None)
-        btc_url = getattr(s, "BTC_DOM_SOURCE_URL", None)
-        fomc_url = getattr(s, "FOMC_CALENDAR_URL", None)
-        
-        if dxy_url or btc_url or fomc_url:  # Создаем только если есть хотя бы один источник
-            dxy = DxyHttp(dxy_url) if dxy_url else None
-            btd = BtcDominanceHttp(btc_url) if btc_url else None
-            fomc = FomcHttp(fomc_url) if fomc_url else None
-            
-            regime_cfg = RegimeConfig(
-                dxy_up_pct=float(getattr(s, "REGIME_DXY_UP_PCT", 0.5)),
-                dxy_down_pct=float(getattr(s, "REGIME_DXY_DOWN_PCT", -0.2)),
-                btc_dom_up_pct=float(getattr(s, "REGIME_BTC_DOM_UP_PCT", 0.5)),
-                btc_dom_down_pct=float(getattr(s, "REGIME_BTC_DOM_DOWN_PCT", -0.5)),
-                fomc_block_minutes=int(getattr(s, "REGIME_FOMC_BLOCK_MIN", 60)),
-            )
-            regime_detector = RegimeDetector(dxy_source=dxy, btc_dom_source=btd, fomc_source=fomc, cfg=regime_cfg)
-            _log.info("regime_detector_enabled")
-    
-    # Оборачиваем broker в GatedBroker если regime включен
-    if regime_detector and getattr(s, "REGIME_BLOCK_BUY", True):
-        br = GatedBroker(
-            inner=base_broker,
-            regime=regime_detector,
-            allow_sells_when_off=True
-        )
-        _log.info("gated_broker_enabled")
-    else:
-        br = base_broker
-
+    br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
     risk = RiskManager(RiskConfig.from_settings(s))
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
@@ -249,6 +213,7 @@ async def build_container_async() -> Container:
     orchs: dict[str, Orchestrator] = {}
 
     def _make_dms(sym: str) -> SafetySwitchPort:
+        # Проверка совместимости bus для DeadMansSwitch
         dms_bus = None
         if isinstance(bus, AsyncEventBus):
             dms_bus = bus
@@ -261,7 +226,7 @@ async def build_container_async() -> Container:
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=dms_bus,
+            bus=dms_bus,  # Передаем None если не AsyncEventBus
         )
 
     for sym in symbols:
@@ -274,7 +239,7 @@ async def build_container_async() -> Container:
             exits=exits,
             health=health,
             settings=s,
-            dms=_make_dms(sym),
+            dms=_make_dms(sym),  # Теперь типы совместимы
         )
 
     attach_alerts(bus, s)
@@ -283,6 +248,7 @@ async def build_container_async() -> Container:
     if hasattr(exits, "on_hint"):
         if hasattr(bus, "on"):
             bus.on("exits.hint", exits.on_hint)
+        # Переиспользуем существующие события
         async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
             try:
                 await exits.on_hint(evt)
@@ -313,15 +279,4 @@ async def build_container_async() -> Container:
         tg_task = asyncio.create_task(bot.run())
         _log.info("telegram_bot_enabled")
 
-    return Container(
-        settings=s, 
-        storage=st, 
-        broker=br, 
-        bus=bus, 
-        risk=risk, 
-        exits=exits, 
-        health=health, 
-        orchestrators=orchs, 
-        tg_bot_task=tg_task,
-        regime_detector=regime_detector
-    )
+    return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
