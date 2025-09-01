@@ -12,11 +12,6 @@ from crypto_ai_bot.core.application.monitoring.health_checker import HealthCheck
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort, BrokerPort
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
-from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
-from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
-from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
-from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
@@ -38,45 +33,29 @@ _log = get_logger("compose")
 @dataclass
 class Container:
     settings: Settings
-    storage: Storage  # Можно оставить конкретный тип т.к. это наша реализация
-    broker: BrokerPort  # Используем протокол
-    bus: EventBusPort  # Используем протокол
+    storage: Storage
+    broker: BrokerPort
+    bus: EventBusPort
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
     tg_bot_task: asyncio.Task | None = None
 
-def _open_storage(settings: Settings) -> Storage:
-    db_path = settings.DB_PATH
-    db_dir = os.path.dirname(db_path) or "."
-    os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
 
-    run_migrations(
-        conn,
-        now_ms=now_ms(),
-        db_path=db_path,
-        do_backup=True,
-        backup_retention_days=int(getattr(settings, "BACKUP_RETENTION_DAYS", 30) or 30),
-    )
-    return Storage.from_connection(conn)
+# ---- Event bus builders ----
 
 def _build_event_bus(settings: Settings) -> EventBusPort:
     raw = getattr(settings, "EVENT_BUS_URL", "")
-    # In tests Settings may be MagicMock; only accept real str with redis/rediss/unix
     redis_url = raw if isinstance(raw, str) else ""
     redis_url = (redis_url or "").strip()
     def _ok(u: str) -> bool:
         return isinstance(u, str) and (u.startswith("redis://") or u.startswith("rediss://") or u.startswith("unix://"))
     impl = RedisEventBus(redis_url) if _ok(redis_url) else AsyncEventBus()
     return UnifiedEventBus(impl)
+
+
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
-    """Мягко оборачиваем publish ретраями и гистограммой, не меняя интерфейса."""
     if not hasattr(bus, "publish"):
         return
     _orig = bus.publish
@@ -91,179 +70,121 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
 
     bus.publish = _publish  # type: ignore[attr-defined]
 
+
 def attach_alerts(bus: Any, settings: Settings) -> None:
-    tg = TelegramAlerts(
-        bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
-        chat_id=getattr(settings, "TELEGRAM_CHAT_ID", ""),
-    )
-    if not tg.enabled():
-        _log.info("telegram_alerts_disabled")
-        return
-
-    async def _send(text: str) -> None:
+    tg = TelegramAlerts(settings=settings)
+    async def on_trade_completed(payload: dict[str, Any]) -> None:
         try:
-            ok = await tg.send(text)
-            if not ok:
-                _log.warning("telegram_send_not_ok")
+            await tg.trade_completed(payload)
         except Exception:
-            _log.error("telegram_send_exception", exc_info=True)
+            _log.error("alert_trade_completed_failed", exc_info=True)
+    bus.on("trade.completed", on_trade_completed)  # type: ignore[arg-type]
 
-    def _sub(topic: str, coro: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
-        for attr in ("subscribe", "on"):
-            if hasattr(bus, attr):
-                try:
-                    getattr(bus, attr)(topic, coro)
-                    return
-                except Exception:
-                    _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
-        _log.error("bus_has_no_subscribe_api")
 
-    # ======= Обработчики алертов =======
-    async def on_auto_paused(evt: dict[str, Any]) -> None:
-        inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
-        await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
-
-    async def on_auto_resumed(evt: dict[str, Any]) -> None:
-        inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
-        await _send(f"🟢 <b>AUTO-RESUME</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
-
-    async def on_pos_mm(evt: dict[str, Any]) -> None:
-        inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
-        await _send(
-            "🔄 <b>RECONCILE</b> {s}\nБиржа: <code>{b}</code>\nЛокально: <code>{l}</code>".format(
-                s=evt.get("symbol", ""), b=evt.get("exchange", ""), l=evt.get("local", "")
-            )
-        )
-
-    async def on_dms_triggered(evt: dict[str, Any]) -> None:
-        inc("dms_triggered_total", symbol=evt.get("symbol", ""))
-        await _send(f"🛑 <b>DMS TRIGGERED</b> {evt.get('symbol','')}\nПродано базового: <code>{evt.get('amount','')}</code>")
-
-    async def on_dms_skipped(evt: dict[str, Any]) -> None:
-        inc("dms_skipped_total", symbol=evt.get("symbol", ""))
-        await _send(f"⛔ <b>DMS SKIPPED</b> {evt.get('symbol','')}\nПадение: <code>{evt.get('drop_pct','')}%</code>")
-
-    async def on_trade_completed(evt: dict[str, Any]) -> None:
-        inc("trade_completed_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
-        s = evt.get("symbol", "")
-        side = evt.get("side", "")
-        cost = evt.get("cost", "")
-        fee = evt.get("fee_quote", "")
-        price = evt.get("price", "")
-        amt = evt.get("amount", "")
-        await _send(f"✅ <b>TRADE</b> {s} {side.upper()}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>")
-
-    async def on_trade_failed(evt: dict[str, Any]) -> None:
-        inc("trade_failed_total", symbol=evt.get("symbol", ""), reason=evt.get("error", ""))
-        await _send(f"❌ <b>TRADE FAILED</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
-
-    async def on_settled(evt: dict[str, Any]) -> None:
-        inc("trade_settled_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
-        await _send(f"📦 <b>SETTLED</b> {evt.get('symbol','')} {evt.get('side','').upper()} id=<code>{evt.get('order_id','')}</code>")
-
-    async def on_settlement_timeout(evt: dict[str, Any]) -> None:
-        inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
-        await _send(f"⏱️ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol','')} id=<code>{evt.get('order_id','')}</code>")
-
-    async def on_budget_exceeded(evt: dict[str, Any]) -> None:
-        inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))
-        s = evt.get("symbol", "")
-        kind = evt.get("type", "")
-        detail = f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}" if kind == "max_orders_5m" else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
-        await _send(f"⏳ <b>BUDGET</b> {s} превышен ({kind})\n{detail}")
-
-    async def on_trade_blocked(evt: dict[str, Any]) -> None:
-        inc("trade_blocked_total", symbol=evt.get("symbol", ""), reason=evt.get("reason", ""))
-        await _send(f"🚫 <b>BLOCKED</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
-
-    async def on_broker_error(evt: dict[str, Any]) -> None:
-        inc("broker_error_total", symbol=evt.get("symbol", ""))
-        await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
-
-    for topic, handler in [
-        ("orchestrator.auto_paused", on_auto_paused),
-        ("orchestrator.auto_resumed", on_auto_resumed),
-        ("reconcile.position_mismatch", on_pos_mm),
-        ("safety.dms.triggered", on_dms_triggered),
-        ("safety.dms.skipped", on_dms_skipped),
-        ("trade.completed", on_trade_completed),
-        ("trade.failed", on_trade_failed),
-        ("trade.settled", on_settled),
-        ("trade.settlement_timeout", on_settlement_timeout),
-        ("budget.exceeded", on_budget_exceeded),
-        ("trade.blocked", on_trade_blocked),
-        ("broker.error", on_broker_error),
-    ]:
-        _sub(topic, handler)
-
-    _log.info("telegram_alerts_enabled")
+# ---- Container ----
 
 async def build_container_async() -> Container:
     s = Settings.load()
-    st = _open_storage(s)
+
+    # Storage
+    db_path = Path(s.DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    st = Storage.from_connection(conn)
+    run_migrations(st)
+
+    # Broker
+    br = make_broker(mode=s.MODE, exchange=s.EXCHANGE, settings=s)
+
+    # Macro regime wiring (use imports only here so ruff sees they are used)
+    try:
+        def _b(name: str, default: str = "0") -> bool:
+            v = (os.getenv(name, default) or "").strip().lower()
+            return v in ("1", "true", "yes", "on")
+        def _f(name: str, default: str) -> float:
+            try:
+                return float(os.getenv(name, default))
+            except Exception:
+                return float(default)
+
+        regime_enabled = _b("REGIME_ENABLED", "0")
+        regime_block_buy = _b("REGIME_BLOCK_BUY", "1")
+
+        if regime_enabled:
+            from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
+            from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp
+            from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
+            from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
+            from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
+
+            dxy_url = (os.getenv("DXY_SOURCE_URL", "") or "").strip()
+            btc_dom_url = (os.getenv("BTC_DOM_SOURCE_URL", "") or "").strip()
+            fomc_url = (os.getenv("FOMC_CALENDAR_URL", "") or "").strip()
+
+            dxy = DxyHttp(dxy_url) if dxy_url else None
+            btc_dom = BtcDominanceHttp(btc_dom_url) if btc_dom_url else None
+            fomc = FomcHttp(fomc_url) if fomc_url else None
+
+            cfg = RegimeConfig(
+                dxy_up_pct=_f("REGIME_DXY_UP_PCT", "0.5"),
+                dxy_down_pct=_f("REGIME_DXY_DOWN_PCT", "-0.2"),
+                btc_dom_up_pct=_f("REGIME_BTC_DOM_UP_PCT", "0.5"),
+                btc_dom_down_pct=_f("REGIME_BTC_DOM_DOWN_PCT", "-0.5"),
+                fomc_block_minutes=int(os.getenv("REGIME_FOMC_BLOCK_MIN", "60") or "60"),
+            )
+            regime = RegimeDetector(dxy=dxy, btc_dom=btc_dom, fomc=fomc, cfg=cfg)
+            if regime_block_buy:
+                br = GatedBroker(inner=br, regime=regime, allow_sells_when_off=True)
+                _log.info("regime_gated_broker_enabled")
+            else:
+                _log.info("regime_detector_enabled")
+        else:
+            _log.info("regime_disabled")
+    except Exception:
+        _log.error("regime_wiring_failed", exc_info=True)
+
+    # Event bus
     bus = _build_event_bus(s)
-    if hasattr(bus, "start"):
-        await bus.start()
-
-    # обёртка publish ретраями + метрики
     _wrap_bus_publish_with_metrics_and_retry(bus)
-
-    br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
-    risk = RiskManager(RiskConfig.from_settings(s))
-    exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
-    health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
-
-    symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
-    orchs: dict[str, Orchestrator] = {}
-
-    def _make_dms(sym: str) -> SafetySwitchPort:
-        # Проверка совместимости bus для DeadMansSwitch
-        dms_bus = None
-        if isinstance(bus, AsyncEventBus):
-            dms_bus = bus
-        
-        return DeadMansSwitch(
-            storage=st,
-            broker=br,
-            symbol=sym,
-            timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
-            rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
-            recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-            max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=dms_bus,  # Передаем None если не AsyncEventBus
-        )
-
-    for sym in symbols:
-        orchs[sym] = Orchestrator(
-            symbol=sym,
-            storage=st,
-            broker=br,
-            bus=bus,
-            risk=risk,
-            exits=exits,
-            health=health,
-            settings=s,
-            dms=_make_dms(sym),  # Теперь типы совместимы
-        )
-
     attach_alerts(bus, s)
 
-    # ==== Hint для ProtectiveExits ====
-    if hasattr(exits, "on_hint"):
-        if hasattr(bus, "on"):
-            bus.on("exits.hint", exits.on_hint)
-        # Переиспользуем существующие события
-        async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
-            try:
-                await exits.on_hint(evt)
-            except Exception:
-                _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol","")}, exc_info=True)
-        if hasattr(bus, "on"):
-            bus.on("trade.completed", _on_trade_completed_hint)  # type: ignore[arg-type]
+    # Risk
+    rcfg = RiskConfig(
+        max_loss_streak=s.RISK_MAX_LOSS_STREAK,
+        daily_loss_limit_quote=s.RISK_DAILY_LOSS_LIMIT_QUOTE,
+        max_drawdown_pct=s.RISK_MAX_DRAWDOWN_PCT,
+    )
+    risk = RiskManager(storage=st, cfg=rcfg)
 
-    # ---- Командный Telegram-бот ----
+    # Exits
+    exits = ProtectiveExits(storage=st, broker=br, risk=risk)
+
+    # Health checker
+    health = HealthChecker(storage=st, bus=bus, broker=br)
+
+    # Orchestrators per symbol
+    symbols = s.SYMBOLS or [s.SYMBOL]
+    orchs: dict[str, Orchestrator] = {}
+    for sym in symbols:
+        can = canonical(sym)
+        orch = Orchestrator(
+            symbol=can,
+            storage=st,
+            broker=br,
+            risk=risk,
+            exits=exits,
+            bus=bus,
+            evaluate_interval_sec=s.EVALUATE_INTERVAL_SEC,
+            exits_interval_sec=s.EXITS_INTERVAL_SEC,
+            reconcile_interval_sec=s.RECONCILE_INTERVAL_SEC,
+            watchdog_interval_sec=s.WATCHDOG_INTERVAL_SEC,
+        )
+        orchs[can] = orch
+
+    # Telegram command bot (optional)
     tg_task: asyncio.Task | None = None
-    if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
+    if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", 0) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
         users: list[int] = []
         if raw_users:
