@@ -216,25 +216,7 @@ async def execute_trade(
         if act == "buy":
             q_amt = quote_amount if quote_amount and quote_amount > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
             _log.info("execute_order_buy", extra={"symbol": sym, "quote_amount": str(q_amt)})
-            order = await broker.
-    # ---- NO SHORTS: sell allowed only to close/reduce existing long ----
-    try:
-        if act == "sell":
-            pos = getattr(storage, "positions", None)
-            held_base = dec("0")
-            if pos and hasattr(pos, "get_position"):
-                p = pos.get_position(sym)
-                if p:
-                    held_base = dec(str(getattr(p, "base_qty", "0") or "0"))
-            if held_base <= dec("0"):
-                await bus.publish("trade.blocked", {"symbol": sym, "reason": "no_shorts"})
-                _log.warning("trade_blocked_no_shorts", extra={"symbol": sym, "side": act})
-                return {"action": "skip", "executed": False, "why": "blocked: no_shorts"}
-            if base_amount and base_amount > held_base:
-                base_amount = held_base
-    except Exception:
-        _log.error("no_shorts_check_failed", extra={"symbol": sym}, exc_info=True)
-create_market_buy_quote(symbol=sym, quote_amount=q_amt, client_order_id=client_id)
+            order = await broker.create_market_buy_quote(symbol=sym, quote_amount=q_amt, client_order_id=client_id)
         elif act == "sell":
             b_amt = base_amount if base_amount and base_amount > dec("0") else dec("0")
             _log.info("execute_order_sell", extra={"symbol": sym, "base_amount": str(b_amt)})

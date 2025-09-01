@@ -108,40 +108,7 @@ async def place_order(
         elif side == "sell":
             b = inputs.base_amount if inputs.base_amount > 0 else dec("0")
             inc("broker.order.create", {"side": "sell"})
-            order = 
-    # ---- NO SHORTS guard (place_order SELL): only close existing LONG ----
-    try:
-        from crypto_ai_bot.utils.decimal import dec
-        pos_repo = getattr(storage, "positions", None)
-        held_base = dec("0")
-        if pos_repo and hasattr(pos_repo, "get_position"):
-            _p = pos_repo.get_position(symbol)
-            if _p:
-                held_base = dec(str(getattr(_p, "base_qty", "0") or "0"))
-        if held_base <= dec("0"):
-            try:
-                await bus.publish("trade.blocked", {"symbol": symbol, "reason": "no_shorts"})
-            except Exception:
-                pass
-            return {"ok": False, "reason": "blocked: no_shorts"}
-        # normalize amount variable name
-        if "base_amount" in locals() and base_amount:
-            if base_amount > held_base: base_amount = held_base
-        elif "amount" in locals() and amount:
-            if amount > held_base: amount = held_base
-    except Exception:
-        pass
-await broker.create_market_sell_base(symbol=sym, base_amount=b, client_order_id=inputs.client_order_id)
-    try:
-        _orders = getattr(storage, "orders", None)
-        if _orders is not None:
-            _o = type("OpenOrder", (), {"id": getattr(order, "id", None) if 'order' in locals() else None,
-                                         "client_order_id": locals().get("client_order_id", None) if 'client_order_id' in locals() else None,
-                                         "symbol": symbol, "side": side, "amount": str(base_amount or amount if 'base_amount' in locals() else amount),
-                                         "filled": "0", "status": "open", "ts_ms": int(__import__('time').time()*1000)})
-            _orders.upsert_open(_o)
-    except Exception:
-        pass
+            order = await broker.create_market_sell_base(symbol=sym, base_amount=b, client_order_id=inputs.client_order_id)
         else:
             return PlaceOrderResult(ok=False, reason="invalid_side")
 
