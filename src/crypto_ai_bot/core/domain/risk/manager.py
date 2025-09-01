@@ -45,8 +45,7 @@ class RiskConfig:
             max_slippage_pct=dec(str(g("RISK_MAX_SLIPPAGE_PCT", "0.0") or "0.0")),
             # легаси
             max_orders_5m=int(g("RISK_MAX_ORDERS_5M", 0) or 0),
-            safety_max_turnover_quote_per_day=dec(str(g("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0") or "0")),
-        )
+            safety_max_turnover_quote_per_day=dec(str(g("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0") or "0")))
 
 
 class RiskManager:
@@ -104,7 +103,7 @@ class RiskManager:
                 except Exception:
                     recent = []
                 try:
-                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  [attr-defined]
+                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  
                 except Exception:
                     ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
                 if ls.max_streak and recent:
@@ -121,9 +120,8 @@ class RiskManager:
 
             try:
                 md = MaxDrawdownRule(
-                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  [attr-defined]
-                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),  [attr-defined]
-                )
+                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  
+                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")))
             except Exception:
                 md = MaxDrawdownRule()
 

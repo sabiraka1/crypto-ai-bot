@@ -1,8 +1,20 @@
+from __future__ import annotations
+from typing import Any, Callable
 def __getv(d: Any) -> Callable[[str], Any]:
     def _inner(k: str) -> Any:
         if isinstance(d, dict):
             return d.get(k)
         return getattr(d, k, None)
+    return _inner
+
+def _getv(d: Any):
+    def _inner(k: str) -> Any:
+        if isinstance(d, dict):
+            return d.get(k, {})
+        try:
+            return getattr(d, k.lower(), {})
+        except Exception:
+            return {}
     return _inner
 
 from __future__ import annotations
@@ -282,9 +294,9 @@ class TelegramBotCommands:
         base, quote = _split_symbol(symbol)
         try:
             b = await broker.fetch_balance()
-            getv = lambda cur: b.get(cur, {}) if isinstance(b, dict) else getattr(b, cur.lower(), {})
-            base_free = _getv(base).get("free") or _getv(base).get("total") or "0"
-            quote_free = _getv(quote).get("free") or _getv(quote).get("total") or "0"
+gv = _getv(b)
+base_free = gv(base).get("free") or gv(base).get("total") or "0"
+quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
             await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:

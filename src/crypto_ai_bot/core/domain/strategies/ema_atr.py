@@ -1,5 +1,5 @@
 from typing import Any
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass

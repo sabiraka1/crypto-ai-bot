@@ -1,4 +1,4 @@
-﻿# src/crypto_ai_bot/core/application/use_cases/execute_trade.py
+# src/crypto_ai_bot/core/application/use_cases/execute_trade.py
 from __future__ import annotations
 
 import hashlib

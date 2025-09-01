@@ -1,4 +1,4 @@
-﻿# src/crypto_ai_bot/core/application/orchestrator.py
+# src/crypto_ai_bot/core/application/orchestrator.py
 from __future__ import annotations
 
 import asyncio

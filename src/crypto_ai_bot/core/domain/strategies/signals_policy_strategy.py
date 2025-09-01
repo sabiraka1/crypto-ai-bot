@@ -1,5 +1,5 @@
 from typing import Any, Callable
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from .base import BaseStrategy, MarketData, StrategyContext, Decision  # Добавлен Decision
 

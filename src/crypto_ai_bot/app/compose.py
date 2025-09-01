@@ -86,7 +86,9 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
-    setattr(bus, 'publish', _publish)def attach_alerts(bus: Any, settings: Settings) -> None:
+    setattr(bus, 'publish', _publish)
+
+def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
         bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
         chat_id=getattr(settings, "TELEGRAM_CHAT_ID", ""),
@@ -216,9 +218,7 @@ async def build_container_async() -> Container:
         dms_bus = None
         if isinstance(bus, AsyncEventBus):
             dms_bus = bus
-        
-        from typing import Any
-    return cast(Any, DeadMansSwitch(
+    return DeadMansSwitch(
             storage=st,
             broker=br,
             symbol=sym,

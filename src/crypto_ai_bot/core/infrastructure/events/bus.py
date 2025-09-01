@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Awaitable, Callable, TypedDict
+from typing import Any
 
 import asyncio
 from collections import defaultdict
@@ -48,10 +48,6 @@ class Event:
     key: str | None = None
     ts_ms: int = 0
 
-
-class Event(TypedDict, total=False):
-    topic: str
-    payload: dict[str, Any]
 
 class AsyncEventBus:
     """
