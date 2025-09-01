@@ -100,7 +100,7 @@ class ProtectiveExits:
         if self._cfg.min_base > 0 and qty < self._cfg.min_base:
             return None
         try:
-            order = await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
+            await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
             await self._bus.publish("trade.completed", {"symbol": symbol, "action": "sell", "reason": reason, "amount": str(qty)})
             _log.info("protective_exit_sell", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
             return {"closed": True, "qty": str(qty), "reason": reason}

@@ -2,8 +2,6 @@
 import sqlite3
 import pytest
 from types import SimpleNamespace
-from decimal import Decimal
-
 from crypto_ai_bot.core.infrastructure.storage.repositories.orders import OrdersRepository
 from crypto_ai_bot.core.infrastructure.storage.repositories.trades import TradesRepository
 from crypto_ai_bot.core.infrastructure.storage.repositories.positions import PositionsRepository
@@ -33,8 +31,8 @@ async def test_settle_orders_adds_trade_and_updates_position(tmp_path):
     st.orders.ensure_schema()
     st.trades.ensure_schema()
     st.positions.ensure_schema()
-    class O: pass
-    o=O(); o.id="1"; o.client_order_id="c1"; o.symbol="BTC/USDT"; o.side="buy"; o.amount="1"; o.filled="0"; o.status="open"; o.ts_ms=1
+class OpenOrder: pass
+    o=OpenOrder(); o.id="1"; o.client_order_id="c1"; o.symbol="BTC/USDT"; o.side="buy"; o.amount="1"; o.filled="0"; o.status="open"; o.ts_ms=1
     st.orders.upsert_open(o)
     bus = DummyBus(); br = DummyBroker()
     class S: pass
