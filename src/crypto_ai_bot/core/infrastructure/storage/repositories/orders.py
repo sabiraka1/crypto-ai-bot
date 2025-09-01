@@ -54,7 +54,11 @@ class OrdersRepository:
             (symbol,),
         )
         rows = cur.fetchall() or []
-        return [dict(r) for r in rows]
+        # If sqlite3.Row, convert to dict
+        return [dict(r) if hasattr(r, "keys") else {
+            "id": r[0], "broker_order_id": r[1], "client_order_id": r[2], "symbol": r[3], "side": r[4],
+            "amount": r[5], "filled": r[6], "status": r[7], "ts_ms": r[8]
+        } for r in rows]
 
     def mark_closed(self, broker_order_id: str, filled: str) -> None:
         self.ensure_schema()
