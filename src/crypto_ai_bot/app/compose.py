@@ -12,11 +12,11 @@ from crypto_ai_bot.core.application.monitoring.health_checker import HealthCheck
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort, BrokerPort
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
-from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
-from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
-from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
-from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
+from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker  # noqa: F401 (runtime-config wiring)
+from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig  # noqa: F401 (runtime-config wiring)
+from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp  # noqa: F401 (runtime-config wiring)
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено  # noqa: F401 (runtime-config wiring)
+from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp  # noqa: F401 (runtime-config wiring)
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
