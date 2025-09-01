@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Callable
+from typing import Any
 import asyncio
 import html
 import os
@@ -8,6 +8,16 @@ from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.utils.http_client import aget  # для getUpdates
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
+
+def _getv(d: Any):
+    def _inner(k: str) -> Any:
+        if isinstance(d, dict):
+            return d.get(k, {})
+        try:
+            return getattr(d, k.lower(), {})
+        except Exception:
+            return {}
+    return _inner
 
 _log = get_logger("adapters.telegram_bot")
 
@@ -272,8 +282,15 @@ class TelegramBotCommands:
         base, quote = _split_symbol(symbol)
         try:
             b = await broker.fetch_balance()
-            base_free = getv(base).get("free") or getv(base).get("total") or "0"
-            quote_free = getv(quote).get("free") or getv(quote).get("total") or "0"
+
+        try:
+            gv = _getv(b)
+
+        try:
+            base_free = gv(base).get("free") or gv(base).get("total") or "0"
+
+        try:
+            quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
             await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:
