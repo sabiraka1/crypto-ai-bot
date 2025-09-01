@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import os
 import sqlite3
@@ -44,7 +45,7 @@ class Container:
     exits: ProtectiveExits
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
-    tg_bot_task: asyncio.Task[None] | None = None
+    tg_bot_task: asyncio.Task | None = None
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -84,7 +85,7 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
-    bus.publish = _publish
+    bus.publish = _publish  # type: ignore[attr-defined]
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -213,22 +214,24 @@ async def build_container_async() -> Container:
 
     def _make_dms(sym: str) -> SafetySwitchPort:
         # Проверка совместимости bus для DeadMansSwitch
-                
-        from typing import Any
-    return cast(Any, DeadMansSwitch(
+        dms_bus = None
+        if isinstance(bus, AsyncEventBus):
+            dms_bus = bus
+        
+        return DeadMansSwitch(
             storage=st,
             broker=br,
-            symbol=settings.SYMBOLS[0],
+            symbol=sym,
             timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=bus,  # Передаем None если не AsyncEventBus
+            bus=dms_bus,  # Передаем None если не AsyncEventBus
         )
 
     for sym in symbols:
         orchs[sym] = Orchestrator(
-            symbol=settings.SYMBOLS[0],
+            symbol=sym,
             storage=st,
             broker=br,
             bus=bus,
@@ -255,7 +258,7 @@ async def build_container_async() -> Container:
             bus.on("trade.completed", _on_trade_completed_hint)  # type: ignore[arg-type]
 
     # ---- Командный Telegram-бот ----
-    tg_task: asyncio.Task[None] | None = None
+    tg_task: asyncio.Task | None = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
         users: list[int] = []

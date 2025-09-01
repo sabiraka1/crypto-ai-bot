@@ -61,7 +61,7 @@ class RiskManager:
         self.config = config
 
     # --- Современный метод проверки ---
-    def can_execute(self, *args: Any, **kwargs: Any) -> bool:
+    def can_execute(self, *_, **__) -> bool:
         """
         Базовый фильтр «можно ли вообще рассматривать исполнение».
         Сейчас оставляем «разрешено», так как конкретные лимиты
@@ -71,7 +71,7 @@ class RiskManager:
         return True
 
     # --- Обратная совместимость (alias) ---
-    def allow(self, *args: Any, **kwargs: Any) -> bool:
+    def allow(self, *args, **kwargs) -> bool:
         """
         Сохранён для совместимости со старым кодом/скриптами:
         прежний вызов risk.allow(...) теперь корректно отработает.
@@ -104,7 +104,7 @@ class RiskManager:
                 except Exception:
                     recent = []
                 try:
-                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  [attr-defined]
+                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  # type: ignore
                 except Exception:
                     ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
                 if ls.max_streak and recent:
@@ -121,8 +121,8 @@ class RiskManager:
 
             try:
                 md = MaxDrawdownRule(
-                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  [attr-defined]
-                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),  [attr-defined]
+                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  # type: ignore
+                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),  # type: ignore
                 )
             except Exception:
                 md = MaxDrawdownRule()

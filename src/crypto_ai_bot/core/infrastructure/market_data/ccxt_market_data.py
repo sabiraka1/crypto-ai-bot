@@ -25,7 +25,7 @@ class CcxtMarketData(MarketDataPort):
             fetch = self._broker.exchange.fetch_ohlcv
         elif hasattr(self._broker, "fetch_ohlcv"):
             fetch = self._broker.fetch_ohlcv
-        if fetch is None:  
+        if fetch is None:  # type: ignore[unreachable]
             return tuple()
         data = await fetch(symbol, timeframe=timeframe, limit=int(limit))
         self._cache.put(key, data)

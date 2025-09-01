@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import ModuleType
 
 import base64
 import logging
@@ -11,7 +10,7 @@ from typing import Optional
 try:
     import httpx
 except Exception:  # pragma: no cover
-    httpx: ModuleType | None = None  # будет понятный лог-ворнинг при инициализации
+    httpx = None  # будет понятный лог-ворнинг при инициализации
 
 
 class TelegramErrorHandler(logging.Handler):

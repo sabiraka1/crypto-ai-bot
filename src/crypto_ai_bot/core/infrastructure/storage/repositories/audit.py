@@ -18,7 +18,7 @@ class AuditRepo:
     Ожидает SQLite-подобный connection (conn.cursor().execute(...)).
     """
 
-    def __init__(self, conn: Any) -> None:
+    def __init__(self, conn) -> None:
         self._conn = conn
 
     def write(self, event: str, payload: dict[str, Any]) -> None:

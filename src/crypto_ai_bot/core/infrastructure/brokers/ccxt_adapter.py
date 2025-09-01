@@ -1,5 +1,4 @@
 from __future__ import annotations
-﻿
 import asyncio
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
@@ -51,7 +50,7 @@ class CcxtBroker:
         rps = float(getattr(self.settings, "BROKER_RATE_RPS", 8))
         cap = int(getattr(self.settings, "BROKER_RATE_BURST", 16))
         self._bucket = _TokenBucket(rps, cap)
-        self._markets: dict[str, dict[str, Any]] = {}
+        self._markets: dict[str, dict] = {}
         self._sym_to_gate: dict[str, str] = {}
         self._gate_to_sym: dict[str, str] = {}
 
@@ -86,7 +85,7 @@ class CcxtBroker:
                 self._sym_to_gate[k] = g
                 self._gate_to_sym[g] = k
 
-    def _market_desc(self, sym: str) -> dict[str, Any]:
+    def _market_desc(self, sym: str) -> dict:
         can = sym
         gate = self._sym_to_gate.get(can) or self._to_gate(can)
         return self._markets.get(gate) or self._markets.get(can) or {}
@@ -193,10 +192,7 @@ class CcxtBroker:
         if ask <= 0:
             raise ValidationError("ticker_ask_invalid")
         base_amount = quote_amount / ask
-        base_amount, _ = self._apply_precision(symbol, amount=base_amount)
-        if base_amount is None:
-            from decimal import Decimal
-            base_amount = Decimal('0')
+        base_amount, _ = self._apply_precision(symbol, amount=base_amount, price=None)
         if base_amount is None:
             raise ValidationError("precision_application_failed")
         self._check_min_notional(symbol, amount=base_amount, price=ask)
@@ -262,7 +258,7 @@ class CcxtBroker:
             raise self._map_error(exc) from exc
 
 
-def _extract_fee_quote(order: dict[str, Any], *, symbol: str) -> str:
+def _extract_fee_quote(order: dict, *, symbol: str) -> str:
     """
     Возвращает сумму комиссии в котируемой валюте (quote), если она совпадает с валютой fee.
     Иначе возвращает "0". Безопасная best-effort логика.

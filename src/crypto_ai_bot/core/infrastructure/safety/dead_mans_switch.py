@@ -28,7 +28,7 @@ class DeadMansSwitch:
 
         # first snapshot
         t = await self.broker.fetch_ticker(self.symbol)
-        last = Decimal(str(getattr(t, "last", "0")))
+        last = Decimal(str(getattr(t, "last", "0")))  # type: ignore[arg-type]
 
         if self._last_healthy_price is None:
             self._last_healthy_price = last
