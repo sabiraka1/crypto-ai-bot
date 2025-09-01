@@ -1,29 +1,24 @@
 from __future__ import annotations
 
 from typing import Any
-
 import httpx
 
 from crypto_ai_bot.core.domain.macro.ports import FomcCalendarPort
 from crypto_ai_bot.utils.logging import get_logger
 
-_log = get_logger("macro.http_fomc")
+_log = get_logger("macro.fomc_http")
 
 
-class HttpFomcSource(FomcCalendarPort):
-    """
-    HTTP-источник FOMC календаря.
-    Ожидается JSON: {"event_today": true}
-    """
-
-    def __init__(self, *, url: str, timeout_sec: float = 5.0) -> None:
+class FomcHttp(FomcCalendarPort):
+    """HTTP-источник FOMC календаря. JSON: {"event_today": true}"""
+    def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
         self._url = url
         self._timeout = float(timeout_sec)
 
     async def event_today(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                r = await client.get(self._url)
+            async with httpx.AsyncClient(timeout=self._timeout) as c:
+                r = await c.get(self._url)
                 r.raise_for_status()
                 data: Any = r.json()
                 if isinstance(data, dict) and "event_today" in data:
