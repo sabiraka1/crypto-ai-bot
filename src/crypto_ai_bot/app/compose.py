@@ -8,23 +8,34 @@ from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
+
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort, BrokerPort
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+
+# Режим/макро (опционально, включается по ENV)
 from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
 from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import (
+    BtcDominanceHttp,
+)
 from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
+
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
+
+# Шина событий: реализации + адаптер (единый API)
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
+from crypto_ai_bot.core.infrastructure.events.bus_adapter import UnifiedEventBus
+
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.infrastructure.settings import Settings
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
+
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import hist, inc
@@ -34,26 +45,7 @@ from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("compose")
 
-# ... остальной код без изменений, только исправлены использования класса:
 
-async def build_container_async() -> Container:
-    # ... код до regime ...
-    
-    # ---- Regime (по флагу) ----
-    regime_enabled = bool(getattr(s, "REGIME_ENABLED", False))
-    regime = None
-    broker: BrokerPort = base_broker
-    if regime_enabled:
-        dxy_url = str(getattr(s, "DXY_API_URL", "") or "")
-        btc_url = str(getattr(s, "BTC_DOM_API_URL", "") or "")
-        fomc_url = str(getattr(s, "FOMC_API_URL", "") or "")
-        dxy = DxyHttp(dxy_url) if dxy_url else None
-        btd = BtcDominanceHttp(btc_url) if btc_url else None  # Исправлено имя
-        fomc = FomcHttp(fomc_url) if fomc_url else None
-        regime = RegimeDetector(dxy=dxy, btc_dom=btd, fomc=fomc, cfg=RegimeConfig())
-        broker = GatedBroker(inner=base_broker, regime=regime, allow_sells_when_off=True)
-    
-    # ... остальной код без изменений
 @dataclass
 class Container:
     settings: Settings
@@ -66,6 +58,7 @@ class Container:
     orchestrators: dict[str, Orchestrator]
     tg_bot_task: asyncio.Task | None = None
 
+
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
     db_dir = os.path.dirname(db_path) or "."
@@ -75,28 +68,45 @@ def _open_storage(settings: Settings) -> Storage:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout = 5000;")
-    run_migrations(conn, now_ms=now_ms(), db_path=db_path, do_backup=True,
-                   backup_retention_days=int(getattr(settings, "BACKUP_RETENTION_DAYS", 30) or 30))
+
+    run_migrations(
+        conn,
+        now_ms=now_ms(),
+        db_path=db_path,
+        do_backup=True,
+        backup_retention_days=int(getattr(settings, "BACKUP_RETENTION_DAYS", 30) or 30),
+    )
     return Storage.from_connection(conn)
 
+
 def _build_event_bus(settings: Settings) -> EventBusPort:
+    """
+    Создаём реализацию шины (Redis или локальную Async) и оборачиваем её в UnifiedEventBus,
+    чтобы снаружи везде был единый API EventBusPort, не зависящий от конкретной реализации.
+    """
     redis_url = getattr(settings, "EVENT_BUS_URL", "") or ""
-    if redis_url:
-        return RedisEventBus(redis_url)
-    return AsyncEventBus()
+    impl = RedisEventBus(redis_url) if redis_url else AsyncEventBus()
+    return UnifiedEventBus(impl)
+
 
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
+    """Лёгкий декоратор: ретраи + latency-гистограмма, не меняет интерфейс."""
     if not hasattr(bus, "publish"):
         return
     _orig = bus.publish
+
     async def _publish(topic: str, payload: dict[str, Any]) -> None:
         t = hist("bus_publish_latency_seconds", topic=topic)
+
         async def call() -> Any:
             with t.time():
                 return await _orig(topic, payload)
+
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
+
     bus.publish = _publish  # type: ignore[attr-defined]
+
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -125,6 +135,7 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
+    # ---- подписчики на ключевые события ----
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
@@ -175,7 +186,11 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))
         s = evt.get("symbol", "")
         kind = evt.get("type", "")
-        detail = f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}" if kind == "max_orders_5m" else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
+        detail = (
+            f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}"
+            if kind == "max_orders_5m"
+            else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
+        )
         await _send(f"⏳ <b>BUDGET</b> {s} превышен ({kind})\n{detail}")
 
     async def on_trade_blocked(evt: dict[str, Any]) -> None:
@@ -204,14 +219,18 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
 
     _log.info("telegram_alerts_enabled")
 
+
 async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
+
+    # Шина событий: единый порт через адаптер; реализация (Redis/Async) скрыта внутри
     bus = _build_event_bus(s)
     if hasattr(bus, "start"):
         await bus.start()
     _wrap_bus_publish_with_metrics_and_retry(bus)
 
+    # Брокер (базовый)
     base_broker = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
 
     # ---- Regime (по флагу) ----
@@ -222,9 +241,11 @@ async def build_container_async() -> Container:
         dxy_url = str(getattr(s, "DXY_API_URL", "") or "")
         btc_url = str(getattr(s, "BTC_DOM_API_URL", "") or "")
         fomc_url = str(getattr(s, "FOMC_API_URL", "") or "")
+
         dxy = DxyHttp(dxy_url) if dxy_url else None
-        btd = BtcDominanceHttp(btc_url) if btc_url else None  # Исправлено имя
+        btd = BtcDominanceHttp(btc_url) if btc_url else None
         fomc = FomcHttp(fomc_url) if fomc_url else None
+
         regime = RegimeDetector(dxy=dxy, btc_dom=btd, fomc=fomc, cfg=RegimeConfig())
         broker = GatedBroker(inner=base_broker, regime=regime, allow_sells_when_off=True)
 
@@ -236,9 +257,13 @@ async def build_container_async() -> Container:
     orchs: dict[str, Orchestrator] = {}
 
     def _make_dms(sym: str) -> SafetySwitchPort:
-        dms_bus = None
-        if hasattr(bus, "__class__") and bus.__class__.__name__ == "AsyncEventBus":
-            dms_bus = bus
+        """
+        DMS должен работать только с локальной Async-шиной.
+        Если мы обёрнуты адаптером, пытаемся достать внутреннюю реализацию.
+        """
+        inner = getattr(bus, "_impl", None)
+        dms_bus = inner if isinstance(inner, AsyncEventBus) else (bus if isinstance(bus, AsyncEventBus) else None)
+
         return DeadMansSwitch(
             storage=st,
             broker=broker,
@@ -261,15 +286,15 @@ async def build_container_async() -> Container:
             health=health,
             settings=s,
             dms=_make_dms(sym),
-            # Если потом расширим сигнатуру Оркестратора на regime=..., здесь будет готов флаг.
         )
 
     attach_alerts(bus, s)
 
-    # Хинты для exits:
+    # Прокидываем подсказки exits (если реализованы)
     if hasattr(exits, "on_hint") and hasattr(bus, "on"):
         bus.on("exits.hint", exits.on_hint)  # type: ignore[arg-type]
 
+    # Telegram-команды (по желанию)
     tg_task: asyncio.Task | None = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
@@ -279,9 +304,12 @@ async def build_container_async() -> Container:
                 users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
             except Exception:
                 _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
-        container_view = type("C", (), {
-            "storage": st, "broker": broker, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health, "regime": regime
-        })()
+
+        container_view = type(
+            "C",
+            (),
+            {"storage": st, "broker": broker, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health, "regime": regime},
+        )()
         bot = TelegramBotCommands(
             bot_token=s.TELEGRAM_BOT_TOKEN,
             allowed_users=users,
@@ -291,4 +319,14 @@ async def build_container_async() -> Container:
         tg_task = asyncio.create_task(bot.run())
         _log.info("telegram_bot_enabled")
 
-    return Container(settings=s, storage=st, broker=broker, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
+    return Container(
+        settings=s,
+        storage=st,
+        broker=broker,
+        bus=bus,
+        risk=risk,
+        exits=exits,
+        health=health,
+        orchestrators=orchs,
+        tg_bot_task=tg_task,
+    )

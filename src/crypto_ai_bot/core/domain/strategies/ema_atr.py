@@ -3,9 +3,13 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
 
-from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision, StrategyContext  # Исправлен путь
+from crypto_ai_bot.core.domain.strategies.base import (
+    MarketData,
+    BaseStrategy,
+    Decision,
+    StrategyContext,
+)
 from crypto_ai_bot.utils.decimal import dec
 
 
@@ -48,23 +52,22 @@ class EmaAtrConfig:
     ema_long: int = 26
     atr_period: int = 14
     atr_max_pct: Decimal = dec("1000")  # ограничитель шума, 1000% ~ фактически отключено
-    ema_min_slope: Decimal = dec("0")   # минимальный наклон (в процентах) краткосрочной EMA относительно цены
+    ema_min_slope: Decimal = dec("0")   # минимальный наклон EMA_short относительно цены (в %)
 
 
 class EmaAtrStrategy(BaseStrategy):
     """
     Простая и чистая стратегия:
-    - Сигнал BUY, когда EMA_short > EMA_long и краткосрочная EMA не «плоская» (наклон > ema_min_slope)
-    - Сигнал SELL, когда EMA_short < EMA_long
-    - ATR фильтр: если ATR% > atr_max_pct — игнорируем (слишком шумно)
-    Размеры не определяет — отдаёт только направленный сигнал + reason.
+    - BUY, когда EMA_short > EMA_long и EMA_short имеет наклон ≥ ema_min_slope
+    - SELL, когда EMA_short < EMA_long
+    - ATR-фильтр: если ATR% > atr_max_pct — игнорируем
+    Размер не считает — отдаёт только направленный сигнал + reason.
     """
 
     def __init__(self, cfg: EmaAtrConfig) -> None:
         self.cfg = cfg
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        # Получаем OHLCV данные
         ohlcv = await md.get_ohlcv(ctx.symbol, timeframe="1m", limit=300)
         if len(ohlcv) < max(self.cfg.ema_long + 2, self.cfg.atr_period + 2):
             return Decision(action="hold", reason="not_enough_bars")
@@ -74,20 +77,19 @@ class EmaAtrStrategy(BaseStrategy):
         ema_l = _ema(closes, self.cfg.ema_long)
         es, el = ema_s[-1], ema_l[-1]
 
-        # ATR фильтр по относительной волатильности (к цене)
+        # ATR как % от цены
         atr_abs = _atr(ohlcv, self.cfg.atr_period)
         last = closes[-1]
         atr_pct = (atr_abs / last * dec("100")) if last > 0 else dec("0")
         if atr_pct > self.cfg.atr_max_pct:
             return Decision(action="hold", reason=f"atr_too_high:{atr_pct:.2f}%")
 
-        # Наклон краткосрочной EMA относительно цены (процент)
+        # Наклон EMA_short
         if len(ema_s) >= 2:
             slope = (ema_s[-1] - ema_s[-2]) / last * dec("100") if last > 0 else dec("0")
         else:
             slope = dec("0")
 
-        # Логика сигналов
         if es > el and slope >= self.cfg.ema_min_slope:
             return Decision(action="buy", confidence=0.6, reason=f"ema_bull;slope={slope:.3f}%")
         if es < el:
