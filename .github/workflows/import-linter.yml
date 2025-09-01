@@ -32,4 +32,4 @@ jobs:
 
       - name: Run import-linter
         run: |
-          lint-imports -c importlinter.ini
+          lint-imports --config importlinter.ini --verbose
