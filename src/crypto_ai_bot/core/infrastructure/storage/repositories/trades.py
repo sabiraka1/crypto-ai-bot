@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 @dataclass
@@ -8,7 +9,6 @@ class TradesRepository:
     conn: Any  # sqlite3.Connection with row_factory=sqlite3.Row
 
     def __post_init__(self) -> None:
-        # ensure schema exists (for in-memory DB or fresh file DB)
         try:
             self.ensure_schema()
         except Exception:
@@ -32,4 +32,23 @@ class TradesRepository:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts_ms)")
         self.conn.commit()
 
-    # ... остальные методы (add_from_order, pnl_today_quote и т.д.) остаются без изменений ...
+    def add_from_order(self, order: Any) -> None:
+        """Insert order fields expected in tests into trades table."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO trades (broker_order_id, client_order_id, symbol, side, amount, filled, price, cost, fee_quote, ts_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                getattr(order, "id", None),
+                getattr(order, "client_order_id", None),
+                getattr(order, "symbol", None),
+                getattr(order, "side", None),
+                str(getattr(order, "amount", Decimal("0"))),
+                str(getattr(order, "filled", getattr(order, "amount", Decimal("0")))),
+                str(getattr(order, "price", Decimal("0"))),
+                str(getattr(order, "cost", Decimal("0"))),
+                str(getattr(order, "fee_quote", Decimal("0"))),
+                int(getattr(order, "ts_ms", 0)),
+            ),
+        )
+        self.conn.commit()

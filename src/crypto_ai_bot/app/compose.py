@@ -28,14 +28,15 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import hist, inc
 from crypto_ai_bot.utils.retry import async_retry
 from crypto_ai_bot.utils.symbols import canonical
+from crypto_ai_bot.utils.time import now_ms
 
-# Optional import: InstanceLock may live in different paths or be absent
-try:  # most likely path in your repo
+# Optional InstanceLock import
+try:
     from crypto_ai_bot.core.infrastructure.storage.instance_lock import InstanceLock  # type: ignore
-except Exception:  # fallback path used in some layouts
+except Exception:
     try:
         from crypto_ai_bot.core.infrastructure.instance_lock import InstanceLock  # type: ignore
-    except Exception:  # completely optional
+    except Exception:
         InstanceLock = None  # type: ignore[misc,assignment]
 
 _log = get_logger("compose")
@@ -56,8 +57,6 @@ class Container:
     tg_bot_task: asyncio.Task | None = None
     dms_task: asyncio.Task | None = None
 
-
-# ---- Event bus builders ----
 
 def _build_event_bus(settings: Settings) -> EventBusPort:
     raw = getattr(settings, "EVENT_BUS_URL", "")
@@ -100,13 +99,11 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
         except Exception:
             _log.error("alert_trade_completed_failed", exc_info=True)
 
-    # Use Callable/Awaitable types explicitly to keep type-level imports live
     handler: Callable[[dict[str, Any]], Awaitable[None]] = on_trade_completed
     bus.on(TRADE_COMPLETED, handler)  # type: ignore[arg-type]
 
 
 async def _run_dms_loop(dms: DeadMansSwitch, interval_sec: int) -> None:
-    # Small background loop to keep the safety switch live
     while True:
         try:
             await asyncio.sleep(max(1, interval_sec))
@@ -117,8 +114,6 @@ async def _run_dms_loop(dms: DeadMansSwitch, interval_sec: int) -> None:
             _log.error("dms_check_failed", exc_info=True)
 
 
-# ---- Container ----
-
 async def build_container_async() -> Container:
     s = Settings.load()
 
@@ -128,7 +123,8 @@ async def build_container_async() -> Container:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     st = Storage.from_connection(conn)
-    run_migrations(st)
+    # FIX: new signature requires keyword-only now_ms and db_path
+    run_migrations(st, now_ms=now_ms, db_path=str(db_path))
 
     # Instance lock (optional, if available)
     inst_lock = None
@@ -141,7 +137,7 @@ async def build_container_async() -> Container:
     # Broker
     br = make_broker(mode=s.MODE, exchange=s.EXCHANGE, settings=s)
 
-    # Macro regime wiring (ENV-driven)
+    # Macro regime (ENV-driven)
     try:
         def _b(name: str, default: str = "0") -> bool:
             v = (os.getenv(name, default) or "").strip().lower()
@@ -208,9 +204,8 @@ async def build_container_async() -> Container:
     # Health checker
     health = HealthChecker(storage=st, bus=bus, broker=br)
 
-    # Safety switch (Dead Man's Switch) — keep live & typed as SafetySwitchPort
+    # Safety switch
     dms: SafetySwitchPort = DeadMansSwitch(timeout_ms=s.DMS_TIMEOUT_MS, bus=bus)
-    # also use `dec` to keep Decimal helper live (and useful for logs)
     _ = dec(str(s.RISK_DAILY_LOSS_LIMIT_QUOTE))
     dms_task = asyncio.create_task(_run_dms_loop(dms, max(1, int(getattr(s, "WATCHDOG_INTERVAL_SEC", 15) or 15))))
 
