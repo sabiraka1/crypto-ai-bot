@@ -281,14 +281,15 @@ class TelegramBotCommands:
             return
         base, quote = _split_symbol(symbol)
         try:
-                        try:
-                b = await broker.fetch_balance()
-                gv = _getv(b)
-                base_free = gv(base).get("free") or gv(base).get("total") or "0"
-                quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
-                await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
-            except Exception:
-                await self._reply(chat_id, "⚠️ Не удалось получить баланс")
+                                        try:
+                    b = await broker.fetch_balance()
+                    gv = _getv(b)
+                    base_free = gv(base).get("free") or gv(base).get("total") or "0"
+                    quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
+                    await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
+                                               f"{base}: <code>{base_free}</code>\n{_split_symbol}: <code>{quote_free}</code>")
+                except Exception:
+                    await self._reply(chat_id, "⚠️ Не удалось получить баланс")
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:
             _log.error("balance_fetch_failed", exc_info=True)
