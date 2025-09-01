@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.domain.strategy.base import MarketDataPort, Signal, StrategyPort
+from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision, StrategyContext  # Исправлен путь
 from crypto_ai_bot.utils.decimal import dec
 
 
@@ -51,7 +51,7 @@ class EmaAtrConfig:
     ema_min_slope: Decimal = dec("0")   # минимальный наклон (в процентах) краткосрочной EMA относительно цены
 
 
-class EmaAtrStrategy(StrategyPort):
+class EmaAtrStrategy(BaseStrategy):
     """
     Простая и чистая стратегия:
     - Сигнал BUY, когда EMA_short > EMA_long и краткосрочная EMA не «плоская» (наклон > ema_min_slope)
@@ -63,10 +63,11 @@ class EmaAtrStrategy(StrategyPort):
     def __init__(self, cfg: EmaAtrConfig) -> None:
         self.cfg = cfg
 
-    async def generate(self, *, symbol: str, md: MarketDataPort, settings: Any) -> Signal:
-        ohlcv = await md.get_ohlcv(symbol, timeframe=getattr(settings, "STRAT_TIMEFRAME", "1m"), limit=300)
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
+        # Получаем OHLCV данные
+        ohlcv = await md.get_ohlcv(ctx.symbol, timeframe="1m", limit=300)
         if len(ohlcv) < max(self.cfg.ema_long + 2, self.cfg.atr_period + 2):
-            return Signal(action="hold", reason="not_enough_bars")
+            return Decision(action="hold", reason="not_enough_bars")
 
         closes: list[Decimal] = [dec(str(x[4])) for x in ohlcv]
         ema_s = _ema(closes, self.cfg.ema_short)
@@ -78,7 +79,7 @@ class EmaAtrStrategy(StrategyPort):
         last = closes[-1]
         atr_pct = (atr_abs / last * dec("100")) if last > 0 else dec("0")
         if atr_pct > self.cfg.atr_max_pct:
-            return Signal(action="hold", reason=f"atr_too_high:{atr_pct:.2f}%")
+            return Decision(action="hold", reason=f"atr_too_high:{atr_pct:.2f}%")
 
         # Наклон краткосрочной EMA относительно цены (процент)
         if len(ema_s) >= 2:
@@ -88,7 +89,7 @@ class EmaAtrStrategy(StrategyPort):
 
         # Логика сигналов
         if es > el and slope >= self.cfg.ema_min_slope:
-            return Signal(action="buy", confidence=0.6, reason=f"ema_bull;slope={slope:.3f}%")
+            return Decision(action="buy", confidence=0.6, reason=f"ema_bull;slope={slope:.3f}%")
         if es < el:
-            return Signal(action="sell", confidence=0.6, reason="ema_bear")
-        return Signal(action="hold", reason="flat_or_low_slope")
+            return Decision(action="sell", confidence=0.6, reason="ema_bear")
+        return Decision(action="hold", reason="flat_or_low_slope")

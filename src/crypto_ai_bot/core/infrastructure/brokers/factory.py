@@ -58,10 +58,10 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
         return PaperBroker(settings=settings)
 
     if md in ("live", "real", "prod", "production"):
-        # Ищем реализацию CCXT-брокера-обёртки в одном из известных мест
+        # Ищем реализацию CCXT-брокера-обёртки в существующем файле ccxt_adapter
         mod = _import_first(
-            "crypto_ai_bot.core.infrastructure.brokers.ccxt_broker",
-            "crypto_ai_bot.core.infrastructure.brokers.ccxt",
+            "crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter",  # Исправлено - реальный файл
+            "crypto_ai_bot.core.infrastructure.brokers.live",  # Запасной вариант
         )
         CcxtBroker = getattr(mod, "CcxtBroker", None)
         if CcxtBroker is None:
@@ -74,14 +74,24 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
         http_timeout_sec = float(getattr(settings, "HTTP_TIMEOUT_SEC", 30) or 30)
         proxy = getattr(settings, "HTTP_PROXY", "") or None  # если используется прокси
 
+        # Для CcxtBroker нужен exchange объект из ccxt
+        import ccxt
+        exchange_class = getattr(ccxt, ex, None)
+        if not exchange_class:
+            raise ValueError(f"Exchange {ex} not found in ccxt")
+        
+        exchange_instance = exchange_class({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'password': api_password if api_password else None,
+            'timeout': http_timeout_sec * 1000,  # ccxt использует миллисекунды
+            'enableRateLimit': True,
+            'proxies': proxy,
+        })
+
         _log.info("make_broker_live", extra={"exchange": ex})
         return CcxtBroker(
-            exchange=ex,
-            api_key=api_key,
-            api_secret=api_secret,
-            api_password=api_password,
-            timeout_sec=http_timeout_sec,
-            proxy=proxy,
+            exchange=exchange_instance,
             settings=settings,
         )
 

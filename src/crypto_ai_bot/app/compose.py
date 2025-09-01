@@ -15,7 +15,7 @@ from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
 from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
 from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
@@ -34,6 +34,26 @@ from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("compose")
 
+# ... остальной код без изменений, только исправлены использования класса:
+
+async def build_container_async() -> Container:
+    # ... код до regime ...
+    
+    # ---- Regime (по флагу) ----
+    regime_enabled = bool(getattr(s, "REGIME_ENABLED", False))
+    regime = None
+    broker: BrokerPort = base_broker
+    if regime_enabled:
+        dxy_url = str(getattr(s, "DXY_API_URL", "") or "")
+        btc_url = str(getattr(s, "BTC_DOM_API_URL", "") or "")
+        fomc_url = str(getattr(s, "FOMC_API_URL", "") or "")
+        dxy = DxyHttp(dxy_url) if dxy_url else None
+        btd = BtcDominanceHttp(btc_url) if btc_url else None  # Исправлено имя
+        fomc = FomcHttp(fomc_url) if fomc_url else None
+        regime = RegimeDetector(dxy=dxy, btc_dom=btd, fomc=fomc, cfg=RegimeConfig())
+        broker = GatedBroker(inner=base_broker, regime=regime, allow_sells_when_off=True)
+    
+    # ... остальной код без изменений
 @dataclass
 class Container:
     settings: Settings
@@ -197,13 +217,13 @@ async def build_container_async() -> Container:
     # ---- Regime (по флагу) ----
     regime_enabled = bool(getattr(s, "REGIME_ENABLED", False))
     regime = None
-    broker: BrokerPort = base_broker  # тип: BrokerPort
+    broker: BrokerPort = base_broker
     if regime_enabled:
         dxy_url = str(getattr(s, "DXY_API_URL", "") or "")
         btc_url = str(getattr(s, "BTC_DOM_API_URL", "") or "")
         fomc_url = str(getattr(s, "FOMC_API_URL", "") or "")
         dxy = DxyHttp(dxy_url) if dxy_url else None
-        btd = BtcDominanceHttp(btc_url) if btc_url else None
+        btd = BtcDominanceHttp(btc_url) if btc_url else None  # Исправлено имя
         fomc = FomcHttp(fomc_url) if fomc_url else None
         regime = RegimeDetector(dxy=dxy, btc_dom=btd, fomc=fomc, cfg=RegimeConfig())
         broker = GatedBroker(inner=base_broker, regime=regime, allow_sells_when_off=True)

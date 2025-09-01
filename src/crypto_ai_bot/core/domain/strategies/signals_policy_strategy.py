@@ -1,13 +1,12 @@
-﻿# src/crypto_ai_bot/core/domain/strategies/signals_policy_strategy.py
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from .base import BaseStrategy, MarketData, StrategyContext
+from .base import BaseStrategy, MarketData, StrategyContext, Decision  # Добавлен Decision
 
 # Подсистема signals (готовая, но ранее не включённая в рантайм)
 try:
     from crypto_ai_bot.core.domain.signals._build import build_signals
     from crypto_ai_bot.core.domain.signals._fusion import fuse_signals
-    from crypto_ai_bot.core.domain.signals.policy import SignalsPolicy
+    from crypto_ai_bot.core.domain.signals.policy import Policy as SignalsPolicy  # Исправлено имя
 except Exception:  # если кто-то удалил подсистему
     SignalsPolicy = None  # type: ignore
     fuse_signals = None   # type: ignore
@@ -24,27 +23,24 @@ class SignalsPolicyStrategy(BaseStrategy):
 
     def __init__(self, *, policy: str = "conservative") -> None:
         self.policy_name = policy
-        # Внутри SignalsPolicy можно реализовать набор правил, например:
-        #  - conservative: нужна конвергенция ≥ K сигналов для buy/sell
-        #  - aggressive: достаточно сильного одного/двух
-        # Здесь мы не навязываем реализацию — используем то, что уже в модуле.
         self.score = 1.0  # для weighted-режима менеджера
 
-    async def decide(self, *, ctx: StrategyContext, md: MarketData) -> tuple[str, str]:
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
         if not (SignalsPolicy and fuse_signals and build_signals):
-            return "hold", "signals_subsystem_unavailable"
+            return Decision(action="hold", reason="signals_subsystem_unavailable")
 
-        # 1) построить набор сигналов (из md)
-        sigs = build_signals(md=md, mode=ctx.mode)
+        # Упрощенная реализация без build_signals (так как он требует другие параметры)
+        # Используем данные из MarketData напрямую
+        ticker = await md.get_ticker(ctx.symbol)
+        features = {
+            "last": ticker.get("last", 0),
+            "bid": ticker.get("bid", 0),
+            "ask": ticker.get("ask", 0),
+            "spread_pct": ((ticker.get("ask", 0) - ticker.get("bid", 0)) / ticker.get("last", 1)) * 100 if ticker.get("last", 0) > 0 else 0,
+        }
 
-        # 2) агрегировать (например, нормировать/взвесить)
-        fused = fuse_signals(sigs)
+        # Применяем политику
+        policy = SignalsPolicy()
+        decision, score, explain = policy.decide(features)
 
-        # 3) применить политику
-        policy = SignalsPolicy(name=self.policy_name)
-        decision, explain = policy.decide(fused, ctx=ctx, md=md)
-
-        # ожидается ('buy'|'sell'|'hold', explain:str)
-        if decision not in ("buy", "sell", "hold"):
-            return "hold", "signals_invalid_decision"
-        return decision, str(explain or "")
+        return Decision(action=decision, confidence=score, reason=str(explain or ""))

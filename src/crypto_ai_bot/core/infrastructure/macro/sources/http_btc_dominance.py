@@ -9,7 +9,7 @@ from crypto_ai_bot.utils.logging import get_logger
 _log = get_logger("macro.btc_dom_http")
 
 
-class BtcDomHttp(BtcDomPort):
+class BtcDominanceHttp(BtcDomPort):  # Единое имя BtcDominanceHttp
     """HTTP-источник BTC Dominance. JSON: {"change_pct": -0.25}"""
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
         self._url = url

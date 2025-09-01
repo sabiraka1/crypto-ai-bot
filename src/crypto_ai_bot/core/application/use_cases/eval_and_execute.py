@@ -4,7 +4,7 @@ import math
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.application.macro.regime_detector import RegimeConfig, RegimeDetector
+from crypto_ai_bot.core.domain.macro.regime_detector import RegimeConfig, RegimeDetector  # Исправлен путь
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
 from crypto_ai_bot.core.domain.strategies import MarketData, StrategyContext, StrategyManager
 from crypto_ai_bot.core.domain.strategies.position_sizing import (
@@ -14,9 +14,9 @@ from crypto_ai_bot.core.domain.strategies.position_sizing import (
     kelly_sized_quote,
     volatility_target_size,
 )
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceSource
-from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxySource
-from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcSource
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
+from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
+from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -102,10 +102,10 @@ async def eval_and_execute(
 
         # Regime detector (мягко)
         http_get_json = await _http_get_json_factory(settings)
-        dxy = DxySource(http_get_json=http_get_json, url=getattr(settings, "DXY_SOURCE_URL", None))
-        btd = BtcDominanceSource(http_get_json=http_get_json, url=getattr(settings, "BTC_DOM_SOURCE_URL", None))
-        fomc = FomcSource(http_get_json=http_get_json, url=getattr(settings, "FOMC_CALENDAR_URL", None))
-        cfg = RegimeConfig(
+        dxy = DxyHttp(getattr(settings, "DXY_SOURCE_URL", None)) if getattr(settings, "DXY_SOURCE_URL", None) else None
+        btd = BtcDominanceHttp(getattr(settings, "BTC_DOM_SOURCE_URL", None)) if getattr(settings, "BTC_DOM_SOURCE_URL", None) else None  # Исправлено
+        fomc = FomcHttp(getattr(settings, "FOMC_CALENDAR_URL", None)) if getattr(settings, "FOMC_CALENDAR_URL", None) else None
+            cfg = RegimeConfig(
             dxy_up_pct=float(getattr(settings, "REGIME_DXY_UP_PCT", 0.5) or 0.5),
             dxy_down_pct=float(getattr(settings, "REGIME_DXY_DOWN_PCT", -0.2) or -0.2),
             btc_dom_up_pct=float(getattr(settings, "REGIME_BTC_DOM_UP_PCT", 0.5) or 0.5),
