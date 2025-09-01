@@ -79,7 +79,8 @@ class Settings:
     EVAL_INTERVAL_SEC: int
     EXITS_INTERVAL_SEC: int
     RECONCILE_INTERVAL_SEC: int
-    WATCHDOG_INTERVAL_SEC: int
+    WATCHDOG_INTERVAL_SEC
+    SETTLEMENT_INTERVAL_SEC: float = 60.0: int
     DMS_TIMEOUT_MS: int
 
     EXITS_ENABLED: int
@@ -131,7 +132,9 @@ class Settings:
             EVAL_INTERVAL_SEC=int(_get("EVAL_INTERVAL_SEC", "60")),
             EXITS_INTERVAL_SEC=int(_get("EXITS_INTERVAL_SEC", "5")),
             RECONCILE_INTERVAL_SEC=int(_get("RECONCILE_INTERVAL_SEC", "60")),
-            WATCHDOG_INTERVAL_SEC=int(_get("WATCHDOG_INTERVAL_SEC", "15")),
+            WATCHDOG_INTERVAL_SEC
+    SETTLEMENT_INTERVAL_SEC: float = 60.0=int(_get("WATCHDOG_INTERVAL_SEC
+    SETTLEMENT_INTERVAL_SEC: float = 60.0", "15")),
             DMS_TIMEOUT_MS=int(_get("DMS_TIMEOUT_MS", "120000")),
             EXITS_ENABLED=int(_get("EXITS_ENABLED", "1")),
             EXITS_MODE=_get("EXITS_MODE", "both"),
@@ -149,3 +152,11 @@ class Settings:
             POD_NAME=_get("POD_NAME", ""),
             HOSTNAME=_get("HOSTNAME", ""),
         )
+
+# Backward-compat field used by tests
+try:
+    Settings.__annotations__['SETTLEMENT_INTERVAL_SEC'] = float  # type: ignore
+    if not hasattr(Settings, 'SETTLEMENT_INTERVAL_SEC'):
+        setattr(Settings, 'SETTLEMENT_INTERVAL_SEC', 60.0)
+except Exception:
+    pass
