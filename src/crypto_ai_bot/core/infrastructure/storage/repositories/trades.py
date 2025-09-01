@@ -22,33 +22,6 @@ def _today_bounds_utc() -> tuple[int, int]:
 class TradesRepository:
     conn: Any  # sqlite3.Connection с row_factory=sqlite3.Row
 
-
-    def __post_init__(self) -> None:
-        try:
-            self.ensure_schema()
-        except Exception:
-            pass
-
-    def ensure_schema(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute("""
-CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    broker_order_id TEXT,
-    client_order_id TEXT,
-    symbol TEXT NOT NULL,
-    side TEXT NOT NULL,
-    amount TEXT NOT NULL,
-    filled TEXT NOT NULL,
-    price TEXT NOT NULL,
-    cost TEXT NOT NULL,
-    fee_quote TEXT NOT NULL,
-    ts_ms INTEGER NOT NULL
-)
-""")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts_ms)")
-        self.conn.commit()
-
     def add_from_order(self, order: Any) -> None:
         symbol = getattr(order, "symbol", None)
         side = (getattr(order, "side", "") or "").lower()
@@ -220,3 +193,24 @@ def count_orders_today(self, symbol: str) -> int:
 # ✅ Совместимость с HTTP/TG API
 def pnl_today_quote(self, symbol: str) -> Decimal:
     return self.daily_pnl_quote(symbol)
+
+
+            def ensure_schema(self) -> None:
+                cur = self.conn.cursor()
+                cur.execute("""
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    broker_order_id TEXT,
+    client_order_id TEXT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    filled TEXT NOT NULL,
+    price TEXT NOT NULL,
+    cost TEXT NOT NULL,
+    fee_quote TEXT NOT NULL,
+    ts_ms INTEGER NOT NULL
+)
+""")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts_ms)")
+                self.conn.commit()
