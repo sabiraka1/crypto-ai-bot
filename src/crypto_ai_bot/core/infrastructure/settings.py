@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 from dataclasses import dataclass
 from decimal import Decimal
@@ -11,162 +13,139 @@ from crypto_ai_bot.utils.decimal import dec
 def _get(name: str, default: str) -> str:
     return os.getenv(name, default)
 
+def _read_text_file(path: str) -> str:
+    try:
+        p = Path(path)
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return ""
 
 def _secret(name: str, default: str = "") -> str:
-    val = os.getenv(name)
-    if val is not None:
-        return val
-    path = os.getenv(f"{name}_FILE")
-    if path:
+    val_file = os.getenv(f"{name}_FILE")
+    if val_file:
+        txt = _read_text_file(val_file)
+        if txt:
+            return txt
+    val_b64 = os.getenv(f"{name}_B64")
+    if val_b64:
         try:
-            return Path(path).read_text(encoding="utf-8").strip()
+            return base64.b64decode(val_b64).decode("utf-8").strip()
         except Exception:
-            return default
-    b64 = os.getenv(f"{name}_B64")
-    if b64:
+            pass
+    secrets_path = os.getenv("SECRETS_FILE")
+    if secrets_path:
         try:
-            import base64 as _b64
-            return _b64.b64decode(b64).decode("utf-8").strip()
+            data = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
+            key = name.lower()
+            if data.get(key):
+                return str(data[key]).strip()
         except Exception:
-            return default
-    return default
-
+            pass
+    return os.getenv(name, default)
 
 @dataclass
 class Settings:
-    # Core
     MODE: str
+    SANDBOX: int
+
     EXCHANGE: str
-    SYMBOLS: list[str] | str  # tests sometimes pass ""
     SYMBOL: str
-    DB_PATH: str
+    SYMBOLS: str
 
-    # Backups / migrations
-    BACKUP_RETENTION_DAYS: int
-
-    # Idempotency
-    IDEMPOTENCY_BUCKET_MS: int
-    IDEMPOTENCY_TTL_SEC: int
-
-    # Event bus
-    EVENT_BUS_URL: str
-
-    # HTTP
-    HTTP_TIMEOUT_SEC: int
-
-    # Intervals (sec) — allow floats for fast tests
-    EVAL_INTERVAL_SEC: float  # alias used by tests
-    EVALUATE_INTERVAL_SEC: float
-    EXITS_INTERVAL_SEC: float
-    RECONCILE_INTERVAL_SEC: float
-    WATCHDOG_INTERVAL_SEC: float
-    SETTLEMENT_INTERVAL_SEC: float
-
-    # Safety / DMS
-    DMS_TIMEOUT_MS: int
-
-    # Risk core
-    RISK_MAX_LOSS_STREAK: int
-    RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal
-    RISK_MAX_DRAWDOWN_PCT: float
-
-    # Strategy / trading extras
     FIXED_AMOUNT: float
     PRICE_FEED: str
     FIXED_PRICE: float
-    FEE_PCT_ESTIMATE: Decimal
-    RISK_MAX_FEE_PCT: Decimal
-    RISK_MAX_SLIPPAGE_PCT: Decimal
+
+    DB_PATH: str
+    BACKUP_RETENTION_DAYS: int
+    IDEMPOTENCY_BUCKET_MS: int
+    IDEMPOTENCY_TTL_SEC: int
+
     RISK_COOLDOWN_SEC: int
     RISK_MAX_SPREAD_PCT: float
     RISK_MAX_POSITION_BASE: float
     RISK_MAX_ORDERS_PER_HOUR: int
+    RISK_DAILY_LOSS_LIMIT_QUOTE: float
+
+    FEE_PCT_ESTIMATE: Decimal
+    RISK_MAX_FEE_PCT: Decimal
+    RISK_MAX_SLIPPAGE_PCT: Decimal
+
+    HTTP_TIMEOUT_SEC: int
     TRADER_AUTOSTART: int
 
-    # Exits config
+    EVAL_INTERVAL_SEC: int
+    EXITS_INTERVAL_SEC: int
+    RECONCILE_INTERVAL_SEC: int
+    WATCHDOG_INTERVAL_SEC: int
+    DMS_TIMEOUT_MS: int
+
     EXITS_ENABLED: int
     EXITS_MODE: str
     EXITS_HARD_STOP_PCT: float
     EXITS_TRAILING_PCT: float
     EXITS_MIN_BASE_TO_EXIT: float
 
-    # Telemetry / Telegram
+    # Telegram fields
     TELEGRAM_ENABLED: int
     TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_ALLOWED_USERS: str
-    TELEGRAM_ALERTS_CHAT_ID: str
-    TELEGRAM_BOT_COMMANDS_ENABLED: int
     TELEGRAM_CHAT_ID: str
 
-    # Tokens / API
     API_TOKEN: str
     API_KEY: str
     API_SECRET: str
-    API_PASSWORD: str
-    SANDBOX: int
 
-    # Misc
     POD_NAME: str
     HOSTNAME: str
 
     @classmethod
-    def load(cls) -> "Settings":
-        syms_raw = _get("SYMBOLS", _get("SYMBOL", "BTC/USDT"))
-        # allow both list (via env "A,B") and single symbol
-        if "," in syms_raw:
-            symbols_list = [s.strip() for s in syms_raw.split(",") if s.strip()]
-        else:
-            symbols_list = [syms_raw.strip()] if syms_raw else []
-        sym = symbols_list[0] if symbols_list else "BTC/USDT"
-        eval_interval = float(_get("EVAL_INTERVAL_SEC", _get("EVALUATE_INTERVAL_SEC", "5")))
+    def load(cls) -> Settings:
+        mode = _get("MODE", "paper")
+        base, quote = (_get("SYMBOL", "BTC/USDT").split("/") + ["USDT"])[:2]
+        db_default = f"./data/trader-{_get('EXCHANGE','gateio')}-{base}{quote}-{mode}{'-sandbox' if _get('SANDBOX','0') in ('1','true','yes') else ''}.sqlite3"
         return cls(
-            MODE=_get("MODE", "paper"),
+            MODE=mode,
+            SANDBOX=int(_get("SANDBOX", "0")),
             EXCHANGE=_get("EXCHANGE", "gateio"),
-            SYMBOLS=symbols_list or "",  # tests sometimes assign ""
-            SYMBOL=_get("SYMBOL", sym),
-            DB_PATH=_get("DB_PATH", ":memory:"),
-            BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
-            IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
-            IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
-            EVENT_BUS_URL=_get("EVENT_BUS_URL", ""),
-            HTTP_TIMEOUT_SEC=int(_get("HTTP_TIMEOUT_SEC", "30")),
-            EVAL_INTERVAL_SEC=eval_interval,
-            EVALUATE_INTERVAL_SEC=eval_interval,
-            EXITS_INTERVAL_SEC=float(_get("EXITS_INTERVAL_SEC", "5")),
-            RECONCILE_INTERVAL_SEC=float(_get("RECONCILE_INTERVAL_SEC", "60")),
-            WATCHDOG_INTERVAL_SEC=float(_get("WATCHDOG_INTERVAL_SEC", "15")),
-            SETTLEMENT_INTERVAL_SEC=float(_get("SETTLEMENT_INTERVAL_SEC", "60")),
-            DMS_TIMEOUT_MS=int(_get("DMS_TIMEOUT_MS", "120000")),
-            RISK_MAX_LOSS_STREAK=int(_get("RISK_MAX_LOSS_STREAK", "2")),
-            RISK_DAILY_LOSS_LIMIT_QUOTE=dec(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
-            RISK_MAX_DRAWDOWN_PCT=float(_get("RISK_MAX_DRAWDOWN_PCT", "10.0")),
+            SYMBOL=_get("SYMBOL", "BTC/USDT"),
+            SYMBOLS=_get("SYMBOLS", ""),
             FIXED_AMOUNT=float(_get("FIXED_AMOUNT", "50")),
             PRICE_FEED=_get("PRICE_FEED", "fixed"),
             FIXED_PRICE=float(_get("FIXED_PRICE", "100")),
-            FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
-            RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
-            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.001")),
+            DB_PATH=_get("DB_PATH", db_default),
+            BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
+            IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
+            IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
             RISK_COOLDOWN_SEC=int(_get("RISK_COOLDOWN_SEC", "60")),
             RISK_MAX_SPREAD_PCT=float(_get("RISK_MAX_SPREAD_PCT", "0.3")),
             RISK_MAX_POSITION_BASE=float(_get("RISK_MAX_POSITION_BASE", "0.02")),
             RISK_MAX_ORDERS_PER_HOUR=int(_get("RISK_MAX_ORDERS_PER_HOUR", "6")),
+            RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
+            FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
+            RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
+            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.001")),
+            HTTP_TIMEOUT_SEC=int(_get("HTTP_TIMEOUT_SEC", "30")),
             TRADER_AUTOSTART=int(_get("TRADER_AUTOSTART", "0")),
+            EVAL_INTERVAL_SEC=int(_get("EVAL_INTERVAL_SEC", "60")),
+            EXITS_INTERVAL_SEC=int(_get("EXITS_INTERVAL_SEC", "5")),
+            RECONCILE_INTERVAL_SEC=int(_get("RECONCILE_INTERVAL_SEC", "60")),
+            WATCHDOG_INTERVAL_SEC=int(_get("WATCHDOG_INTERVAL_SEC", "15")),
+            DMS_TIMEOUT_MS=int(_get("DMS_TIMEOUT_MS", "120000")),
             EXITS_ENABLED=int(_get("EXITS_ENABLED", "1")),
             EXITS_MODE=_get("EXITS_MODE", "both"),
             EXITS_HARD_STOP_PCT=float(_get("EXITS_HARD_STOP_PCT", "0.05")),
             EXITS_TRAILING_PCT=float(_get("EXITS_TRAILING_PCT", "0.03")),
-            EXITS_MIN_BASE_TO_EXIT=float(_get("EXITS_MIN_BASE_TO_EXIT", "0.0")),
+            EXITS_MIN_BASE_TO_EXIT=float(_get("EXITS_MIN_BASE_TO_EXIT", "0")),
+            # Telegram configuration
             TELEGRAM_ENABLED=int(_get("TELEGRAM_ENABLED", "0")),
             TELEGRAM_BOT_TOKEN=_secret("TELEGRAM_BOT_TOKEN", ""),
-            TELEGRAM_ALLOWED_USERS=_get("TELEGRAM_ALLOWED_USERS", ""),
-            TELEGRAM_ALERTS_CHAT_ID=_get("TELEGRAM_ALERTS_CHAT_ID", ""),
-            TELEGRAM_BOT_COMMANDS_ENABLED=int(_get("TELEGRAM_BOT_COMMANDS_ENABLED", "0")),
             TELEGRAM_CHAT_ID=_get("TELEGRAM_CHAT_ID", ""),
-            API_TOKEN=_secret("API_TOKEN", ""),
+            # API credentials
+            API_TOKEN=_get("API_TOKEN", ""),
             API_KEY=_secret("API_KEY", ""),
             API_SECRET=_secret("API_SECRET", ""),
-            API_PASSWORD=_secret("API_PASSWORD", ""),
-            SANDBOX=int(_get("SANDBOX", "0")),
             POD_NAME=_get("POD_NAME", ""),
             HOSTNAME=_get("HOSTNAME", ""),
         )
