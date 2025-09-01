@@ -8,19 +8,17 @@ _log = get_logger("brokers.factory")
 
 
 def _import_first(*candidates: str):
-    """
-    Пытается импортировать первый доступный модуль из списка путей.
-    Возвращает модуль, либо поднимает ImportError с понятным сообщением.
-    """
+    """Import first available module from the list."""
     last_exc: Exception | None = None
     for path in candidates:
         try:
             module = __import__(path, fromlist=["*"])
             _log.info("broker_impl_found", extra={"module": path})
             return module
-        except Exception as exc:  # pragma: no cover - просто перебор вариантов
+        except Exception as exc:  # try next candidate
             last_exc = exc
             continue
+    # If nothing found — raise clear error
     raise ImportError(f"Broker implementation not found among: {', '.join(candidates)}") from last_exc
 
 

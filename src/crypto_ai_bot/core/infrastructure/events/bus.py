@@ -109,7 +109,7 @@ class AsyncEventBus:
             delay_ms = self.backoff_base_ms
             while True:
                 try:
-                    await h(evt)
+                    await h(payload)
                     delivered += 1
                     inc("bus_handler_ok_total", topic=topic, handler=getattr(h, "__name__", "handler"))
                     break

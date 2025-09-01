@@ -110,3 +110,5 @@ class DeadMansSwitch:
         self._last_beat_ms = 0
         self._last_healthy_price = None
         _log.info("dms_stopped", extra={"symbol": self.symbol})
+    async def check(self):
+        return await self.tick()
