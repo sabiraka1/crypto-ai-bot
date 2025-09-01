@@ -1,1 +1,1 @@
-"""Macro regime detection domain logic."""
+﻿"""Macro regime detection domain logic."""

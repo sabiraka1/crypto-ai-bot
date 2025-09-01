@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 
 from crypto_ai_bot.core.infrastructure.events.telegram_log_handler import (
     TelegramErrorHandler,

@@ -1,6 +1,5 @@
-from typing import Tuple
 from __future__ import annotations
-
+﻿
 import asyncio
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
@@ -194,7 +193,7 @@ class CcxtBroker:
         if ask <= 0:
             raise ValidationError("ticker_ask_invalid")
         base_amount = quote_amount / ask
-        base_amount, _
+        base_amount, _ = self._apply_precision(symbol, amount=base_amount)
         if base_amount is None:
             from decimal import Decimal
             base_amount = Decimal('0')

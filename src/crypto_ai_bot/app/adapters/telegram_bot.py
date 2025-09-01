@@ -294,9 +294,9 @@ class TelegramBotCommands:
         base, quote = _split_symbol(symbol)
         try:
             b = await broker.fetch_balance()
-gv = _getv(b)
-base_free = gv(base).get("free") or gv(base).get("total") or "0"
-quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
+            getv = lambda cur: b.get(cur, {}) if isinstance(b, dict) else getattr(b, cur.lower(), {})
+            base_free = _getv(base).get("free") or _getv(base).get("total") or "0"
+            quote_free = _getv(quote).get("free") or _getv(quote).get("total") or "0"
             await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:

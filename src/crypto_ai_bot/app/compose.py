@@ -1,6 +1,4 @@
 from __future__ import annotations
-from typing import cast
-
 import asyncio
 import os
 import sqlite3
@@ -86,7 +84,7 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
-    setattr(bus, 'publish', _publish)
+    bus.publish = _publish
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -215,23 +213,22 @@ async def build_container_async() -> Container:
 
     def _make_dms(sym: str) -> SafetySwitchPort:
         # Проверка совместимости bus для DeadMansSwitch
-        dms_bus = None
-        if isinstance(bus, AsyncEventBus):
-            dms_bus = bus
-    return DeadMansSwitch(
+                
+        from typing import Any
+    return cast(Any, DeadMansSwitch(
             storage=st,
             broker=br,
-            symbol=sym,
+            symbol=settings.SYMBOLS[0],
             timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=dms_bus,  # Передаем None если не AsyncEventBus
+            bus=bus,  # Передаем None если не AsyncEventBus
         )
 
     for sym in symbols:
         orchs[sym] = Orchestrator(
-            symbol=sym,
+            symbol=settings.SYMBOLS[0],
             storage=st,
             broker=br,
             bus=bus,

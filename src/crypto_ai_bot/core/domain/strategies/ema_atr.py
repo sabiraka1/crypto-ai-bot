@@ -1,6 +1,6 @@
-from typing import Any
 from __future__ import annotations
-
+from typing import Any
+﻿
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal

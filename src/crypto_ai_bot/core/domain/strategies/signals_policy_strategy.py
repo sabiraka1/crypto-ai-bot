@@ -1,5 +1,6 @@
-from typing import Any, Callable
 from __future__ import annotations
+from typing import Any, Callable
+﻿from __future__ import annotations
 
 from .base import BaseStrategy, MarketData, StrategyContext, Decision  # Добавлен Decision
 
@@ -12,7 +13,6 @@ except Exception:  # если кто-то удалил подсистему
     SignalsPolicy = None  # type: ignore
     fuse_signals = None   # type: ignore
     build_signals = None  # type: ignore
-
 
 class SignalsPolicyStrategy(BaseStrategy):
     """
