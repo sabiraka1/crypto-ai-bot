@@ -22,19 +22,45 @@ class OrdersRepository:
             " ts_ms INTEGER NOT NULL"
             ")"
         )
+        # базовые индексы
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
         self.conn.commit()
 
+    def _exists_by_broker_id(self, broker_order_id: str | None) -> bool:
+        if not broker_order_id:
+            return False
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM orders WHERE broker_order_id = ? LIMIT 1", (broker_order_id,))
+        return cur.fetchone() is not None
+
+    def _exists_by_client_id(self, client_order_id: str | None) -> bool:
+        if not client_order_id:
+            return False
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM orders WHERE client_order_id = ? LIMIT 1", (client_order_id,))
+        return cur.fetchone() is not None
+
     def upsert_open(self, order: Any) -> None:
+        """
+        Безопасная вставка открытого ордера.
+        Если запись с таким broker_order_id или client_order_id уже есть — пропускаем.
+        (Не требует миграции с UNIQUE, не ломает существующие БД.)
+        """
         self.ensure_schema()
+        broker_id = getattr(order, "id", None) or getattr(order, "order_id", None)
+        client_id = getattr(order, "client_order_id", None)
+
+        if self._exists_by_broker_id(broker_id) or self._exists_by_client_id(client_id):
+            return
+
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO orders (broker_order_id, client_order_id, symbol, side, amount, filled, status, ts_ms) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                getattr(order, "id", None) or getattr(order, "order_id", None),
-                getattr(order, "client_order_id", None),
+                broker_id,
+                client_id,
                 getattr(order, "symbol", None),
                 getattr(order, "side", None),
                 str(getattr(order, "amount", "0")),
@@ -45,7 +71,7 @@ class OrdersRepository:
         )
         self.conn.commit()
 
-    def list_open(self, symbol: str) -> list[dict]:
+    def list_open(self, symbol: str) -> list[dict[str, Any]]:
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -54,11 +80,18 @@ class OrdersRepository:
             (symbol,),
         )
         rows = cur.fetchall() or []
-        # If sqlite3.Row, convert to dict
-        return [dict(r) if hasattr(r, "keys") else {
-            "id": r[0], "broker_order_id": r[1], "client_order_id": r[2], "symbol": r[3], "side": r[4],
-            "amount": r[5], "filled": r[6], "status": r[7], "ts_ms": r[8]
-        } for r in rows]
+        # sqlite3.Row -> dict
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            if hasattr(r, "keys"):
+                result.append(dict(r))  # type: ignore[arg-type]
+            else:
+                result.append({
+                    "id": r[0], "broker_order_id": r[1], "client_order_id": r[2],
+                    "symbol": r[3], "side": r[4], "amount": r[5], "filled": r[6],
+                    "status": r[7], "ts_ms": r[8]
+                })
+        return result
 
     def mark_closed(self, broker_order_id: str, filled: str) -> None:
         self.ensure_schema()
