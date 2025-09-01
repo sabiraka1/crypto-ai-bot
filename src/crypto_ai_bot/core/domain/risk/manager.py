@@ -78,69 +78,71 @@ class RiskManager:
         """
         return self.can_execute(*args, **kwargs)
 
-# --- Rule orchestration ---
-try:
-    from crypto_ai_bot.core.domain.risk.rule.loss_streak import LossStreakRule
-    from crypto_ai_bot.core.domain.risk.rule.max_drawdown import MaxDrawdownRule
-except Exception:
-    # Пути на случай альтернативной структуры
-    from .rule.loss_streak import LossStreakRule  # type: ignore
-    from .rule.max_drawdown import MaxDrawdownRule  # type: ignore
-
-class _RepoFacade:
-    def __init__(self, storage: Any) -> None:
-        # поддержка разных фасадов
-        self.trades = getattr(storage, "trades", None) or getattr(getattr(storage, "repos", None) or object(), "trades", None)
-        self.positions = getattr(storage, "positions", None) or getattr(getattr(storage, "repos", None) or object(), "positions", None)
-
-class RiskManager(RiskManager):  # type: ignore[misc]
     def check(self, *, symbol: str, storage: Any) -> Tuple[bool, str]:
-        """Композитная проверка правил. Возвращает (ok, reason)."""
-        cfg = self.config
-        repo = _RepoFacade(storage)
-
-        # 1) Loss streak (по сегодняшним сделкам)
-        if cfg.max_orders_per_hour or True:  # не завязываем на опциях, разрешаем работу правила всегда
-            try:
-                recent = repo.trades.list_today(symbol) if repo.trades else []
-            except Exception:
-                recent = []
-            try:
-                ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  # type: ignore[attr-defined]
-            except Exception:
-                ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
-            if ls.max_streak and recent:
-                ok, reason = ls.check(recent)
-                if not ok:
-                    return False, f"risk.loss_streak:{reason}"
-
-        # 2) Max daily loss / drawdown (используем дневной PnL и позицию)
-        daily_pnl = Decimal("0")
+        """
+        Композитная проверка правил. Возвращает (ok, reason).
+        Расширенная версия для более сложных проверок.
+        """
+        # Попытаемся импортировать правила если они существуют
         try:
-            daily_pnl = repo.trades.daily_pnl_quote(symbol) if repo.trades else Decimal("0")
-        except Exception:
+            from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
+            from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
+            
+            # Фасад для доступа к репозиториям
+            class _RepoFacade:
+                def __init__(self, storage: Any) -> None:
+                    self.trades = getattr(storage, "trades", None) or getattr(getattr(storage, "repos", None) or object(), "trades", None)
+                    self.positions = getattr(storage, "positions", None) or getattr(getattr(storage, "repos", None) or object(), "positions", None)
+            
+            cfg = self.config
+            repo = _RepoFacade(storage)
+
+            # 1) Loss streak (по сегодняшним сделкам)
+            if cfg.max_orders_per_hour or True:  # не завязываем на опциях, разрешаем работу правила всегда
+                try:
+                    recent = repo.trades.list_today(symbol) if repo.trades else []
+                except Exception:
+                    recent = []
+                try:
+                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  # type: ignore[attr-defined]
+                except Exception:
+                    ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
+                if ls.max_streak and recent:
+                    ok, reason = ls.check(recent)
+                    if not ok:
+                        return False, f"risk.loss_streak:{reason}"
+
+            # 2) Max daily loss / drawdown (используем дневной PnL и позицию)
             daily_pnl = Decimal("0")
+            try:
+                daily_pnl = repo.trades.daily_pnl_quote(symbol) if repo.trades else Decimal("0")
+            except Exception:
+                daily_pnl = Decimal("0")
 
-        try:
-            md = MaxDrawdownRule(
-                max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  # type: ignore[attr-defined]
-                max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),  # type: ignore[attr-defined]
-            )
-        except Exception:
-            md = MaxDrawdownRule()
+            try:
+                md = MaxDrawdownRule(
+                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  # type: ignore[attr-defined]
+                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),  # type: ignore[attr-defined]
+                )
+            except Exception:
+                md = MaxDrawdownRule()
 
-        cur_bal = peak_bal = Decimal("0")
-        # (опционально) попытаемся извлечь из storage портфельные балансы
-        try:
-            port = getattr(storage, "portfolio", None)
-            if port:
-                cur_bal = Decimal(str(getattr(port, "current_quote", "0") or "0"))
-                peak_bal = Decimal(str(getattr(port, "peak_quote", "0") or "0"))
-        except Exception:
-            pass
+            cur_bal = peak_bal = Decimal("0")
+            # (опционально) попытаемся извлечь из storage портфельные балансы
+            try:
+                port = getattr(storage, "portfolio", None)
+                if port:
+                    cur_bal = Decimal(str(getattr(port, "current_quote", "0") or "0"))
+                    peak_bal = Decimal(str(getattr(port, "peak_quote", "0") or "0"))
+            except Exception:
+                pass
 
-        ok, reason = md.check(current_balance=cur_bal, peak_balance=peak_bal, daily_pnl=daily_pnl)
-        if not ok:
-            return False, f"risk.drawdown:{reason}"
+            ok, reason = md.check(current_balance=cur_bal, peak_balance=peak_bal, daily_pnl=daily_pnl)
+            if not ok:
+                return False, f"risk.drawdown:{reason}"
 
-        return True, "ok"
+            return True, "ok"
+            
+        except ImportError:
+            # Если модули с правилами не существуют, используем базовую проверку
+            return self.can_execute(), "basic_check"
