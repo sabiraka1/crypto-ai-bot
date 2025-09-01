@@ -14,9 +14,9 @@ from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort,
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
-from crypto_ai_bot.core.infrastructure.macro.dxy_http import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.btc_dom_http import BtcDomHttp
-from crypto_ai_bot.core.infrastructure.macro.fomc_http import FomcHttp
+from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp
+from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
