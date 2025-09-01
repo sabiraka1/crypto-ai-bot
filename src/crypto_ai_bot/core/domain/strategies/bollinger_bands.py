@@ -19,7 +19,7 @@ class BollingerBandsStrategy(BaseStrategy):
         self._prices: deque[Decimal] = deque(maxlen=self.period)
 
     def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
-        price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
+        price = dec(str(getattr(ctx, 'data', {}).get("ticker", {}).get("last", "0")))
         self._prices.append(price)
 
         if len(self._prices) < self.period:

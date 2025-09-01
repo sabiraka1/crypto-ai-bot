@@ -68,7 +68,7 @@ class EmaCrossStrategy(BaseStrategy):
         return True, "ok"
 
     def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
-        d = ctx.data
+        d = getattr(ctx, 'data', {})
         last = dec(d.get("ticker", {}).get("last", "0"))
         explain: dict[str, Any] = {
             "strategy": "ema_cross",

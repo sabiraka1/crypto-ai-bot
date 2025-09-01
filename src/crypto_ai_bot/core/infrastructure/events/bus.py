@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Awaitable, Callable, TypedDict
 
 import asyncio
 from collections import defaultdict
@@ -8,20 +9,20 @@ from typing import Any
 
 # Мягкая интеграция с метриками (без обязательной зависимости)
 try:
-    from crypto_ai_bot.utils.metrics import inc  # type: ignore
+    from crypto_ai_bot.utils.metrics import inc  
 except Exception:  # pragma: no cover
     def inc(name: str, **labels: Any) -> None:  # Исправлено: убрали подчеркивания
         pass
 
 try:
-    from crypto_ai_bot.utils.time import now_ms  # type: ignore
+    from crypto_ai_bot.utils.time import now_ms  
 except Exception:  # pragma: no cover
     import time
     def now_ms() -> int:
         return int(time.time() * 1000)
 
 try:
-    from crypto_ai_bot.utils.logging import get_logger  # type: ignore
+    from crypto_ai_bot.utils.logging import get_logger  
 except Exception:  # pragma: no cover
     import logging
     def get_logger(name: str, *, level: int = 20) -> logging.Logger:  # Исправлено: добавили параметр level
@@ -47,6 +48,10 @@ class Event:
     key: str | None = None
     ts_ms: int = 0
 
+
+class Event(TypedDict, total=False):
+    topic: str
+    payload: dict[str, Any]
 
 class AsyncEventBus:
     """
@@ -109,7 +114,7 @@ class AsyncEventBus:
             delay_ms = self.backoff_base_ms
             while True:
                 try:
-                    await h(payload)
+                    await h({'topic': topic, 'payload': payload})
                     delivered += 1
                     inc("bus_handler_ok_total", topic=topic, handler=getattr(h, "__name__", "handler"))
                     break

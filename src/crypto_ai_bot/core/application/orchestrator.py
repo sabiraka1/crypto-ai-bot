@@ -21,7 +21,7 @@ class LoopSpec:
     interval_sec: float
     enabled: bool
     runner: LoopFn
-    task: asyncio.Task | None = None
+    task: asyncio.Task[None] | None = None
     paused: bool = False
 
 

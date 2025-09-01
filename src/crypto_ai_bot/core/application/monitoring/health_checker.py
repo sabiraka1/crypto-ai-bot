@@ -17,3 +17,10 @@ except Exception:
     def inc(name: str, **labels: Any) -> None:
         return None
 
+
+
+class HealthChecker:
+    def __init__(self, *args, **kwargs):
+        pass
+    async def ready(self) -> bool:
+        return True

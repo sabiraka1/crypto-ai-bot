@@ -44,7 +44,7 @@ class PartialFillHandler:
                 "follow_client_order_id": follow.client_order_id,
             }, key=self._symbol_from(order))
             inc("partial_followup_total", symbol=self._symbol_from(order), side=order.side)
-            return follow
+            return follow  # type: ignore[return-value]
         except Exception as exc:
             _log.error("partial_followup_failed", extra={"error": str(exc)})
             inc("partial_followup_errors_total")

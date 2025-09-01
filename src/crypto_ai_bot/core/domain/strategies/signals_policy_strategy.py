@@ -1,3 +1,4 @@
+from typing import Any, Callable
 ﻿from __future__ import annotations
 
 from .base import BaseStrategy, MarketData, StrategyContext, Decision  # Добавлен Decision
@@ -26,7 +27,7 @@ class SignalsPolicyStrategy(BaseStrategy):
         self.score = 1.0  # для weighted-режима менеджера
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        if not (SignalsPolicy and fuse_signals and build_signals):
+        if SignalsPolicy is None or fuse_signals is None or build_signals is None:
             return Decision(action="hold", reason="signals_subsystem_unavailable")
 
         # Упрощенная реализация без build_signals (так как он требует другие параметры)
@@ -41,6 +42,6 @@ class SignalsPolicyStrategy(BaseStrategy):
 
         # Применяем политику
         policy = SignalsPolicy()
-        decision, score, explain = policy.decide(features)
+        decision, score, explain = policy(features) if callable(policy) else policy.decide(features)
 
         return Decision(action=decision, confidence=score, reason=str(explain or ""))

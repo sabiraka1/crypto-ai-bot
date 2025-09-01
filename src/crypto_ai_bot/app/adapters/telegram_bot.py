@@ -1,4 +1,12 @@
+def __getv(d: Any) -> Callable[[str], Any]:
+    def _inner(k: str) -> Any:
+        if isinstance(d, dict):
+            return d.get(k)
+        return getattr(d, k, None)
+    return _inner
+
 from __future__ import annotations
+from typing import Callable, Dict
 
 import asyncio
 import html
@@ -98,7 +106,7 @@ class TelegramBotCommands:
             if resp.status_code != 200:
                 _log.warning("tg_get_updates_non_200", extra={"status": resp.status_code})
                 return {"ok": False, "result": []}
-            return resp.json()
+            j = resp.json(); return dict(j) if isinstance(j, dict) else {}
         except Exception:
             _log.error("tg_get_updates_failed", exc_info=True)
             return {"ok": False, "result": []}
@@ -250,15 +258,15 @@ class TelegramBotCommands:
         st = getattr(self._container, "storage", None)
         cfg = getattr(getattr(self._container, "risk", None), "config", None)
         try:
-            if st and hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
-                tq = st.trades.daily_turnover_quote(symbol)
+            if st and hasattr(st, "trades") and hasattr(getattr(st, 'trades', None), "daily_turnover_quote"):
+                tq = getattr(st, 'trades', None).daily_turnover_quote(symbol)
                 parts.append(f"turnover_today: <code>{tq}</code>")
         except Exception:
             _log.error("risk_calc_turnover_failed", exc_info=True)
 
         try:
-            if cfg and getattr(cfg, "max_orders_per_hour", 0) and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
-                cnt = st.trades.count_orders_last_minutes(symbol, 60)
+            if cfg and getattr(cfg, "max_orders_per_hour", 0) and hasattr(st, "trades") and hasattr(getattr(st, 'trades', None), "count_orders_last_minutes"):
+                cnt = getattr(st, 'trades', None).count_orders_last_minutes(symbol, 60)
                 mx = getattr(cfg, "max_orders_per_hour", 0)
                 parts.append(f"orders_60m: <code>{cnt}/{mx}</code>")
         except Exception:
@@ -275,8 +283,8 @@ class TelegramBotCommands:
         try:
             b = await broker.fetch_balance()
             getv = lambda cur: b.get(cur, {}) if isinstance(b, dict) else getattr(b, cur.lower(), {})
-            base_free = getv(base).get("free") or getv(base).get("total") or "0"
-            quote_free = getv(quote).get("free") or getv(quote).get("total") or "0"
+            base_free = _getv(base).get("free") or _getv(base).get("total") or "0"
+            quote_free = _getv(quote).get("free") or _getv(quote).get("total") or "0"
             await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:
@@ -309,12 +317,12 @@ class TelegramBotCommands:
             return
         try:
             parts = [f"📅 <b>Сегодня</b> <code>{html.escape(symbol)}</code>"]
-            if hasattr(st.trades, "daily_turnover_quote"):
-                t = st.trades.daily_turnover_quote(symbol)
+            if hasattr(getattr(st, 'trades', None), "daily_turnover_quote"):
+                t = getattr(st, 'trades', None).daily_turnover_quote(symbol)
                 parts.append(f"turnover_quote: <code>{t}</code>")
-            if hasattr(st.trades, "count_orders_last_minutes"):
-                c60 = st.trades.count_orders_last_minutes(symbol, 60)
-                c5 = st.trades.count_orders_last_minutes(symbol, 5)
+            if hasattr(getattr(st, 'trades', None), "count_orders_last_minutes"):
+                c60 = getattr(st, 'trades', None).count_orders_last_minutes(symbol, 60)
+                c5 = getattr(st, 'trades', None).count_orders_last_minutes(symbol, 5)
                 parts.append(f"orders_60m: <code>{c60}</code> | 5m: <code>{c5}</code>")
             await self._reply(chat_id, "\n".join(parts))
         except Exception:
@@ -324,8 +332,8 @@ class TelegramBotCommands:
     async def _cmd_pnl(self, chat_id: int, symbol: str) -> None:
         st = getattr(self._container, "storage", None)
         try:
-            if st and hasattr(st.trades, "pnl_today_quote"):
-                v = st.trades.pnl_today_quote(symbol)
+            if st and hasattr(getattr(st, 'trades', None), "pnl_today_quote"):
+                v = getattr(st, 'trades', None).pnl_today_quote(symbol)
                 await self._reply(chat_id, f"💰 <b>PNL</b> сегодня <code>{html.escape(symbol)}</code>: <code>{v}</code>")
                 return
         except Exception:

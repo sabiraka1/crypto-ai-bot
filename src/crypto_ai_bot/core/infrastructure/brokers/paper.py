@@ -17,7 +17,7 @@ class PaperBroker:
     """Простой симулятор PAPER; не тянет application, нормализация из utils.symbols."""
     settings: Any
 
-    async def fetch_ticker(self, symbol: str) -> dict:
+    async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         symbol = canonical(symbol)
         px = dec(str(getattr(self.settings, "PAPER_PRICE", "60000") or "60000"))
         delta = px * dec("0.0005")
@@ -27,7 +27,7 @@ class PaperBroker:
         ask = last + spread / 2
         return {"symbol": symbol, "last": last, "bid": bid, "ask": ask}
 
-    async def fetch_balance(self, symbol: str) -> dict:
+    async def fetch_balance(self, symbol: str) -> dict[str, Any]:
         symbol = canonical(symbol)
         free_base = dec(str(getattr(self.settings, "PAPER_FREE_BASE", "0") or "0"))
         free_quote = dec(str(getattr(self.settings, "PAPER_FREE_QUOTE", "100000") or "100000"))

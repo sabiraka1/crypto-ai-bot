@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import cast
 
 import asyncio
 import os
@@ -45,7 +46,7 @@ class Container:
     exits: ProtectiveExits
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
-    tg_bot_task: asyncio.Task | None = None
+    tg_bot_task: asyncio.Task[None] | None = None
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -85,9 +86,7 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
-    bus.publish = _publish  # type: ignore[attr-defined]
-
-def attach_alerts(bus: Any, settings: Settings) -> None:
+    setattr(bus, 'publish', _publish)def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
         bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
         chat_id=getattr(settings, "TELEGRAM_CHAT_ID", ""),
@@ -218,7 +217,8 @@ async def build_container_async() -> Container:
         if isinstance(bus, AsyncEventBus):
             dms_bus = bus
         
-        return DeadMansSwitch(
+        from typing import Any
+    return cast(Any, DeadMansSwitch(
             storage=st,
             broker=br,
             symbol=sym,
@@ -258,7 +258,7 @@ async def build_container_async() -> Container:
             bus.on("trade.completed", _on_trade_completed_hint)  # type: ignore[arg-type]
 
     # ---- Командный Telegram-бот ----
-    tg_task: asyncio.Task | None = None
+    tg_task: asyncio.Task[None] | None = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
         users: list[int] = []

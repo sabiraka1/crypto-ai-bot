@@ -23,7 +23,7 @@ def backup_db(db_path: str, out_dir: str | None = None, retention_days: int = 30
     src = sqlite3.connect(db_path)
     dst = sqlite3.connect(out_path)
     with dst:
-        src.backup(dst)  # type: ignore[attr-defined]
+        src.backup(dst)  
     src.close()
     dst.close()
 

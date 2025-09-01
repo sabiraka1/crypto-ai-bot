@@ -59,13 +59,13 @@ async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> Mark
             std = dec(str(math.sqrt(float(var))))
             vol_pct = std * dec("100")
 
-    return MarketData(
+    return {
         last_price=last,
         bid=bid,
         ask=ask,
         spread_pct=spread_pct,
         volatility_pct=vol_pct,
-        samples=len(closes),
+        samples=len(closes},
         timeframe=timeframe,
     )
 
@@ -79,7 +79,7 @@ async def eval_and_execute(
     risk: Any,
     exits: Any,
     settings: Any,
-) -> dict:
+) -> dict[str, Any]:
     try:
         md = await _build_market_data(symbol=symbol, broker=broker, settings=settings)
 
@@ -91,7 +91,7 @@ async def eval_and_execute(
             except Exception:
                 _log.warning("regime_detector_failed", exc_info=True)
 
-        ctx = StrategyContext(mode=str(getattr(settings, "MODE", "paper") or "paper"), now_ms=None)
+        ctx = StrategyContext(str(getattr(settings, "MODE", "paper") or "paper"), timestamp_ms=None)
         manager = StrategyManager(settings=settings, regime_provider=lambda: regime)
         decision, explain = await manager.decide(ctx=ctx, md=md)
 

@@ -1,3 +1,4 @@
+from typing import Any
 ﻿from __future__ import annotations
 
 from collections.abc import Sequence
@@ -23,7 +24,7 @@ def _ema(values: list[Decimal], period: int) -> list[Decimal]:
     return out
 
 
-def _atr(ohlcv: Sequence[tuple], period: int) -> Decimal:
+def _atr(ohlcv: Sequence[tuple[Any, ...]], period: int) -> Decimal:
     # ohlcv: [ (ts, o,h,l,c,v), ... ]
     if len(ohlcv) < max(2, period + 1):
         return dec("0")

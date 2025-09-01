@@ -12,7 +12,7 @@ class EventBusPort(Protocol):
     """Единый контракт для шины событий во всей системе."""
 
     async def publish(self, topic: str, payload: dict[str, Any], key: str | None = None) -> None: ...
-    def on(self, topic: str, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> None: ...
+    def on(self, topic: str, handler: Callable[[Event], Awaitable[None]]) -> None: ...
     async def start(self) -> None: ...
     async def close(self) -> None: ...
 
@@ -37,7 +37,7 @@ class UnifiedEventBus(EventBusPort):
         # RedisEventBus уже возвращает None
         await self._impl.publish(topic, payload, key=key)
 
-    def on(self, topic: str, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+    def on(self, topic: str, handler: Callable[[Event], Awaitable[None]]) -> None:
         if self._is_async:
             async def _wrap(evt: Event) -> None:
                 data: dict[str, Any] = {

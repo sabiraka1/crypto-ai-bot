@@ -48,7 +48,7 @@ class RSIMomentumStrategy(BaseStrategy):
         return ((cur - past) / past) * dec("100")
 
     def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
-        price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
+        price = dec(str(getattr(ctx, 'data', {}).get("ticker", {}).get("last", "0")))
         if price <= 0:
             return "hold", {"reason": "no_price"}
 
