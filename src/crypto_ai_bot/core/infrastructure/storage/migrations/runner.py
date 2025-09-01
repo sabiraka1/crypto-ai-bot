@@ -210,10 +210,9 @@ def _v11(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
-migs.append(PyMigration(11, "positions_schema_extend", _v11))
+ migs.append(PyMigration(11, "positions_schema_extend", _v11))
 
-    return migs
-
+ return migs
 
 # -------------------------
 # Публичный раннер

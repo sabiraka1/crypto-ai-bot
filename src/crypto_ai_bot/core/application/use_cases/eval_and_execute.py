@@ -1,10 +1,9 @@
-﻿rom __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.domain.macro.regime_detector import RegimeConfig, RegimeDetector  # Исправлен путь
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
 from crypto_ai_bot.core.domain.strategies import MarketData, StrategyContext, StrategyManager
 from crypto_ai_bot.core.domain.strategies.position_sizing import (
@@ -14,27 +13,11 @@ from crypto_ai_bot.core.domain.strategies.position_sizing import (
     kelly_sized_quote,
     volatility_target_size,
 )
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено
-from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("usecase.eval_and_execute")
-
-
-async def _http_get_json_factory(settings: Any):
-    try:
-        from crypto_ai_bot.utils.http_client import HttpClient
-        client = HttpClient(timeout=float(getattr(settings, "HTTP_TIMEOUT", 5.0) or 5.0))
-        async def _get(url: str):
-            return await client.get_json(url)
-        return _get
-    except Exception:
-        async def _missing(_url: str):
-            raise RuntimeError("no_http_client")
-        return _missing
 
 
 async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> MarketData:
@@ -100,23 +83,16 @@ async def eval_and_execute(
     try:
         md = await _build_market_data(symbol=symbol, broker=broker, settings=settings)
 
-        # Regime detector (мягко)
-        http_get_json = await _http_get_json_factory(settings)
-        dxy = DxyHttp(getattr(settings, "DXY_SOURCE_URL", None)) if getattr(settings, "DXY_SOURCE_URL", None) else None
-        btd = BtcDominanceHttp(getattr(settings, "BTC_DOM_SOURCE_URL", None)) if getattr(settings, "BTC_DOM_SOURCE_URL", None) else None  # Исправлено
-        fomc = FomcHttp(getattr(settings, "FOMC_CALENDAR_URL", None)) if getattr(settings, "FOMC_CALENDAR_URL", None) else None
-        cfg = RegimeConfig(
-            dxy_up_pct=float(getattr(settings, "REGIME_DXY_UP_PCT", 0.5) or 0.5),
-            dxy_down_pct=float(getattr(settings, "REGIME_DXY_DOWN_PCT", -0.2) or -0.2),
-            btc_dom_up_pct=float(getattr(settings, "REGIME_BTC_DOM_UP_PCT", 0.5) or 0.5),
-            btc_dom_down_pct=float(getattr(settings, "REGIME_BTC_DOM_DOWN_PCT", -0.5) or -0.5),
-            fomc_block_minutes=int(getattr(settings, "REGIME_FOMC_BLOCK_MIN", 60) or 60),
-        )
-        detector = RegimeDetector(dxy_source=dxy, btc_dom_source=btd, fomc_source=fomc, cfg=cfg)
-        regime = await detector.regime()
+        # Получаем regime из GatedBroker если он есть
+        regime = "neutral"  # default
+        if hasattr(broker, "_regime") and broker._regime:
+            try:
+                regime = await broker._regime.regime()
+            except Exception:
+                _log.warning("regime_detector_failed", exc_info=True)
 
         ctx = StrategyContext(mode=str(getattr(settings, "MODE", "paper") or "paper"), now_ms=None)
-        manager = StrategyManager(settings=settings, regime_provider=lambda r=regime: r)
+        manager = StrategyManager(settings=settings, regime_provider=lambda: regime)
         decision, explain = await manager.decide(ctx=ctx, md=md)
 
         if decision not in ("buy", "sell"):
@@ -124,7 +100,6 @@ async def eval_and_execute(
             return {"ok": True, "action": "hold", "reason": explain, "regime": regime}
 
         # ----------------- Position sizing -----------------
-        # читаем свободный баланс в котируемой
         quote_balance: Decimal = dec("0")
         try:
             bal = await broker.fetch_balance()
@@ -176,18 +151,19 @@ async def eval_and_execute(
                     constraints=constraints,
                 )
 
-# ----------------- Risk check -----------------
-try:
-    ok_risk, risk_reason = (risk.check(symbol=symbol, storage=storage)
-                            if hasattr(risk, "check")
-                            else (risk.can_execute(), "legacy_risk"))
-except Exception:
-    ok_risk, risk_reason = False, "risk_exception"
-if not ok_risk:
-    inc("risk_block_total", symbol=symbol, reason=str(risk_reason))
-    return {"ok": True, "action": "hold", "reason": f"risk:{risk_reason}", "regime": regime}
+        # ----------------- Risk check -----------------
+        try:
+            ok_risk, risk_reason = (risk.check(symbol=symbol, storage=storage)
+                                    if hasattr(risk, "check")
+                                    else (risk.can_execute(), "legacy_risk"))
+        except Exception:
+            ok_risk, risk_reason = False, "risk_exception"
+        
+        if not ok_risk:
+            inc("risk_block_total", symbol=symbol, reason=str(risk_reason))
+            return {"ok": True, "action": "hold", "reason": f"risk:{risk_reason}", "regime": regime}
 
-# ----------------- Execute trade -----------------
+        # ----------------- Execute trade -----------------
         res = await execute_trade(
             symbol=symbol,
             side=decision,
