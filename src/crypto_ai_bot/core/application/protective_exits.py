@@ -89,3 +89,7 @@ class ProtectiveExits:
 # Фабрика (на случай, если где-то вызывается именно функция)
 def make_protective_exits(*, broker: Any, storage: Any, bus: Any, settings: Any) -> ProtectiveExits:
     return ProtectiveExits(broker=broker, storage=storage, bus=bus, settings=settings)
+
+# ✅ Совместимость: orchestrator вызывает exits.tick(symbol)
+async def tick(self, symbol: str) -> dict | None:
+    return await self.evaluate(symbol=symbol)

@@ -175,3 +175,21 @@ class TradesRepository:
 
     def daily_pnl_quote(self, symbol: str) -> Decimal:
         return self.realized_pnl_day_quote(symbol)
+
+
+def count_orders_today(self, symbol: str) -> int:
+    ts_from, ts_to = _today_bounds_utc()
+    cur = self.conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) AS cnt FROM trades WHERE symbol = ? AND ts_ms BETWEEN ? AND ?",
+        (symbol, ts_from, ts_to),
+    )
+    row = cur.fetchone()
+    try:
+        return int(row["cnt"] if row is not None else 0)
+    except Exception:
+        return int(row[0] if row is not None else 0)
+
+# ✅ Совместимость с HTTP/TG API
+def pnl_today_quote(self, symbol: str) -> Decimal:
+    return self.daily_pnl_quote(symbol)

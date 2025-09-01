@@ -168,6 +168,50 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(10, "audit_ts_idx", _v10))
 
+    
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table});")
+    return any(row[1] == column for row in cur.fetchall())
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if not _column_exists(conn, table, column):
+        with conn:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl};")
+
+def _rename_column_if_exists(conn: sqlite3.Connection, table: str, old: str, new: str) -> None:
+    # SQLite нет IF EXISTS для rename колонок — обойдёмся копированием данных на уровне UPDATE
+    pass  # используем UPDATE-перенос ниже
+
+
+
+# V0011 — расширение схемы для совместимости с репозиториями
+def _v11(conn: sqlite3.Connection) -> None:
+    # trades: добавить недостающие колонки
+    _add_column_if_missing(conn, "trades", "broker_order_id", "TEXT")
+    _add_column_if_missing(conn, "trades", "filled", "TEXT")
+
+    # positions: добавить новые поля
+    _add_column_if_missing(conn, "positions", "avg_entry_price", "TEXT NOT NULL DEFAULT '0'")
+    _add_column_if_missing(conn, "positions", "realized_pnl", "TEXT NOT NULL DEFAULT '0'")
+    _add_column_if_missing(conn, "positions", "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'")
+    _add_column_if_missing(conn, "positions", "updated_ts_ms", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "positions", "version", "INTEGER NOT NULL DEFAULT 0")
+
+    # совместимость имён: перенести avg_price -> avg_entry_price; updated_ms -> updated_ts_ms
+    try:
+        with conn:
+            conn.execute("UPDATE positions SET avg_entry_price = COALESCE(avg_entry_price, avg_price, '0')")
+    except Exception:
+        pass
+    try:
+        with conn:
+            conn.execute("UPDATE positions SET updated_ts_ms = COALESCE(updated_ts_ms, updated_ms, 0)")
+    except Exception:
+        pass
+
+migs.append(PyMigration(11, "positions_schema_extend", _v11))
+
     return migs
 
 
