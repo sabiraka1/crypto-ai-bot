@@ -35,6 +35,7 @@ from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("compose")
 
+
 @dataclass
 class Container:
     settings: Settings
@@ -46,6 +47,7 @@ class Container:
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
     tg_bot_task: asyncio.Task | None = None
+
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH
@@ -66,10 +68,16 @@ def _open_storage(settings: Settings) -> Storage:
     )
     return Storage.from_connection(conn)
 
+
 def _build_event_bus(settings: Settings) -> EventBusPort:
+    """
+    Создаём реализацию шины, затем оборачиваем её в UnifiedEventBus,
+    чтобы снаружи всегда был единый API (publish(dict)/on(dict-handler)).
+    """
     redis_url = str(getattr(settings, "EVENT_BUS_URL", "") or "").strip()
     impl = RedisEventBus(redis_url) if redis_url else AsyncEventBus()
     return UnifiedEventBus(impl)
+
 
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
     """Мягко оборачиваем publish ретраями и гистограммой, не меняя интерфейса."""
@@ -79,13 +87,16 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
 
     async def _publish(topic: str, payload: dict[str, Any]) -> None:
         t = hist("bus_publish_latency_seconds", topic=topic)
+
         async def call() -> Any:
             with t.time():
                 return await _orig(topic, payload)
+
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
     bus.publish = _publish  # type: ignore[attr-defined]
+
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -194,9 +205,12 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
 
     _log.info("telegram_alerts_enabled")
 
+
 async def build_container_async() -> Container:
     s = Settings.load()
     st = _open_storage(s)
+
+    # Шина событий (единообразный интерфейс через адаптер)
     bus = _build_event_bus(s)
     if hasattr(bus, "start"):
         await bus.start()
@@ -204,66 +218,54 @@ async def build_container_async() -> Container:
     # обёртка publish ретраями + метрики
     _wrap_bus_publish_with_metrics_and_retry(bus)
 
-    br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
+    # Создаём базовый broker
+    base_broker = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
+    br: BrokerPort = base_broker  # По умолчанию используем базовый
 
-# ---- Macro Regime (DXY/BTC.D/FOMC) wiring ----
-try:
-    from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp
-    from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp
-    from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp
-    from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig
-    from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker
+    # ---- Macro Regime (DXY/BTC.D/FOMC) wiring ----
+    try:
+        regime_enabled = bool(getattr(s, "REGIME_ENABLED", False))
+        regime_block_buy = bool(getattr(s, "REGIME_BLOCK_BUY", True))
 
-    env = os.getenv
-    def _b(s: str, default: str = "0") -> bool:
-        v = (env(s, default) or "").strip().lower()
-        return v in ("1", "true", "yes", "on")
-    def _f(s: str, default: str) -> float:
-        try:
-            return float(env(s, default))
-        except Exception:
-            return float(default)
+        dxy_url = str(getattr(s, "DXY_SOURCE_URL", "") or "")
+        btc_url = str(getattr(s, "BTC_DOM_SOURCE_URL", "") or "")
+        fomc_url = str(getattr(s, "FOMC_CALENDAR_URL", "") or "")
 
-    regime_enabled = _b("REGIME_ENABLED", "0")
-    regime_block_buy = _b("REGIME_BLOCK_BUY", "1")
+        dxy = DxyHttp(dxy_url) if dxy_url else None
+        btc_dom = BtcDominanceHttp(btc_url) if btc_url else None
+        fomc = FomcHttp(fomc_url) if fomc_url else None
 
-    dxy_url = (env("DXY_SOURCE_URL", "") or "").strip()
-    btc_dom_url = (env("BTC_DOM_SOURCE_URL", "") or "").strip()
-    fomc_url = (env("FOMC_CALENDAR_URL", "") or "").strip()
+        cfg = RegimeConfig(
+            dxy_up_pct=float(getattr(s, "REGIME_DXY_UP_PCT", 0.5) or 0.5),
+            dxy_down_pct=float(getattr(s, "REGIME_DXY_DOWN_PCT", -0.2) or -0.2),
+            btc_dom_up_pct=float(getattr(s, "REGIME_BTC_DOM_UP_PCT", 0.5) or 0.5),
+            btc_dom_down_pct=float(getattr(s, "REGIME_BTC_DOM_DOWN_PCT", -0.5) or -0.5),
+            fomc_block_minutes=int(getattr(s, "REGIME_FOMC_BLOCK_MIN", 60) or 60),
+        )
 
-    dxy = DxyHttp(dxy_url) if dxy_url else None
-    btc_dom = BtcDominanceHttp(btc_dom_url) if btc_dom_url else None
-    fomc = FomcHttp(fomc_url) if fomc_url else None
+        regime = RegimeDetector(dxy=dxy, btc_dom=btc_dom, fomc=fomc, cfg=cfg) if regime_enabled else None
+        if regime and regime_block_buy:
+            br = GatedBroker(inner=base_broker, regime=regime, allow_sells_when_off=True)
+            _log.info("regime_gated_broker_enabled")
+        else:
+            _log.info("regime_disabled_or_not_blocking")
+    except Exception:
+        _log.error("regime_wiring_failed", exc_info=True)
+        # Продолжаем с базовым broker
 
-    cfg = RegimeConfig(
-        dxy_up_pct=_f("REGIME_DXY_UP_PCT", "0.5"),
-        dxy_down_pct=_f("REGIME_DXY_DOWN_PCT", "-0.2"),
-        btc_dom_up_pct=_f("REGIME_BTC_DOM_UP_PCT", "0.5"),
-        btc_dom_down_pct=_f("REGIME_BTC_DOM_DOWN_PCT", "-0.5"),
-        fomc_block_minutes=int(env("REGIME_FOMC_BLOCK_MIN", "60") or "60"),
-    )
-
-    regime = RegimeDetector(dxy=dxy, btc_dom=btc_dom, fomc=fomc, cfg=cfg) if regime_enabled else None
-    if regime and regime_block_buy:
-        br = GatedBroker(inner=br, regime=regime, allow_sells_when_off=True)
-        _log.info("regime_gated_broker_enabled")
-    else:
-        _log.info("regime_detector_enabled" if regime else "regime_disabled")
-except Exception:
-    _log.error("regime_wiring_failed", exc_info=True)
+    # Риск/выходы/здоровье
     risk = RiskManager(RiskConfig.from_settings(s))
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
 
+    # Мульти-символ
     symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
     orchs: dict[str, Orchestrator] = {}
 
     def _make_dms(sym: str) -> SafetySwitchPort:
-        # Проверка совместимости bus для DeadMansSwitch
-        dms_bus = None
-        if isinstance(bus, AsyncEventBus):
-            dms_bus = bus
-        
+        # Проверка совместимости bus для DeadMansSwitch:
+        # Работает только с локальной AsyncEventBus; если шина не локальная — передаём None.
+        dms_bus = bus if isinstance(bus, AsyncEventBus) else None
         return DeadMansSwitch(
             storage=st,
             broker=br,
@@ -272,7 +274,7 @@ except Exception:
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=dms_bus,  # Передаем None если не AsyncEventBus
+            bus=dms_bus,  # Передаём None если не AsyncEventBus
         )
 
     for sym in symbols:
@@ -288,6 +290,7 @@ except Exception:
             dms=_make_dms(sym),  # Теперь типы совместимы
         )
 
+    # Подписки-алерты
     attach_alerts(bus, s)
 
     # ==== Hint для ProtectiveExits ====
@@ -313,9 +316,11 @@ except Exception:
                 users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
             except Exception:
                 _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
-        container_view = type("C", (), {
-            "storage": st, "broker": br, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health
-        })()
+        container_view = type(
+            "C",
+            (),
+            {"storage": st, "broker": br, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health},
+        )()
         bot = TelegramBotCommands(
             bot_token=s.TELEGRAM_BOT_TOKEN,
             allowed_users=users,
@@ -325,4 +330,14 @@ except Exception:
         tg_task = asyncio.create_task(bot.run())
         _log.info("telegram_bot_enabled")
 
-    return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
+    return Container(
+        settings=s,
+        storage=st,
+        broker=br,
+        bus=bus,
+        risk=risk,
+        exits=exits,
+        health=health,
+        orchestrators=orchs,
+        tg_bot_task=tg_task,
+    )
