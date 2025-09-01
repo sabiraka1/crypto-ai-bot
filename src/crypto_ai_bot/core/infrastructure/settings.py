@@ -37,9 +37,16 @@ class Settings:
     # Core
     MODE: str
     EXCHANGE: str
-    SYMBOLS: list[str]
+    SYMBOLS: list[str] | str  # tests sometimes pass ""
     SYMBOL: str
     DB_PATH: str
+
+    # Backups / migrations
+    BACKUP_RETENTION_DAYS: int
+
+    # Idempotency
+    IDEMPOTENCY_BUCKET_MS: int
+    IDEMPOTENCY_TTL_SEC: int
 
     # Event bus
     EVENT_BUS_URL: str
@@ -47,11 +54,12 @@ class Settings:
     # HTTP
     HTTP_TIMEOUT_SEC: int
 
-    # Intervals (sec)
-    EVALUATE_INTERVAL_SEC: int
-    EXITS_INTERVAL_SEC: int
-    RECONCILE_INTERVAL_SEC: int
-    WATCHDOG_INTERVAL_SEC: int
+    # Intervals (sec) — allow floats for fast tests
+    EVAL_INTERVAL_SEC: float  # alias used by tests
+    EVALUATE_INTERVAL_SEC: float
+    EXITS_INTERVAL_SEC: float
+    RECONCILE_INTERVAL_SEC: float
+    WATCHDOG_INTERVAL_SEC: float
     SETTLEMENT_INTERVAL_SEC: float
 
     # Safety / DMS
@@ -62,7 +70,7 @@ class Settings:
     RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal
     RISK_MAX_DRAWDOWN_PCT: float
 
-    # Strategy / trading extras (used in tests)
+    # Strategy / trading extras
     FIXED_AMOUNT: float
     PRICE_FEED: str
     FIXED_PRICE: float
@@ -104,20 +112,29 @@ class Settings:
     @classmethod
     def load(cls) -> "Settings":
         syms_raw = _get("SYMBOLS", _get("SYMBOL", "BTC/USDT"))
-        symbols = [s.strip() for s in syms_raw.split(",") if s.strip()]
-        sym = symbols[0] if symbols else "BTC/USDT"
+        # allow both list (via env "A,B") and single symbol
+        if "," in syms_raw:
+            symbols_list = [s.strip() for s in syms_raw.split(",") if s.strip()]
+        else:
+            symbols_list = [syms_raw.strip()] if syms_raw else []
+        sym = symbols_list[0] if symbols_list else "BTC/USDT"
+        eval_interval = float(_get("EVAL_INTERVAL_SEC", _get("EVALUATE_INTERVAL_SEC", "5")))
         return cls(
             MODE=_get("MODE", "paper"),
             EXCHANGE=_get("EXCHANGE", "gateio"),
-            SYMBOLS=symbols,
+            SYMBOLS=symbols_list or "",  # tests sometimes assign ""
             SYMBOL=_get("SYMBOL", sym),
-            DB_PATH=_get("DB_PATH", "./data/app.db"),
+            DB_PATH=_get("DB_PATH", ":memory:"),
+            BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
+            IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
+            IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
             EVENT_BUS_URL=_get("EVENT_BUS_URL", ""),
             HTTP_TIMEOUT_SEC=int(_get("HTTP_TIMEOUT_SEC", "30")),
-            EVALUATE_INTERVAL_SEC=int(_get("EVALUATE_INTERVAL_SEC", "5")),
-            EXITS_INTERVAL_SEC=int(_get("EXITS_INTERVAL_SEC", "5")),
-            RECONCILE_INTERVAL_SEC=int(_get("RECONCILE_INTERVAL_SEC", "60")),
-            WATCHDOG_INTERVAL_SEC=int(_get("WATCHDOG_INTERVAL_SEC", "15")),
+            EVAL_INTERVAL_SEC=eval_interval,
+            EVALUATE_INTERVAL_SEC=eval_interval,
+            EXITS_INTERVAL_SEC=float(_get("EXITS_INTERVAL_SEC", "5")),
+            RECONCILE_INTERVAL_SEC=float(_get("RECONCILE_INTERVAL_SEC", "60")),
+            WATCHDOG_INTERVAL_SEC=float(_get("WATCHDOG_INTERVAL_SEC", "15")),
             SETTLEMENT_INTERVAL_SEC=float(_get("SETTLEMENT_INTERVAL_SEC", "60")),
             DMS_TIMEOUT_MS=int(_get("DMS_TIMEOUT_MS", "120000")),
             RISK_MAX_LOSS_STREAK=int(_get("RISK_MAX_LOSS_STREAK", "2")),

@@ -103,10 +103,10 @@ def attach_alerts(bus: Any, settings: Settings) -> None:
     bus.on(TRADE_COMPLETED, handler)  # type: ignore[arg-type]
 
 
-async def _run_dms_loop(dms: DeadMansSwitch, interval_sec: int) -> None:
+async def _run_dms_loop(dms: DeadMansSwitch, interval_sec: float) -> None:
     while True:
         try:
-            await asyncio.sleep(max(1, interval_sec))
+            await asyncio.sleep(max(0.1, interval_sec))
             await dms.check()
         except asyncio.CancelledError:
             raise
@@ -123,8 +123,7 @@ async def build_container_async() -> Container:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     st = Storage.from_connection(conn)
-    # FIX: new signature requires keyword-only now_ms and db_path
-    run_migrations(st, now_ms=now_ms, db_path=str(db_path))
+    run_migrations(st, now_ms=now_ms(), db_path=str(db_path))
 
     # Instance lock (optional, if available)
     inst_lock = None
@@ -205,12 +204,12 @@ async def build_container_async() -> Container:
     health = HealthChecker(storage=st, bus=bus, broker=br)
 
     # Safety switch
-    dms: SafetySwitchPort = DeadMansSwitch(timeout_ms=s.DMS_TIMEOUT_MS, bus=bus)
+    dms: SafetySwitchPort = DeadMansSwitch(timeout_ms=s.DMS_TIMEOUT_MS, bus=bus, broker=br, symbol=(s.SYMBOL or "BTC/USDT"))
     _ = dec(str(s.RISK_DAILY_LOSS_LIMIT_QUOTE))
-    dms_task = asyncio.create_task(_run_dms_loop(dms, max(1, int(getattr(s, "WATCHDOG_INTERVAL_SEC", 15) or 15))))
+    dms_task = asyncio.create_task(_run_dms_loop(dms, float(getattr(s, "WATCHDOG_INTERVAL_SEC", 15) or 15)))
 
     # Orchestrators per symbol
-    symbols = s.SYMBOLS or [s.SYMBOL]
+    symbols = s.SYMBOLS if isinstance(s.SYMBOLS, list) else ([s.SYMBOL] if s.SYMBOL else ["BTC/USDT"])
     orchs: dict[str, Orchestrator] = {}
     for sym in symbols:
         can = canonical(sym)
@@ -221,10 +220,10 @@ async def build_container_async() -> Container:
             risk=risk,
             exits=exits,
             bus=bus,
-            evaluate_interval_sec=s.EVALUATE_INTERVAL_SEC,
-            exits_interval_sec=s.EXITS_INTERVAL_SEC,
-            reconcile_interval_sec=s.RECONCILE_INTERVAL_SEC,
-            watchdog_interval_sec=s.WATCHDOG_INTERVAL_SEC,
+            evaluate_interval_sec=float(getattr(s, "EVALUATE_INTERVAL_SEC", getattr(s, "EVAL_INTERVAL_SEC", 5))),
+            exits_interval_sec=float(s.EXITS_INTERVAL_SEC),
+            reconcile_interval_sec=float(s.RECONCILE_INTERVAL_SEC),
+            watchdog_interval_sec=float(s.WATCHDOG_INTERVAL_SEC),
         )
         orchs[can] = orch
 

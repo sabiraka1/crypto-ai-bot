@@ -29,11 +29,16 @@ class TradesRepository:
     fee_quote TEXT NOT NULL,
     ts_ms INTEGER NOT NULL
 )""")
+        # ensure broker_order_id exists even if table was created earlier without it
+        cur.execute("PRAGMA table_info(trades)")
+        cols = [r[1] for r in cur.fetchall()]
+        if "broker_order_id" not in cols:
+            cur.execute("ALTER TABLE trades ADD COLUMN broker_order_id TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts_ms)")
         self.conn.commit()
 
     def add_from_order(self, order: Any) -> None:
-        """Insert order fields expected in tests into trades table."""
+        self.ensure_schema()  # make sure latest columns exist
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO trades (broker_order_id, client_order_id, symbol, side, amount, filled, price, cost, fee_quote, ts_ms) "
