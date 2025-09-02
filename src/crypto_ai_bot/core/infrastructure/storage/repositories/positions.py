@@ -28,6 +28,28 @@ class Position:
 class PositionsRepository:
     conn: Any
 
+    def __post_init__(self) -> None:
+        try:
+            self.ensure_schema()
+        except Exception:
+            pass
+
+    def ensure_schema(self) -> None:
+        """Создает таблицу positions если её нет."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS positions (
+                symbol TEXT PRIMARY KEY,
+                base_qty NUMERIC NOT NULL DEFAULT 0,
+                avg_entry_price NUMERIC NOT NULL DEFAULT 0,
+                realized_pnl NUMERIC NOT NULL DEFAULT 0,
+                unrealized_pnl NUMERIC NOT NULL DEFAULT 0,
+                updated_ts_ms INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        self.conn.commit()
+
     def get_position(self, symbol: str) -> Position:
         cur = self.conn.cursor()
         cur.execute(

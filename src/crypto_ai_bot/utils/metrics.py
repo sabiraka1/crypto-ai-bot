@@ -10,6 +10,10 @@ _COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Counter] = {}
 _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}
 _HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
 
+def _sanitize_name(name: str) -> str:
+    """Convert dots and dashes to underscores for Prometheus compatibility."""
+    return name.replace(".", "_").replace("-", "_")
+
 def _key(name: str, labels: dict[str, str] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
     pairs = tuple(sorted((labels or {}).items()))
     return (name, pairs)
@@ -25,6 +29,7 @@ def _buckets_ms() -> tuple[float, ...]:
 
 def inc(name: str, **labels: Any) -> None:
     """Counter +1"""
+    name = _sanitize_name(name)  # Санитизация имени
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
     if k not in _COUNTERS:
@@ -33,6 +38,7 @@ def inc(name: str, **labels: Any) -> None:
 
 def gauge(name: str, **labels: Any) -> Gauge:
     """Gauge (вернёт объект, чтобы .set())"""
+    name = _sanitize_name(name)  # Санитизация имени
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
     if k not in _GAUGES:
@@ -41,6 +47,7 @@ def gauge(name: str, **labels: Any) -> Gauge:
 
 def hist(name: str, **labels: Any) -> Histogram:
     """Histogram (секунды)"""
+    name = _sanitize_name(name)  # Санитизация имени
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
     if k not in _HISTS:
@@ -49,6 +56,7 @@ def hist(name: str, **labels: Any) -> Histogram:
 
 def observe(name: str, value: float, labels: dict[str, str] | None = None) -> None:
     """Шорткат для наблюдения значения (секунды)"""
+    name = _sanitize_name(name)  # Санитизация имени
     (hist(name, **(labels or {}))).observe(float(value))
 
 def export_text() -> str:
