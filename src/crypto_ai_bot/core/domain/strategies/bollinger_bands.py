@@ -6,7 +6,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-from .base import BaseStrategy, Decision, StrategyContext
+from .base import BaseStrategy, Decision, StrategyContext, MarketData
 
 
 class BollingerBandsStrategy(BaseStrategy):
@@ -18,8 +18,9 @@ class BollingerBandsStrategy(BaseStrategy):
         self.squeeze_threshold = dec(str(squeeze_threshold))
         self._prices: deque[Decimal] = deque(maxlen=self.period)
 
-    def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
-        price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
+    def decide(self, ctx: StrategyContext) -> tuple[str, dict[str, Any]]:
+        data = ctx.data or {}
+        price = dec(str(data.get("ticker", {}).get("last", "0")))
         self._prices.append(price)
 
         if len(self._prices) < self.period:
@@ -49,3 +50,28 @@ class BollingerBandsStrategy(BaseStrategy):
 
         explain["signal"] = "within_bands"
         return "hold", explain
+
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
+        """Адаптер для BaseStrategy.generate() - вызывает decide() и преобразует результат."""
+        # Получаем данные из MarketData если их нет в контексте
+        if ctx.data is None:
+            ticker = await md.get_ticker(ctx.symbol)
+            ctx = StrategyContext(
+                symbol=ctx.symbol,
+                settings=ctx.settings,
+                data={"ticker": ticker}
+            )
+        
+        action, explain = self.decide(ctx)
+        reason = explain.get("signal", explain.get("reason", ""))
+        
+        # Вычисляем confidence на основе силы сигнала
+        confidence = 0.5
+        if action in ["buy", "sell"] and "touch" in reason:
+            confidence = 0.65
+        
+        return Decision(
+            action=action,
+            confidence=confidence,
+            reason=reason
+        )

@@ -6,7 +6,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-from .base import BaseStrategy, Decision, StrategyContext
+from .base import BaseStrategy, Decision, StrategyContext, MarketData
 
 
 class EmaCrossStrategy(BaseStrategy):
@@ -67,8 +67,8 @@ class EmaCrossStrategy(BaseStrategy):
                 return False, f"low_volatility:{vol:.2f}%<{self.min_vol}%"
         return True, "ok"
 
-    def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
-        d = ctx.data
+    def decide(self, ctx: StrategyContext) -> tuple[str, dict[str, Any]]:
+        d = ctx.data or {}
         last = dec(d.get("ticker", {}).get("last", "0"))
         explain: dict[str, Any] = {
             "strategy": "ema_cross",
@@ -115,3 +115,24 @@ class EmaCrossStrategy(BaseStrategy):
 
         explain["reason"] = "no_clear_signal"
         return "hold", explain
+
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
+        """Адаптер для BaseStrategy.generate() - вызывает decide() и преобразует результат."""
+        # Получаем данные из MarketData если их нет в контексте
+        if ctx.data is None:
+            ticker = await md.get_ticker(ctx.symbol)
+            ctx = StrategyContext(
+                symbol=ctx.symbol,
+                settings=ctx.settings,
+                data={"ticker": ticker}
+            )
+        
+        action, explain = self.decide(ctx)
+        reason = explain.get("reason", "")
+        
+        # Преобразуем в Decision
+        return Decision(
+            action=action,
+            confidence=0.6,  # Можно вычислять на основе индикаторов
+            reason=reason
+        )

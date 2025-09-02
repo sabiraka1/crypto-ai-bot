@@ -6,7 +6,7 @@ from typing import Any
 
 from .base import BaseStrategy, MarketData, StrategyContext
 from .bollinger_bands import BollingerBandsStrategy
-from .ema_atr import EmaAtrStrategy
+from .ema_atr import EmaAtrConfig, EmaAtrStrategy
 from .ema_cross import EmaCrossStrategy
 from .rsi_momentum import RSIMomentumStrategy
 from .signals_policy_strategy import SignalsPolicyStrategy
@@ -76,7 +76,9 @@ class StrategyManager:
             elif name == "bollinger_bands":
                 yield BollingerBandsStrategy()
             elif name == "ema_atr":
-                yield EmaAtrStrategy()
+                # Исправлено: создаём с конфигом
+                cfg = EmaAtrConfig()
+                yield EmaAtrStrategy(cfg)
             elif name in ("signals", "signals_policy"):
                 yield SignalsPolicyStrategy()
 
@@ -87,7 +89,7 @@ class StrategyManager:
             for cand in (key,):
                 if cand in self._scores_map:
                     try:
-                        s.score = float(self._scores_map[cand])
+                        setattr(s, 'score', float(self._scores_map[cand]))
                     except Exception:
                         pass
 
@@ -114,14 +116,29 @@ class StrategyManager:
 
         if self._mode == "first":
             for s in self._strategies:
-                action, explain = await s.decide(ctx=ctx, md=md)
+                # Адаптер: если есть decide() - используем его, иначе generate()
+                if hasattr(s, 'decide') and callable(getattr(s, 'decide')):
+                    action, explain = await s.decide(ctx=ctx, md=md)  # type: ignore
+                else:
+                    # Используем generate() и преобразуем Decision в (action, explain)
+                    decision = await s.generate(ctx=ctx, md=md)
+                    action = decision.action
+                    explain = decision.reason
+                
                 if action in ("buy", "sell"):
                     return self._apply_regime_first(action, explain)
             return "hold", "all_hold"
 
         votes: list[Decision] = []
         for s in self._strategies:
-            action, explain = await s.decide(ctx=ctx, md=md)
+            # Адаптер для совместимости
+            if hasattr(s, 'decide') and callable(getattr(s, 'decide')):
+                action, explain = await s.decide(ctx=ctx, md=md)  # type: ignore
+            else:
+                decision = await s.generate(ctx=ctx, md=md)
+                action = decision.action
+                explain = decision.reason
+            
             score = float(getattr(s, "score", 1.0) or 1.0)
             votes.append(Decision(action=action, explain=explain, score=score))
 

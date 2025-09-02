@@ -6,7 +6,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-from .base import BaseStrategy, Decision, StrategyContext
+from .base import BaseStrategy, Decision, StrategyContext, MarketData
 
 
 class RSIMomentumStrategy(BaseStrategy):
@@ -47,8 +47,9 @@ class RSIMomentumStrategy(BaseStrategy):
             return dec("0")
         return ((cur - past) / past) * dec("100")
 
-    def decide(self, ctx: StrategyContext) -> tuple[Decision, dict[str, Any]]:
-        price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
+    def decide(self, ctx: StrategyContext) -> tuple[str, dict[str, Any]]:
+        data = ctx.data or {}
+        price = dec(str(data.get("ticker", {}).get("last", "0")))
         if price <= 0:
             return "hold", {"reason": "no_price"}
 
@@ -69,3 +70,30 @@ class RSIMomentumStrategy(BaseStrategy):
 
         explain["signal"] = "neutral"
         return "hold", explain
+
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
+        """Адаптер для BaseStrategy.generate() - вызывает decide() и преобразует результат."""
+        # Получаем данные из MarketData если их нет в контексте
+        if ctx.data is None:
+            ticker = await md.get_ticker(ctx.symbol)
+            ctx = StrategyContext(
+                symbol=ctx.symbol,
+                settings=ctx.settings,
+                data={"ticker": ticker}
+            )
+        
+        action, explain = self.decide(ctx)
+        reason = explain.get("signal", explain.get("reason", ""))
+        
+        # Вычисляем confidence на основе силы сигнала
+        confidence = 0.5  # базовая уверенность
+        if action == "buy" and "oversold_with_positive_momentum" in reason:
+            confidence = 0.7
+        elif action == "sell" and "overbought_with_negative_momentum" in reason:
+            confidence = 0.7
+        
+        return Decision(
+            action=action,
+            confidence=confidence,
+            reason=reason
+        )

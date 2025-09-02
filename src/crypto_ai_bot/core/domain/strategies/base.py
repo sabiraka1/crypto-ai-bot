@@ -29,6 +29,7 @@ class StrategyContext:
     """Контекст генерации сигнала."""
     symbol: str
     settings: Any
+    data: dict[str, Any] | None = None  # Добавлен для совместимости с существующим кодом
 
 
 class MarketData(Protocol):
@@ -48,3 +49,9 @@ class BaseStrategy(ABC):
 
     @abstractmethod
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision: ...
+    
+    # Добавляем метод decide для обратной совместимости
+    def decide(self, ctx: StrategyContext) -> tuple[str, dict[str, Any]]:
+        """Легаси метод для совместимости со старым кодом."""
+        # Будет переопределен в конкретных стратегиях
+        return "hold", {"reason": "not_implemented"}
