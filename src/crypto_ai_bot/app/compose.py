@@ -15,7 +15,7 @@ from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.regime.gated_broker import GatedBroker  # noqa: F401 (runtime-config wiring)
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector, RegimeConfig  # noqa: F401 (runtime-config wiring)
 from crypto_ai_bot.core.infrastructure.macro.sources.http_dxy import DxyHttp  # noqa: F401 (runtime-config wiring)
-from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # Исправлено  # noqa: F401 (runtime-config wiring)
+from crypto_ai_bot.core.infrastructure.macro.sources.http_btc_dominance import BtcDominanceHttp  # noqa: F401 (runtime-config wiring)
 from crypto_ai_bot.core.infrastructure.macro.sources.http_fomc import FomcHttp  # noqa: F401 (runtime-config wiring)
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
@@ -38,9 +38,9 @@ _log = get_logger("compose")
 @dataclass
 class Container:
     settings: Settings
-    storage: Storage  # Можно оставить конкретный тип т.к. это наша реализация
-    broker: BrokerPort  # Используем протокол
-    bus: EventBusPort  # Используем протокол
+    storage: Storage
+    broker: BrokerPort
+    bus: EventBusPort
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
@@ -80,7 +80,10 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
     async def _publish(topic: str, payload: dict[str, Any]) -> None:
         t = hist("bus_publish_latency_seconds", topic=topic)
         async def call() -> Any:
-            with t.time():
+            if t:
+                with t.time():
+                    return await _orig(topic, payload)
+            else:
                 return await _orig(topic, payload)
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
@@ -226,7 +229,7 @@ async def build_container_async() -> Container:
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
             max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
-            bus=dms_bus,  # Передаем None если не AsyncEventBus
+            bus=dms_bus,
         )
 
     for sym in symbols:
@@ -239,7 +242,7 @@ async def build_container_async() -> Container:
             exits=exits,
             health=health,
             settings=s,
-            dms=_make_dms(sym),  # Теперь типы совместимы
+            dms=_make_dms(sym),
         )
 
     attach_alerts(bus, s)
@@ -280,5 +283,3 @@ async def build_container_async() -> Container:
         _log.info("telegram_bot_enabled")
 
     return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
-
-

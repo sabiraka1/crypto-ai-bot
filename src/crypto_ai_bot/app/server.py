@@ -104,7 +104,10 @@ async def _metrics_middleware(request: Request, call_next: Callable[[Request], A
     path = request.url.path
     method = request.method
     t = hist("http_request_latency_seconds", path=path, method=method)
-    with t.time():
+    if t:
+        with t.time():
+            response = await call_next(request)
+    else:
         response = await call_next(request)
     inc("http_requests_total", path=path, method=method, code=str(response.status_code))
     return response

@@ -40,7 +40,7 @@ class RedisEventBus:
     def __init__(self, url: str) -> None:
         # Исправляем схему URL если нужно
         if url and not url.startswith(('redis://', 'rediss://', 'unix://')):
-            url = f"redis://{url}" if ':' in url else f"redis://localhost:6379"
+            url = f"redis://{url}" if ':' in url else "redis://localhost:6379"
         
         self._url = url
         self._redis: Redis | None = None

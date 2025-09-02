@@ -3,7 +3,6 @@
 from typing import Any, Dict
 from decimal import Decimal
 from dataclasses import dataclass, field
-import asyncio
 from collections import defaultdict
 
 from crypto_ai_bot.utils.decimal import dec
