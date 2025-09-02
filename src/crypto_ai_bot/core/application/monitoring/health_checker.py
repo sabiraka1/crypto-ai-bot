@@ -17,3 +17,59 @@ except Exception:
     def inc(name: str, **labels: Any) -> None:
         return None
 
+
+class HealthChecker:
+    """Health checker for monitoring system components."""
+    
+    def __init__(
+        self,
+        storage: Any,
+        broker: Any,
+        bus: Any,
+        settings: Any
+    ) -> None:
+        self.storage = storage
+        self.broker = broker
+        self.bus = bus
+        self.settings = settings
+        self._log = get_logger("health_checker")
+        
+    async def check(self) -> dict[str, Any]:
+        """Check health of all components."""
+        results = {
+            "storage": False,
+            "broker": False,
+            "bus": False,
+            "healthy": False
+        }
+        
+        # Check storage
+        try:
+            if hasattr(self.storage, "conn"):
+                self.storage.conn.execute("SELECT 1")
+                results["storage"] = True
+        except Exception as e:
+            self._log.error(f"Storage health check failed: {e}")
+            
+        # Check broker
+        try:
+            if hasattr(self.broker, "exchange"):
+                results["broker"] = True
+        except Exception as e:
+            self._log.error(f"Broker health check failed: {e}")
+            
+        # Check bus
+        try:
+            if hasattr(self.bus, "publish"):
+                results["bus"] = True
+        except Exception as e:
+            self._log.error(f"Bus health check failed: {e}")
+            
+        # Overall health
+        results["healthy"] = all([
+            results["storage"],
+            results["broker"],
+            results["bus"]
+        ])
+        
+        return results

@@ -57,3 +57,45 @@ class TradesRepository:
             ),
         )
         self.conn.commit()
+
+    def daily_pnl_quote(self, symbol: str) -> Decimal:
+        """Calculate daily PnL in quote currency."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT COALESCE(SUM(
+                CASE 
+                    WHEN side = 'sell' THEN CAST(cost AS REAL) - CAST(fee_quote AS REAL)
+                    WHEN side = 'buy' THEN -CAST(cost AS REAL) - CAST(fee_quote AS REAL)
+                    ELSE 0
+                END
+            ), 0) as pnl
+            FROM trades 
+            WHERE symbol = ? 
+            AND DATE(ts_ms/1000, 'unixepoch') = DATE('now')
+        """, (symbol,))
+        result = cur.fetchone()
+        return Decimal(str(result[0] if result else 0))
+
+    def daily_turnover_quote(self, symbol: str) -> Decimal:
+        """Calculate daily turnover in quote currency."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT COALESCE(SUM(CAST(cost AS REAL)), 0) as turnover
+            FROM trades
+            WHERE symbol = ?
+            AND DATE(ts_ms/1000, 'unixepoch') = DATE('now')
+        """, (symbol,))
+        result = cur.fetchone()
+        return Decimal(str(result[0] if result else 0))
+
+    def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
+        """Count orders in last N minutes."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) as cnt
+            FROM trades
+            WHERE symbol = ?
+            AND ts_ms > (CAST(STRFTIME('%s', 'now') AS INTEGER) * 1000 - ? * 60 * 1000)
+        """, (symbol, minutes))
+        result = cur.fetchone()
+        return int(result[0] if result else 0)

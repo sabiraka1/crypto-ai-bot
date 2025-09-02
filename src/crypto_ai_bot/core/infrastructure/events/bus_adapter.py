@@ -40,13 +40,8 @@ class UnifiedEventBus(EventBusPort):
     def on(self, topic: str, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
         if self._is_async:
             async def _wrap(evt: Event) -> None:
-                data: dict[str, Any] = {
-                    "topic": evt.topic,
-                    "payload": evt.payload,
-                    "key": evt.key,
-                    "ts_ms": evt.ts_ms,
-                }
-                await handler(data)
+                # Извлекаем только payload из Event для handler
+                await handler(evt.payload)
 
             self._impl.on(topic, _wrap)
             return
