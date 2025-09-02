@@ -280,3 +280,14 @@ async def build_container_async() -> Container:
         _log.info("telegram_bot_enabled")
 
     return Container(settings=s, storage=st, broker=br, bus=bus, risk=risk, exits=exits, health=health, orchestrators=orchs, tg_bot_task=tg_task)
+
+
+# — Regime gating: wrap the real broker with GatedBroker based on macro regime detector.
+try:
+    regime_sources = [DxyHttp(), BtcDominanceHttp(), FomcHttp()]
+    regime = RegimeDetector(RegimeConfig(), sources=regime_sources)
+    broker = GatedBroker(broker, regime)
+except Exception:
+    # Fail-open: if signatures/config differ, proceed with raw broker (do not block startup).
+    pass
+
