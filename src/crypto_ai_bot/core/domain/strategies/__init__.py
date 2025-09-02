@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 # Базовые контракты/типы
-from .base import BaseStrategy, MarketData, StrategyContext
+from .base import BaseStrategy, Decision, MarketData, StrategyContext
 from .bollinger_bands import BollingerBandsStrategy
-from .ema_atr import EmaAtrStrategy
+from .ema_atr import EmaAtrConfig, EmaAtrStrategy
 
 # Стратегии
 from .ema_cross import EmaCrossStrategy
@@ -30,6 +30,8 @@ from .signals_policy_strategy import SignalsPolicyStrategy
 __all__ = [
     "BaseStrategy",
     "BollingerBandsStrategy",
+    "Decision",
+    "EmaAtrConfig",
     "EmaAtrStrategy",
     "EmaCrossStrategy",
     "MarketData",

@@ -104,7 +104,8 @@ class RiskManager:
                 except Exception:
                     recent = []
                 try:
-                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)
+                    max_streak_val = int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0)
+                    ls = LossStreakRule(max_streak=max_streak_val, lookback_trades=10)
                 except Exception:
                     ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
                 if ls.max_streak and recent:
@@ -120,9 +121,11 @@ class RiskManager:
                 daily_pnl = Decimal("0")
 
             try:
+                max_dd_pct = Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0"))
+                max_daily_loss = Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0"))
                 md = MaxDrawdownRule(
-                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),
-                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),
+                    max_drawdown_pct=max_dd_pct,
+                    max_daily_loss_quote=max_daily_loss,
                 )
             except Exception:
                 md = MaxDrawdownRule()
