@@ -99,3 +99,14 @@ class TradesRepository:
         """, (symbol, minutes))
         result = cur.fetchone()
         return int(result[0] if result else 0)
+
+    def list_today(self, symbol: str) -> list[Any]:
+        """Возвращает сделки за сегодня."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT * FROM trades 
+            WHERE symbol = ? 
+            AND DATE(ts_ms/1000, 'unixepoch') = DATE('now')
+            ORDER BY ts_ms DESC
+        """, (symbol,))
+        return cur.fetchall()

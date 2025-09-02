@@ -10,6 +10,14 @@ _COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Counter] = {}
 _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}
 _HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
 
+def reset_registry():
+    """Сброс регистра для тестов."""
+    global _REGISTRY, _COUNTERS, _GAUGES, _HISTS
+    _REGISTRY = CollectorRegistry()
+    _COUNTERS = {}
+    _GAUGES = {}
+    _HISTS = {}
+
 def _sanitize_name(name: str) -> str:
     """Convert dots and dashes to underscores for Prometheus compatibility."""
     return name.replace(".", "_").replace("-", "_")
