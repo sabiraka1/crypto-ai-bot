@@ -7,6 +7,7 @@ from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, Order
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+from typing import cast
 
 _log = get_logger("usecase.partial_fills")
 
@@ -44,7 +45,7 @@ class PartialFillHandler:
                 "follow_client_order_id": follow.client_order_id,
             }, key=self._symbol_from(order))
             inc("partial_followup_total", symbol=self._symbol_from(order), side=order.side)
-            return follow
+            return cast(OrderLike, follow)
         except Exception as exc:
             _log.error("partial_followup_failed", extra={"error": str(exc)})
             inc("partial_followup_errors_total")

@@ -10,7 +10,7 @@ from typing import Optional, Any
 try:
     import httpx
 except Exception:  # pragma: no cover
-    httpx: Any = None  # Исправлено: указан тип Any вместо присваивания None напрямую
+    httpx = None  # type: ignore[assignment]
 
 
 class TelegramErrorHandler(logging.Handler):

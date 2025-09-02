@@ -46,7 +46,7 @@ class RedisEventBus:
         self._pub: Redis | None = None
         self._subs: defaultdict[str, list[Handler]] = defaultdict(list)
         self._dlq: list[Handler] = []
-        self._listener_task: asyncio.Task | None = None
+        self._listener_task: asyncio.Task[None] | None = None
         self._started: bool = False
         self._active_pubsub: PubSub | None = None  # Исправлено: указали правильный тип
 
