@@ -10,6 +10,7 @@ from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from work_apply.crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
+from crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
 
 # Доп. правила риска (опционально)
 try:

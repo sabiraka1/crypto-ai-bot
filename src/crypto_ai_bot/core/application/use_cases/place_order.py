@@ -9,6 +9,7 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 from work_apply.crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
+from crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
 
 _log = get_logger("usecase.place_order")
 
