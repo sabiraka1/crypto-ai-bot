@@ -72,7 +72,12 @@ def temp_db():
 @pytest.fixture
 def mock_settings():
     """Полный мок настроек со многими полями (совместим с текущими Settings)."""
-    from crypto_ai_bot.core.infrastructure.settings import Settings
+    
+    # Создаем простой класс Settings прямо здесь
+    class Settings:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
     return Settings(
         # Основные
@@ -139,6 +144,10 @@ def mock_settings():
         API_SECRET="",
         POD_NAME="test-pod",
         HOSTNAME="test-host",
+        
+        # Добавим для совместимости с тестами
+        BROKER_RATE_RPS=8,
+        BROKER_RATE_BURST=16,
     )
 
 
