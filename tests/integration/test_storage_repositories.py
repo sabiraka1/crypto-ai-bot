@@ -1,10 +1,11 @@
 ﻿from decimal import Decimal
 from typing import Any, Dict
 
+from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.utils.time import now_ms
 
 
-def test_trades_repo_basic(mock_storage) -> None:
+def test_trades_repo_basic(mock_storage: Storage) -> None:
     """Тест базовых операций с репозиторием сделок."""
     st = mock_storage
     
