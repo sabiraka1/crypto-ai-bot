@@ -1,3 +1,4 @@
+# src/crypto_ai_bot/core/infrastructure/events/bus.py
 from __future__ import annotations
 
 import asyncio
@@ -6,29 +7,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-# Мягкая интеграция с метриками (без обязательной зависимости)
-try:
-    from crypto_ai_bot.utils.metrics import inc
-except Exception:  # pragma: no cover
-    def inc(name: str, **labels: Any) -> None:
-        pass
-
-try:
-    from crypto_ai_bot.utils.time import now_ms
-except Exception:  # pragma: no cover
-    import time
-    def now_ms() -> int:
-        return int(time.time() * 1000)
-
-try:
-    from crypto_ai_bot.utils.logging import get_logger
-except Exception:  # pragma: no cover
-    import logging
-    def get_logger(name: str, *, level: int = 20) -> logging.Logger:
-        return logging.getLogger(name)
+from crypto_ai_bot.utils.metrics import inc
+from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("events.bus")
-
 
 Handler = Callable[["Event"], Awaitable[None]]
 
@@ -141,7 +124,7 @@ class AsyncEventBus:
     async def start(self) -> None:
         """Для совместимости с EventBusPort"""
         pass
-    
+
     async def close(self) -> None:
         """Для совместимости с EventBusPort"""
         pass
