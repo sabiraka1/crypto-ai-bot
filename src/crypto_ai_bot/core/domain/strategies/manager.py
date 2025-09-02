@@ -89,7 +89,7 @@ class StrategyManager:
             for cand in (key,):
                 if cand in self._scores_map:
                     try:
-                        setattr(s, 'score', float(self._scores_map[cand]))
+                        s.score = float(self._scores_map[cand])  # type: ignore[attr-defined]
                     except Exception:
                         pass
 
@@ -117,7 +117,7 @@ class StrategyManager:
         if self._mode == "first":
             for s in self._strategies:
                 # Адаптер: если есть decide() - используем его, иначе generate()
-                if hasattr(s, 'decide') and callable(getattr(s, 'decide')):
+                if hasattr(s, 'decide') and callable(s.decide):
                     action, explain = await s.decide(ctx=ctx, md=md)  # type: ignore
                 else:
                     # Используем generate() и преобразуем Decision в (action, explain)
@@ -132,7 +132,7 @@ class StrategyManager:
         votes: list[Decision] = []
         for s in self._strategies:
             # Адаптер для совместимости
-            if hasattr(s, 'decide') and callable(getattr(s, 'decide')):
+            if hasattr(s, 'decide') and callable(s.decide):
                 action, explain = await s.decide(ctx=ctx, md=md)  # type: ignore
             else:
                 decision = await s.generate(ctx=ctx, md=md)
