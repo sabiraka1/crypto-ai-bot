@@ -363,7 +363,7 @@ class TelegramBotCommands:
                 # Небольшая пауза между запросами
                 await asyncio.sleep(1)
                 
-            except Exception as e:
+            except Exception:
                 _log.error("telegram_bot_run_error", exc_info=True)
                 # При ошибке делаем паузу подольше
                 await asyncio.sleep(5)
