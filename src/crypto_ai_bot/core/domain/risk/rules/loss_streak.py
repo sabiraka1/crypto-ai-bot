@@ -1,62 +1,100 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from decimal import Decimal
+from typing import Any, List, Tuple
 
-from crypto_ai_bot.utils.decimal import dec
+
+@dataclass(frozen=True)
+class LossStreakConfig:
+    limit: int  # 0 = отключено
 
 
-@dataclass
 class LossStreakRule:
-    """Правило ограничения серии убыточных сделок."""
+    """
+    Считает ПОДРЯД идущие убыточные продажи (реализованный PnL < 0) по FIFO.
+    История берётся вся (символ-локальная), комиссии учитываются через fee_quote.
+    Если streak >= limit -> блок.
+    """
 
-    max_streak: int = 3
-    lookback_trades: int = 10
+    def __init__(self, cfg: LossStreakConfig) -> None:
+        self.cfg = cfg
 
-    def check(self, recent_trades: list[dict[str, Any]]) -> tuple[bool, str]:
-        """
-        Проверяет текущую серию убытков.
-        Returns: (allowed, reason)
-        """
-        if not recent_trades:
-            return True, "no_trades"
+    @staticmethod
+    def _to_dec(x: Any) -> Decimal:
+        return Decimal(str(x if x is not None else "0"))
 
-        # Считаем текущую серию убытков
-        current_streak = 0
-        for trade in reversed(recent_trades[-self.lookback_trades:]):
-            pnl = dec(str(trade.get("cost", 0)))
-            side = str(trade.get("side", "")).lower()
+    def _iter_all_asc(self, trades_repo: Any, symbol: str) -> List[Any]:
+        # Требуется API, возвращающий все трейды по символу в порядке возрастания времени.
+        # В твоём TradesRepository есть аналогичный приватный итератор — реализуем локально через SQL в самом репозитории.
+        if hasattr(trades_repo, "_iter_all_asc"):
+            return trades_repo._iter_all_asc(symbol)  # type: ignore[attr-defined]
+        # fallback: если нет — используем list_today + оставим как минимум за сегодня
+        if hasattr(trades_repo, "list_today"):
+            rows = trades_repo.list_today(symbol)  # type: ignore[attr-defined]
+            return list(reversed(rows))  # приблизим к ASC
+        return []
 
-            # Для buy отрицательный cost = покупка (убыток пока не продали)
-            # Для sell положительный cost = продажа (может быть прибыль или убыток)
+    def check(self, *, symbol: str, trades_repo: Any) -> tuple[bool, str, dict]:
+        lim = int(self.cfg.limit or 0)
+        if lim <= 0:
+            return True, "disabled", {}
+
+        rows = self._iter_all_asc(trades_repo, symbol)
+        if not rows:
+            return True, "no_trades", {}
+
+        # FIFO склад покупок: [(qty_left, unit_cost_quote)]
+        buy_lots: List[Tuple[Decimal, Decimal]] = []
+        streak = 0
+        worst_trade_pnl: Decimal = Decimal("0")
+
+        for r in rows:
+            side = (r["side"] or "").lower()
+            filled = self._to_dec(r.get("filled") or r.get("amount"))
+            price = self._to_dec(r.get("price"))
+            cost = self._to_dec(r.get("cost"))
+            fee_q = self._to_dec(r.get("fee_quote"))
+
+            if filled <= 0:
+                continue
+
             if side == "buy":
-                # Пока не закрыта позиция - не считаем
-                continue
-            elif side == "sell" and pnl <= 0:
-                current_streak += 1
-            else:
-                break  # Прибыльная сделка прерывает серию
-
-        if current_streak >= self.max_streak:
-            return False, f"loss_streak_{current_streak}_of_{self.max_streak}"
-
-        return True, f"streak_{current_streak}"
-
-    def calculate_streak(self, trades: list[dict[str, Any]]) -> int:
-        """Подсчёт максимальной серии убытков в истории."""
-        max_streak = 0
-        current_streak = 0
-
-        for trade in trades:
-            side = str(trade.get("side", "")).lower()
-            if side != "sell":
+                unit_cost = (cost + fee_q) / filled if filled > 0 else Decimal("0")
+                buy_lots.append((filled, unit_cost))
                 continue
 
-            pnl = dec(str(trade.get("cost", 0)))
-            if pnl <= 0:
-                current_streak += 1
-                max_streak = max(max_streak, current_streak)
-            else:
-                current_streak = 0
+            if side == "sell":
+                qty = filled
+                unit_sell = price
+                realized = Decimal("0")
+                i = 0
+                while qty > 0 and i < len(buy_lots):
+                    lot_qty, lot_uc = buy_lots[i]
+                    take = min(lot_qty, qty)
+                    realized += take * (unit_sell - lot_uc)
+                    new_qty = lot_qty - take
+                    qty -= take
+                    if new_qty > 0:
+                        buy_lots[i] = (new_qty, lot_uc)
+                        i += 1
+                    else:
+                        buy_lots.pop(i)
 
-        return max_streak
+                # комиссия продажи относится к этой продаже целиком
+                realized -= fee_q
+                if realized < 0:
+                    streak += 1
+                    if realized < worst_trade_pnl:
+                        worst_trade_pnl = realized
+                else:
+                    streak = 0
+
+                if streak >= lim:
+                    return False, "loss_streak", {
+                        "streak": streak,
+                        "limit": lim,
+                        "worst_trade_pnl": str(worst_trade_pnl),
+                    }
+
+        return True, "ok", {"streak": streak, "limit": lim}

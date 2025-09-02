@@ -2,68 +2,93 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any, List, Tuple
 
-from crypto_ai_bot.utils.decimal import dec
+
+@dataclass(frozen=True)
+class MaxDrawdownConfig:
+    max_drawdown_pct: float  # 0 = отключено
 
 
-@dataclass
 class MaxDrawdownRule:
-    """Правило ограничения просадки."""
+    """
+    Внутридневная кумулятивная equity-линия из реализованного PnL (FIFO, с комиссиями).
+    Блокирует, если относительная просадка от внутридневного пика >= max_drawdown_pct.
+    """
 
-    max_drawdown_pct: Decimal = dec("10.0")  # 10%
-    max_daily_loss_quote: Decimal = dec("100")
+    def __init__(self, cfg: MaxDrawdownConfig) -> None:
+        self.cfg = cfg
 
-    def check(self,
-             current_balance: Decimal,
-             peak_balance: Decimal,
-             daily_pnl: Decimal) -> tuple[bool, str]:
-        """
-        Проверяет текущую просадку.
-        Returns: (allowed, reason)
-        """
-        # Проверка дневного лимита убытков
-        if daily_pnl < -abs(self.max_daily_loss_quote):
-            return False, f"daily_loss_exceeded_{daily_pnl}"
+    @staticmethod
+    def _to_dec(x: Any) -> Decimal:
+        return Decimal(str(x if x is not None else "0"))
 
-        # Проверка общей просадки от пика
-        if peak_balance > 0:
-            drawdown_pct = ((peak_balance - current_balance) / peak_balance) * dec("100")
-            if drawdown_pct > self.max_drawdown_pct:
-                return False, f"max_drawdown_{drawdown_pct:.2f}%"
+    def _iter_today_asc(self, trades_repo: Any, symbol: str) -> List[Any]:
+        # Нужна последовательность за "сегодня" в порядке времени
+        if hasattr(trades_repo, "list_today"):
+            rows = list(reversed(trades_repo.list_today(symbol)))  # type: ignore[attr-defined]
+            return rows
+        return []
 
-        return True, "ok"
+    def check(self, *, symbol: str, trades_repo: Any) -> tuple[bool, str, dict]:
+        lim_pct = float(self.cfg.max_drawdown_pct or 0.0)
+        if lim_pct <= 0:
+            return True, "disabled", {}
 
-    def calculate_drawdown(self, balances: list[Decimal]) -> dict[str, Decimal]:
-        """
-        Рассчитывает метрики просадки для серии балансов.
-        Returns: {"current": x, "max": y, "peak": z}
-        """
-        if not balances:
-            return {"current": dec("0"), "max": dec("0"), "peak": dec("0")}
+        rows = self._iter_today_asc(trades_repo, symbol)
+        if not rows:
+            return True, "no_today_trades", {}
 
-        peak = balances[0]
-        max_dd = dec("0")
-        current_dd = dec("0")
+        # FIFO склад покупок
+        buy_lots: List[Tuple[Decimal, Decimal]] = []
+        cum: Decimal = Decimal("0")
+        peak: Decimal = Decimal("0")
+        worst_dd_pct: float = 0.0
 
-        for balance in balances:
-            if balance > peak:
-                peak = balance
+        for r in rows:
+            side = (r["side"] or "").lower()
+            filled = self._to_dec(r.get("filled") or r.get("amount"))
+            price = self._to_dec(r.get("price"))
+            cost = self._to_dec(r.get("cost"))
+            fee_q = self._to_dec(r.get("fee_quote"))
 
-            if peak > 0:
-                dd = ((peak - balance) / peak) * dec("100")
-                max_dd = max(max_dd, dd)
-                current_dd = dd
+            if filled <= 0:
+                continue
 
-        return {
-            "current": current_dd,
-            "max": max_dd,
-            "peak": peak
-        }
+            if side == "buy":
+                unit_cost = (cost + fee_q) / filled if filled > 0 else Decimal("0")
+                buy_lots.append((filled, unit_cost))
+                continue
 
-    def recovery_ratio(self, current: Decimal, trough: Decimal, peak: Decimal) -> Decimal:
-        """Процент восстановления от минимума к пику."""
-        if peak <= trough:
-            return dec("100")
+            if side == "sell":
+                qty = filled
+                unit_sell = price
+                realized = Decimal("0")
+                i = 0
+                while qty > 0 and i < len(buy_lots):
+                    lot_qty, lot_uc = buy_lots[i]
+                    take = min(lot_qty, qty)
+                    realized += take * (unit_sell - lot_uc)
+                    new_qty = lot_qty - take
+                    qty -= take
+                    if new_qty > 0:
+                        buy_lots[i] = (new_qty, lot_uc)
+                        i += 1
+                    else:
+                        buy_lots.pop(i)
+                realized -= fee_q  # комиссия продажи
 
-        recovery = ((current - trough) / (peak - trough)) * dec("100")
-        return max(dec("0"), min(dec("100"), recovery))
+                cum += realized
+                if cum > peak:
+                    peak = cum
+                # относительная просадка от пика
+                denom = float(peak) if float(peak) != 0.0 else 1.0
+                dd_pct = max(0.0, float(peak - cum) / abs(denom) * 100.0)
+                worst_dd_pct = max(worst_dd_pct, dd_pct)
+                if dd_pct >= lim_pct:
+                    return False, "max_drawdown", {
+                        "drawdown_pct": round(dd_pct, 6),
+                        "limit_pct": lim_pct,
+                    }
+
+        return True, "ok", {"drawdown_pct": round(worst_dd_pct, 6), "limit_pct": lim_pct}

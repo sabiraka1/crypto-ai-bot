@@ -7,6 +7,7 @@ WATCHDOG_HEARTBEAT = "watchdog.heartbeat"
 
 # Риски
 RISK_BLOCKED = "risk.blocked"
+BUDGET_EXCEEDED = "budget.exceeded"  # <— добавлено
 
 # Оценка/решение
 EVALUATION_STARTED = "evaluation.started"

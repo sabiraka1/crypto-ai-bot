@@ -2,166 +2,140 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Tuple
+from typing import Any, Optional
 
-from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule, LossStreakConfig
+from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule, MaxDrawdownConfig
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import inc
+
+# топики
+try:
+    from crypto_ai_bot.core.infrastructure.events.topics import (
+        RISK_BLOCKED,
+    )
+except Exception:
+    RISK_BLOCKED = "risk.blocked"
+
+_log = get_logger("risk.manager")
 
 
 @dataclass(frozen=True)
 class RiskConfig:
-    """
-    Конфигурация риск-лимитов. Значения 0/None означают «лимит отключён».
-    """
-    cooldown_sec: int = 0
-    max_spread_pct: Decimal = dec("0")
-    max_position_base: Decimal = dec("0")
-    max_orders_per_hour: int = 0
-    daily_loss_limit_quote: Decimal = dec("0")
-    max_fee_pct: Decimal = dec("0.0")
-    max_slippage_pct: Decimal = dec("0.0")
-
-    # Легаси (для обратной совместимости окружения/скриптов):
-    max_orders_5m: int = 0
-    safety_max_turnover_quote_per_day: Decimal = dec("0")
-    max_turnover_day: Decimal = dec("0")
+    loss_streak_limit: int = 0                    # >=1 включает правило
+    max_drawdown_pct: float = 0.0                 # >0 включает правило
+    max_orders_per_day: int = 0                   # >0 включает бюджет
+    max_turnover_quote_per_day: Decimal = Decimal("0")  # >0 включает бюджет
 
     @classmethod
-    def from_settings(cls, s: Any) -> RiskConfig:
-        """
-        Без чтения ENV напрямую — только из объекта Settings.
-        """
-        def g(name: str, default: Any) -> Any:
-            val = getattr(s, name, default)
-            # Обработка None и пустых строк
-            if val is None or val == "":
-                return default
-            return val
-
-        def safe_dec(val: Any, default: str = "0") -> Decimal:
-            """Безопасное преобразование в Decimal."""
-            if val is None or val == "":
-                return dec(default)
-            try:
-                # Убедимся что это строка
-                str_val = str(val).strip()
-                if not str_val:
-                    return dec(default)
-                return dec(str_val)
-            except Exception:
-                return dec(default)
-
+    def from_settings(cls, s: Any) -> "RiskConfig":
+        # Читаем мягко: если значений нет — считаем отключёнными
         return cls(
-            cooldown_sec=int(g("RISK_COOLDOWN_SEC", 0) or 0),
-            max_spread_pct=safe_dec(g("RISK_MAX_SPREAD_PCT", "0")),
-            max_position_base=safe_dec(g("RISK_MAX_POSITION_BASE", "0")),
-            max_orders_per_hour=int(g("RISK_MAX_ORDERS_PER_HOUR", 0) or 0),
-            daily_loss_limit_quote=safe_dec(g("RISK_DAILY_LOSS_LIMIT_QUOTE", "0")),
-            max_fee_pct=safe_dec(g("RISK_MAX_FEE_PCT", "0.0")),
-            max_slippage_pct=safe_dec(g("RISK_MAX_SLIPPAGE_PCT", "0.0")),
-            # легаси
-            max_orders_5m=int(g("RISK_MAX_ORDERS_5M", 0) or 0),
-            safety_max_turnover_quote_per_day=safe_dec(g("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0")),
-            max_turnover_day=safe_dec(g("RISK_MAX_TURNOVER_DAY", "0")),
+            loss_streak_limit=int(getattr(s, "RISK_LOSS_STREAK_LIMIT", 0) or 0),
+            max_drawdown_pct=float(getattr(s, "RISK_MAX_DRAWDOWN_PCT", 0.0) or 0.0),
+            max_orders_per_day=int(getattr(s, "SAFETY_MAX_ORDERS_PER_DAY", 0) or 0),
+            max_turnover_quote_per_day=Decimal(str(getattr(s, "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", 0.0) or 0.0)),
         )
 
 
 class RiskManager:
     """
-    Чистый доменный компонент. Не знает про Broker/Storage, не делает I/O.
-    Содержит статические/детерминированные проверки.
+    Единая точка входа: check(symbol, storage) -> (ok, reason)
+    Ничего не меняет в бизнес-логике — только блокирует шаг, если правила нарушены.
     """
 
-    def __init__(self, config: RiskConfig) -> None:
-        self.config = config
+    def __init__(self, cfg: RiskConfig, *, bus: Optional[Any] = None) -> None:
+        self.cfg = cfg
+        self.bus = bus
+        self._loss = LossStreakRule(LossStreakConfig(limit=cfg.loss_streak_limit))
+        self._dd = MaxDrawdownRule(MaxDrawdownConfig(max_drawdown_pct=cfg.max_drawdown_pct))
 
-    def can_execute(self, *_: Any, **__: Any) -> bool:
-        """
-        Базовый фильтр «можно ли вообще рассматривать исполнение».
-        """
-        return True
-
-    def allow(self, symbol: str, now_ms: int, storage: Any | None = None) -> Tuple[bool, str]:
-        """
-        Обратная совместимость - возвращает tuple (bool, str).
-        Для тестов которые ожидают именно этот формат.
-        """
-        can = self.can_execute(symbol=symbol, now_ms=now_ms, storage=storage)
-        if not can:
-            return False, "risk_check_failed"
-        
-        if storage:
-            return self.check(symbol=symbol, storage=storage)
-        
-        return True, "ok"
-
-    def check(self, *, symbol: str, storage: Any) -> Tuple[bool, str]:
-        """
-        Композитная проверка правил. Возвращает (ok, reason).
-        Расширенная версия для более сложных проверок.
-        """
-        # Попытаемся импортировать правила если они существуют
-        try:
-            from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
-            from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
-            
-            # Фасад для доступа к репозиториям
-            class _RepoFacade:
-                def __init__(self, storage: Any) -> None:
-                    self.trades = getattr(storage, "trades", None) or getattr(getattr(storage, "repos", None) or object(), "trades", None)
-                    self.positions = getattr(storage, "positions", None) or getattr(getattr(storage, "repos", None) or object(), "positions", None)
-            
-            cfg = self.config
-            repo = _RepoFacade(storage)
-
-            # 1) Loss streak (по сегодняшним сделкам)
-            if cfg.max_orders_per_hour or True:  # не завязываем на опциях, разрешаем работу правила всегда
-                try:
-                    recent = repo.trades.list_today(symbol) if repo.trades else []
-                except Exception:
-                    recent = []
-                try:
-                    max_streak_val = int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0)
-                    ls = LossStreakRule(max_streak=max_streak_val, lookback_trades=10)
-                except Exception:
-                    ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
-                if ls.max_streak and recent:
-                    ok, reason = ls.check(recent)
-                    if not ok:
-                        return False, f"risk.loss_streak:{reason}"
-
-            # 2) Max daily loss / drawdown (используем дневной PnL и позицию)
-            daily_pnl = Decimal("0")
+    async def _publish(self, topic: str, payload: dict) -> None:
+        bus = self.bus
+        if bus and hasattr(bus, "publish"):
             try:
-                daily_pnl = repo.trades.daily_pnl_quote(symbol) if repo.trades else Decimal("0")
+                await bus.publish(topic, payload)
             except Exception:
-                daily_pnl = Decimal("0")
+                _log.debug("risk_publish_failed", extra={"topic": topic}, exc_info=True)
 
-            try:
-                max_dd_pct = Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0"))
-                max_daily_loss = Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0"))
-                md = MaxDrawdownRule(
-                    max_drawdown_pct=max_dd_pct,
-                    max_daily_loss_quote=max_daily_loss,
-                )
-            except Exception:
-                md = MaxDrawdownRule()
+    def _budget_check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
+        """
+        Дневные бюджеты: кол-во ордеров и дневной оборот в quote.
+        Используем имеющиеся методы репозиториев. 0 = отключено.
+        """
+        limit_n = int(self.cfg.max_orders_per_day or 0)
+        limit_turn = Decimal(self.cfg.max_turnover_quote_per_day or 0)
 
-            cur_bal = peak_bal = Decimal("0")
-            # (опционально) попытаемся извлечь из storage портфельные балансы
+        trades = getattr(storage, "trades", None)
+        if (limit_n > 0) and trades:
+            count = None
+            if hasattr(trades, "count_orders_last_minutes"):
+                try:
+                    count = int(trades.count_orders_last_minutes(symbol, 1440))
+                except Exception:
+                    count = None
+            if count is None and hasattr(trades, "list_today"):
+                try:
+                    count = len(trades.list_today(symbol))
+                except Exception:
+                    count = None
+            if isinstance(count, int) and count >= limit_n > 0:
+                return False, "max_orders_per_day", {"count": count, "limit": limit_n}
+
+        if (limit_turn > 0) and trades and hasattr(trades, "daily_turnover_quote"):
             try:
-                port = getattr(storage, "portfolio", None)
-                if port:
-                    cur_bal = Decimal(str(getattr(port, "current_quote", "0") or "0"))
-                    peak_bal = Decimal(str(getattr(port, "peak_quote", "0") or "0"))
+                turn = trades.daily_turnover_quote(symbol)
+                if turn >= limit_turn:
+                    return False, "max_turnover_quote_per_day", {"turnover": str(turn), "limit": str(limit_turn)}
             except Exception:
                 pass
 
-            ok, reason = md.check(current_balance=cur_bal, peak_balance=peak_bal, daily_pnl=daily_pnl)
-            if not ok:
-                return False, f"risk.drawdown:{reason}"
+        return True, "ok", {}
 
-            return True, "ok"
-            
-        except ImportError:
-            # Если модули с правилами не существуют, используем базовую проверку
-            return True, "basic_check"
+    def check(self, *, symbol: str, storage: Any) -> tuple[bool, str]:
+        """
+        Синхронный API — вызывается из оркестратора до шага исполнения.
+        Возвращает (ok, reason). Публикатор событий вызывается асинхронно снаружи при необходимости.
+        """
+        # ---- бюджеты (мягкая проверка) ----
+        ok, why, extra = self._budget_check(symbol=symbol, storage=storage)
+        if not ok:
+            # события/метрики
+            inc("budget_exceeded_total", symbol=symbol, type=why)
+            # оставляем строковый топик для совместимости с существующими подписчиками
+            # (в твоём Telegram-подписчике уже есть обработчик 'budget.exceeded')
+            # publish можно сделать снаружи, но оставим тут мягкий вариант через async helper
+            try:
+                import asyncio
+                asyncio.create_task(self._publish("budget.exceeded", {"symbol": symbol, "type": why, **extra}))
+            except Exception:
+                pass
+            return False, f"budget:{why}"
+
+        trades = getattr(storage, "trades", None)
+        if trades is None:
+            return True, "no_trades_repo"
+
+        # ---- loss streak ----
+        ok, why, extra = self._loss.check(symbol=symbol, trades_repo=trades)
+        if not ok:
+            inc("risk_block_total", symbol=symbol, reason=why)
+            try:
+                import asyncio
+                asyncio.create_task(self._publish(RISK_BLOCKED, {"symbol": symbol, "reason": why, **extra}))
+            except Exception:
+                pass
+            return False, why
+
+        # ---- max drawdown ----
+        ok, why, extra = self._dd.check(symbol=symbol, trades_repo=trades)
+        if not ok:
+            inc("risk_block_total", symbol=symbol, reason=why)
+            try:
+                import asyncio
+                asyncio.create_task(self._publish(RISK_BLOCKED, {"symbol": symbol, "reason": why, **extra}))
+            except Exception:
+                pass
+            return False, why
+
+        return True, "ok"
