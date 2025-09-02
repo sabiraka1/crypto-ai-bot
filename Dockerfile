@@ -1,4 +1,4 @@
-$dockerfile = @'
+$content = @'
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -16,9 +16,3 @@ COPY . /app/
 EXPOSE 8080
 CMD ["sh", "-c", "uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port ${PORT:-8080}"]
 '@
-
-[System.IO.File]::WriteAllText("Dockerfile", $dockerfile)
-
-git add Dockerfile
-git commit -m "Fix Dockerfile to use PORT variable"
-git push
