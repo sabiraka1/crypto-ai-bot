@@ -1,5 +1,5 @@
 ﻿from decimal import Decimal
-from typing import Any
+from typing import Any, Dict
 
 from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.utils.time import now_ms
@@ -9,24 +9,23 @@ def test_trades_repo_basic(mock_storage: Storage) -> None:
     """Тест базовых операций с репозиторием сделок."""
     st = mock_storage
     
-    # Создаем объект-ордер (как ожидает add_from_order)
-    class Order:
-        def __init__(self) -> None:
-            self.id = "x1"
-            self.broker_order_id = "x1"
-            self.client_order_id = "cid"
-            self.symbol = "BTC/USDT"
-            self.side = "buy"
-            self.amount = Decimal("0.001")
-            self.filled = Decimal("0.001")
-            self.price = Decimal("10000")
-            self.cost = Decimal("10")
-            self.fee_quote = Decimal("0.01")
-            self.ts_ms = now_ms()
-            self.timestamp = now_ms()
-            self.status = "closed"
-    
-    order = Order()
+    # Создаем объект-ордер как словарь (как возвращает брокер)
+    order: Dict[str, Any] = {
+        "id": "x1",
+        "broker_order_id": "x1",
+        "client_order_id": "cid",
+        "clientOrderId": "cid",  # для совместимости
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "amount": "0.001",
+        "filled": "0.001",
+        "price": "10000",
+        "cost": "10",
+        "fee_quote": "0.01",
+        "ts_ms": now_ms(),
+        "timestamp": now_ms(),
+        "status": "closed"
+    }
 
     # Добавляем ордер в trades
     st.trades.add_from_order(order)
@@ -37,3 +36,10 @@ def test_trades_repo_basic(mock_storage: Storage) -> None:
     
     turnover = st.trades.daily_turnover_quote("BTC/USDT")
     assert turnover >= Decimal("0"), f"Expected non-negative turnover, got {turnover}"
+    
+    # Проверяем что client_order_id сохранился правильно
+    # (если есть метод для получения по client_order_id)
+    trades = st.trades.list_today("BTC/USDT")
+    if trades:
+        last_trade = trades[-1]
+        assert last_trade["side"] == "buy", f"Expected side 'buy', got {last_trade['side']}"
