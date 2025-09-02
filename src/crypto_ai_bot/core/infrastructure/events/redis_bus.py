@@ -40,7 +40,6 @@ class RedisEventBus:
     def __init__(self, url: str) -> None:
         # Исправляем схему URL если нужно
         if url and not url.startswith(('redis://', 'rediss://', 'unix://')):
-            # Предполагаем redis:// по умолчанию
             url = f"redis://{url}" if ':' in url else f"redis://localhost:6379"
         
         self._url = url
@@ -76,9 +75,7 @@ class RedisEventBus:
         if self._started:
             return
         
-        # Проверяем URL перед подключением
         if not self._url or self._url == 'redis://':
-            # Если URL пустой или некорректный, используем дефолтный
             self._url = 'redis://localhost:6379'
         
         self._redis = Redis.from_url(self._url, decode_responses=True)
