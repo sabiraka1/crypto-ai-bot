@@ -25,6 +25,7 @@ class RiskConfig:
     # а применяются в use-case execute_trade (центр. проверка бюджета).
     max_orders_5m: int = 0
     safety_max_turnover_quote_per_day: Decimal = dec("0")
+    max_turnover_day: Decimal = dec("0")  # Добавлен для совместимости с execute_trade
 
     @classmethod
     def from_settings(cls, s: Any) -> RiskConfig:
@@ -46,6 +47,7 @@ class RiskConfig:
             # легаси
             max_orders_5m=int(g("RISK_MAX_ORDERS_5M", 0) or 0),
             safety_max_turnover_quote_per_day=dec(str(g("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0") or "0")),
+            max_turnover_day=dec(str(g("RISK_MAX_TURNOVER_DAY", "0") or "0")),
         )
 
 
@@ -61,7 +63,7 @@ class RiskManager:
         self.config = config
 
     # --- Современный метод проверки ---
-    def can_execute(self, *_, **__) -> bool:
+    def can_execute(self, *_: Any, **__: Any) -> bool:
         """
         Базовый фильтр «можно ли вообще рассматривать исполнение».
         Сейчас оставляем «разрешено», так как конкретные лимиты
@@ -71,7 +73,7 @@ class RiskManager:
         return True
 
     # --- Обратная совместимость (alias) ---
-    def allow(self, *args, **kwargs) -> bool:
+    def allow(self, *args: Any, **kwargs: Any) -> bool:
         """
         Сохранён для совместимости со старым кодом/скриптами:
         прежний вызов risk.allow(...) теперь корректно отработает.
@@ -104,7 +106,8 @@ class RiskManager:
                 except Exception:
                     recent = []
                 try:
-                    ls = LossStreakRule(max_streak=int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0), lookback_trades=10)  # type: ignore
+                    max_streak_val = int(getattr(storage.settings, "RISK_MAX_LOSS_STREAK", 0) or 0)
+                    ls = LossStreakRule(max_streak=max_streak_val, lookback_trades=10)
                 except Exception:
                     ls = LossStreakRule(max_streak=0, lookback_trades=10)  # off
                 if ls.max_streak and recent:
@@ -120,9 +123,11 @@ class RiskManager:
                 daily_pnl = Decimal("0")
 
             try:
+                max_dd_pct = Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0"))
+                max_daily_loss = Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0"))
                 md = MaxDrawdownRule(
-                    max_drawdown_pct=Decimal(str(getattr(storage.settings, "RISK_MAX_DRAWDOWN_PCT", "0") or "0")),  # type: ignore
-                    max_daily_loss_quote=Decimal(str(getattr(storage.settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),  # type: ignore
+                    max_drawdown_pct=max_dd_pct,
+                    max_daily_loss_quote=max_daily_loss,
                 )
             except Exception:
                 md = MaxDrawdownRule()
