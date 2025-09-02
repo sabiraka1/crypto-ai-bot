@@ -6,7 +6,7 @@ from typing import Any
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
-from crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
+
 _log = get_logger("protective_exits")
 
 
@@ -38,7 +38,7 @@ class ProtectiveExits:
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
 
-    async def evaluate(self, *, symbol: str) -> dict | None:
+    async def evaluate(self, *, symbol: str) -> dict[str, Any] | None:
         # Нет порогов — ничего не делаем
         if self._cfg.stop_pct <= 0 and self._cfg.take_pct <= 0 and self._cfg.trailing_pct <= 0:
             return None
@@ -94,16 +94,10 @@ class ProtectiveExits:
             inc("protective_exits_tick_total", symbol=symbol)
             return None
 
-        # Используем compute_sell_amount для расчета количества
-        try:
-            qty = compute_sell_amount(
-                current_position=base,
-                target_percentage=dec("100"),  # Продаем 100% при защитных выходах
-                min_amount=self._cfg.min_base
-            )
-        except Exception:
-            # Fallback если compute_sell_amount недоступен
-            qty = base
+        # Используем правильный вызов compute_sell_amount или просто base
+        # Согласно ошибке, compute_sell_amount не принимает эти параметры
+        # Используем простой подход
+        qty: Decimal = base
             
         if self._cfg.min_base > 0 and qty < self._cfg.min_base:
             return None
@@ -118,7 +112,7 @@ class ProtectiveExits:
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return None
 
-    async def tick(self, symbol: str) -> dict | None:
+    async def tick(self, symbol: str) -> dict[str, Any] | None:
         return await self.evaluate(symbol=symbol)
 
 

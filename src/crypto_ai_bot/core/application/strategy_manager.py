@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from crypto_ai_bot.core.domain.strategy.base import MarketDataPort, Signal, StrategyPort
-from crypto_ai_bot.core.domain.strategy.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
+from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision
+from crypto_ai_bot.core.domain.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
 from crypto_ai_bot.utils.decimal import dec
+
+
+# Создаем алиасы для совместимости со старым кодом
+MarketDataPort = MarketData
+StrategyPort = BaseStrategy
+Signal = Decision
 
 
 class StrategyManager:
@@ -40,7 +46,9 @@ class StrategyManager:
             return Signal(action="hold", reason="no_strategies")
         # Простой приоритет: первая, давшая directional-сигнал
         for strat in self._strategies:
-            sig = await strat.generate(symbol=symbol, md=self._md, settings=self._settings)
+            from crypto_ai_bot.core.domain.strategies.base import StrategyContext
+            ctx = StrategyContext(symbol=symbol, settings=self._settings)
+            sig = await strat.generate(md=self._md, ctx=ctx)
             if sig.action in ("buy", "sell"):
                 return sig
         return Signal(action="hold", reason="all_hold")

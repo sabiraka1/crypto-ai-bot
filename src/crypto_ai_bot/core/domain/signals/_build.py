@@ -35,7 +35,7 @@ def build_signal(inp: SignalInputs) -> Signal:
 
 
 # --- Совместимое имя, которого ждёт старый код:
-def build_signals(*args, **kwargs) -> Signal:
+def build_signals(*args: Any, **kwargs: Any) -> Signal:
     """
     Обёртка для совместимости: старые модули вызывали build_signals().
     Делегируем в build_signal() с теми же аргументами.
