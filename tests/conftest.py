@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock  # Убрали MagicMock
 
 import pytest
 
@@ -212,11 +212,19 @@ def mock_broker():
 
 @pytest.fixture
 def mock_storage(temp_db):
-    """Хранилище на временной БД (настоящая facade)."""
+    """Хранилище на временной БД с моком для positions."""
     from crypto_ai_bot.core.infrastructure.storage.facade import Storage
+    from unittest.mock import Mock
 
     conn, _ = temp_db
-    return Storage.from_connection(conn)
+    storage = Storage.from_connection(conn)
+    
+    # Создаем мок для positions.get_position
+    mock_get_position = Mock()
+    mock_get_position.return_value = None  # По умолчанию нет позиции
+    storage.positions.get_position = mock_get_position
+    
+    return storage
 
 
 @pytest.fixture

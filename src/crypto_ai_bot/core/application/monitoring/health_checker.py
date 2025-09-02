@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from typing import Any
+from typing import Any, Dict
 
 try:
     from crypto_ai_bot.utils.logging import get_logger as _get_logger
@@ -33,9 +33,9 @@ class HealthChecker:
         self.bus = bus
         self.settings = settings
         self._log = get_logger("health_checker")
-        self._last_check_results: dict[str, Any] = {}
+        self._last_check_results: Dict[str, Any] = {}
         
-    async def check(self) -> dict[str, Any]:
+    async def check(self) -> Dict[str, Any]:
         """Check health of all components."""
         results = {
             "storage": False,
@@ -76,15 +76,12 @@ class HealthChecker:
         self._last_check_results = results
         return results
     
-    async def tick(self, symbol: str) -> dict[str, Any]:
-        """Periodic health check tick for a symbol - needed by Orchestrator."""
-        # Для совместимости с Orchestrator просто возвращаем последний статус
-        # или делаем быструю проверку
+    async def tick(self, symbol: str, **kwargs: Any) -> Dict[str, Any]:
+        """Periodic health check tick - accepts any kwargs for compatibility."""
+        # Игнорируем дополнительные параметры типа dms
         if not self._last_check_results:
-            # Первый tick - делаем полную проверку
             await self.check()
         
-        # Возвращаем результат в формате, который ожидает Orchestrator
         return {
             "healthy": self._last_check_results.get("healthy", True),
             "symbol": symbol

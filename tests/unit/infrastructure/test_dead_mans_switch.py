@@ -8,7 +8,7 @@ from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSw
 
 @pytest.mark.asyncio
 async def test_dms_triggers_and_publishes(mock_storage, mock_broker):
-    # ДОБАВЛЯЕМ: настройка позиции чтобы было что продавать
+    # Настраиваем позицию правильно через мок
     mock_storage.positions.get_position.return_value = type("Position", (), {
         "base_qty": Decimal("0.1"),
         "avg_entry_price": Decimal("100")
@@ -52,7 +52,7 @@ async def test_dms_triggers_and_publishes(mock_storage, mock_broker):
 
 @pytest.mark.asyncio
 async def test_dms_skips_when_impact_limit(mock_storage, mock_broker):
-    # ДОБАВЛЯЕМ: настройка позиции
+    # Настраиваем позицию
     mock_storage.positions.get_position.return_value = type("Position", (), {
         "base_qty": Decimal("0.1"),
         "avg_entry_price": Decimal("100")
