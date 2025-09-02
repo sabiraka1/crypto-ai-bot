@@ -1,5 +1,0 @@
-﻿"Path","Issue","Details"
-"C:\Users\satis\Documents\GitHub\crypto-ai-bot\src\crypto_ai_bot\core\domain\macro\ports.py","protocol_redeclared_outside_ports_py","BtcDomPort"
-"C:\Users\satis\Documents\GitHub\crypto-ai-bot\src\crypto_ai_bot\core\domain\macro\ports.py","protocol_redeclared_outside_ports_py","DxyPort"
-"C:\Users\satis\Documents\GitHub\crypto-ai-bot\src\crypto_ai_bot\core\domain\macro\ports.py","protocol_redeclared_outside_ports_py","FomcCalendarPort"
-"C:\Users\satis\Documents\GitHub\crypto-ai-bot\src\crypto_ai_bot\core\infrastructure\events\bus_adapter.py","protocol_redeclared_outside_ports_py","EventBusPort"
