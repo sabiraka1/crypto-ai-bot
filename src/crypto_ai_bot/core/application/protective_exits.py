@@ -101,7 +101,7 @@ class ProtectiveExits:
                 target_percentage=dec("100"),  # Продаем 100% при защитных выходах
                 min_amount=self._cfg.min_base
             )
-        except:
+        except Exception:
             # Fallback если compute_sell_amount недоступен
             qty = base
             
