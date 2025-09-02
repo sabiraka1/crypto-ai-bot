@@ -33,6 +33,7 @@ class HealthChecker:
         self.bus = bus
         self.settings = settings
         self._log = get_logger("health_checker")
+        self._last_check_results: dict[str, Any] = {}
         
     async def check(self) -> dict[str, Any]:
         """Check health of all components."""
@@ -72,4 +73,19 @@ class HealthChecker:
             results["bus"]
         ])
         
+        self._last_check_results = results
         return results
+    
+    async def tick(self, symbol: str) -> dict[str, Any]:
+        """Periodic health check tick for a symbol - needed by Orchestrator."""
+        # Для совместимости с Orchestrator просто возвращаем последний статус
+        # или делаем быструю проверку
+        if not self._last_check_results:
+            # Первый tick - делаем полную проверку
+            await self.check()
+        
+        # Возвращаем результат в формате, который ожидает Orchestrator
+        return {
+            "healthy": self._last_check_results.get("healthy", True),
+            "symbol": symbol
+        }

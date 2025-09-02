@@ -1,65 +1,43 @@
 ﻿import asyncio
+import os
 import sqlite3
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from crypto_ai_bot.core.infrastructure.storage.migrations.runner import run_migrations
 from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.time import now_ms
+
+
+@pytest.fixture(autouse=True)
+def disable_redis():
+    """Отключаем Redis для всех тестов."""
+    os.environ["EVENT_BUS_URL"] = ""
+    yield
 
 
 @pytest.fixture
 def temp_db():
-    """Временная БД для тестов."""
+    """Временная БД для тестов с применением миграций."""
     with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as f:
         db_path = f.name
+    
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-
-    # Базовые таблицы (минимально необходимые для facades)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS positions(
-            symbol TEXT PRIMARY KEY,
-            base_qty NUMERIC NOT NULL DEFAULT 0
-        )
-        """
+    
+    # Применяем все миграции
+    run_migrations(
+        conn,
+        now_ms=now_ms(),
+        db_path=db_path,
+        do_backup=False,
+        backup_retention_days=0
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            side TEXT NOT NULL,
-            amount NUMERIC NOT NULL DEFAULT 0,
-            price NUMERIC NOT NULL DEFAULT 0,
-            cost NUMERIC NOT NULL DEFAULT 0,
-            status TEXT NOT NULL DEFAULT 'closed',
-            ts_ms INTEGER NOT NULL,
-            created_at_ms INTEGER NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS idempotency(
-            key TEXT PRIMARY KEY,
-            ts_ms INTEGER NOT NULL,
-            ttl_sec INTEGER NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS audit(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            action TEXT NOT NULL,
-            payload TEXT,
-            ts_ms INTEGER NOT NULL
-        )
-        """
-    )
+    
     conn.commit()
 
     try:
@@ -73,119 +51,162 @@ def temp_db():
 def mock_settings():
     """Полный мок настроек со многими полями (совместим с текущими Settings)."""
     
-    # Создаем простой класс Settings прямо здесь
-    class Settings:
-        def __init__(self, **kwargs):
-            for key, value in kwargs.items():
-                setattr(self, key, value)
-
-    return Settings(
+    class MockSettings:
         # Основные
-        MODE="paper",
-        SANDBOX=0,
-        EXCHANGE="gateio",
-        SYMBOL="BTC/USDT",
-        SYMBOLS="",
+        MODE: str = "paper"
+        SANDBOX: int = 0
+        EXCHANGE: str = "gateio"
+        SYMBOL: str = "BTC/USDT"
+        SYMBOLS: str = ""
 
         # Торговля
-        FIXED_AMOUNT=50.0,
-        PRICE_FEED="fixed",
-        FIXED_PRICE=100.0,
+        FIXED_AMOUNT: float = 50.0
+        PRICE_FEED: str = "fixed"
+        FIXED_PRICE: float = 100.0
 
         # БД
-        DB_PATH=":memory:",
-        BACKUP_RETENTION_DAYS=30,
+        DB_PATH: str = ":memory:"
+        BACKUP_RETENTION_DAYS: int = 30
+
+        # Event Bus - ВАЖНО: пустая строка отключает Redis
+        EVENT_BUS_URL: str = ""
 
         # Идемпотентность
-        IDEMPOTENCY_BUCKET_MS=60000,
-        IDEMPOTENCY_TTL_SEC=3600,
+        IDEMPOTENCY_BUCKET_MS: int = 60000
+        IDEMPOTENCY_TTL_SEC: int = 3600
 
         # Риски
-        RISK_COOLDOWN_SEC=60,
-        RISK_MAX_SPREAD_PCT=0.3,
-        RISK_MAX_POSITION_BASE=0.02,
-        RISK_MAX_ORDERS_PER_HOUR=6,
-        RISK_DAILY_LOSS_LIMIT_QUOTE=100.0,
+        RISK_COOLDOWN_SEC: int = 60
+        RISK_MAX_SPREAD_PCT: float = 0.3
+        RISK_MAX_POSITION_BASE: float = 0.02
+        RISK_MAX_ORDERS_PER_HOUR: int = 6
+        RISK_DAILY_LOSS_LIMIT_QUOTE: float = 100.0
+        RISK_MAX_ORDERS_5M: int = 10
+        SAFETY_MAX_TURNOVER_QUOTE_PER_DAY: float = 10000.0
+        RISK_MAX_TURNOVER_DAY: float = 10000.0
 
         # Комиссии и проскальзывание
-        FEE_PCT_ESTIMATE=dec("0.001"),
-        RISK_MAX_FEE_PCT=dec("0.001"),
-        RISK_MAX_SLIPPAGE_PCT=dec("0.001"),
+        FEE_PCT_ESTIMATE: Any = dec("0.001")
+        RISK_MAX_FEE_PCT: Any = dec("0.001")
+        RISK_MAX_SLIPPAGE_PCT: Any = dec("0.001")
 
         # HTTP и автостарт
-        HTTP_TIMEOUT_SEC=30,
-        TRADER_AUTOSTART=0,
+        HTTP_TIMEOUT_SEC: int = 30
+        HTTP_PROXY: str = ""
+        TRADER_AUTOSTART: int = 0
 
         # Интервалы
-        EVAL_INTERVAL_SEC=0.01,
-        EXITS_INTERVAL_SEC=0.01,
-        RECONCILE_INTERVAL_SEC=0.01,
-        WATCHDOG_INTERVAL_SEC=0.01,
-        SETTLEMENT_INTERVAL_SEC=0.01,
-        DMS_TIMEOUT_MS=120000,
+        EVAL_INTERVAL_SEC: float = 0.01
+        EXITS_INTERVAL_SEC: float = 0.01
+        RECONCILE_INTERVAL_SEC: float = 0.01
+        WATCHDOG_INTERVAL_SEC: float = 0.01
+        SETTLEMENT_INTERVAL_SEC: float = 0.01
+
+        # DMS
+        DMS_TIMEOUT_MS: int = 120000
+        DMS_RECHECKS: int = 2
+        DMS_RECHECK_DELAY_SEC: float = 3.0
+        DMS_MAX_IMPACT_PCT: float = 0.0
 
         # Защитные выходы
-        EXITS_ENABLED=1,
-        EXITS_MODE="both",
-        EXITS_HARD_STOP_PCT=0.05,
-        EXITS_TRAILING_PCT=0.03,
-        EXITS_MIN_BASE_TO_EXIT=0.0,
+        EXITS_ENABLED: int = 1
+        EXITS_MODE: str = "both"
+        EXITS_STOP_PCT: float = 5.0
+        EXITS_TAKE_PCT: float = 10.0
+        EXITS_TRAIL_PCT: float = 3.0
+        EXITS_MIN_BASE: float = 0.0
+        
+        # Альтернативные названия для совместимости
+        EXITS_HARD_STOP_PCT: float = 5.0
+        EXITS_TAKE_PROFIT_PCT: float = 10.0
+        EXITS_TRAILING_PCT: float = 3.0
+        EXITS_MIN_BASE_TO_EXIT: float = 0.0
 
         # Telegram
-        TELEGRAM_ENABLED=0,
-        TELEGRAM_BOT_TOKEN="",
-        TELEGRAM_CHAT_ID="",
-        TELEGRAM_BOT_COMMANDS_ENABLED=0,
-        TELEGRAM_ALLOWED_USERS="",
+        TELEGRAM_ENABLED: int = 0
+        TELEGRAM_BOT_TOKEN: str = ""
+        TELEGRAM_CHAT_ID: str = ""
+        TELEGRAM_BOT_COMMANDS_ENABLED: bool = False
+        TELEGRAM_ALLOWED_USERS: str = ""
 
         # API/Keys
-        API_TOKEN="",
-        API_KEY="",
-        API_SECRET="",
-        POD_NAME="test-pod",
-        HOSTNAME="test-host",
+        API_TOKEN: str = ""
+        API_KEY: str = ""
+        API_SECRET: str = ""
+        API_PASSWORD: str = ""
+        POD_NAME: str = "test-pod"
+        HOSTNAME: str = "test-host"
         
-        # Добавим для совместимости с тестами
-        BROKER_RATE_RPS=8,
-        BROKER_RATE_BURST=16,
-    )
+        # Rate limiting
+        BROKER_RATE_RPS: int = 8
+        BROKER_RATE_BURST: int = 16
+        
+        def __getattr__(self, name: str) -> Any:
+            # Возвращаем None для неопределенных атрибутов
+            return None
+
+    return MockSettings()
 
 
 @pytest.fixture
 def mock_broker():
     """Мок брокера с простыми объектами-ответами (атрибуты как у CCXT-DTO)."""
     broker = AsyncMock()
-    broker.fetch_ticker.return_value = MagicMock(
-        symbol="BTC/USDT",
-        last=dec("50000"),
-        bid=dec("49950"),
-        ask=dec("50050"),
-        timestamp=1700000000000,
-    )
-    broker.fetch_balance.return_value = MagicMock(
-        free_quote=dec("1000"),
-        free_base=dec("0.001"),
-    )
-    broker.create_market_buy_quote.return_value = MagicMock(
-        id="123",
-        client_order_id="test-buy-123",
-        symbol="BTC/USDT",
-        side="buy",
-        amount=dec("0.001"),
-        status="closed",
-        filled=dec("0.001"),
-        timestamp=1700000000000,
-    )
-    broker.create_market_sell_base.return_value = MagicMock(
-        id="124",
-        client_order_id="test-sell-124",
-        symbol="BTC/USDT",
-        side="sell",
-        amount=dec("0.001"),
-        status="closed",
-        filled=dec("0.001"),
-        timestamp=1700000000000,
-    )
+    broker.exchange = "paper"
+    
+    broker.fetch_ticker.return_value = {
+        "symbol": "BTC/USDT",
+        "last": "50000",
+        "bid": "49950",
+        "ask": "50050",
+        "timestamp": 1700000000000,
+    }
+    
+    broker.fetch_balance.return_value = {
+        "USDT": {
+            "free": "1000",
+            "used": "0",
+            "total": "1000"
+        },
+        "BTC": {
+            "free": "0.001",
+            "used": "0",
+            "total": "0.001"
+        }
+    }
+    
+    broker.create_market_buy_quote.return_value = {
+        "id": "123",
+        "clientOrderId": "test-buy-123",
+        "client_order_id": "test-buy-123",
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "amount": "0.001",
+        "status": "closed",
+        "filled": "0.001",
+        "price": "50000",
+        "cost": "50",
+        "fee_quote": "0.05",
+        "timestamp": 1700000000000,
+        "ts_ms": 1700000000000
+    }
+    
+    broker.create_market_sell_base.return_value = {
+        "id": "124",
+        "clientOrderId": "test-sell-124",
+        "client_order_id": "test-sell-124",
+        "symbol": "BTC/USDT",
+        "side": "sell",
+        "amount": "0.001",
+        "status": "closed",
+        "filled": "0.001",
+        "price": "50000",
+        "cost": "50",
+        "fee_quote": "0.05",
+        "timestamp": 1700000000000,
+        "ts_ms": 1700000000000
+    }
+    
     return broker
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 from fastapi import status
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 
 
 @pytest.mark.asyncio
@@ -40,7 +40,9 @@ async def test_server_health_and_status(monkeypatch):
 
     monkeypatch.setattr(srv, "build_container_async", _build)
 
-    async with AsyncClient(app=srv.app, base_url="http://test") as ac:
+    # ЕДИНСТВЕННОЕ ИЗМЕНЕНИЕ - используем ASGITransport
+    transport = ASGITransport(app=srv.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         r = await ac.get("/health")
         assert r.status_code == status.HTTP_200_OK
         data = r.json()
