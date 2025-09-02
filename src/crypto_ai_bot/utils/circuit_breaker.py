@@ -38,3 +38,4 @@ class CircuitBreaker:
                     self._state = "open"
                     self._opened_at = time.time()
                 return False
+        return None  # Добавлен return для успешного пути

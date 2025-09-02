@@ -14,8 +14,8 @@ from .exit_policies import (
     TrailingStopPolicy,
 )
 
-# Менеджер
-from .manager import StrategyManager
+# Менеджер - исправлено: импорт из strategy_manager
+from .strategy_manager import StrategyManager
 
 # Позиционирование / выходы
 from .position_sizing import (

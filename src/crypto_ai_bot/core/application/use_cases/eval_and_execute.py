@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
-from crypto_ai_bot.core.domain.strategies import MarketData, StrategyContext, StrategyManager
 from crypto_ai_bot.core.domain.strategies.position_sizing import (
     SizeConstraints,
     fixed_fractional,
@@ -18,6 +18,25 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("usecase.eval_and_execute")
+
+
+@dataclass(frozen=True)
+class MarketData:
+    """Контейнер рыночных данных для стратегий."""
+    last_price: Decimal
+    bid: Decimal
+    ask: Decimal
+    spread_pct: Decimal
+    volatility_pct: Decimal
+    samples: int
+    timeframe: str
+
+
+@dataclass(frozen=True)
+class StrategyContext:
+    """Контекст для выполнения стратегии."""
+    mode: str
+    now_ms: int | None = None
 
 
 async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> MarketData:
@@ -70,6 +89,19 @@ async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> Mark
     )
 
 
+class StrategyManager:
+    """Простая обертка для вызова стратегий."""
+    def __init__(self, settings: Any, regime_provider: Any = None) -> None:
+        self.settings = settings
+        self.regime_provider = regime_provider
+
+    async def decide(self, ctx: StrategyContext, md: MarketData) -> tuple[str, str | None]:
+        """Упрощенная логика для принятия решения."""
+        # Здесь должна быть реальная логика стратегий
+        # Для примера возвращаем hold
+        return "hold", "no_strategy_configured"
+
+
 async def eval_and_execute(
     *,
     symbol: str,
@@ -79,7 +111,7 @@ async def eval_and_execute(
     risk: Any,
     exits: Any,
     settings: Any,
-) -> dict:
+) -> dict[str, Any]:
     try:
         md = await _build_market_data(symbol=symbol, broker=broker, settings=settings)
 
