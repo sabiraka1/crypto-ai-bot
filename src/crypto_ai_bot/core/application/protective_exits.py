@@ -1,7 +1,8 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Dict, Optional
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
@@ -28,17 +29,54 @@ class ProtectiveExits:
         self._storage = storage
         self._bus = bus
         self._settings = settings
+        
+        # Безопасное получение параметров с обработкой None и пустых строк
+        def safe_dec(name: str, default: str = "0") -> Decimal:
+            val = getattr(settings, name, None)
+            if val is None or val == "" or val == "None":
+                return dec(default)
+            try:
+                str_val = str(val).strip()
+                if not str_val or str_val == "None":
+                    return dec(default)
+                return dec(str_val)
+            except (ValueError, TypeError):
+                return dec(default)
+        
+        # Поддержка разных имен параметров для совместимости
+        stop_pct = safe_dec("EXITS_STOP_PCT")
+        if stop_pct == dec("0"):
+            stop_pct = safe_dec("EXITS_HARD_STOP_PCT")
+        
+        take_pct = safe_dec("EXITS_TAKE_PCT")
+        if take_pct == dec("0"):
+            take_pct = safe_dec("EXITS_TAKE_PROFIT_PCT")
+        
+        trailing_pct = safe_dec("EXITS_TRAIL_PCT")
+        if trailing_pct == dec("0"):
+            trailing_pct = safe_dec("EXITS_TRAILING_PCT")
+        
+        min_base = safe_dec("EXITS_MIN_BASE")
+        if min_base == dec("0"):
+            min_base = safe_dec("EXITS_MIN_BASE_TO_EXIT")
+        
         self._cfg = ExitConfig(
-            stop_pct=dec(str(getattr(settings, "EXITS_STOP_PCT", "0") or "0")),
-            take_pct=dec(str(getattr(settings, "EXITS_TAKE_PCT", "0") or "0")),
-            trailing_pct=dec(str(getattr(settings, "EXITS_TRAIL_PCT", "0") or "0")),
-            min_base=dec(str(getattr(settings, "EXITS_MIN_BASE", "0") or "0")),
+            stop_pct=stop_pct,
+            take_pct=take_pct,
+            trailing_pct=trailing_pct,
+            min_base=min_base,
         )
 
-    async def start(self) -> None: ...
-    async def stop(self) -> None: ...
+    async def start(self) -> None:
+        """Start protective exits monitoring."""
+        pass
 
-    async def evaluate(self, *, symbol: str) -> dict[str, Any] | None:
+    async def stop(self) -> None:
+        """Stop protective exits monitoring."""
+        pass
+
+    async def evaluate(self, *, symbol: str) -> Optional[Dict[str, Any]]:
+        """Evaluate if position should be closed."""
         # Нет порогов — ничего не делаем
         if self._cfg.stop_pct <= 0 and self._cfg.take_pct <= 0 and self._cfg.trailing_pct <= 0:
             return None
@@ -47,8 +85,8 @@ class ProtectiveExits:
         if not pos:
             return None
 
-        base = pos.base_qty or dec("0")
-        avg = pos.avg_entry_price or dec("0")
+        base = getattr(pos, "base_qty", dec("0")) or dec("0")
+        avg = getattr(pos, "avg_entry_price", dec("0")) or dec("0")
         if base <= 0 or avg <= 0:
             return None
 
@@ -61,11 +99,16 @@ class ProtectiveExits:
         if last <= 0:
             return None
 
-        stop_price = avg * (dec("1") - (self._cfg.stop_pct / dec("100"))) if self._cfg.stop_pct > 0 else None
-        take_price = avg * (dec("1") + (self._cfg.take_pct / dec("100"))) if self._cfg.take_pct > 0 else None
+        stop_price: Optional[Decimal] = None
+        take_price: Optional[Decimal] = None
+        
+        if self._cfg.stop_pct > 0:
+            stop_price = avg * (dec("1") - (self._cfg.stop_pct / dec("100")))
+        if self._cfg.take_pct > 0:
+            take_price = avg * (dec("1") + (self._cfg.take_pct / dec("100")))
 
         # Trailing
-        trail_trigger = None
+        trail_trigger: Optional[Decimal] = None
         if self._cfg.trailing_pct > 0:
             try:
                 max_seen = getattr(pos, "max_price", None)
@@ -83,10 +126,10 @@ class ProtectiveExits:
         if stop_price and last <= stop_price:
             should_close = True
             reason = f"stop_loss@{self._cfg.stop_pct}%"
-        if not should_close and take_price and last >= take_price:
+        elif take_price and last >= take_price:
             should_close = True
             reason = f"take_profit@{self._cfg.take_pct}%"
-        if not should_close and trail_trigger and last <= trail_trigger:
+        elif trail_trigger and last <= trail_trigger:
             should_close = True
             reason = f"trailing_stop@{self._cfg.trailing_pct}%"
 
@@ -94,9 +137,6 @@ class ProtectiveExits:
             inc("protective_exits_tick_total", symbol=symbol)
             return None
 
-        # Используем правильный вызов compute_sell_amount или просто base
-        # Согласно ошибке, compute_sell_amount не принимает эти параметры
-        # Используем простой подход
         qty: Decimal = base
             
         if self._cfg.min_base > 0 and qty < self._cfg.min_base:
@@ -112,9 +152,15 @@ class ProtectiveExits:
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return None
 
-    async def tick(self, symbol: str) -> dict[str, Any] | None:
+    async def tick(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Process tick for protective exits."""
         return await self.evaluate(symbol=symbol)
+
+    async def on_hint(self, evt: Dict[str, Any]) -> None:
+        """Handle hint events."""
+        pass
 
 
 def make_protective_exits(*, broker: Any, storage: Any, bus: Any, settings: Any) -> ProtectiveExits:
+    """Factory function for creating ProtectiveExits instance."""
     return ProtectiveExits(broker=broker, storage=storage, bus=bus, settings=settings)

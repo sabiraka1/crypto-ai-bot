@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List
 from decimal import Decimal
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import defaultdict
 
 from crypto_ai_bot.utils.decimal import dec
@@ -16,12 +16,15 @@ _log = get_logger("brokers.paper")
 class PaperBroker:
     """Симулятор брокера для paper trading."""
     
-    settings: Any = None
-    exchange: str = "paper"  # Поменял порядок для совместимости
-    _balances: Dict[str, Decimal] = field(default_factory=lambda: {"USDT": dec("10000"), "BTC": dec("0.5")})
-    _positions: Dict[str, Decimal] = field(default_factory=dict)
-    _orders: Dict[str, Any] = field(default_factory=dict)
-    _last_prices: Dict[str, Decimal] = field(default_factory=lambda: defaultdict(lambda: dec("50000")))
+    settings: Any
+    
+    def __post_init__(self) -> None:
+        # Инициализируем атрибуты после создания
+        self._balances: Dict[str, Decimal] = {"USDT": dec("10000"), "BTC": dec("0.5")}
+        self._positions: Dict[str, Decimal] = {}
+        self._orders: Dict[str, Any] = {}
+        self._last_prices: Dict[str, Decimal] = defaultdict(lambda: dec("50000"))
+        self.exchange = getattr(self.settings, "EXCHANGE", "paper") if self.settings else "paper"
     
     async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         """Возвращает фиктивный ticker."""
@@ -72,7 +75,7 @@ class PaperBroker:
         symbol: str, 
         quote_amount: Decimal, 
         client_order_id: str | None = None
-    ) -> Any:
+    ) -> Dict[str, Any]:
         """Симулирует покупку."""
         price = self._last_prices[symbol]
         amount = quote_amount / price
@@ -82,12 +85,14 @@ class PaperBroker:
         base, quote = symbol.split("/")
         if quote in self._balances:
             self._balances[quote] -= (quote_amount + fee)
-        if base in self._balances:
-            self._balances[base] = self._balances.get(base, dec("0")) + amount
+        if base not in self._balances:
+            self._balances[base] = dec("0")
+        self._balances[base] = self._balances[base] + amount
         
         order = {
             "id": f"paper_{client_order_id or now_ms()}",
             "clientOrderId": client_order_id,
+            "client_order_id": client_order_id,  # для совместимости
             "symbol": symbol,
             "side": "buy",
             "type": "market",
@@ -113,7 +118,7 @@ class PaperBroker:
         symbol: str,
         base_amount: Decimal,
         client_order_id: str | None = None
-    ) -> Any:
+    ) -> Dict[str, Any]:
         """Симулирует продажу."""
         price = self._last_prices[symbol]
         cost = base_amount * price
@@ -123,12 +128,14 @@ class PaperBroker:
         base, quote = symbol.split("/")
         if base in self._balances:
             self._balances[base] -= base_amount
-        if quote in self._balances:
-            self._balances[quote] = self._balances.get(quote, dec("0")) + (cost - fee)
+        if quote not in self._balances:
+            self._balances[quote] = dec("0")
+        self._balances[quote] = self._balances[quote] + (cost - fee)
         
         order = {
             "id": f"paper_{client_order_id or now_ms()}",
             "clientOrderId": client_order_id,
+            "client_order_id": client_order_id,  # для совместимости
             "symbol": symbol,
             "side": "sell",
             "type": "market",
@@ -149,7 +156,7 @@ class PaperBroker:
         
         return order
     
-    async def fetch_order(self, order_id: str, symbol: str) -> Any:
+    async def fetch_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         """Получить ордер по ID."""
         return self._orders.get(order_id, {
             "id": order_id,
@@ -159,10 +166,10 @@ class PaperBroker:
             "remaining": "0",
         })
     
-    async def fetch_open_orders(self, symbol: str | None = None) -> List[Any]:
+    async def fetch_open_orders(self, symbol: str | None = None) -> List[Dict[str, Any]]:
         """В paper режиме все ордера сразу исполняются, поэтому открытых нет."""
         return []
     
-    async def cancel_order(self, order_id: str, symbol: str) -> Any:
+    async def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         """В paper режиме нечего отменять."""
         return {"id": order_id, "status": "canceled"}
