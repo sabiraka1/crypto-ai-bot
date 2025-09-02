@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from decimal import Decimal
+from typing import Any, Tuple
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.utils.decimal import dec
@@ -9,6 +10,48 @@ from crypto_ai_bot.utils.logging import get_logger
 _log = get_logger("application.reconcile.positions")
 
 
+# --- Centralized NO_SHORTS helper ---------------------------------------------------------
+def compute_sell_amount(storage: StoragePort, symbol: str, requested: Decimal | None) -> tuple[bool, Decimal]:
+    """
+    Centralized NO_SHORTS guard: cap sell amount by held base position.
+    Returns (allowed, amount_to_sell). If nothing held -> (False, 0).
+    The function is tolerant to both object- and dict-shaped position records.
+    """
+    try:
+        repo = getattr(storage, "positions", None)
+        if repo is None:
+            return (False, dec("0"))
+        pos = repo.get_position(symbol)
+        # extract held base quantity
+        held_raw: Any = None
+        if pos is not None:
+            held_raw = getattr(pos, "base_qty", None)
+            if held_raw is None and isinstance(pos, dict):
+                held_raw = pos.get("base_qty")
+        held = dec(str(held_raw or "0"))
+        if held <= dec("0"):
+            return (False, dec("0"))
+        # choose requested or full position
+        amt = dec(str(requested)) if requested is not None else held
+        if amt > held:
+            amt = held
+        if amt <= dec("0"):
+            return (False, dec("0"))
+        return (True, amt)
+    except Exception:
+        return (False, dec("0"))
+
+
+# Backward-compat shim for old call-sites that expect PositionGuard.can_sell(...)
+class PositionGuard:
+    """Single source of truth for NO_SHORTS checks (compat wrapper)."""
+
+    @staticmethod
+    def can_sell(storage: StoragePort, symbol: str, amount: Decimal) -> Tuple[bool, Decimal]:
+        return compute_sell_amount(storage, symbol, amount)
+
+
+# --- Reconciliation logic (from original) -------------------------------------------------
 async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort) -> None:
     """
     Простая сверка: подтягиваем текущую цену и обновляем нереализованный PnL.

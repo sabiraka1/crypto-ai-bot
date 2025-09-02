@@ -9,6 +9,7 @@ from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, Stora
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+from work_apply.crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
 
 _log = get_logger("usecase.place_order")
 
@@ -108,7 +109,13 @@ async def place_order(
         elif side == "sell":
             b = inputs.base_amount if inputs.base_amount > 0 else dec("0")
             inc("broker.order.create", {"side": "sell"})
-            order = await broker.create_market_sell_base(symbol=sym, base_amount=b, client_order_id=inputs.client_order_id)
+            _ok,_amt = compute_sell_amount(storage, sym, b, client_order_id=inputs.client_order_id)
+if not _ok:
+    return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
+order = _ok,_amt = compute_sell_amount(storage, sym, _amt)
+if not _ok:
+    return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
+await broker.create_market_sell_base(symbol=sym, base_amount=_amt)
         else:
             return PlaceOrderResult(ok=False, reason="invalid_side")
 

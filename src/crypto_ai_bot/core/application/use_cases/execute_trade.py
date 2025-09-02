@@ -10,6 +10,7 @@ from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, Stora
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+from work_apply.crypto_ai_bot.core.application.reconciliation.positions import compute_sell_amount
 
 # Доп. правила риска (опционально)
 try:
@@ -220,7 +221,13 @@ async def execute_trade(
         elif act == "sell":
             b_amt = base_amount if base_amount and base_amount > dec("0") else dec("0")
             _log.info("execute_order_sell", extra={"symbol": sym, "base_amount": str(b_amt)})
-            order = await broker.create_market_sell_base(symbol=sym, base_amount=b_amt, client_order_id=client_id)
+            _ok,_amt = compute_sell_amount(storage, sym, b_amt, client_order_id=client_id)
+if not _ok:
+    return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
+order = _ok,_amt = compute_sell_amount(storage, sym, _amt)
+if not _ok:
+    return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
+await broker.create_market_sell_base(symbol=sym, base_amount=_amt)
         else:
             return {"action": "skip", "executed": False, "reason": "invalid_side"}
     except Exception:
