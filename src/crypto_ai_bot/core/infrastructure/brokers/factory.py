@@ -7,7 +7,7 @@ from crypto_ai_bot.utils.logging import get_logger
 _log = get_logger("brokers.factory")
 
 
-def _import_first(*candidates: str):
+def _import_first(*candidates: str) -> Any:  # Исправлено: добавлен return type
     """Import first available module from the list."""
     last_exc: Exception | None = None
     for path in candidates:
@@ -23,6 +23,7 @@ def _import_first(*candidates: str):
 
 
 def _lower(value: Any, default: str = "") -> str:
+    """Safely convert value to lowercase string."""
     try:
         s = (value or "").strip()
     except Exception:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 
@@ -18,7 +19,7 @@ class AuditRepo:
     Ожидает SQLite-подобный connection (conn.cursor().execute(...)).
     """
 
-    def __init__(self, conn) -> None:
+    def __init__(self, conn: sqlite3.Connection) -> None:  # Исправлено: добавлен тип
         self._conn = conn
 
     def write(self, event: str, payload: dict[str, Any]) -> None:
