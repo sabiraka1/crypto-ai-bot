@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/core/infrastructure/events/redis_bus.py
 from __future__ import annotations
 
 import asyncio
@@ -10,22 +9,22 @@ from typing import Any
 try:
     from redis.asyncio import Redis
     from redis.asyncio.client import PubSub
-except Exception as exc:  # pragma: no cover
+except Exception as exc:
     raise RuntimeError("redis.asyncio is required for RedisEventBus") from exc
 
 try:
     from crypto_ai_bot.utils.logging import get_logger
-except Exception:  # pragma: no cover
+except Exception:
     import logging
-    def get_logger(name: str, *, level: int = 20) -> logging.Logger:  # Исправлено: добавили параметр level
+    def get_logger(name: str, *, level: int = 20) -> logging.Logger:
         return logging.getLogger(name)
 
 try:
     from crypto_ai_bot.utils.metrics import inc, observe
-except Exception:  # pragma: no cover
-    def inc(name: str, **labels: Any) -> None:  # Исправлено: убрали подчеркивания
+except Exception:
+    def inc(name: str, **labels: Any) -> None:
         pass
-    def observe(name: str, value: float, labels: dict[str, str] | None = None) -> None:  # Исправлено: убрали подчеркивания
+    def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
         pass
 
 _log = get_logger("events.redis_bus")
@@ -36,11 +35,14 @@ Handler = Callable[[Any], Awaitable[None]]
 class RedisEventBus:
     """
     Durable event bus поверх Redis Pub/Sub.
-    Хранит реестр подписок и пере-подписывается при старте/реконнекте.
-    Формат сообщения: {"topic": "...", "payload": {...}, "ts_ms": int, "key": str?}
     """
 
     def __init__(self, url: str) -> None:
+        # Исправляем схему URL если нужно
+        if url and not url.startswith(('redis://', 'rediss://', 'unix://')):
+            # Предполагаем redis:// по умолчанию
+            url = f"redis://{url}" if ':' in url else f"redis://localhost:6379"
+        
         self._url = url
         self._redis: Redis | None = None
         self._pub: Redis | None = None
@@ -48,9 +50,7 @@ class RedisEventBus:
         self._dlq: list[Handler] = []
         self._listener_task: asyncio.Task[None] | None = None
         self._started: bool = False
-        self._active_pubsub: PubSub | None = None  # Исправлено: указали правильный тип
-
-    # ------------------ API совместимый с AsyncEventBus ------------------
+        self._active_pubsub: PubSub | None = None
 
     def subscribe(self, topic: str, handler: Handler) -> None:
         self._subs[topic].append(handler)
@@ -61,7 +61,7 @@ class RedisEventBus:
     def subscribe_dlq(self, handler: Handler) -> None:
         self._dlq.append(handler)
 
-    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None) -> None:  # Исправлено: возвращаем None
+    async def publish(self, topic: str, payload: dict[str, Any], *, key: str | None = None) -> None:
         if not self._pub:
             raise RuntimeError("RedisEventBus not started")
         msg = json.dumps({"topic": topic, "payload": payload, "key": key})
@@ -75,6 +75,12 @@ class RedisEventBus:
     async def start(self) -> None:
         if self._started:
             return
+        
+        # Проверяем URL перед подключением
+        if not self._url or self._url == 'redis://':
+            # Если URL пустой или некорректный, используем дефолтный
+            self._url = 'redis://localhost:6379'
+        
         self._redis = Redis.from_url(self._url, decode_responses=True)
         self._pub = Redis.from_url(self._url, decode_responses=True)
         self._listener_task = asyncio.create_task(self._listen_loop())
@@ -94,12 +100,7 @@ class RedisEventBus:
                 await self._pub.close()
         _log.info("redis_bus_closed")
 
-    # ------------------ Внутреннее ------------------
-
     async def _resubscribe_all(self) -> None:
-        """
-        Подписываемся на все каналы evt:* согласно сохранённым топикам.
-        """
         if not self._redis:
             return
         topics = list(self._subs.keys())
@@ -115,13 +116,11 @@ class RedisEventBus:
             _log.error("redis_bus_resubscribe_failed", extra={"topics": topics}, exc_info=True)
 
     async def _emit_dlq(self, evt: dict[str, Any], *, error: str, failed_handler: str) -> None:
-        # Локальные DLQ-хендлеры
         for d in self._dlq:
             try:
                 await d({"topic": "__dlq__", "payload": {**evt.get("payload", {}), "original_topic": evt.get("topic"), "error": error, "failed_handler": failed_handler}})
             except Exception:
                 _log.debug("redis_bus_local_dlq_handler_failed", extra={"topic": evt.get("topic")}, exc_info=True)
-        # И в общий канал
         try:
             if self._pub:
                 await self._pub.publish("evt:__dlq__", json.dumps({"topic": "__dlq__", "payload": {**evt.get("payload", {}), "original_topic": evt.get("topic"), "error": error, "failed_handler": failed_handler}}))
@@ -130,10 +129,6 @@ class RedisEventBus:
             _log.error("redis_bus_publish_dlq_failed", exc_info=True)
 
     async def _listen_loop(self) -> None:
-        """
-        Основной цикл приёма сообщений.
-        При разрыве соединения пытается переподключиться и пере-подписаться.
-        """
         backoff = 0.5
         while True:
             try:
@@ -146,7 +141,7 @@ class RedisEventBus:
                 self._active_pubsub = pubsub
                 _log.info("redis_bus_listen_started", extra={"topics": topics or ["<none>"]})
                 observe("redis_bus.listen.backoff_ms", backoff * 1000.0, {"phase": "started"})
-                backoff = 0.5  # <- сбросим бэкофф после успешного старта
+                backoff = 0.5
 
                 async for msg in pubsub.listen():
                     if msg is None:
@@ -158,7 +153,6 @@ class RedisEventBus:
                     try:
                         data = json.loads(msg["data"])
                     except Exception:
-                        # невалидное сообщение
                         inc("redis_bus_malformed_total")
                         continue
                     topic = data.get("topic")

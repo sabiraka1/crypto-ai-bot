@@ -7,7 +7,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 
-# Лёгкие утилиты (без жёстких зависимостей)
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -62,9 +61,6 @@ def _mark_applied(conn: sqlite3.Connection, version: int, name: str, now_ms: int
         )
 
 
-# -------------------------
-# Вспомогательные функции для миграций
-# -------------------------
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     cur = conn.execute(f"PRAGMA table_info({table});")
     return any(row[1] == column for row in cur.fetchall())
@@ -74,18 +70,11 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
         with conn:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl};")
 
-def _rename_column_if_exists(conn: sqlite3.Connection, table: str, old: str, new: str) -> None:
-    # SQLite нет IF EXISTS для rename колонок — обойдёмся копированием данных на уровне UPDATE
-    pass  # используем UPDATE-перенос ниже
 
-
-# -------------------------
-# Программные миграции (источник истины)
-# -------------------------
 def _pymigrations() -> list[PyMigration]:
     migs: list[PyMigration] = []
 
-    # V0001 — базовая схема (если у вас уже была, оператор IF NOT EXISTS всё равно безопасен)
+    # V0001 — базовая схема
     def _v1(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -94,11 +83,10 @@ def _pymigrations() -> list[PyMigration]:
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol            TEXT NOT NULL,
                 side              TEXT NOT NULL,
-                amount            TEXT NOT NULL,     -- Decimal в текстовом виде
+                amount            TEXT NOT NULL,
                 price             TEXT NOT NULL,
                 cost              TEXT NOT NULL,
                 fee_quote         TEXT,
-                client_order_id   TEXT,
                 ts_ms             INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS positions (
@@ -125,10 +113,18 @@ def _pymigrations() -> list[PyMigration]:
                 last              TEXT,
                 ts_ms             INTEGER NOT NULL
             );
-            """,
+            """
         )
 
     migs.append(PyMigration(1, "init", _v1))
+
+    # V0002 - добавим broker_order_id и client_order_id
+    def _v2(conn: sqlite3.Connection) -> None:
+        _add_column_if_missing(conn, "trades", "broker_order_id", "TEXT")
+        _add_column_if_missing(conn, "trades", "client_order_id", "TEXT")
+        _add_column_if_missing(conn, "trades", "filled", "TEXT")
+
+    migs.append(PyMigration(2, "trades_order_ids", _v2))
 
     # V0006 — индексы по сделкам
     def _v6(conn: sqlite3.Connection) -> None:
@@ -142,12 +138,12 @@ def _pymigrations() -> list[PyMigration]:
                 WHERE client_order_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_trades_ts
                 ON trades(ts_ms);
-            """,
+            """
         )
 
     migs.append(PyMigration(6, "trades_indexes", _v6))
 
-    # V0007 — уникальность идемпотентности + ускорение GC
+    # V0007 — уникальность идемпотентности
     def _v7(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -156,7 +152,7 @@ def _pymigrations() -> list[PyMigration]:
                 ON idempotency(key);
             CREATE INDEX IF NOT EXISTS idx_idempotency_ts
                 ON idempotency(ts_ms);
-            """,
+            """
         )
 
     migs.append(PyMigration(7, "idempotency_unique_and_ts", _v7))
@@ -168,37 +164,34 @@ def _pymigrations() -> list[PyMigration]:
             """
             CREATE INDEX IF NOT EXISTS idx_positions_symbol
                 ON positions(symbol);
-            """,
+            """
         )
 
     migs.append(PyMigration(8, "positions_idx", _v8))
 
-    # V0010 — индекс аудита по времени
+    # V0010 — индекс аудита
     def _v10(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
             """
             CREATE INDEX IF NOT EXISTS idx_audit_ts
                 ON audit(ts_ms);
-            """,
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_broker_order_id
+                ON trades(broker_order_id)
+                WHERE broker_order_id IS NOT NULL;
+            """
         )
 
     migs.append(PyMigration(10, "audit_ts_idx", _v10))
 
-    # V0011 — расширение схемы для совместимости с репозиториями
+    # V0011 — расширение схемы
     def _v11(conn: sqlite3.Connection) -> None:
-        # trades: добавить недостающие колонки
-        _add_column_if_missing(conn, "trades", "broker_order_id", "TEXT")
-        _add_column_if_missing(conn, "trades", "filled", "TEXT")
-
-        # positions: добавить новые поля
         _add_column_if_missing(conn, "positions", "avg_entry_price", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "realized_pnl", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "updated_ts_ms", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "positions", "version", "INTEGER NOT NULL DEFAULT 0")
 
-        # совместимость имён: перенести avg_price -> avg_entry_price; updated_ms -> updated_ts_ms
         try:
             with conn:
                 conn.execute("UPDATE positions SET avg_entry_price = COALESCE(avg_entry_price, avg_price, '0')")
@@ -212,12 +205,32 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(11, "positions_schema_extend", _v11))
 
+    # V0012 - orders table
+    def _v12(conn: sqlite3.Connection) -> None:
+        _apply_sql(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_order_id TEXT,
+                client_order_id TEXT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                filled TEXT NOT NULL DEFAULT '0',
+                status TEXT NOT NULL DEFAULT 'open',
+                ts_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
+            CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+            """
+        )
+
+    migs.append(PyMigration(12, "orders_table", _v12))
+
     return migs
 
 
-# -------------------------
-# Публичный раннер
-# -------------------------
 def run_migrations(
     conn: sqlite3.Connection,
     *,
@@ -226,14 +239,10 @@ def run_migrations(
     do_backup: bool = True,
     backup_retention_days: int = 30,
 ) -> None:
-    """
-    Применяет программные миграции (Python) как единственный источник истины.
-    SQL-файлы, лежащие в репозитории, считаются архивом и НЕ исполняются.
-    """
+    """Применяет программные миграции."""
     assert isinstance(now_ms, int), "now_ms must be int (epoch ms)"
     _init_schema_table(conn)
 
-    # Бэкап перед миграциями (безопасно для WAL)
     if do_backup and db_path:
         dest = os.path.join(os.path.dirname(db_path) or ".", "backups")
         _backup_file(db_path, dest_dir=dest, now_ms=now_ms)
@@ -245,18 +254,17 @@ def run_migrations(
         mig.up(conn)
         _mark_applied(conn, mig.version, mig.name, now_ms)
 
-    # Подчистить старые бэкапы (best-effort)
+    # Подчистить старые бэкапы
     try:
         if do_backup and db_path and backup_retention_days >= 0:
             dest = os.path.join(os.path.dirname(db_path) or ".", "backups")
             if os.path.isdir(dest):
-                # оставим N последних по времени
                 files = sorted(
                     (os.path.join(dest, f) for f in os.listdir(dest)),
                     key=lambda p: os.path.getmtime(p),
                     reverse=True,
                 )
-                keep = max(3, int(backup_retention_days / 7))  # эвристика
+                keep = max(3, int(backup_retention_days / 7))
                 for p in files[keep:]:
                     try:
                         os.remove(p)

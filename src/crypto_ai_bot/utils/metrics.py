@@ -32,7 +32,6 @@ def _buckets_ms() -> tuple[float, ...]:
         vals = [float(x.strip()) for x in env.split(",") if x.strip()]
     except Exception:
         vals = [5, 10, 25, 50, 100, 250, 500, 1000]
-    # гистограмма в секундах
     return tuple(v / 1000.0 for v in vals)
 
 def inc(name: str, **labels: Any) -> None:
@@ -42,12 +41,15 @@ def inc(name: str, **labels: Any) -> None:
     k = _key(name, labs)
     if k not in _COUNTERS:
         try:
-            _COUNTERS[k] = Counter(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
+            _COUNTERS[k] = Counter(name, name, list(labs.keys()), registry=_REGISTRY)
         except ValueError:
-            # Метрика уже зарегистрирована
-            pass
+            # Метрика уже зарегистрирована, попытаемся найти существующую
+            for metric in _REGISTRY.collect():
+                if metric.name == name and isinstance(metric, Counter):
+                    return
+            return
     if k in _COUNTERS:
-        _COUNTERS[k].labels(**dict(k[1])).inc()
+        _COUNTERS[k].labels(**labs).inc()
 
 def gauge(name: str, **labels: Any) -> Gauge | None:
     """Gauge (вернёт объект, чтобы .set())"""
@@ -56,11 +58,10 @@ def gauge(name: str, **labels: Any) -> Gauge | None:
     k = _key(name, labs)
     if k not in _GAUGES:
         try:
-            _GAUGES[k] = Gauge(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
+            _GAUGES[k] = Gauge(name, name, list(labs.keys()), registry=_REGISTRY)
         except ValueError:
-            # Метрика уже зарегистрирована
-            pass
-    return _GAUGES[k].labels(**dict(k[1])) if k in _GAUGES else None
+            return None
+    return _GAUGES[k].labels(**labs) if k in _GAUGES else None
 
 def hist(name: str, **labels: Any) -> Histogram | None:
     """Histogram (секунды)"""
@@ -69,16 +70,15 @@ def hist(name: str, **labels: Any) -> Histogram | None:
     k = _key(name, labs)
     if k not in _HISTS:
         try:
-            _HISTS[k] = Histogram(name, name, list(dict(k[1]).keys()), buckets=_buckets_ms(), registry=_REGISTRY)
+            _HISTS[k] = Histogram(name, name, list(labs.keys()), buckets=_buckets_ms(), registry=_REGISTRY)
         except ValueError:
-            # Метрика уже зарегистрирована
-            pass
-    return _HISTS[k].labels(**dict(k[1])) if k in _HISTS else None
+            return None
+    return _HISTS[k].labels(**labs) if k in _HISTS else None
 
 def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
     """Шорткат для наблюдения значения (миллисекунды -> секунды)."""
     name = _sanitize_name(name)
-    value_sec = float(value) / 1000.0  # Конвертируем ms в секунды
+    value_sec = float(value) / 1000.0
     h = hist(name, **(labels or {}))
     if h:
         h.observe(value_sec)

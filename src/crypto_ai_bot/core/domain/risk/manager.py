@@ -21,17 +21,14 @@ class RiskConfig:
     max_slippage_pct: Decimal = dec("0.0")
 
     # Легаси (для обратной совместимости окружения/скриптов):
-    # RISK_MAX_ORDERS_5M, SAFETY_MAX_TURNOVER_QUOTE_PER_DAY читаются здесь,
-    # а применяются в use-case execute_trade (центр. проверка бюджета).
     max_orders_5m: int = 0
     safety_max_turnover_quote_per_day: Decimal = dec("0")
-    max_turnover_day: Decimal = dec("0")  # Добавлен для совместимости с execute_trade
+    max_turnover_day: Decimal = dec("0")
 
     @classmethod
     def from_settings(cls, s: Any) -> RiskConfig:
         """
         Без чтения ENV напрямую — только из объекта Settings.
-        Любые отсутствующие поля интерпретируются как «лимит отключён».
         """
         def g(name: str, default: Any) -> Any:
             return getattr(s, name, default)
@@ -54,31 +51,31 @@ class RiskConfig:
 class RiskManager:
     """
     Чистый доменный компонент. Не знает про Broker/Storage, не делает I/O.
-    Содержит статические/детерминированные проверки (напр., cooldown по времени,
-    базовые расчёты лимитов), а динамические (ордера/оборот/спред) — централизованы
-    в use-case `execute_trade`, который и так имеет все зависимости.
+    Содержит статические/детерминированные проверки.
     """
 
     def __init__(self, config: RiskConfig) -> None:
         self.config = config
 
-    # --- Современный метод проверки ---
     def can_execute(self, *_: Any, **__: Any) -> bool:
         """
         Базовый фильтр «можно ли вообще рассматривать исполнение».
-        Сейчас оставляем «разрешено», так как конкретные лимиты
-        проверяются внутри use-case `execute_trade`.
-        Если понадобится — сюда вернём лёгкую статическую проверку, например cooldown.
         """
         return True
 
-    # --- Обратная совместимость (alias) ---
-    def allow(self, *args: Any, **kwargs: Any) -> bool:
+    def allow(self, symbol: str, now_ms: int, storage: Any | None = None) -> Tuple[bool, str]:
         """
-        Сохранён для совместимости со старым кодом/скриптами:
-        прежний вызов risk.allow(...) теперь корректно отработает.
+        Обратная совместимость - возвращает tuple (bool, str).
+        Для тестов которые ожидают именно этот формат.
         """
-        return self.can_execute(*args, **kwargs)
+        can = self.can_execute(symbol=symbol, now_ms=now_ms, storage=storage)
+        if not can:
+            return False, "risk_check_failed"
+        
+        if storage:
+            return self.check(symbol=symbol, storage=storage)
+        
+        return True, "ok"
 
     def check(self, *, symbol: str, storage: Any) -> Tuple[bool, str]:
         """
@@ -150,4 +147,4 @@ class RiskManager:
             
         except ImportError:
             # Если модули с правилами не существуют, используем базовую проверку
-            return self.can_execute(), "basic_check"
+            return True, "basic_check"
