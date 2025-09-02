@@ -47,7 +47,11 @@ class UnifiedEventBus(EventBusPort):
             return
 
         # RedisEventBus – уже dict
-        self._impl.on(topic, handler)
+        # Для RedisEventBus нужен другой wrapper
+        async def _redis_wrap(data: Any) -> None:
+            await handler(data)
+    
+        self._impl.on(topic, _redis_wrap)
 
     async def start(self) -> None:
         if hasattr(self._impl, "start"):
