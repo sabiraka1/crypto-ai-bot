@@ -281,7 +281,6 @@ class TelegramBotCommands:
             return
         base, quote = _split_symbol(symbol)
         try:
-            # balance display
             b = await broker.fetch_balance()
             gv = _getv(b)
             base, quote = (symbol.split('/') + ['',''])[:2]
