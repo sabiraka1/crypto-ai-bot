@@ -1,4 +1,3 @@
-# В папке crypto-ai-bot
 $dockerfile = @'
 FROM python:3.11-slim
 
