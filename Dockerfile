@@ -1,3 +1,5 @@
+# В папке crypto-ai-bot
+$dockerfile = @'
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,5 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app/
 
-EXPOSE 8000
-CMD ["uvicorn", "crypto_ai_bot.app.server:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8080
+CMD ["sh", "-c", "uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port ${PORT:-8080}"]
+'@
+
+[System.IO.File]::WriteAllText("Dockerfile", $dockerfile)
+
+git add Dockerfile
+git commit -m "Fix Dockerfile to use PORT variable"
+git push
