@@ -85,7 +85,7 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         await async_retry(call, retries=3, base_delay=0.2)
         inc("bus_publish_total", topic=topic)
 
-    bus.publish = _publish  # type: ignore[attr-defined]
+    bus.publish = _publish
 
 def attach_alerts(bus: Any, settings: Settings) -> None:
     tg = TelegramAlerts(
@@ -218,7 +218,7 @@ async def build_container_async() -> Container:
         if isinstance(bus, AsyncEventBus):
             dms_bus = bus
         
-        return DeadMansSwitch(
+        return DeadMansSwitch(  # type: ignore[return-value]
             storage=st,
             broker=br,
             symbol=sym,
@@ -255,10 +255,10 @@ async def build_container_async() -> Container:
             except Exception:
                 _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol","")}, exc_info=True)
         if hasattr(bus, "on"):
-            bus.on("trade.completed", _on_trade_completed_hint)  # type: ignore[arg-type]
+            bus.on("trade.completed", _on_trade_completed_hint)
 
     # ---- Командный Telegram-бот ----
-    tg_task: asyncio.Task | None = None
+    tg_task: asyncio.Task[None] | None = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
         users: list[int] = []
