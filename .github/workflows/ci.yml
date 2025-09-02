@@ -53,8 +53,10 @@ jobs:
           mypy --config-file mypy.ini .
 
       - name: Import Linter (architecture)
-        run: |
-          lint-imports --config importlinter.ini --verbose
+      env:
+        PYTHONPATH: ./src
+      run: |
+        lint-imports --config importlinter.ini --verbose
 
       - name: Pytest
         env:
