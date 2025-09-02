@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
@@ -11,8 +10,8 @@ _log = get_logger("subscribers.telegram")
 
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
-    Регистрирует Telegram-уведомления на события из EventBus.
-    Ничего не меняет в логике — это ровно та же проводка, которая была в compose.attach_alerts.
+    Подписчик Telegram: слушает события из EventBus и отправляет в Telegram.
+    Никакой бизнес-логики не добавляет; формат сообщений — короткий и безопасный.
     """
     tg = TelegramAlerts(
         bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
@@ -40,7 +39,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
-    # ======= Обработчики алертов =======
+    # ======= Базовые оповещения (как было) =======
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
@@ -102,6 +101,32 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
         await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
+    # ======= Новые: health + alertmanager =======
+    async def on_health_report(evt: dict[str, Any]) -> None:
+        if evt.get("ok", True):
+            return
+        # краткая сводка по деградации
+        parts = []
+        for k in ("db", "bus", "broker"):
+            v = evt.get(k)
+            if v and v != "ok":
+                parts.append(f"{k}={v}")
+        summary = ", ".join(parts) or "degraded"
+        await _send(f"❗ <b>HEALTH FAIL</b>\n<code>{summary}</code>")
+
+    async def on_alertmanager(evt: dict[str, Any]) -> None:
+        p = evt.get("payload", {}) or {}
+        status = p.get("status", "?")
+        alerts = p.get("alerts", []) or []
+        lines = [f"*Alertmanager* status: `{status}`", f"count: {len(alerts)}"]
+        for a in alerts[:5]:
+            ann = a.get("annotations", {}) or {}
+            lbl = a.get("labels", {}) or {}
+            name = lbl.get("alertname") or "Alert"
+            text = ann.get("summary") or ann.get("description") or ""
+            lines.append(f"- `{name}` {text}")
+        await _send("\n".join(lines))
+
     for topic, handler in [
         ("orchestrator.auto_paused", on_auto_paused),
         ("orchestrator.auto_resumed", on_auto_resumed),
@@ -115,6 +140,9 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         ("budget.exceeded", on_budget_exceeded),
         ("trade.blocked", on_trade_blocked),
         ("broker.error", on_broker_error),
+        # новые подписки
+        ("health.report", on_health_report),
+        ("alerts.alertmanager", on_alertmanager),
     ]:
         _sub(topic, handler)
 

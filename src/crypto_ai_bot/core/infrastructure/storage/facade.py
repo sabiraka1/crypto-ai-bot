@@ -9,8 +9,6 @@ from .repositories.idempotency import IdempotencyRepository as _IdempotencyRepos
 from .repositories.market_data import MarketDataRepository as _MarketDataRepository
 from .repositories.positions import PositionsRepository as _PositionsRepository
 from .repositories.orders import OrdersRepository as _OrdersRepository
-
-# РРјРїРѕСЂС‚С‹ СЂРѕРІРЅРѕ РїРѕРґ СЂРµР°Р»СЊРЅС‹Рµ РєР»Р°СЃСЃС‹ РІ СЂРµРїРѕР·РёС‚РѕСЂРёСЏС…
 from .repositories.trades import TradesRepository as _TradesRepository
 
 
@@ -36,3 +34,9 @@ class Storage:
             orders=_OrdersRepository(conn),
         )
 
+    # ✅ честный health-ping для /health
+    async def ping(self) -> bool:  # тип синхронный conn, но FastAPI ждёт await → делаем лёгкий async-адаптер
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1;")
+        cur.fetchone()
+        return True
