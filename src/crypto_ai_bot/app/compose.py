@@ -4,6 +4,7 @@ import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
@@ -221,6 +222,20 @@ async def build_container_async() -> Container:
         if isinstance(bus, AsyncEventBus):
             dms_bus = bus
         
+        # Безопасное получение Decimal значений
+        def safe_dec(name: str, default: str = "0") -> Decimal:
+            val = getattr(s, name, None)
+            if val is None:
+                return dec(default)
+            try:
+                str_val = str(val).strip()
+                if not str_val or str_val.lower() in ("none", "null", ""):
+                    return dec(default)
+                float(str_val)  # проверка валидности
+                return dec(str_val)
+            except (ValueError, TypeError, AttributeError):
+                return dec(default)
+        
         return DeadMansSwitch(  # type: ignore[return-value]
             storage=st,
             broker=br,
@@ -228,7 +243,7 @@ async def build_container_async() -> Container:
             timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
             rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
             recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-            max_impact_pct=dec(str(getattr(s, "DMS_MAX_IMPACT_PCT", 0) or 0)),
+            max_impact_pct=safe_dec("DMS_MAX_IMPACT_PCT", "0"),
             bus=dms_bus,
         )
 
