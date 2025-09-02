@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from decimal import Decimal
 
 @dataclass
 class DeadMansSwitch:
@@ -14,7 +13,7 @@ class DeadMansSwitch:
     timeout_ms: int = 120_000
     rechecks: int = 1
     recheck_delay_sec: float = 0.0
-    max_impact_pct: Decimal = Decimal("0")  # Исправлено: изменен тип на Decimal
+    max_impact_pct: Decimal = Decimal("0")
     bus: Any | None = None
 
     _last_beat_ms: int = 0
