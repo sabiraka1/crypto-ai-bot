@@ -31,20 +31,37 @@ class RiskConfig:
         Без чтения ENV напрямую — только из объекта Settings.
         """
         def g(name: str, default: Any) -> Any:
-            return getattr(s, name, default)
+            val = getattr(s, name, default)
+            # Обработка None и пустых строк
+            if val is None or val == "":
+                return default
+            return val
+
+        def safe_dec(val: Any, default: str = "0") -> Decimal:
+            """Безопасное преобразование в Decimal."""
+            if val is None or val == "":
+                return dec(default)
+            try:
+                # Убедимся что это строка
+                str_val = str(val).strip()
+                if not str_val:
+                    return dec(default)
+                return dec(str_val)
+            except Exception:
+                return dec(default)
 
         return cls(
             cooldown_sec=int(g("RISK_COOLDOWN_SEC", 0) or 0),
-            max_spread_pct=dec(str(g("RISK_MAX_SPREAD_PCT", "0") or "0")),
-            max_position_base=dec(str(g("RISK_MAX_POSITION_BASE", "0") or "0")),
+            max_spread_pct=safe_dec(g("RISK_MAX_SPREAD_PCT", "0")),
+            max_position_base=safe_dec(g("RISK_MAX_POSITION_BASE", "0")),
             max_orders_per_hour=int(g("RISK_MAX_ORDERS_PER_HOUR", 0) or 0),
-            daily_loss_limit_quote=dec(str(g("RISK_DAILY_LOSS_LIMIT_QUOTE", "0") or "0")),
-            max_fee_pct=dec(str(g("RISK_MAX_FEE_PCT", "0.0") or "0.0")),
-            max_slippage_pct=dec(str(g("RISK_MAX_SLIPPAGE_PCT", "0.0") or "0.0")),
+            daily_loss_limit_quote=safe_dec(g("RISK_DAILY_LOSS_LIMIT_QUOTE", "0")),
+            max_fee_pct=safe_dec(g("RISK_MAX_FEE_PCT", "0.0")),
+            max_slippage_pct=safe_dec(g("RISK_MAX_SLIPPAGE_PCT", "0.0")),
             # легаси
             max_orders_5m=int(g("RISK_MAX_ORDERS_5M", 0) or 0),
-            safety_max_turnover_quote_per_day=dec(str(g("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0") or "0")),
-            max_turnover_day=dec(str(g("RISK_MAX_TURNOVER_DAY", "0") or "0")),
+            safety_max_turnover_quote_per_day=safe_dec(g("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0")),
+            max_turnover_day=safe_dec(g("RISK_MAX_TURNOVER_DAY", "0")),
         )
 
 

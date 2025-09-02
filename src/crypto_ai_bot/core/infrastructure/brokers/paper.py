@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 from decimal import Decimal
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -16,8 +16,8 @@ _log = get_logger("brokers.paper")
 class PaperBroker:
     """Симулятор брокера для paper trading."""
     
-    exchange: str = "paper"
     settings: Any = None
+    exchange: str = "paper"  # Поменял порядок для совместимости
     _balances: Dict[str, Decimal] = field(default_factory=lambda: {"USDT": dec("10000"), "BTC": dec("0.5")})
     _positions: Dict[str, Decimal] = field(default_factory=dict)
     _orders: Dict[str, Any] = field(default_factory=dict)
@@ -46,10 +46,10 @@ class PaperBroker:
             }
         return result
     
-    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[list]:
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> List[List[float]]:
         """Возвращает фиктивные OHLCV данные."""
         price = float(self._last_prices[symbol])
-        ohlcv = []
+        ohlcv: List[List[float]] = []
         ts = now_ms()
         
         for i in range(limit):
@@ -57,7 +57,7 @@ class PaperBroker:
             variation = 0.995 + (i % 10) * 0.001
             p = price * variation
             ohlcv.append([
-                ts - (limit - i) * 60000,  # timestamp
+                float(ts - (limit - i) * 60000),  # timestamp
                 p * 0.999,  # open
                 p * 1.001,  # high
                 p * 0.998,  # low
@@ -159,7 +159,7 @@ class PaperBroker:
             "remaining": "0",
         })
     
-    async def fetch_open_orders(self, symbol: str | None = None) -> list[Any]:
+    async def fetch_open_orders(self, symbol: str | None = None) -> List[Any]:
         """В paper режиме все ордера сразу исполняются, поэтому открытых нет."""
         return []
     

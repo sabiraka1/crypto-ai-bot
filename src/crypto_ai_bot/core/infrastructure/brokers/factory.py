@@ -49,7 +49,8 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
             raise ImportError("PaperBroker class not found in paper broker module(s)")
         
         _log.info("make_broker_paper", extra={"exchange": ex})
-        return PaperBroker(exchange=ex, settings=settings)
+        # Передаем параметры в том порядке, который ожидает PaperBroker
+        return PaperBroker(settings=settings, exchange=ex)
 
     if md in ("live", "real", "prod", "production"):
         mod = _import_first(
