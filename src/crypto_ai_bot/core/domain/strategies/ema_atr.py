@@ -2,8 +2,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
-from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision, StrategyContext  # Исправлен путь
+from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision, StrategyContext
 from crypto_ai_bot.utils.decimal import dec
 
 
@@ -22,7 +23,7 @@ def _ema(values: list[Decimal], period: int) -> list[Decimal]:
     return out
 
 
-def _atr(ohlcv: Sequence[tuple], period: int) -> Decimal:
+def _atr(ohlcv: Sequence[tuple[Any, ...]], period: int) -> Decimal:
     # ohlcv: [ (ts, o,h,l,c,v), ... ]
     if len(ohlcv) < max(2, period + 1):
         return dec("0")
