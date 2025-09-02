@@ -158,13 +158,15 @@ class PaperBroker:
     
     async def fetch_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         """Получить ордер по ID."""
-        return self._orders.get(order_id, {
+        default_order: Dict[str, Any] = {
             "id": order_id,
             "symbol": symbol,
             "status": "closed",
             "filled": "0",
             "remaining": "0",
-        })
+        }
+        result: Dict[str, Any] = self._orders.get(order_id, default_order)
+        return result
     
     async def fetch_open_orders(self, symbol: str | None = None) -> List[Dict[str, Any]]:
         """В paper режиме все ордера сразу исполняются, поэтому открытых нет."""

@@ -33,32 +33,35 @@ class ProtectiveExits:
         # Безопасное получение параметров с обработкой None и пустых строк
         def safe_dec(name: str, default: str = "0") -> Decimal:
             val = getattr(settings, name, None)
-            if val is None or val == "" or val == "None":
+            if val is None:
                 return dec(default)
             try:
                 str_val = str(val).strip()
-                if not str_val or str_val == "None":
+                # Проверяем на пустую строку или None
+                if not str_val or str_val.lower() in ("none", "null", ""):
                     return dec(default)
+                # Проверяем что это валидное число
+                float(str_val)  # проверка на валидность
                 return dec(str_val)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return dec(default)
         
         # Поддержка разных имен параметров для совместимости
-        stop_pct = safe_dec("EXITS_STOP_PCT")
+        stop_pct = safe_dec("EXITS_STOP_PCT", "0")
         if stop_pct == dec("0"):
-            stop_pct = safe_dec("EXITS_HARD_STOP_PCT")
+            stop_pct = safe_dec("EXITS_HARD_STOP_PCT", "0")
         
-        take_pct = safe_dec("EXITS_TAKE_PCT")
+        take_pct = safe_dec("EXITS_TAKE_PCT", "0")
         if take_pct == dec("0"):
-            take_pct = safe_dec("EXITS_TAKE_PROFIT_PCT")
+            take_pct = safe_dec("EXITS_TAKE_PROFIT_PCT", "0")
         
-        trailing_pct = safe_dec("EXITS_TRAIL_PCT")
+        trailing_pct = safe_dec("EXITS_TRAIL_PCT", "0")
         if trailing_pct == dec("0"):
-            trailing_pct = safe_dec("EXITS_TRAILING_PCT")
+            trailing_pct = safe_dec("EXITS_TRAILING_PCT", "0")
         
-        min_base = safe_dec("EXITS_MIN_BASE")
+        min_base = safe_dec("EXITS_MIN_BASE", "0")
         if min_base == dec("0"):
-            min_base = safe_dec("EXITS_MIN_BASE_TO_EXIT")
+            min_base = safe_dec("EXITS_MIN_BASE_TO_EXIT", "0")
         
         self._cfg = ExitConfig(
             stop_pct=stop_pct,
