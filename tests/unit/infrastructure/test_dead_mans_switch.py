@@ -1,5 +1,5 @@
 ﻿from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -14,21 +14,19 @@ async def test_dms_triggers_and_publishes(mock_storage, mock_broker):
         "avg_entry_price": Decimal("100")
     })()
     
-    # цена упала на 3%, порог = 0 => должен триггериться
+    # Создаем мок для ticker который возвращает объект, а не dict
     broker = mock_broker
-    broker.fetch_ticker.return_value.last = Decimal("100")
-
-    # Вторая проверка ниже первой, чтобы дало сигнал продажи
+    
+    # Переопределяем fetch_ticker чтобы возвращал объект
     async def _ticker_side_effect(_):
         if not hasattr(_ticker_side_effect, "n"):
             _ticker_side_effect.n = 0
         _ticker_side_effect.n += 1
         last = Decimal("100") if _ticker_side_effect.n == 1 else Decimal("95")
-        o = type("T", (), {})()
-        o.last, o.bid, o.ask = last, last, last
-        return o
+        # Возвращаем объект с атрибутами, а не dict
+        return Mock(last=last, bid=last, ask=last)
 
-    broker.fetch_ticker.side_effect = _ticker_side_effect
+    broker.fetch_ticker = AsyncMock(side_effect=_ticker_side_effect)
 
     bus = type("Bus", (), {"publish": AsyncMock()})()
 
