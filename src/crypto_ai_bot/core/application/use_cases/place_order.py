@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
@@ -112,7 +111,6 @@ async def place_order(
             _ok,_amt = compute_sell_amount(storage, sym, b, client_order_id=inputs.client_order_id)
 if not _ok:
     return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
-order = _ok,_amt = compute_sell_amount(storage, sym, _amt)
 if not _ok:
     return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
 await broker.create_market_sell_base(symbol=sym, base_amount=_amt)

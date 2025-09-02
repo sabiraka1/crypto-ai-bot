@@ -1,6 +1,5 @@
-﻿# src/crypto_ai_bot/core/application/use_cases/execute_trade.py
 from __future__ import annotations
-
+﻿# src/crypto_ai_bot/core/application/use_cases/execute_trade.py
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
@@ -224,7 +223,6 @@ async def execute_trade(
             _ok,_amt = compute_sell_amount(storage, sym, b_amt, client_order_id=client_id)
 if not _ok:
     return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
-order = _ok,_amt = compute_sell_amount(storage, sym, _amt)
 if not _ok:
     return {'action': 'skip', 'executed': False, 'reason': 'no_position'}
 await broker.create_market_sell_base(symbol=sym, base_amount=_amt)
