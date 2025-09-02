@@ -54,9 +54,9 @@ jobs:
 
       - name: Import Linter (architecture)
         env:
-        PYTHONPATH: ./src
+          PYTHONPATH: ./src
         run: |
-        lint-imports --config importlinter.ini --verbose
+          lint-imports --config importlinter.ini --verbose
 
       - name: Pytest
         env:
