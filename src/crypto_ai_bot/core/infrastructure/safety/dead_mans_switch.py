@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
+from decimal import Decimal
 
 @dataclass
 class DeadMansSwitch:
