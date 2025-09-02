@@ -290,3 +290,80 @@ class TelegramBotCommands:
                                            f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:
             await self._reply(chat_id, "⚠️ Не удалось получить баланс")
+
+    # --------------------- главный метод run() ---------------------
+    
+    async def run(self) -> None:
+        """Главный цикл long-polling для получения команд из Telegram"""
+        _log.info("telegram_bot_commands_started")
+        
+        while True:
+            try:
+                # Получаем обновления от Telegram
+                data = await self._get_updates()
+                
+                if data.get("ok"):
+                    for update in data.get("result", []):
+                        # Обновляем offset для следующего запроса
+                        self._offset = update.get("update_id", 0) + 1
+                        
+                        # Обрабатываем сообщение
+                        msg = update.get("message", {})
+                        if not msg:
+                            continue
+                            
+                        user_id = msg.get("from", {}).get("id")
+                        chat_id = msg.get("chat", {}).get("id")
+                        text = msg.get("text", "").strip()
+                        
+                        if not text or not chat_id:
+                            continue
+                        
+                        # Проверяем доступ
+                        if not self._allow(user_id):
+                            await self._reply(chat_id, "❌ Доступ запрещен")
+                            continue
+                        
+                        # Проверяем rate limit
+                        if not self._throttle(user_id):
+                            await self._reply(chat_id, "⚠️ Слишком много запросов, подождите")
+                            continue
+                        
+                        # Обрабатываем команды
+                        if text.startswith("/"):
+                            cmd = text.split()[0].lower()
+                            
+                            # Команды без символа
+                            if cmd == "/help":
+                                await self._cmd_help(chat_id)
+                            elif cmd == "/symbols":
+                                await self._cmd_symbols(chat_id)
+                            elif cmd == "/set":
+                                await self._cmd_set(chat_id, text)
+                            elif cmd == "/limits":
+                                await self._cmd_limits(chat_id)
+                            # Команды с символом
+                            else:
+                                symbol = self._pick_symbol(chat_id, text)
+                                
+                                if cmd == "/status":
+                                    await self._cmd_status(chat_id, symbol)
+                                elif cmd == "/pause":
+                                    await self._cmd_pause(chat_id, symbol)
+                                elif cmd == "/resume":
+                                    await self._cmd_resume(chat_id, symbol)
+                                elif cmd == "/stop":
+                                    await self._cmd_stop(chat_id, symbol)
+                                elif cmd == "/balance":
+                                    await self._cmd_balance(chat_id, symbol)
+                                elif cmd == "/risk":
+                                    await self._cmd_risk(chat_id, symbol)
+                                # Можно добавить другие команды по необходимости
+                
+                # Небольшая пауза между запросами
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                _log.error("telegram_bot_run_error", exc_info=True)
+                # При ошибке делаем паузу подольше
+                await asyncio.sleep(5)
