@@ -47,9 +47,9 @@ class SignalsPolicyStrategy(BaseStrategy):
 
         # Создаем экземпляр политики
         try:
-            policy = SignalsPolicy()  # type: ignore[misc]
+            policy = SignalsPolicy()
             if hasattr(policy, 'decide'):
-                decision, score, explain = policy.decide(features)  # type: ignore[attr-defined]
+                decision, score, explain = policy.decide(features)
             else:
                 # Если метода decide нет, возвращаем hold
                 return Decision(action="hold", reason="policy_decide_not_found")
