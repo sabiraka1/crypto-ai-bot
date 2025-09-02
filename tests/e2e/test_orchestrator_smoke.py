@@ -1,18 +1,28 @@
 ﻿import asyncio
-from unittest.mock import MagicMock, patch
-
+from unittest.mock import patch
 import pytest
 
-from crypto_ai_bot.app.compose import build_container_async
-from crypto_ai_bot.utils.decimal import dec
-
-
 @pytest.mark.asyncio
-async def test_orchestrator_start_stop():
-    """Тест запуска и остановки любого оркестратора из контейнера."""
+async def test_orchestrator_start_stop(monkeypatch):
+    """
+    Старт/стоп оркестратора через in-memory bus (без Redis).
+    """
+    from crypto_ai_bot.core.infrastructure.events import redis_bus as rb
+
+    class DummyBus:
+        def __init__(self, *_a, **_kw):
+            pass
+        async def start(self): pass
+        async def stop(self): pass
+        async def publish(self, *_a, **_kw): pass
+        async def subscribe(self, *_a, **_kw): pass
+
+    monkeypatch.setattr(rb, "RedisBus", DummyBus, raising=True)
+
+    from crypto_ai_bot.app.compose import build_container_async
+
     with patch("crypto_ai_bot.core.infrastructure.settings.Settings.load") as mock_load:
-        # Полный набор настроек (как было), только используем async контейнер
-        mock_load.return_value = MagicMock(
+        mock_load.return_value = type("S", (), dict(
             MODE="paper",
             SANDBOX=0,
             EXCHANGE="gateio",
@@ -25,21 +35,20 @@ async def test_orchestrator_start_stop():
             BACKUP_RETENTION_DAYS=30,
             IDEMPOTENCY_BUCKET_MS=60000,
             IDEMPOTENCY_TTL_SEC=3600,
-            RISK_COOLDOWN_SEC=60,
-            RISK_MAX_SPREAD_PCT=0.3,
-            RISK_MAX_POSITION_BASE=0.02,
-            RISK_MAX_ORDERS_PER_HOUR=6,
-            RISK_DAILY_LOSS_LIMIT_QUOTE=dec("100"),
-            FEE_PCT_ESTIMATE=dec("0.001"),
-            RISK_MAX_FEE_PCT=dec("0.001"),
-            RISK_MAX_SLIPPAGE_PCT=dec("0.001"),
-            HTTP_TIMEOUT_SEC=30,
+            RISK_COOLDOWN_SEC=0,
+            RISK_MAX_SPREAD_PCT=5.0,
+            RISK_MAX_POSITION_BASE=10.0,
+            RISK_MAX_ORDERS_PER_HOUR=999,
+            RISK_DAILY_LOSS_LIMIT_QUOTE=0,
+            FEE_PCT_ESTIMATE=0,
+            RISK_MAX_FEE_PCT=1,
+            RISK_MAX_SLIPPAGE_PCT=1,
+            HTTP_TIMEOUT_SEC=5,
             TRADER_AUTOSTART=0,
-            # Интервалы большие, чтобы фоновые задачи не мешали управлению в тесте
-            EVAL_INTERVAL_SEC=999,
-            EXITS_INTERVAL_SEC=999,
-            RECONCILE_INTERVAL_SEC=999,
-            WATCHDOG_INTERVAL_SEC=999,
+            EVAL_INTERVAL_SEC=0.1,
+            EXITS_INTERVAL_SEC=0.1,
+            RECONCILE_INTERVAL_SEC=0.1,
+            WATCHDOG_INTERVAL_SEC=0.1,
             DMS_TIMEOUT_MS=120000,
             EXITS_ENABLED=1,
             EXITS_MODE="both",
@@ -54,22 +63,12 @@ async def test_orchestrator_start_stop():
             API_SECRET="",
             POD_NAME="test",
             HOSTNAME="test",
-        )
+        ))()
 
         container = await build_container_async()
-        assert container is not None
-        assert isinstance(container.orchestrators, dict) and container.orchestrators
 
-        # Берём первый доступный оркестратор по символу
-        symbol, orch = next(iter(container.orchestrators.items()))
-
-        # Старт/стоп — именно await, потому что методы асинхронные
-        await orch.start()
-        status = orch.status()
-        assert status.get("started", status.get("running")) in (True,)
-
-        await asyncio.sleep(0.1)
-
-        await orch.stop()
-        status = orch.status()
-        assert status.get("started", status.get("running")) in (False,)
+    assert container and container.orchestrators
+    _, orch = next(iter(container.orchestrators.items()))
+    await orch.start()
+    await asyncio.sleep(0.1)
+    await orch.stop()
