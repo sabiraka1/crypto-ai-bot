@@ -3,10 +3,10 @@ line-length = 120
 target-version = "py311"
 
 [lint]
-# Expand families: add I (isort) and UP (pyupgrade) to catch drift.
-select = ["E", "F", "W", "B", "C90", "I", "UP"]
+# Core families + isort + pyupgrade + security + naming + simplify
+select = ["E", "F", "W", "B", "C90", "I", "UP", "S", "N", "SIM", "RET", "PERF"]
 
-# Keep pragmatic ignores. E501 intentionally ignored; tests/scripts looser via per-file-ignores.
+# Pragmatic ignores (tests/scripts — см. per-file-ignores ниже)
 ignore = [
   "E501",   # long lines
   "E701",   # multiple statements on one line (colon)
@@ -22,11 +22,15 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"tests/**"          = ["E501", "E701", "E702", "C901", "E741", "B904", "B008"]
-"scripts/**"        = ["E501", "E701", "E702"]
+"tests/**"           = ["E501", "E701", "E702", "C901", "E741", "B904", "B008", "S", "N", "SIM", "RET"]
+"scripts/**"         = ["E501", "E701", "E702", "S", "N", "SIM"]
 "src/**/__init__.py" = ["F401"]
 
 [lint.isort]
 known-first-party = ["crypto_ai_bot"]
 combine-as-imports = true
 force-sort-within-sections = true
+
+# Optional: help catching suspicious code paths (Bandit fine-tuning)
+[lint.flake8-bandit]
+# Allow common patterns in tests while keeping prod strict via per-file-ignores.
