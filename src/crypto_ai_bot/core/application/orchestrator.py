@@ -194,3 +194,81 @@ class Orchestrator:
         except Exception as exc:
             _log.error("settlement_loop_error", extra={"error": str(exc)})
             raise
+
+    # ---------------------------
+    # ЕДИНОРАЗОВЫЙ БИЗНЕС-ШАГ (evaluate → risk → execute → protective_exits → reconcile → watchdog [+ settlement])
+    # НИЧЕГО ВНУТРИ НЕ МЕНЯЕМ — используем те же функции и параметры, что и в текущих циклах.
+    # ---------------------------
+    async def run_once(self) -> dict[str, Any]:
+        loop = asyncio.get_event_loop()
+        t0 = loop.time()
+        s = self.settings
+        result: dict[str, Any] = {"symbol": self.symbol}
+
+        with cid_context():
+            # 1) evaluate+risk+execute (через тот же use-case, что в _eval_loop)
+            try:
+                from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+                await eval_and_execute(
+                    symbol=self.symbol,
+                    storage=self.storage,
+                    broker=self.broker,
+                    bus=self.bus,
+                    risk=self.risk,
+                    exits=self.exits,
+                    settings=s,
+                )
+                inc("orchestrator_step_ok_total", step="eval_and_execute", symbol=self.symbol)
+                await self.bus.publish("trade.execute.done", {"symbol": self.symbol})
+            except Exception as exc:
+                _log.error("run_once_eval_execute_failed", extra={"error": str(exc)})
+                inc("orchestrator_step_failed_total", step="eval_and_execute", symbol=self.symbol)
+                await self.bus.publish("trade.execute.failed", {"symbol": self.symbol, "error": str(exc)})
+
+            # 2) protective_exits (используем твой exits.tick, как в _exits_loop), соблюдаем EXITS_ENABLED
+            if getattr(s, "EXITS_ENABLED", False):
+                try:
+                    await self.exits.tick(self.symbol)
+                    inc("orchestrator_step_ok_total", step="protective_exits", symbol=self.symbol)
+                    await self.bus.publish("trade.protective_exits.done", {"symbol": self.symbol})
+                except Exception as exc:
+                    _log.error("run_once_exits_failed", extra={"error": str(exc)})
+                    inc("orchestrator_step_failed_total", step="protective_exits", symbol=self.symbol)
+
+            # 3) reconcile (тем же кодом, что и в _reconcile_loop), соблюдаем RECONCILE_ENABLED
+            if getattr(s, "RECONCILE_ENABLED", True):
+                try:
+                    from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances
+                    from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
+                    await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, s)
+                    await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, s)
+                    inc("orchestrator_step_ok_total", step="reconcile", symbol=self.symbol)
+                    await self.bus.publish("trade.reconcile.done", {"symbol": self.symbol})
+                except Exception as exc:
+                    _log.error("run_once_reconcile_failed", extra={"error": str(exc)})
+                    inc("orchestrator_step_failed_total", step="reconcile", symbol=self.symbol)
+
+            # 4) watchdog (тем же методом, что и в _watchdog_loop), соблюдаем WATCHDOG_ENABLED
+            if getattr(s, "WATCHDOG_ENABLED", True):
+                try:
+                    await self.health.tick(self.symbol, dms=self.dms)
+                    inc("orchestrator_step_ok_total", step="watchdog", symbol=self.symbol)
+                    await self.bus.publish("trade.watchdog.done", {"symbol": self.symbol})
+                except Exception as exc:
+                    _log.error("run_once_watchdog_failed", extra={"error": str(exc)})
+                    inc("orchestrator_step_failed_total", step="watchdog", symbol=self.symbol)
+
+            # 5) settlement (если включен), как в _settlement_loop
+            if getattr(s, "SETTLEMENT_ENABLED", True):
+                try:
+                    from crypto_ai_bot.core.application.use_cases.partial_fills import settle_orders
+                    await settle_orders(self.symbol, self.storage, self.broker, self.bus, s)
+                    inc("orchestrator_step_ok_total", step="settlement", symbol=self.symbol)
+                    await self.bus.publish("trade.settlement.done", {"symbol": self.symbol})
+                except Exception as exc:
+                    _log.error("run_once_settlement_failed", extra={"error": str(exc)})
+                    inc("orchestrator_step_failed_total", step="settlement", symbol=self.symbol)
+
+        dt_ms = (loop.time() - t0) * 1000.0
+        observe("orchestrator.run_once.ms", dt_ms, {"symbol": self.symbol})
+        return {"ok": True, **result}

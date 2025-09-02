@@ -2,16 +2,19 @@
 
 import asyncio
 import time
+import hashlib
+import hmac
 from collections.abc import Callable, Awaitable
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
+from crypto_ai_bot.utils.time import now_ms
 
 _log = get_logger("app.server")
 _container: Any | None = None
@@ -130,19 +133,96 @@ def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
         raise HTTPException(status_code=404, detail=f"orchestrator_not_found_for_{sym}")
     return orch, sym
 
+# -------- helpers --------
+async def _call_with_timeout(coro, *, timeout: float = 2.5):
+    return await asyncio.wait_for(coro, timeout=timeout)
+
+# -------- endpoints --------
 @router.get("/health")
 async def health() -> JSONResponse:
+    """
+    Реальный health: DB, EventBus, Broker (если доступны).
+    Каждый чек — с тайм-аутом. Публикует событие в шину.
+    Возвращает также прежние поля (default_symbol, symbols) для совместимости.
+    """
+    ok = True
+    details: dict[str, Any] = {"ts_ms": now_ms()}
+
     try:
         c = _ctx_or_500()
-        settings = getattr(c, "settings", None)
-        symbols = list(getattr(c, "orchestrators", {}).keys())
-        return JSONResponse({"ok": True, "default_symbol": getattr(settings, "SYMBOL", "BTC/USDT") if settings else "BTC/USDT",
-                             "symbols": symbols})
     except HTTPException:
-        raise
-    except Exception:
-        _log.error("health_failed", exc_info=True)
-        return JSONResponse({"ok": False, "error": "internal_error"}, status_code=500)
+        # контейнер ещё не готов
+        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
+
+    settings = getattr(c, "settings", None)
+    default_symbol = getattr(settings, "SYMBOL", "BTC/USDT") if settings else "BTC/USDT"
+    symbols = list(getattr(c, "orchestrators", {}).keys())
+
+    bus = getattr(c, "bus", None)
+    storage = getattr(c, "storage", None)
+    broker = getattr(c, "broker", None)
+
+    # DB check
+    try:
+        if storage and hasattr(storage, "ping"):
+            await _call_with_timeout(storage.ping(), timeout=1.5)
+            details["db"] = "ok"
+        else:
+            details["db"] = "n/a"
+    except Exception as exc:
+        ok = False
+        details["db"] = f"fail: {exc!s}"
+
+    # EventBus check
+    try:
+        if bus and hasattr(bus, "publish"):
+            await _call_with_timeout(bus.publish("health.ping", {"ts_ms": now_ms()}), timeout=1.0)
+            details["bus"] = "ok"
+        else:
+            details["bus"] = "n/a"
+    except Exception as exc:
+        ok = False
+        details["bus"] = f"fail: {exc!s}"
+
+    # Broker check (мягкий)
+    try:
+        if broker and hasattr(broker, "get_balance"):
+            await _call_with_timeout(broker.get_balance(), timeout=2.0)
+            details["broker"] = "ok"
+        else:
+            details["broker"] = "n/a"
+    except Exception as exc:
+        ok = False
+        details["broker"] = f"fail: {exc!s}"
+
+    # Публикуем событие о состоянии (для подписчиков/Telegram)
+    if bus and hasattr(bus, "publish"):
+        try:
+            await bus.publish("health.report", {"ok": ok, **details})
+        except Exception:
+            _log.debug("health_bus_publish_failed", exc_info=True)
+
+    body = {"ok": ok, "default_symbol": default_symbol, "symbols": symbols, **details}
+    return JSONResponse(body, status_code=200 if ok else 500)
+
+@router.post("/alertmanager/webhook")
+async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
+    """
+    Webhook от Alertmanager → транслируем в EventBus на 'alerts.alertmanager'.
+    Дальше это подберёт Telegram-подписчик и выведет уведомление.
+    """
+    try:
+        c = _ctx_or_500()
+    except HTTPException:
+        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
+
+    bus = getattr(c, "bus", None)
+    if bus and hasattr(bus, "publish"):
+        try:
+            await bus.publish("alerts.alertmanager", {"payload": payload, "ts_ms": now_ms()})
+        except Exception:
+            _log.debug("alert_bus_publish_failed", exc_info=True)
+    return JSONResponse({"ok": True})
 
 @router.get("/metrics")
 async def metrics() -> PlainTextResponse:
@@ -226,28 +306,28 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
 
         pnl_quote = None
         if hasattr(st, "trades") and hasattr(st.trades, "pnl_today_quote"):
-            try: 
+            try:
                 pnl_quote = st.trades.pnl_today_quote(sym)
-            except Exception: 
+            except Exception:
                 _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
 
         turnover_quote = None
         if hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
-            try: 
+            try:
                 turnover_quote = st.trades.daily_turnover_quote(sym)
-            except Exception: 
+            except Exception:
                 _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
 
         orders_count = None
         if hasattr(st, "trades") and hasattr(st.trades, "count_orders_today"):
-            try: 
+            try:
                 orders_count = st.trades.count_orders_today(sym)
-            except Exception: 
+            except Exception:
                 _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
         if orders_count is None and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
-            try: 
+            try:
                 orders_count = st.trades.count_orders_last_minutes(sym, 1440)
-            except Exception: 
+            except Exception:
                 _log.error("orders_1440m_count_failed", extra={"symbol": sym}, exc_info=True)
 
         return JSONResponse(
@@ -261,5 +341,39 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
     except Exception as e:
         _log.error("pnl_today_failed", exc_info=True)
         raise HTTPException(status_code=500, detail="pnl_today_failed") from e
+
+@router.post("/telegram/webhook")
+async def telegram_webhook(request: Request) -> JSONResponse:
+    """Webhook endpoint для Telegram бота (подготовка для будущего)"""
+    try:
+        # Получаем данные
+        body = await request.body()
+        data = await request.json()
+
+        # Проверяем секрет если он есть
+        c = _ctx_or_500()
+        settings = getattr(c, "settings", None)
+        secret = getattr(settings, "TELEGRAM_BOT_SECRET", "")
+
+        if secret:
+            # Проверка заголовка X-Telegram-Bot-Api-Secret-Token
+            provided_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if provided_token != secret:
+                _log.warning("telegram_webhook_invalid_secret")
+                return JSONResponse({"ok": False}, status_code=401)
+
+        # Пока просто логируем - бот работает в polling режиме
+        _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
+
+        # В будущем здесь будет:
+        # tg_bot = getattr(c, "tg_bot", None)
+        # if tg_bot and hasattr(tg_bot, "process_webhook_update"):
+        #     await tg_bot.process_webhook_update(data)
+
+        return JSONResponse({"ok": True})
+
+    except Exception as e:
+        _log.error("telegram_webhook_error", exc_info=True)
+        return JSONResponse({"ok": False}, status_code=500)
 
 app.include_router(router)
