@@ -33,7 +33,7 @@ def _lower(value: Any, default: str = "") -> str:
 def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
     """
     Фабрика брокеров:
-      - MODE=paper -> PaperBroker
+      - MODE=paper -> PaperBroker (через порт-адаптер)
       - MODE=live  -> CcxtBroker (обёртка над CCXT)
     """
     md = _lower(mode)
@@ -42,15 +42,18 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
     if md in ("paper", "sim", "simulation"):
         mod = _import_first(
             "crypto_ai_bot.core.infrastructure.brokers.paper",
-            "crypto_ai_bot.core.infrastructure.brokers.simulator",
+            # "crypto_ai_bot.core.infrastructure.brokers.simulator",  # удалён тобой — оставим как комментарий
         )
+        # Берём PaperBroker и его порт-адаптер
         PaperBroker = getattr(mod, "PaperBroker", None)
-        if PaperBroker is None:
-            raise ImportError("PaperBroker class not found in paper broker module(s)")
-        
+        PaperBrokerPortAdapter = getattr(mod, "PaperBrokerPortAdapter", None)
+        if PaperBroker is None or PaperBrokerPortAdapter is None:
+            raise ImportError("Paper broker or its port adapter not found in module")
+
         _log.info("make_broker_paper", extra={"exchange": ex})
-        # PaperBroker принимает только settings согласно тесту и своей сигнатуре
-        return PaperBroker(settings=settings)
+        # ВНИМАНИЕ: сохраняем текущую сигнатуру — PaperBroker(settings=...)
+        core = PaperBroker(settings=settings)
+        return PaperBrokerPortAdapter(core)
 
     if md in ("live", "real", "prod", "production"):
         mod = _import_first(
