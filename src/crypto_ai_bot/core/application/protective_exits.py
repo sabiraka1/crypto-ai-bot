@@ -94,10 +94,20 @@ class ProtectiveExits:
             inc("protective_exits_tick_total", symbol=symbol)
             return None
 
-        # Продаём не больше, чем есть
-        qty = base
+        # Используем compute_sell_amount для расчета количества
+        try:
+            qty = compute_sell_amount(
+                current_position=base,
+                target_percentage=dec("100"),  # Продаем 100% при защитных выходах
+                min_amount=self._cfg.min_base
+            )
+        except:
+            # Fallback если compute_sell_amount недоступен
+            qty = base
+            
         if self._cfg.min_base > 0 and qty < self._cfg.min_base:
             return None
+            
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
             await self._bus.publish("trade.completed", {"symbol": symbol, "action": "sell", "reason": reason, "amount": str(qty)})

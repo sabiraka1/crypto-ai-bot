@@ -174,7 +174,7 @@ class TelegramBotCommands:
         orchs = getattr(self._container, "orchestrators", {}) or {}
         syms = ", ".join(sorted(orchs.keys())) or "—"
         cur = self._chat_symbol.get(chat_id, self._default_symbol)
-        txt = f"🔣 <b>Символы</b>\nДоступно: <code>{html.escape(syms)}</code>\nТекущий: <code>{html.escape(cur)}</code>"
+        txt = f"📣 <b>Символы</b>\nДоступно: <code>{html.escape(syms)}</code>\nТекущий: <code>{html.escape(cur)}</code>"
         self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
 
@@ -254,7 +254,7 @@ class TelegramBotCommands:
         await self._reply(chat_id, txt)
 
     async def _cmd_risk(self, chat_id: int, symbol: str) -> None:
-        parts = ["📏 <b>Риск (оценка)</b>"]
+        parts = ["🔐 <b>Риск (оценка)</b>"]
         st = getattr(self._container, "storage", None)
         cfg = getattr(getattr(self._container, "risk", None), "config", None)
         try:
@@ -281,14 +281,13 @@ class TelegramBotCommands:
             return
         base, quote = _split_symbol(symbol)
         try:
-                                                # balance display
-        try:
+            # balance display
             b = await broker.fetch_balance()
             gv = _getv(b)
             base, quote = (symbol.split('/') + ['',''])[:2]
             base_free = gv(base).get('free') or gv(base).get('total') or '0'
             quote_free = gv(quote).get('free') or gv(quote).get('total') or '0'
-            await self._reply(chat_id, f"👛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
+            await self._reply(chat_id, f"💛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
                                            f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:
             await self._reply(chat_id, "⚠️ Не удалось получить баланс")
