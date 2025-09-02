@@ -22,7 +22,6 @@ _log = get_logger("usecase.eval_and_execute")
 
 @dataclass(frozen=True)
 class MarketData:
-    """Контейнер рыночных данных для стратегий."""
     last_price: Decimal
     bid: Decimal
     ask: Decimal
@@ -34,7 +33,6 @@ class MarketData:
 
 @dataclass(frozen=True)
 class StrategyContext:
-    """Контекст для выполнения стратегии."""
     mode: str
     now_ms: int | None = None
 
@@ -90,15 +88,12 @@ async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> Mark
 
 
 class StrategyManager:
-    """Простая обертка для вызова стратегий."""
     def __init__(self, settings: Any, regime_provider: Any = None) -> None:
         self.settings = settings
         self.regime_provider = regime_provider
 
     async def decide(self, ctx: StrategyContext, md: MarketData) -> tuple[str, str | None]:
-        """Упрощенная логика для принятия решения."""
-        # Здесь должна быть реальная логика стратегий
-        # Для примера возвращаем hold
+        # здесь может быть логика стратегий; по умолчанию — hold
         return "hold", "no_strategy_configured"
 
 
@@ -115,8 +110,8 @@ async def eval_and_execute(
     try:
         md = await _build_market_data(symbol=symbol, broker=broker, settings=settings)
 
-        # Получаем regime из GatedBroker если он есть
-        regime = "neutral"  # default
+        # regime (не ломаем поведение)
+        regime = "neutral"
         if hasattr(broker, "_regime") and broker._regime:
             try:
                 regime = await broker._regime.regime()
@@ -131,15 +126,27 @@ async def eval_and_execute(
             inc("strategy_hold_total", symbol=symbol, reason=explain or "")
             return {"ok": True, "action": "hold", "reason": explain, "regime": regime}
 
-        # ----------------- Position sizing -----------------
+        # ----------------- Position sizing (совместимо с CCXT и paper) -----------------
         quote_balance: Decimal = dec("0")
+        quote_ccy = symbol.split("/")[1]
+        bal = None
         try:
-            bal = await broker.fetch_balance()
-            quote_ccy = symbol.split("/")[1]
-            info = bal.get(quote_ccy, {}) if isinstance(bal, dict) else {}
-            free = info.get("free") or info.get("total")
-            if free is not None:
-                quote_balance = dec(str(free))
+            # 1) попробуем CCXT-стиль (по символу): {"free_base","free_quote"}
+            try:
+                bal = await broker.fetch_balance(symbol)  # ccxt_adapter поддерживает symbol
+            except TypeError:
+                bal = await broker.fetch_balance()        # paper-стиль без аргумента
+
+            if isinstance(bal, dict):
+                if "free_quote" in bal:  # CCXT-адаптер
+                    qb = bal.get("free_quote")
+                    if qb is not None:
+                        quote_balance = dec(str(qb))
+                elif quote_ccy in bal:  # словарь по активам (paper)
+                    info = bal.get(quote_ccy, {}) or {}
+                    free = info.get("free") or info.get("total")
+                    if free is not None:
+                        quote_balance = dec(str(free))
         except Exception:
             _log.error("sizing_balance_failed", extra={"symbol": symbol}, exc_info=True)
 
@@ -176,26 +183,26 @@ async def eval_and_execute(
                     base_fraction=dec(str(getattr(settings, "STRAT_QUOTE_FRACTION", "0.05") or "0.05")),
                     constraints=constraints,
                 )
-            else:  # fractional (дефолт)
+            else:  # fractional
                 quote_amount = fixed_fractional(
                     free_quote_balance=quote_balance,
                     fraction=dec(str(getattr(settings, "STRAT_QUOTE_FRACTION", "0.05") or "0.05")),
                     constraints=constraints,
                 )
 
-        # ----------------- Risk check -----------------
+        # ----------------- Risk check (как было) -----------------
         try:
             ok_risk, risk_reason = (risk.check(symbol=symbol, storage=storage)
                                     if hasattr(risk, "check")
                                     else (risk.can_execute(), "legacy_risk"))
         except Exception:
             ok_risk, risk_reason = False, "risk_exception"
-        
+
         if not ok_risk:
             inc("risk_block_total", symbol=symbol, reason=str(risk_reason))
             return {"ok": True, "action": "hold", "reason": f"risk:{risk_reason}", "regime": regime}
 
-        # ----------------- Execute trade -----------------
+        # ----------------- Execute trade (как было) -----------------
         res = await execute_trade(
             symbol=symbol,
             side=decision,

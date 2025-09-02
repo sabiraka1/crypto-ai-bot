@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, cast, List, Tuple
 
 @dataclass
 class TradesRepository:
@@ -37,6 +37,8 @@ class TradesRepository:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, ts_ms)")
         self.conn.commit()
 
+    # ---------- INSERTS / LISTS ----------
+
     def add_from_order(self, order: Any) -> None:
         self.ensure_schema()  # make sure latest columns exist
         cur = self.conn.cursor()
@@ -58,26 +60,17 @@ class TradesRepository:
         )
         self.conn.commit()
 
-    def daily_pnl_quote(self, symbol: str) -> Decimal:
-        """Calculate daily PnL in quote currency."""
+    def list_today(self, symbol: str) -> list[Any]:
         cur = self.conn.cursor()
         cur.execute("""
-            SELECT COALESCE(SUM(
-                CASE 
-                    WHEN side = 'sell' THEN CAST(cost AS REAL) - CAST(fee_quote AS REAL)
-                    WHEN side = 'buy' THEN -CAST(cost AS REAL) - CAST(fee_quote AS REAL)
-                    ELSE 0
-                END
-            ), 0) as pnl
-            FROM trades 
+            SELECT * FROM trades 
             WHERE symbol = ? 
             AND DATE(ts_ms/1000, 'unixepoch') = DATE('now')
+            ORDER BY ts_ms DESC
         """, (symbol,))
-        result = cur.fetchone()
-        return Decimal(str(result[0] if result else 0))
+        return cast(list[Any], cur.fetchall())
 
     def daily_turnover_quote(self, symbol: str) -> Decimal:
-        """Calculate daily turnover in quote currency."""
         cur = self.conn.cursor()
         cur.execute("""
             SELECT COALESCE(SUM(CAST(cost AS REAL)), 0) as turnover
@@ -89,7 +82,6 @@ class TradesRepository:
         return Decimal(str(result[0] if result else 0))
 
     def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
-        """Count orders in last N minutes."""
         cur = self.conn.cursor()
         cur.execute("""
             SELECT COUNT(*) as cnt
@@ -100,13 +92,86 @@ class TradesRepository:
         result = cur.fetchone()
         return int(result[0] if result else 0)
 
-    def list_today(self, symbol: str) -> list[Any]:
-        """Возвращает сделки за сегодня."""
+    # ---------- FIFO PnL (с учётом fee_quote) ----------
+
+    def _iter_all_asc(self, symbol: str) -> List[Any]:
         cur = self.conn.cursor()
         cur.execute("""
-            SELECT * FROM trades 
-            WHERE symbol = ? 
-            AND DATE(ts_ms/1000, 'unixepoch') = DATE('now')
-            ORDER BY ts_ms DESC
+            SELECT side, amount, filled, price, cost, fee_quote, ts_ms
+            FROM trades
+            WHERE symbol = ?
+            ORDER BY ts_ms ASC
         """, (symbol,))
-        return cast(list[Any], cur.fetchall())
+        return cast(List[Any], cur.fetchall())
+
+    @staticmethod
+    def _to_dec(x: Any) -> Decimal:
+        return Decimal(str(x if x is not None else "0"))
+
+    def pnl_today_quote(self, symbol: str) -> Decimal:
+        """
+        Совместимый с сервером API: возвращает реализованный PnL за сегодня (quote),
+        рассчитанный по FIFO с учётом fee_quote.
+        """
+        return self._pnl_today_fifo_quote(symbol)
+
+    def _pnl_today_fifo_quote(self, symbol: str) -> Decimal:
+        rows = self._iter_all_asc(symbol)
+
+        # FIFO-очередь покупок: элементы (qty_left, unit_cost_quote)
+        # unit_cost_quote = (cost + fee_quote) / filled
+        buy_lots: List[Tuple[Decimal, Decimal]] = []
+
+        pnl_today = Decimal("0")
+
+        # границы "сегодня" — через SQLite DATE('now') мы уже отфильтровали бы,
+        # но нам нужна последовательность, поэтому отметим день тут же:
+        import datetime as _dt
+        today_utc = _dt.datetime.utcnow().date()
+
+        for r in rows:
+            side = (r["side"] or "").lower()
+            filled = self._to_dec(r["filled"] or r["amount"])
+            price = self._to_dec(r["price"])
+            cost = self._to_dec(r["cost"])
+            fee_q = self._to_dec(r["fee_quote"])
+            ts_ms = int(r["ts_ms"] or 0)
+            ts_day = _dt.datetime.utcfromtimestamp(ts_ms / 1000).date()
+
+            if filled <= 0:
+                continue
+
+            if side == "buy":
+                # покупка — пополняем склад (включая комиссию в себестоимость)
+                unit_cost = (cost + fee_q) / filled if filled > 0 else Decimal("0")
+                buy_lots.append((filled, unit_cost))
+                continue
+
+            if side == "sell":
+                # продали — списываем из FIFO-лотов
+                qty_to_consume = filled
+                unit_sell = price  # выручка до комиссии
+                realized = Decimal("0")
+
+                # списываем с лотов (это влияет и на будущие дни)
+                i = 0
+                while qty_to_consume > 0 and i < len(buy_lots):
+                    lot_qty, lot_uc = buy_lots[i]
+                    take = min(lot_qty, qty_to_consume)
+                    realized += take * (unit_sell - lot_uc)
+                    new_qty = lot_qty - take
+                    qty_to_consume -= take
+                    if new_qty > 0:
+                        buy_lots[i] = (new_qty, lot_uc)
+                        i += 1
+                    else:
+                        buy_lots.pop(i)
+
+                # учтём комиссию продажи: целиком относится к этой продаже
+                if ts_day == today_utc:
+                    pnl_today += realized - fee_q
+                else:
+                    # продажа была не сегодня — она меняет склад, но не «сегодняшний» PnL
+                    pass
+
+        return pnl_today
