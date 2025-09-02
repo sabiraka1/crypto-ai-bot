@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 @dataclass
 class TradesRepository:
@@ -109,4 +109,4 @@ class TradesRepository:
             AND DATE(ts_ms/1000, 'unixepoch') = DATE('now')
             ORDER BY ts_ms DESC
         """, (symbol,))
-        return cur.fetchall()
+        return cast(list[Any], cur.fetchall())

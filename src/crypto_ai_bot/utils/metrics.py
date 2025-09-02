@@ -10,7 +10,7 @@ _COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Counter] = {}
 _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}
 _HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
 
-def reset_registry():
+def reset_registry() -> None:
     """Сброс регистра для тестов."""
     global _REGISTRY, _COUNTERS, _GAUGES, _HISTS
     _REGISTRY = CollectorRegistry()
@@ -37,35 +37,51 @@ def _buckets_ms() -> tuple[float, ...]:
 
 def inc(name: str, **labels: Any) -> None:
     """Counter +1"""
-    name = _sanitize_name(name)  # Санитизация имени
+    name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
     if k not in _COUNTERS:
-        _COUNTERS[k] = Counter(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
-    _COUNTERS[k].labels(**dict(k[1])).inc()
+        try:
+            _COUNTERS[k] = Counter(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
+        except ValueError:
+            # Метрика уже зарегистрирована
+            pass
+    if k in _COUNTERS:
+        _COUNTERS[k].labels(**dict(k[1])).inc()
 
-def gauge(name: str, **labels: Any) -> Gauge:
+def gauge(name: str, **labels: Any) -> Gauge | None:
     """Gauge (вернёт объект, чтобы .set())"""
-    name = _sanitize_name(name)  # Санитизация имени
+    name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
     if k not in _GAUGES:
-        _GAUGES[k] = Gauge(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
-    return _GAUGES[k].labels(**dict(k[1]))
+        try:
+            _GAUGES[k] = Gauge(name, name, list(dict(k[1]).keys()), registry=_REGISTRY)
+        except ValueError:
+            # Метрика уже зарегистрирована
+            pass
+    return _GAUGES[k].labels(**dict(k[1])) if k in _GAUGES else None
 
-def hist(name: str, **labels: Any) -> Histogram:
+def hist(name: str, **labels: Any) -> Histogram | None:
     """Histogram (секунды)"""
-    name = _sanitize_name(name)  # Санитизация имени
+    name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
     if k not in _HISTS:
-        _HISTS[k] = Histogram(name, name, list(dict(k[1]).keys()), buckets=_buckets_ms(), registry=_REGISTRY)
-    return _HISTS[k].labels(**dict(k[1]))
+        try:
+            _HISTS[k] = Histogram(name, name, list(dict(k[1]).keys()), buckets=_buckets_ms(), registry=_REGISTRY)
+        except ValueError:
+            # Метрика уже зарегистрирована
+            pass
+    return _HISTS[k].labels(**dict(k[1])) if k in _HISTS else None
 
-def observe(name: str, value: float, labels: dict[str, str] | None = None) -> None:
-    """Шорткат для наблюдения значения (секунды)"""
-    name = _sanitize_name(name)  # Санитизация имени
-    (hist(name, **(labels or {}))).observe(float(value))
+def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
+    """Шорткат для наблюдения значения (миллисекунды -> секунды)."""
+    name = _sanitize_name(name)
+    value_sec = float(value) / 1000.0  # Конвертируем ms в секунды
+    h = hist(name, **(labels or {}))
+    if h:
+        h.observe(value_sec)
 
 def export_text() -> str:
     """Для /metrics в FastAPI"""
