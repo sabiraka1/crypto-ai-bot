@@ -1,75 +1,71 @@
 ﻿from __future__ import annotations
 
-import random
-from dataclasses import dataclass
+from typing import Any, Dict
 from decimal import Decimal
-from typing import Any
+from dataclasses import dataclass
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.symbols import canonical  # <-- ЕДИНЫЙ источник
 
-_log = get_logger("broker.paper")
+_log = get_logger("brokers.paper")
 
 
 @dataclass
 class PaperBroker:
-    """Простой симулятор PAPER; не тянет application, нормализация из utils.symbols."""
+    """Симулятор брокера для paper trading."""
+    
     settings: Any
-
-    async def fetch_ticker(self, symbol: str) -> dict:
-        symbol = canonical(symbol)
-        px = dec(str(getattr(self.settings, "PAPER_PRICE", "60000") or "60000"))
-        delta = px * dec("0.0005")
-        last = px + dec(str(random.uniform(float(-delta), float(delta))))
-        spread = last * dec("0.0008")
-        bid = last - spread / 2
-        ask = last + spread / 2
-        return {"symbol": symbol, "last": last, "bid": bid, "ask": ask}
-
-    async def fetch_balance(self, symbol: str) -> dict:
-        symbol = canonical(symbol)
-        free_base = dec(str(getattr(self.settings, "PAPER_FREE_BASE", "0") or "0"))
-        free_quote = dec(str(getattr(self.settings, "PAPER_FREE_QUOTE", "100000") or "100000"))
-        return {"free_base": free_base, "free_quote": free_quote}
-
-    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal,
-                                      client_order_id: str | None = None) -> Any:
-        symbol = canonical(symbol)
-        t = await self.fetch_ticker(symbol)
-        price = t["ask"]
-        cost = quote_amount
-        amount = dec("0")
-        if price > 0 and cost > 0:
-            amount = cost / price
-        order = type("Order", (), {})()
-        order.id = f"paper-{random.randrange(10**9)}"
-        order.client_order_id = client_order_id
-        order.symbol = symbol
-        order.side = "buy"
-        order.amount = amount
-        order.filled = amount
-        order.price = price
-        order.cost = cost
-        order.fee_quote = dec("0")
-        order.ts_ms = 0
-        return order
-
-    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal,
-                                      client_order_id: str | None = None) -> Any:
-        symbol = canonical(symbol)
-        t = await self.fetch_ticker(symbol)
-        price = t["bid"]
+    
+    async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        """Возвращает фиктивный ticker."""
+        return {
+            "symbol": symbol,
+            "bid": "50000.00",
+            "ask": "50010.00",
+            "last": "50005.00",
+        }
+    
+    async def fetch_balance(self, symbol: str = "") -> Dict[str, Any]:
+        """Возвращает фиктивный баланс."""
+        return {
+            "USDT": {"free": "10000.00", "total": "10000.00"},
+            "BTC": {"free": "0.5", "total": "0.5"},
+        }
+    
+    async def create_market_buy_quote(
+        self, 
+        symbol: str, 
+        quote_amount: Decimal, 
+        client_order_id: str | None = None
+    ) -> Any:
+        """Симулирует покупку."""
+        price = dec("50000")
+        amount = quote_amount / price
+        return {
+            "id": f"paper_{client_order_id or 'order'}",
+            "symbol": symbol,
+            "side": "buy",
+            "amount": str(amount),
+            "price": str(price),
+            "cost": str(quote_amount),
+            "fee_quote": str(quote_amount * dec("0.001")),
+        }
+    
+    async def create_market_sell_base(
+        self,
+        symbol: str,
+        base_amount: Decimal,
+        client_order_id: str | None = None
+    ) -> Any:
+        """Симулирует продажу."""
+        price = dec("50000")
         cost = base_amount * price
-        order = type("Order", (), {})()
-        order.id = f"paper-{random.randrange(10**9)}"
-        order.client_order_id = client_order_id
-        order.symbol = symbol
-        order.side = "sell"
-        order.amount = base_amount
-        order.filled = base_amount
-        order.price = price
-        order.cost = cost
-        order.fee_quote = dec("0")
-        order.ts_ms = 0
-        return order
+        return {
+            "id": f"paper_{client_order_id or 'order'}",
+            "symbol": symbol,
+            "side": "sell",
+            "amount": str(base_amount),
+            "price": str(price),
+            "cost": str(cost),
+            "fee_quote": str(cost * dec("0.001")),
+        }

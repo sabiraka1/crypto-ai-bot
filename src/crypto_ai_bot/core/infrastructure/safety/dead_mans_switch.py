@@ -13,7 +13,7 @@ class DeadMansSwitch:
     timeout_ms: int = 120_000
     rechecks: int = 1
     recheck_delay_sec: float = 0.0
-    max_impact_pct: float = 0.0
+    max_impact_pct: Decimal = Decimal("0")  # Исправлено: изменен тип на Decimal
     bus: Any | None = None
 
     _last_beat_ms: int = 0
@@ -28,7 +28,7 @@ class DeadMansSwitch:
 
         # first snapshot
         t = await self.broker.fetch_ticker(self.symbol)
-        last = Decimal(str(getattr(t, "last", "0")))  # type: ignore[arg-type]
+        last = Decimal(str(getattr(t, "last", "0")))
 
         if self._last_healthy_price is None:
             self._last_healthy_price = last

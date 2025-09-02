@@ -5,12 +5,12 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Optional, Any
 
 try:
     import httpx
 except Exception:  # pragma: no cover
-    httpx = None  # будет понятный лог-ворнинг при инициализации
+    httpx: Any = None  # Исправлено: указан тип Any вместо присваивания None напрямую
 
 
 class TelegramErrorHandler(logging.Handler):

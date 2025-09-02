@@ -45,7 +45,7 @@ class Container:
     exits: ProtectiveExits
     health: HealthChecker
     orchestrators: dict[str, Orchestrator]
-    tg_bot_task: asyncio.Task | None = None
+    tg_bot_task: asyncio.Task[None] | None = None
 
 def _open_storage(settings: Settings) -> Storage:
     db_path = settings.DB_PATH

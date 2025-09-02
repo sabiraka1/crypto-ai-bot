@@ -3,23 +3,12 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Dict
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
-
-# Доп. правила риска (опционально)
-try:
-    from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
-except Exception:
-    LossStreakRule = None  # type: ignore
-
-try:
-    from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
-except Exception:
-    MaxDrawdownRule = None  # type: ignore
 
 _log = get_logger("usecase.execute_trade")
 
@@ -37,7 +26,7 @@ class ExecuteTradeResult:
     why: str = ""  # доп. пояснение (для причин блокировки)
 
 
-async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, Any]]:
+async def _recent_trades(storage: Any, symbol: str, n: int) -> list[Dict[str, Any]]:
     """Безопасно достаём последние N сделок, если storage поддерживает."""
     try:
         repo = getattr(storage, "trades", None)
@@ -95,7 +84,7 @@ async def execute_trade(
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
     protective_exits: Any | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     """Исполняет торговое решение (покупку или продажу) с учетом идемпотентности и риск-лимитов."""
     # Обработка дефолтных значений для B008
     if quote_amount is None:
@@ -126,36 +115,44 @@ async def execute_trade(
 
     # ---- (опционально) правило: серия убыточных сделок ----
     try:
-        if getattr(settings, "RISK_USE_LOSS_STREAK", 0) and LossStreakRule:
-            max_streak = int(getattr(settings, "RISK_LOSS_STREAK_MAX", 3) or 3)
-            lookback = int(getattr(settings, "RISK_LOSS_STREAK_LOOKBACK", 10) or 10)
-            rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)
-            trades = await _recent_trades(storage, sym, n=max(lookback, 10))
-            allowed, reason = rule.check(trades)
-            if not allowed:
-                await bus.publish("budget.exceeded", {"symbol": sym, "type": "loss_streak", "reason": reason})
-                _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "loss_streak", "reason": reason})
-                return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+        if getattr(settings, "RISK_USE_LOSS_STREAK", 0):
+            try:
+                from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
+                max_streak = int(getattr(settings, "RISK_LOSS_STREAK_MAX", 3) or 3)
+                lookback = int(getattr(settings, "RISK_LOSS_STREAK_LOOKBACK", 10) or 10)
+                ls_rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)
+                trades = await _recent_trades(storage, sym, n=max(lookback, 10))
+                allowed, reason = ls_rule.check(trades)
+                if not allowed:
+                    await bus.publish("budget.exceeded", {"symbol": sym, "type": "loss_streak", "reason": reason})
+                    _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "loss_streak", "reason": reason})
+                    return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+            except ImportError:
+                pass  # LossStreakRule не найден
     except Exception:
         _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- (опционально) правило: просадка/дневной лимит убытков ----
     try:
-        if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0) and MaxDrawdownRule:
-            max_dd = dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", "10.0") or "10.0"))
-            max_daily = dec(str(getattr(settings, "RISK_MAX_DAILY_LOSS_QUOTE", "0") or "0"))
-            rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)
+        if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0):
+            try:
+                from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
+                max_dd = dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", "10.0") or "10.0"))
+                max_daily = dec(str(getattr(settings, "RISK_MAX_DAILY_LOSS_QUOTE", "0") or "0"))
+                md_rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)
 
-            balances = await _balances_series(storage, sym, limit=int(getattr(settings, "RISK_BALS_LOOKBACK", 48) or 48))
-            current = balances[-1] if balances else dec("0")
-            peak = max(balances) if balances else dec("0")
-            daily_pnl = await _daily_pnl_quote(storage, sym)
+                balances = await _balances_series(storage, sym, limit=int(getattr(settings, "RISK_BALS_LOOKBACK", 48) or 48))
+                current = balances[-1] if balances else dec("0")
+                peak = max(balances) if balances else dec("0")
+                daily_pnl = await _daily_pnl_quote(storage, sym)
 
-            allowed, reason = rule.check(current_balance=current, peak_balance=peak, daily_pnl=daily_pnl)
-            if not allowed:
-                await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_drawdown", "reason": reason})
-                _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "max_drawdown", "reason": reason})
-                return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+                allowed, reason = md_rule.check(current_balance=current, peak_balance=peak, daily_pnl=daily_pnl)
+                if not allowed:
+                    await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_drawdown", "reason": reason})
+                    _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "max_drawdown", "reason": reason})
+                    return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+            except ImportError:
+                pass  # MaxDrawdownRule не найден
     except Exception:
         _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
 
@@ -193,17 +190,18 @@ async def execute_trade(
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- ограничение дневного оборота по котируемой (если задано) ----
-    if cfg.max_turnover_day and cfg.max_turnover_day > dec("0"):
+    max_turnover_attr = getattr(cfg, "max_turnover_day", None) or cfg.safety_max_turnover_quote_per_day
+    if max_turnover_attr and max_turnover_attr > dec("0"):
         try:
             current_turnover = storage.trades.daily_turnover_quote(sym)
-            if current_turnover >= cfg.max_turnover_day:
+            if current_turnover >= max_turnover_attr:
                 await bus.publish(
                     "budget.exceeded",
-                    {"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(cfg.max_turnover_day)},
+                    {"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(max_turnover_attr)},
                 )
                 _log.warning(
                     "trade_blocked_budget",
-                    extra={"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(cfg.max_turnover_day)},
+                    extra={"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(max_turnover_attr)},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
         except Exception:

@@ -56,7 +56,7 @@ async def place_order(
         key = _derive_idem_key(inputs, settings)
         try:
             if not bool(idem_repo.check_and_store(key, ttl)):
-                inc("trade.blocked", {"reason": "idempotent_duplicate"})
+                inc("trade.blocked", reason="idempotent_duplicate")
                 await bus.publish("trade.blocked", {"symbol": sym, "reason": "idempotent_duplicate"})
                 return PlaceOrderResult(ok=False, reason="idempotent_duplicate")
         except Exception as e:
@@ -92,7 +92,7 @@ async def place_order(
                 spread_pct = (ask - bid) / mid * 100
                 if spread_pct > max_slip_pct:
                     reason = f"slippage_exceeds:{spread_pct:.4f}%>{max_slip_pct}%"
-                    inc("trade.blocked", {"reason": "slippage"})
+                    inc("trade.blocked", reason="slippage")
                     await bus.publish("trade.blocked", {"symbol": sym, "reason": reason})
                     return PlaceOrderResult(ok=False, reason=reason)
         except Exception as exc:
@@ -102,11 +102,11 @@ async def place_order(
     try:
         if side == "buy":
             q = inputs.quote_amount if inputs.quote_amount > 0 else dec(str(getattr(settings, "FIXED_AMOUNT", 0) or 0))
-            inc("broker.order.create", {"side": "buy"})
+            inc("broker.order.create", side="buy")
             order = await broker.create_market_buy_quote(symbol=sym, quote_amount=q, client_order_id=inputs.client_order_id)
         elif side == "sell":
             b = inputs.base_amount if inputs.base_amount > 0 else dec("0")
-            inc("broker.order.create", {"side": "sell"})
+            inc("broker.order.create", side="sell")
             order = await broker.create_market_sell_base(symbol=sym, base_amount=b, client_order_id=inputs.client_order_id)
         else:
             return PlaceOrderResult(ok=False, reason="invalid_side")
@@ -142,7 +142,7 @@ async def place_order(
 
     except Exception as exc:
         _log.error("place_order_failed", extra={"symbol": sym, "side": side, "error": str(exc)})
-        inc("trade.failed", {"where": "broker"})
+        inc("trade.failed", where="broker")
         await bus.publish("trade.failed", {"symbol": sym, "side": side, "error": str(exc)})
         try:
             if audit_repo is not None:

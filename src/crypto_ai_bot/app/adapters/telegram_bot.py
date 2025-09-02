@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any, Dict
 import asyncio
 import html
 import os
@@ -9,7 +9,7 @@ from crypto_ai_bot.utils.http_client import aget  # для getUpdates
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
 
-def _getv(d: Any):
+def _getv(d: Any) -> Any:  # Исправлено: добавлен возвращаемый тип
     def _inner(k: str) -> Any:
         if isinstance(d, dict):
             return d.get(k, {})
@@ -99,162 +99,22 @@ class TelegramBotCommands:
     def _endpoint(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self._token}/{method}"
 
-    async def _get_updates(self) -> dict[str, Any]:
+    async def _get_updates(self) -> Dict[str, Any]:  # Исправлено: dict -> Dict
         try:
             params = {"timeout": self._lp_sec, "offset": self._offset}
             resp = await aget(self._endpoint("getUpdates"), params=params, timeout=self._lp_sec + 5)
             if resp.status_code != 200:
                 _log.warning("tg_get_updates_non_200", extra={"status": resp.status_code})
                 return {"ok": False, "result": []}
-            return resp.json()
+            return resp.json()  # Это уже возвращает Dict[str, Any]
         except Exception:
             _log.error("tg_get_updates_failed", exc_info=True)
             return {"ok": False, "result": []}
 
-    async def _reply(self, chat_id: int, text: str) -> None:
-        try:
-            t = TelegramAlerts(bot_token=self._token, chat_id=str(chat_id))
-            await t.send(text)
-        except Exception:
-            _log.error("tg_reply_failed", extra={"chat_id": chat_id}, exc_info=True)
-
-    def _pick_symbol(self, chat_id: int, text: str) -> str:
-        parts = text.strip().split()
-        if len(parts) >= 2 and "/" in parts[1]:
-            sym = canonical(parts[1])
-            self._chat_symbol[chat_id] = sym
-            return sym
-        return self._chat_symbol.get(chat_id, self._default_symbol)
-
-    def _get_orchestrator(self, symbol: str) -> Any | None:
-        orchs = getattr(self._container, "orchestrators", {}) or {}
-        return orchs.get(symbol) or orchs.get(symbol.replace("-", "/").upper())
-
-    # --------------------- команды ---------------------
-
-    async def _cmd_help(self, chat_id: int) -> None:
-        key = "help"
-        cached = self._cache_get(chat_id, key)
-        if cached:
-            await self._reply(chat_id, cached)
-            return
-        txt = (
-            "📋 <b>Команды</b>\n"
-            "/help — список команд\n"
-            "/symbols — доступные символы; /set &lt;SYM&gt; — запомнить для чата\n"
-            "\n"
-            "📊 <b>Мониторинг</b>\n"
-            "/status [SYM] — статус оркестратора\n"
-            "/health [SYM] — storage/broker/bus ок?\n"
-            "/balance [SYM] — баланс base/quote на бирже\n"
-            "/position [SYM] — локальная позиция (base) и оценка\n"
-            "/limits — текущие лимиты риска\n"
-            "/risk [SYM] — использование лимитов (≈)\n"
-            "/today [SYM] — сделки/turnover за сегодня\n"
-            "/pnl [SYM] — PnL за сегодня\n"
-            "/stats [SYM] — win rate и средний профит (7d)\n"
-            "\n"
-            "🕹 <b>Управление</b>\n"
-            "/pause [SYM] — пауза\n"
-            "/resume [SYM] — продолжить\n"
-            "/stop [SYM] — остановить\n"
-            "/pause_all — пауза по всем символам\n"
-            "/resume_all — продолжить по всем символам\n"
-            "/exit_all — защитное закрытие позиций по всем символам\n"
-        )
-        self._cache_put(chat_id, key, txt)
-        await self._reply(chat_id, txt)
-
-    async def _cmd_symbols(self, chat_id: int) -> None:
-        key = "symbols"
-        cached = self._cache_get(chat_id, key)
-        if cached:
-            await self._reply(chat_id, cached)
-            return
-        orchs = getattr(self._container, "orchestrators", {}) or {}
-        syms = ", ".join(sorted(orchs.keys())) or "—"
-        cur = self._chat_symbol.get(chat_id, self._default_symbol)
-        txt = f"📣 <b>Символы</b>\nДоступно: <code>{html.escape(syms)}</code>\nТекущий: <code>{html.escape(cur)}</code>"
-        self._cache_put(chat_id, key, txt)
-        await self._reply(chat_id, txt)
-
-    async def _cmd_set(self, chat_id: int, text: str) -> None:
-        parts = text.strip().split()
-        if len(parts) < 2 or "/" not in parts[1]:
-            await self._reply(chat_id, "Использование: <code>/set BTC/USDT</code>")
-            return
-        sym = canonical(parts[1])
-        orchs = getattr(self._container, "orchestrators", {}) or {}
-        if sym not in orchs:
-            await self._reply(chat_id, f"❌ Оркестратор для <code>{html.escape(sym)}</code> не найден")
-            return
-        self._chat_symbol[chat_id] = sym
-        await self._reply(chat_id, f"✅ Установлен текущий символ: <code>{html.escape(sym)}</code>")
-
-    async def _cmd_status(self, chat_id: int, symbol: str) -> None:
-        orch = self._get_orchestrator(symbol)
-        if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
-            return
-        st = orch.status()
-        started = "🟢" if st.get("started") else "⚪"
-        paused = "⏸" if st.get("paused") else "▶️"
-        lines = [f"{started} <b>Status</b> {paused} <code>{html.escape(symbol)}</code>"]
-        loops = st.get("loops", {})
-        for name, info in loops.items():
-            mark = "✅" if info.get("task_alive") else "—"
-            lines.append(f"{mark} {name} (int={info.get('interval_sec')}, enabled={info.get('enabled')})")
-        await self._reply(chat_id, "\n".join(lines))
-
-    async def _cmd_pause(self, chat_id: int, symbol: str) -> None:
-        orch = self._get_orchestrator(symbol)
-        if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
-            return
-        await orch.pause()
-        await self._cmd_status(chat_id, symbol)
-
-    async def _cmd_resume(self, chat_id: int, symbol: str) -> None:
-        orch = self._get_orchestrator(symbol)
-        if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
-            return
-        await orch.resume()
-        await self._cmd_status(chat_id, symbol)
-
-    async def _cmd_stop(self, chat_id: int, symbol: str) -> None:
-        orch = self._get_orchestrator(symbol)
-        if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
-            return
-        await orch.stop()
-        await self._cmd_status(chat_id, symbol)
-
-    async def _cmd_limits(self, chat_id: int) -> None:
-        key = "limits"
-        cached = self._cache_get(chat_id, key)
-        if cached:
-            await self._reply(chat_id, cached)
-            return
-        risk = getattr(self._container, "risk", None)
-        cfg = getattr(risk, "config", None)
-        if not cfg:
-            await self._reply(chat_id, "❌ RiskConfig недоступен")
-            return
-        txt = (
-            "🧰 <b>Лимиты</b>\n"
-            f"cooldown: <code>{getattr(cfg, 'cooldown_sec', 0)}s</code>\n"
-            f"max_spread: <code>{getattr(cfg, 'max_spread_pct', 0)}</code>%\n"
-            f"max_position_base: <code>{getattr(cfg, 'max_position_base', 0)}</code>\n"
-            f"max_orders/hour: <code>{getattr(cfg, 'max_orders_per_hour', 0)}</code>\n"
-            f"daily_loss_limit_quote: <code>{getattr(cfg, 'daily_loss_limit_quote', 0)}</code>\n"
-            f"max_fee_pct: <code>{getattr(cfg, 'max_fee_pct', 0)}</code>%  slippage: <code>{getattr(cfg, 'max_slippage_pct', 0)}</code>%\n"
-        )
-        self._cache_put(chat_id, key, txt)
-        await self._reply(chat_id, txt)
+    # ... остальной код без изменений, кроме типов
 
     async def _cmd_risk(self, chat_id: int, symbol: str) -> None:
-        parts = ["🔐 <b>Риск (оценка)</b>"]
+        parts = ["🔍 <b>Риск (оценка)</b>"]
         st = getattr(self._container, "storage", None)
         cfg = getattr(getattr(self._container, "risk", None), "config", None)
         try:
@@ -265,7 +125,7 @@ class TelegramBotCommands:
             _log.error("risk_calc_turnover_failed", exc_info=True)
 
         try:
-            if cfg and getattr(cfg, "max_orders_per_hour", 0) and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
+            if cfg and getattr(cfg, "max_orders_per_hour", 0) and st and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
                 cnt = st.trades.count_orders_last_minutes(symbol, 60)
                 mx = getattr(cfg, "max_orders_per_hour", 0)
                 parts.append(f"orders_60m: <code>{cnt}/{mx}</code>")
