@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
@@ -7,20 +7,20 @@ from crypto_ai_bot.core.domain.strategies.ema_atr import EmaAtrConfig, EmaAtrStr
 from crypto_ai_bot.utils.decimal import dec
 
 
-# Создаем алиасы для совместимости со старым кодом
-MarketDataPort = MarketData
+# РЎРѕР·РґР°РµРј Р°Р»РёР°СЃС‹ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃРѕ СЃС‚Р°СЂС‹Рј РєРѕРґРѕРј
+MarketData = MarketData
 StrategyPort = BaseStrategy
 Signal = Decision
 
 
 class StrategyManager:
     """
-    Агрегатор стратегий.
-    На первом этапе — один сигнал (EMA+ATR). Позже можно добавлять другие
-    и агрегировать (взвешивание/приоритеты).
+    РђРіСЂРµРіР°С‚РѕСЂ СЃС‚СЂР°С‚РµРіРёР№.
+    РќР° РїРµСЂРІРѕРј СЌС‚Р°РїРµ вЂ” РѕРґРёРЅ СЃРёРіРЅР°Р» (EMA+ATR). РџРѕР·Р¶Рµ РјРѕР¶РЅРѕ РґРѕР±Р°РІР»СЏС‚СЊ РґСЂСѓРіРёРµ
+    Рё Р°РіСЂРµРіРёСЂРѕРІР°С‚СЊ (РІР·РІРµС€РёРІР°РЅРёРµ/РїСЂРёРѕСЂРёС‚РµС‚С‹).
     """
 
-    def __init__(self, *, md: MarketDataPort, settings: Any) -> None:
+    def __init__(self, *, md: MarketData, settings: Any) -> None:
         self._md = md
         self._settings = settings
         self._strategies: list[StrategyPort] = []
@@ -44,7 +44,7 @@ class StrategyManager:
     async def decide(self, symbol: str) -> Signal:
         if not self._strategies:
             return Signal(action="hold", reason="no_strategies")
-        # Простой приоритет: первая, давшая directional-сигнал
+        # РџСЂРѕСЃС‚РѕР№ РїСЂРёРѕСЂРёС‚РµС‚: РїРµСЂРІР°СЏ, РґР°РІС€Р°СЏ directional-СЃРёРіРЅР°Р»
         for strat in self._strategies:
             from crypto_ai_bot.core.domain.strategies.base import StrategyContext
             ctx = StrategyContext(symbol=symbol, settings=self._settings)

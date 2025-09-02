@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 from typing import Any
@@ -38,5 +38,6 @@ class MarketDataRepository:
         return [dict(r) for r in cur.fetchall()]
 
 
-# Совместимость со старым именем
-MarketDataRepo = MarketDataRepository
+# РЎРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃРѕ СЃС‚Р°СЂС‹Рј РёРјРµРЅРµРј
+MarketDataRepository = MarketDataRepository
+
