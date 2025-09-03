@@ -1,36 +1,148 @@
+# Crypto AI Bot - Enhanced Ruff Configuration
 # Stricter, but still green-by-default (tests are relaxed where sensible).
 line-length = 120
 target-version = "py311"
 
 [lint]
 # Core families + isort + pyupgrade + security + naming + simplify
-select = ["E", "F", "W", "B", "C90", "I", "UP", "S", "N", "SIM", "RET", "PERF"]
+# ENHANCED: Added crypto-specific rules
+select = [
+    "E", "F", "W",           # pycodestyle + pyflakes
+    "B", "C90",              # bugbear + complexity
+    "I",                     # isort
+    "UP",                    # pyupgrade  
+    "S",                     # bandit security
+    "N",                     # pep8-naming
+    "SIM", "RET", "PERF",    # simplify + return + performance
+    # CRYPTO-SPECIFIC ADDITIONS
+    "ASYNC",                 # async/await patterns (critical for trading)
+    "A",                     # flake8-builtins (avoid shadowing)
+    "BLE",                   # blind-except (important for error handling)
+    "FBT",                   # boolean-trap (trading functions clarity)
+    "C4",                    # comprehensions (performance)
+    "EM",                    # error messages (structured logging)
+    "LOG",                   # logging patterns
+    "PIE",                   # unnecessary code
+    "T20",                   # print statements (should use logging)
+    "TRY",                   # exception handling patterns
+    "ARG",                   # unused arguments
+]
 
 # Pragmatic ignores (tests/scripts — см. per-file-ignores ниже)
 ignore = [
-  "E501",   # long lines
-  "E701",   # multiple statements on one line (colon)
-  "E702",   # multiple statements on one line (semicolon)
-  "E731",   # lambda assigned
-  "B904",   # raise ... from in except blocks
-  "B008",   # function call in default argument
-  "RUF001", "RUF002", "RUF003", "RUF005", "RUF012",
-  "UP027", "UP038",
-  "E402",   # module level import not at top of file
-  "E741",   # ambiguous variable name
-  "C901",   # function complexity
+    "E501",   # long lines
+    "E701",   # multiple statements on one line (colon)
+    "E702",   # multiple statements on one line (semicolon) 
+    "E731",   # lambda assigned
+    "B904",   # raise ... from in except blocks
+    "B008",   # function call in default argument
+    "RUF001", "RUF002", "RUF003", "RUF005", "RUF012",
+    "UP027", "UP038",
+    "E402",   # module level import not at top of file
+    "E741",   # ambiguous variable name
+    "C901",   # function complexity
+    
+    # CRYPTO-SPECIFIC IGNORES
+    "FBT001", "FBT002",      # boolean traps (common in trading APIs)
+    "EM101", "EM102",        # exception message patterns
+    "TRY003",                # long exception messages (trading errors need context)
+    "ARG002",                # unused method argument (interfaces/protocols)
+    "S101",                  # assert statements (used in domain validation)
+    "A003",                  # builtin attribute shadowing (common with 'type', 'id')
 ]
 
 [lint.per-file-ignores]
-"tests/**"           = ["E501", "E701", "E702", "C901", "E741", "B904", "B008", "S", "N", "SIM", "RET"]
-"scripts/**"         = ["E501", "E701", "E702", "S", "N", "SIM"]
+# Tests - more relaxed
+"tests/**" = [
+    "E501", "E701", "E702", "C901", "E741", "B904", "B008", 
+    "S", "N", "SIM", "RET",
+    "ASYNC",                 # tests can have simpler async patterns
+    "A", "BLE", "FBT", "C4", "EM", "LOG", "PIE", "T20", "TRY", "ARG"
+]
+
+# Scripts - operational tools
+"scripts/**" = [
+    "E501", "E701", "E702", "S", "N", "SIM",
+    "T20",                   # allow prints in scripts
+    "ASYNC", "BLE", "ARG"
+]
+
+# Package inits
 "src/**/__init__.py" = ["F401"]
+
+# CLI tools - allow prints and simpler patterns  
+"src/crypto_ai_bot/cli/*.py" = [
+    "T20",                   # print statements OK in CLI
+    "FBT",                   # boolean arguments common in CLI
+    "C901",                  # complexity OK in CLI entry points
+    "ARG",                   # CLI argument patterns
+]
+
+# Migrations - can be more flexible
+"src/crypto_ai_bot/core/infrastructure/storage/migrations/*.py" = [
+    "S608",                  # hardcoded SQL (by design)
+    "E501",                  # long SQL lines
+    "T20",                   # debug prints
+]
+
+# Settings - environment access patterns
+"src/crypto_ai_bot/core/infrastructure/settings.py" = [
+    "S105", "S106",          # hardcoded secrets (false positive on env var names)
+]
+
+# CRYPTO-SPECIFIC PER-FILE RULES
+# Domain layer - strictest rules (business logic)
+"src/crypto_ai_bot/core/domain/**/*.py" = []  # no ignores - maximum strictness
+
+# Critical trading paths - strict error handling
+"src/crypto_ai_bot/core/application/use_cases/execute_trade.py" = [
+    # No ignores - this is critical trading logic
+]
+
+"src/crypto_ai_bot/core/application/use_cases/eval_and_execute.py" = [
+    # No ignores - critical decision logic
+]
+
+# Utils with financial calculations - strict
+"src/crypto_ai_bot/utils/decimal.py" = []  # no ignores
+"src/crypto_ai_bot/utils/pnl.py" = []     # no ignores
+
+# Infrastructure adapters - some flexibility for external APIs
+"src/crypto_ai_bot/core/infrastructure/brokers/*.py" = [
+    "A003",                  # CCXT API has 'type', 'id' attributes
+    "ARG",                   # CCXT methods have many unused params
+]
 
 [lint.isort]
 known-first-party = ["crypto_ai_bot"]
 combine-as-imports = true
 force-sort-within-sections = true
+# ENHANCED: Add trading-specific import grouping
+known-third-party = ["ccxt", "redis", "prometheus_client"]
+section-order = [
+    "future", 
+    "standard-library", 
+    "third-party", 
+    "first-party", 
+    "local-folder"
+]
 
-# Optional: help catching suspicious code paths (Bandit fine-tuning)
 [lint.flake8-bandit]
-# Allow common patterns in tests while keeping prod strict via per-file-ignores.
+# CRYPTO-SPECIFIC: Allow patterns needed for trading systems
+check-typed-exception = true
+
+# Allow subprocess in operational scripts  
+[lint.flake8-bandit.hardcoded-tmp-directory]
+extend-immutable-calls = ["pathlib.Path"]
+
+[lint.pylint]
+# Financial calculations can be complex
+max-args = 8
+max-branches = 15
+
+[lint.flake8-async]
+# Async trading operations
+check-blocking-calls = true
+
+[lint.flake8-logging-format] 
+# Structured logging for trading systems
