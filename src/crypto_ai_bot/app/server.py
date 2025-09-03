@@ -15,7 +15,7 @@ from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.core.application import events_topics as EVT  # ✅ добавлено: нужен в /health и alertmanager/webhook
+from crypto_ai_bot.core.application import events_topics as EVT  # нужен в /health и alertmanager/webhook
 
 _log = get_logger("app.server")
 _container: Any | None = None
@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         try:
             bus = getattr(_container, "bus", None)
-            # ✅ безопасный shutdown шины: сначала stop(), если нет — close()
+            # безопасный shutdown шины: сначала stop(), если нет — close()
             if bus and hasattr(bus, "stop"):
                 await bus.stop()
             elif bus and hasattr(bus, "close"):
@@ -145,9 +145,9 @@ async def _call_with_timeout(coro, *, timeout: float = 2.5):
 @router.get("/health")
 async def health() -> JSONResponse:
     """
-    ???????? health: DB, EventBus, Broker (???? ????????).
-    ?????? ??? — ? ????-?????. ????????? ??????? ? ????.
-    ?????????? ????? ??????? ???? (default_symbol, symbols) ??? ?????????????.
+    Детальная проверка health: DB, EventBus, Broker (с таймаутами).
+    Быстрый путь — в memory-only. Публикуем событие в шину.
+    Возвращаем также удобные поля (default_symbol, symbols) для интерфейса.
     """
     ok = True
     details: dict[str, Any] = {"ts_ms": now_ms()}
@@ -155,7 +155,6 @@ async def health() -> JSONResponse:
     try:
         c = _ctx_or_500()
     except HTTPException:
-        # ????????? ??? ?? ?????
         return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
 
     settings = getattr(c, "settings", None)
@@ -188,7 +187,7 @@ async def health() -> JSONResponse:
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
-    # Broker check (??????)
+    # Broker check (облегчённый)
     try:
         if broker and hasattr(broker, "get_balance"):
             await _call_with_timeout(broker.get_balance(), timeout=2.0)
@@ -199,7 +198,7 @@ async def health() -> JSONResponse:
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
-    # ????????? ??????? ? ????????? (??? ???????????/Telegram)
+    # публикация события в шину (для наблюдаемости/Telegram)
     if bus and hasattr(bus, "publish"):
         try:
             await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
@@ -212,8 +211,8 @@ async def health() -> JSONResponse:
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     """
-    Webhook ?? Alertmanager › ??????????? ? EventBus ?? EVT.ALERTS_ALERTMANAGER.
-    ?????? ??? ???????? Telegram-????????? ? ??????? ???????????.
+    Webhook от Alertmanager -> перенаправляем в EventBus на EVT.ALERTS_ALERTMANAGER.
+    Нужен для телеграм-алёртов и общего мониторинга.
     """
     try:
         c = _ctx_or_500()
@@ -302,8 +301,9 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
     """
-    ✅ ЕДИНЫЙ источник истинны — репозиторий трейдов.
-       Без запасных обходов (count_orders_last_minutes и т.п.).
+    ЕДИНЫЙ источник истины — репозиторий трейдов:
+    daily_pnl_quote / daily_turnover_quote / count_orders_today.
+    Без запасных обходов.
     """
     c = _ctx_or_500()
     try:
@@ -317,7 +317,6 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         orders_count_int = 0
 
         if hasattr(st, "trades"):
-            # PnL
             if hasattr(st.trades, "daily_pnl_quote"):
                 try:
                     pnl_quote_str = str(st.trades.daily_pnl_quote(sym))
@@ -326,7 +325,6 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
             else:
                 _log.warning("pnl_today_missing_method_daily_pnl_quote", extra={"symbol": sym})
 
-            # Оборот
             if hasattr(st.trades, "daily_turnover_quote"):
                 try:
                     turnover_quote_str = str(st.trades.daily_turnover_quote(sym))
@@ -335,7 +333,6 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
             else:
                 _log.warning("pnl_today_missing_method_daily_turnover_quote", extra={"symbol": sym})
 
-            # Кол-во сделок
             if hasattr(st.trades, "count_orders_today"):
                 try:
                     orders_count_int = int(st.trades.count_orders_today(sym))
@@ -345,12 +342,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
                 _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": sym})
 
         return JSONResponse(
-            {
-                "symbol": sym,
-                "pnl_quote": pnl_quote_str,
-                "turnover_quote": turnover_quote_str,
-                "orders_count": orders_count_int,
-            }
+            {"symbol": sym, "pnl_quote": pnl_quote_str, "turnover_quote": turnover_quote_str, "orders_count": orders_count_int}
         )
     except HTTPException:
         raise
@@ -360,35 +352,24 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
-    """Webhook endpoint ??? Telegram ???? (?????????? ??? ????????)"""
+    """Webhook endpoint Telegram-бота (можно использовать вместо polling)."""
     try:
-        # ???????? ??????
-        body = await request.body()
+        _ = await request.body()
         data = await request.json()
-
-        # ????????? ?????? ???? ?? ????
         c = _ctx_or_500()
         settings = getattr(c, "settings", None)
         secret = getattr(settings, "TELEGRAM_BOT_SECRET", "")
 
         if secret:
-            # ???????? ????????? X-Telegram-Bot-Api-Secret-Token
             provided_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if provided_token != secret:
                 _log.warning("telegram_webhook_invalid_secret")
                 return JSONResponse({"ok": False}, status_code=401)
 
-        # ???? ?????? ???????? - ??? ???????? ? polling ??????
         _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
-
-        # ? ??????? ????? ?????:
-        # tg_bot = getattr(c, "tg_bot", None)
-        # if tg_bot and hasattr(tg_bot, "process_webhook_update"):
-        #     await tg_bot.process_webhook_update(data)
-
+        # если нужно — передать в tg_bot.process_webhook_update(data)
         return JSONResponse({"ok": True})
-
-    except Exception as e:
+    except Exception:
         _log.error("telegram_webhook_error", exc_info=True)
         return JSONResponse({"ok": False}, status_code=500)
 

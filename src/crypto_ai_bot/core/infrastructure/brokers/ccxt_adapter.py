@@ -21,6 +21,8 @@ class ExchangeUnavailable(BrokerError): ...
 
 
 class _TokenBucket:
+    """Rate limiter using token bucket algorithm."""
+    
     def __init__(self, rate_per_sec: float, capacity: int) -> None:
         self._rate = float(rate_per_sec)
         self._cap = int(capacity)
@@ -43,6 +45,8 @@ class _TokenBucket:
 
 @dataclass
 class CcxtBroker:
+    """CCXT exchange adapter with circuit breaker and rate limiting."""
+    
     exchange: Any
     settings: Any
 
@@ -61,15 +65,18 @@ class CcxtBroker:
 
     @staticmethod
     def _to_gate(sym: str) -> str:
+        """Convert symbol format: BTC/USDT -> btc_usdt"""
         base, quote = sym.split("/")
         return f"{base.lower()}_{quote.lower()}"
 
     @staticmethod
     def _from_gate(g: str) -> str:
+        """Convert gate format: btc_usdt -> BTC/USDT"""
         base, quote = g.split("_")
         return f"{base.upper()}/{quote.upper()}"
 
     async def _ensure_markets(self) -> None:
+        """Load market info from exchange if not cached."""
         if self._markets:
             return
         await self._bucket.acquire()
@@ -86,12 +93,14 @@ class CcxtBroker:
                 self._gate_to_sym[g] = k
 
     def _market_desc(self, sym: str) -> dict[str, Any]:
+        """Get market description for symbol."""
         can = sym
         gate = self._sym_to_gate.get(can) or self._to_gate(can)
         return self._markets.get(gate) or self._markets.get(can) or {}
 
     @staticmethod
     def _quant(x: Decimal, step: Decimal | None) -> Decimal:
+        """Quantize value to step precision."""
         if not step or step <= 0:
             return x
         return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
@@ -99,6 +108,7 @@ class CcxtBroker:
     def _apply_precision(
         self, sym: str, *, amount: Decimal | None, price: Decimal | None
     ) -> tuple[Decimal | None, Decimal | None]:
+        """Apply exchange precision rules to amount and price."""
         md = self._market_desc(sym)
         p_amt = amount
         p_pr = price
@@ -124,6 +134,7 @@ class CcxtBroker:
 
     @staticmethod
     def _map_error(exc: Exception) -> BrokerError:
+        """Map exchange exceptions to broker errors."""
         msg = str(exc).lower()
         if "insufficient" in msg or "balance" in msg:
             return InsufficientFunds(msg)
@@ -138,6 +149,7 @@ class CcxtBroker:
         return BrokerError(msg)
 
     def _check_min_notional(self, sym: str, *, amount: Decimal, price: Decimal) -> None:
+        """Check if order meets minimum notional value requirements."""
         md = self._market_desc(sym)
         notional = amount * price
         limits = md.get("limits", {}) or {}
@@ -151,10 +163,12 @@ class CcxtBroker:
             raise ValidationError(f"minNotional:{notional}<{min_notional}")
 
     async def _with_cb(self, cb: CircuitBreaker, coro_fn: Callable[[], Awaitable[Any]]) -> Any:
+        """Execute coroutine with circuit breaker protection."""
         async with cb:
             return await coro_fn()
 
-    async def fetch_ticker(self, symbol: str) -> Any:
+    async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
+        """Fetch current ticker data for symbol."""
         await self._ensure_markets()
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         await self._bucket.acquire()
@@ -167,7 +181,8 @@ class CcxtBroker:
             inc("broker.request.error", fn="fetch_ticker")
             raise self._map_error(exc) from exc
 
-    async def fetch_balance(self, symbol: str) -> Any:
+    async def fetch_balance(self, symbol: str) -> dict[str, Decimal]:
+        """Fetch account balance for trading pair."""
         await self._ensure_markets()
         base, quote = symbol.split("/")
         await self._bucket.acquire()
@@ -186,7 +201,7 @@ class CcxtBroker:
             raise self._map_error(exc) from exc
 
     async def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
-        """ĞœĞ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ğ°Ñ Ñ€ĞµĞ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ğ´Ğ»Ñ ÑĞ²ĞµÑ€Ğ¾Ğº Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ²."""
+        """Fetch list of open orders for symbol."""
         await self._ensure_markets()
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         await self._bucket.acquire()
@@ -204,7 +219,10 @@ class CcxtBroker:
             inc("broker.request.error", fn="fetch_open_orders")
             raise self._map_error(exc) from exc
 
-    async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None) -> Any:
+    async def create_market_buy_quote(
+        self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None
+    ) -> dict[str, Any]:
+        """Create market buy order using quote currency amount."""
         await self._ensure_markets()
         t = await self.fetch_ticker(symbol)
         ask = dec(str(t.get("ask") or "0")) or dec(str(t.get("last") or "0"))
@@ -223,7 +241,10 @@ class CcxtBroker:
         await self._bucket.acquire()
         try:
             t0 = asyncio.get_event_loop().time()
-            order = await self._with_cb(self._cb_create, lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params))
+            order = await self._with_cb(
+                self._cb_create, 
+                lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params)
+            )
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})
             order = order if isinstance(order, dict) else dict(order)
             try:
@@ -235,7 +256,10 @@ class CcxtBroker:
             inc("broker.request.error", fn="create_buy")
             raise self._map_error(exc) from exc
 
-    async def create_market_sell_base(self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None) -> Any:
+    async def create_market_sell_base(
+        self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None
+    ) -> dict[str, Any]:
+        """Create market sell order using base currency amount."""
         await self._ensure_markets()
         t = await self.fetch_ticker(symbol)
         bid = dec(str(t.get("bid") or "0")) or dec(str(t.get("last") or "0"))
@@ -252,7 +276,10 @@ class CcxtBroker:
         await self._bucket.acquire()
         try:
             t0 = asyncio.get_event_loop().time()
-            order = await self._with_cb(self._cb_create, lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params))
+            order = await self._with_cb(
+                self._cb_create,
+                lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params)
+            )
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"})
             order = order if isinstance(order, dict) else dict(order)
             try:
@@ -264,7 +291,8 @@ class CcxtBroker:
             inc("broker.request.error", fn="create_sell")
             raise self._map_error(exc) from exc
 
-    async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any:
+    async def fetch_order(self, *, symbol: str, broker_order_id: str) -> dict[str, Any]:
+        """Fetch order details by broker order ID."""
         await self._ensure_markets()
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         await self._bucket.acquire()
@@ -280,8 +308,9 @@ class CcxtBroker:
 
 def _extract_fee_quote(order: dict[str, Any], *, symbol: str) -> str:
     """
-    Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ ÑÑƒĞ¼Ğ¼Ñƒ ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ğ¸ Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ (quote), ĞµÑĞ»Ğ¸ Ğ¾Ğ½Ğ° ÑĞ¾Ğ²Ğ¿Ğ°Ğ´Ğ°ĞµÑ‚ Ñ Ğ²Ğ°Ğ»ÑÑ‚Ğ¾Ğ¹ fee.
-    Ğ˜Ğ½Ğ°Ñ‡Ğµ Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ "0". Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ°Ñ best-effort Ğ»Ğ¾Ğ³Ğ¸ĞºĞ°.
+    Extract fee amount in quote currency if available.
+    Returns the fee amount in quote currency if it matches the fee currency,
+    otherwise returns "0". Safe best-effort logic.
     """
     try:
         fee = (order or {}).get("fee") or {}

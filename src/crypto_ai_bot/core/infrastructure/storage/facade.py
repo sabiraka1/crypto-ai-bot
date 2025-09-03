@@ -34,8 +34,8 @@ class Storage:
             orders=_OrdersRepository(conn),
         )
 
-    # ✅ честный health-ping для /health
-    async def ping(self) -> bool:  # тип синхронный conn, но FastAPI ждёт await → делаем лёгкий async-адаптер
+    # честный health-ping для /health
+    async def ping(self) -> bool:
         cur = self.conn.cursor()
         cur.execute("SELECT 1;")
         cur.fetchone()
