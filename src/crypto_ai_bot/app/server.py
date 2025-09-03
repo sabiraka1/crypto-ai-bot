@@ -15,6 +15,7 @@ from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
 from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.core.application import events_topics as EVT  # ✅ добавлено: нужен в /health и alertmanager/webhook
 
 _log = get_logger("app.server")
 _container: Any | None = None
@@ -84,10 +85,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         try:
             bus = getattr(_container, "bus", None)
-            if bus and hasattr(bus, "close"):
+            # ✅ безопасный shutdown шины: сначала stop(), если нет — close()
+            if bus and hasattr(bus, "stop"):
+                await bus.stop()
+            elif bus and hasattr(bus, "close"):
                 await bus.close()
         except Exception:
-            _log.error("bus_close_failed", exc_info=True)
+            _log.error("bus_shutdown_failed", exc_info=True)
 
         try:
             broker = getattr(_container, "broker", None)
@@ -297,6 +301,10 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
 
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
+    """
+    ✅ ЕДИНЫЙ источник истинны — репозиторий трейдов.
+       Без запасных обходов (count_orders_last_minutes и т.п.).
+    """
     c = _ctx_or_500()
     try:
         _, sym = _get_orchestrator(symbol)
@@ -304,43 +312,51 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         if not st:
             raise HTTPException(status_code=500, detail="storage_missing")
 
-        pnl_quote = None
-        if hasattr(st, "trades") and hasattr(st.trades, "pnl_today_quote"):
-            try:
-                pnl_quote = st.trades.pnl_today_quote(sym)
-            except Exception:
-                _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+        pnl_quote_str = "0"
+        turnover_quote_str = "0"
+        orders_count_int = 0
 
-        turnover_quote = None
-        if hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
-            try:
-                turnover_quote = st.trades.daily_turnover_quote(sym)
-            except Exception:
-                _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+        if hasattr(st, "trades"):
+            # PnL
+            if hasattr(st.trades, "daily_pnl_quote"):
+                try:
+                    pnl_quote_str = str(st.trades.daily_pnl_quote(sym))
+                except Exception:
+                    _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+            else:
+                _log.warning("pnl_today_missing_method_daily_pnl_quote", extra={"symbol": sym})
 
-        orders_count = None
-        if hasattr(st, "trades") and hasattr(st.trades, "count_orders_today"):
-            try:
-                orders_count = st.trades.count_orders_today(sym)
-            except Exception:
-                _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
-        if orders_count is None and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
-            try:
-                orders_count = st.trades.count_orders_last_minutes(sym, 1440)
-            except Exception:
-                _log.error("orders_1440m_count_failed", extra={"symbol": sym}, exc_info=True)
+            # Оборот
+            if hasattr(st.trades, "daily_turnover_quote"):
+                try:
+                    turnover_quote_str = str(st.trades.daily_turnover_quote(sym))
+                except Exception:
+                    _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
+            else:
+                _log.warning("pnl_today_missing_method_daily_turnover_quote", extra={"symbol": sym})
+
+            # Кол-во сделок
+            if hasattr(st.trades, "count_orders_today"):
+                try:
+                    orders_count_int = int(st.trades.count_orders_today(sym))
+                except Exception:
+                    _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
+            else:
+                _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": sym})
 
         return JSONResponse(
-            {"symbol": sym,
-             "pnl_quote": str(pnl_quote) if pnl_quote is not None else None,
-             "turnover_quote": str(turnover_quote) if turnover_quote is not None else None,
-             "orders_count": int(orders_count) if orders_count is not None else None}
+            {
+                "symbol": sym,
+                "pnl_quote": pnl_quote_str,
+                "turnover_quote": turnover_quote_str,
+                "orders_count": orders_count_int,
+            }
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         _log.error("pnl_today_failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="pnl_today_failed") from e
+        raise HTTPException(status_code=500, detail="pnl_today_failed")
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
