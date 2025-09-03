@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Optional
 
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
 from crypto_ai_bot.core.domain.strategies.position_sizing import (
@@ -16,6 +16,19 @@ from crypto_ai_bot.core.domain.strategies.position_sizing import (
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+
+# === AI skeleton imports (безопасные, есть фолбэк) ===
+try:
+    from crypto_ai_bot.core.domain.signals.feature_pipeline import Candle, last_features
+    from crypto_ai_bot.core.domain.signals.ai_scoring import AIScorer, AIScoringConfig
+    from crypto_ai_bot.core.domain.signals.fusion import pass_thresholds, FusionThresholds
+except Exception:  # если папки ещё не добавили — всё равно не ломаемся
+    Candle = None  # type: ignore
+    last_features = None  # type: ignore
+    AIScorer = None  # type: ignore
+    AIScoringConfig = None  # type: ignore
+    pass_thresholds = None  # type: ignore
+    FusionThresholds = None  # type: ignore
 
 _log = get_logger("usecase.eval_and_execute")
 
@@ -35,6 +48,26 @@ class MarketData:
 class StrategyContext:
     mode: str
     now_ms: int | None = None
+
+
+async def _fetch_ohlcv_as_candles(broker: Any, symbol: str, timeframe: str, limit: int) -> list[Candle]:
+    """Унифицированная загрузка OHLCV и преобразование в Candle (если модуль доступен).
+    При ошибке возвращает пустой список — логика не ломается.
+    """
+    out: list[Candle] = []
+    if Candle is None:
+        return out
+    try:
+        exch = getattr(broker, "exchange", None)
+        if exch and hasattr(exch, "fetch_ohlcv"):
+            ohlcv = await exch.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            for row in (ohlcv or []):
+                # CCXT формирует: [ts, open, high, low, close, volume]
+                out.append(Candle(t=int(row[0]), o=dec(str(row[1])), h=dec(str(row[2])),
+                                  l=dec(str(row[3])), c=dec(str(row[4])), v=dec(str(row[5]))))
+    except Exception:
+        _log.error("ohlcv_fetch_failed", extra={"symbol": symbol, "timeframe": timeframe}, exc_info=True)
+    return out
 
 
 async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> MarketData:
@@ -87,6 +120,50 @@ async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> Mark
     )
 
 
+def _heuristic_ind_score_from_features(feats: dict[str, float]) -> float:
+    """Простой и безопасный индикаторный скор без сторонних зависимостей.
+    Скейл 0..100. Используется только если включён AI-gating.
+    """
+    score = 50.0
+    ema20 = feats.get("ema20_15m", 0.0)
+    ema50 = feats.get("ema50_15m", 0.0)
+    macd = feats.get("macd_15m", 0.0)
+    macds = feats.get("macds_15m", 0.0)
+    rsi = feats.get("rsi14_15m", 50.0)
+    bb_u = feats.get("bb_u_15m", 0.0)
+    bb_m = feats.get("bb_m_15m", 0.0)
+    bb_l = feats.get("bb_l_15m", 0.0)
+
+    # Тренд: EMA20 > EMA50
+    if ema20 > ema50:
+        score += 10
+    else:
+        score -= 5
+
+    # MACD > Signal
+    if macd > macds:
+        score += 10
+    else:
+        score -= 5
+
+    # RSI зона
+    if 55 <= rsi <= 70:
+        score += 10
+    elif rsi > 70:
+        score += 5
+    elif rsi < 45:
+        score -= 10
+
+    # Положение относительно средины Боллинджера
+    if bb_u and bb_m and bb_l:
+        if bb_m > 0:
+            # близко к верхней половине канала — лёгкий плюс
+            score += 5 if (ema20 > bb_m) else 0
+
+    # Нормировка
+    return max(0.0, min(100.0, score))
+
+
 class StrategyManager:
     def __init__(self, settings: Any, regime_provider: Any = None) -> None:
         self.settings = settings
@@ -121,6 +198,45 @@ async def eval_and_execute(
         ctx = StrategyContext(mode=str(getattr(settings, "MODE", "paper") or "paper"), now_ms=None)
         manager = StrategyManager(settings=settings, regime_provider=lambda: regime)
         decision, explain = await manager.decide(ctx=ctx, md=md)
+
+        # === AI-gating (строго опционально) ===
+        ai_gating = bool(int(getattr(settings, "AI_GATING_ENABLED", 0) or 0))
+        if ai_gating and decision in ("buy", "sell") and AIScorer and last_features and Candle:
+            # Подготовим OHLCV для мульти-TF
+            limit = int(getattr(settings, "STRAT_OHLCV_LIMIT", 200) or 200)
+            # Базовый TF: 15m (если у тебя другой — подставится как есть)
+            tf_15m = str(getattr(settings, "STRAT_TIMEFRAME", "15m") or "15m")
+            o15 = await _fetch_ohlcv_as_candles(broker, symbol, tf_15m, limit)
+            o1h = await _fetch_ohlcv_as_candles(broker, symbol, "1h", 200)
+            o4h = await _fetch_ohlcv_as_candles(broker, symbol, "4h", 200)
+            o1d = await _fetch_ohlcv_as_candles(broker, symbol, "1d", 200)
+            o1w = await _fetch_ohlcv_as_candles(broker, symbol, "1w", 200)
+
+            feats = last_features(o15, o1h, o4h, o1d, o1w)
+            ind_score = _heuristic_ind_score_from_features(feats)
+
+            # Настройка AI: можно переопределить путями в settings при желании
+            cfg = AIScoringConfig(
+                model_path=str(getattr(settings, "AI_MODEL_PATH", "models/ai/model.onnx") or "models/ai/model.onnx"),
+                meta_path=str(getattr(settings, "AI_META_PATH", "models/ai/meta.json") or "models/ai/meta.json"),
+                required=bool(int(getattr(settings, "AI_REQUIRED", 0) or 0)),
+            )
+            scorer = AIScorer(cfg)
+            ai_score: Optional[float] = None
+            try:
+                ai_score = scorer.score(o15, o1h, o4h, o1d, o1w)
+            except Exception:
+                _log.error("ai_score_failed", extra={"symbol": symbol}, exc_info=True)
+
+            ok, dbg = pass_thresholds(
+                ind_score=ind_score,
+                ai_score=ai_score,
+                regime=("bull" if regime == "bull" else "bear" if regime == "bear" else "neutral"),
+            )
+
+            if not ok:
+                inc("strategy_hold_total", symbol=symbol, reason=f"ai_gating:{dbg.get('reason','')}")
+                return {"ok": True, "action": "hold", "reason": f"ai_gating:{dbg}", "regime": regime}
 
         if decision not in ("buy", "sell"):
             inc("strategy_hold_total", symbol=symbol, reason=explain or "")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Optional
@@ -10,89 +11,192 @@ from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("protective_exits")
 
+# ----------------------------- Конфиг по умолчанию -----------------------------
 
 @dataclass(frozen=True)
-class ExitConfig:
-    stop_pct: Decimal = dec("0")
-    take_pct: Decimal = dec("0")
-    trailing_pct: Decimal = dec("0")
-    min_base: Decimal = dec("0")
+class AtrExitConfig:
+    atr_period: int = 14          # период ATR
+    tp1_atr: Decimal = dec("1.0") # TP1 = entry + 1.0 * ATR
+    tp2_atr: Decimal = dec("2.0") # TP2 = entry + 2.0 * ATR
+    sl_atr:  Decimal = dec("1.5") # SL  = entry - 1.5 * ATR
+    tp1_close_pct: int = 50       # процент позиции, закрываемый на TP1
+    enable_breakeven: bool = True # перенос SL в б/у после TP1
+    min_base_to_exit: Decimal = dec("0")  # не закрывать крошечные объёмы
+    tick_interval_sec: float = 2.0        # период фоновой проверки
+    ohlcv_limit: int = 200                # свечи на загрузку
+    timeframe: str = "15m"                # рабочий TF
 
+def _safe_dec(settings: Any, name: str, default: str) -> Decimal:
+    val = getattr(settings, name, None)
+    if val is None:
+        return dec(default)
+    try:
+        s = str(val).strip()
+        if not s or s.lower() in ("none", "null"):
+            return dec(default)
+        float(s)
+        return dec(s)
+    except Exception:
+        return dec(default)
+
+def _cfg_from_settings(s: Any) -> AtrExitConfig:
+    return AtrExitConfig(
+        atr_period=int(getattr(s, "EXITS_ATR_PERIOD", 14) or 14),
+        tp1_atr=_safe_dec(s, "EXITS_TP1_ATR", "1.0"),
+        tp2_atr=_safe_dec(s, "EXITS_TP2_ATR", "2.0"),
+        sl_atr=_safe_dec(s,  "EXITS_SL_ATR",  "1.5"),
+        tp1_close_pct=int(getattr(s, "EXITS_TP1_CLOSE_PCT", 50) or 50),
+        enable_breakeven=bool(int(getattr(s, "EXITS_ENABLE_BREAKEVEN", 1) or 1)),
+        min_base_to_exit=_safe_dec(s, "EXITS_MIN_BASE", "0"),
+        tick_interval_sec=float(getattr(s, "EXITS_TICK_INTERVAL_SEC", 2.0) or 2.0),
+        ohlcv_limit=int(getattr(s, "STRAT_OHLCV_LIMIT", 200) or 200),
+        timeframe=str(getattr(s, "STRAT_TIMEFRAME", "15m") or "15m"),
+    )
+
+# ------------------------------- ATR утилиты -----------------------------------
+
+def _true_ranges(ohlcv: list[list[Decimal]]) -> list[Decimal]:
+    # ohlcv: [ts, open, high, low, close, volume]
+    if not ohlcv or len(ohlcv) < 2:
+        return []
+    trs: list[Decimal] = []
+    prev_close = dec(str(ohlcv[0][4]))
+    for row in ohlcv[1:]:
+        high = dec(str(row[2])); low = dec(str(row[3])); close = dec(str(row[4]))
+        tr = max(high - low, abs(high - prev_close), abs(prev_close - low))
+        trs.append(tr)
+        prev_close = close
+    return trs
+
+def _ema_last(values: list[Decimal], period: int) -> Optional[Decimal]:
+    if period <= 0 or len(values) < period:
+        return None
+    k = dec("2") / dec(str(period + 1))
+    ema = values[0]
+    for x in values[1:]:
+        ema = x * k + ema * (dec("1") - k)
+    return ema
+
+async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int) -> Optional[Decimal]:
+    try:
+        ohlcv_raw = await broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if not ohlcv_raw:
+            return None
+        # Преобразование в Decimal
+        ohlcv: list[list[Decimal]] = []
+        for r in ohlcv_raw:
+            ohlcv.append([dec(str(r[0])), dec(str(r[1])), dec(str(r[2])), dec(str(r[3])), dec(str(r[4])), dec(str(r[5]))])
+        trs = _true_ranges(ohlcv)
+        if len(trs) < period:
+            return None
+        return _ema_last(trs, period)
+    except Exception:
+        _log.error("atr_fetch_failed", extra={"symbol": symbol, "tf": timeframe}, exc_info=True)
+        return None
+
+# ------------------------------- Основной класс --------------------------------
 
 class ProtectiveExits:
     """
-    SL/TP/Trailing только close-only для LONG.
-    Шорты не открываются: продаём не больше текущей позиции.
+    ATR-выходы для LONG-позиции:
+      - TP1 = +tp1_atr*ATR (закрыть tp1_close_pct, перенос SL в б/у)
+      - TP2 = +tp2_atr*ATR (закрыть остаток)
+      - SL  = -sl_atr*ATR
+    Фоновая петля на символ запускается после BUY через on_hint().
     """
     def __init__(self, *, broker: Any, storage: Any, bus: Any, settings: Any) -> None:
         self._broker = broker
         self._storage = storage
         self._bus = bus
         self._settings = settings
-        
-        # Безопасное получение параметров с обработкой None и пустых строк
-        def safe_dec(name: str, default: str = "0") -> Decimal:
-            val = getattr(settings, name, None)
-            if val is None:
-                return dec(default)
-            try:
-                str_val = str(val).strip()
-                # Проверяем на пустую строку или None
-                if not str_val or str_val.lower() in ("none", "null", ""):
-                    return dec(default)
-                # Проверяем что это валидное число
-                float(str_val)  # проверка на валидность
-                return dec(str_val)
-            except (ValueError, TypeError, AttributeError):
-                return dec(default)
-        
-        # Поддержка разных имен параметров для совместимости
-        stop_pct = safe_dec("EXITS_STOP_PCT", "0")
-        if stop_pct == dec("0"):
-            stop_pct = safe_dec("EXITS_HARD_STOP_PCT", "0")
-        
-        take_pct = safe_dec("EXITS_TAKE_PCT", "0")
-        if take_pct == dec("0"):
-            take_pct = safe_dec("EXITS_TAKE_PROFIT_PCT", "0")
-        
-        trailing_pct = safe_dec("EXITS_TRAIL_PCT", "0")
-        if trailing_pct == dec("0"):
-            trailing_pct = safe_dec("EXITS_TRAILING_PCT", "0")
-        
-        min_base = safe_dec("EXITS_MIN_BASE", "0")
-        if min_base == dec("0"):
-            min_base = safe_dec("EXITS_MIN_BASE_TO_EXIT", "0")
-        
-        self._cfg = ExitConfig(
-            stop_pct=stop_pct,
-            take_pct=take_pct,
-            trailing_pct=trailing_pct,
-            min_base=min_base,
-        )
+        self._cfg = _cfg_from_settings(settings)
 
+        # состояние по символам
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._tp1_done: dict[str, bool] = {}     # TP1 пройден
+        self._breakeven_px: dict[str, Decimal] = {}  # цена б/у после TP1
+
+    # API совместимости (оркестратор не трогаем)
     async def start(self) -> None:
-        """Start protective exits monitoring."""
         pass
 
     async def stop(self) -> None:
-        """Stop protective exits monitoring."""
-        pass
+        for sym, t in list(self._tasks.items()):
+            t.cancel()
+            self._tasks.pop(sym, None)
 
+    # ---- события/подсказки от шины (compose уже подписывает trade.completed) ----
+    async def on_hint(self, evt: Dict[str, Any]) -> None:
+        """
+        Получаем trade.completed; если это BUY — стартуем фоновый монитор,
+        если SELL и позиции больше нет — стопим монитор.
+        """
+        sym = str(evt.get("symbol", "") or "")
+        if not sym:
+            return
+        side = str(evt.get("side", evt.get("action", "") or "")).lower()
+
+        if side == "buy":
+            # сброс состояния и старт фонового мониторинга
+            self._tp1_done[sym] = False
+            self._breakeven_px.pop(sym, None)
+            await self._ensure_task(sym)
+        elif side == "sell":
+            # если позиции нет — останавливаем
+            pos = self._storage.positions.get_position(sym) if hasattr(self._storage, "positions") else None
+            if not pos or (getattr(pos, "base_qty", dec("0")) or dec("0")) <= 0:
+                self._cancel_task(sym)
+
+    # ---- публичные интерфейсы (сохраняем сигнатуры) ----
     async def evaluate(self, *, symbol: str) -> Optional[Dict[str, Any]]:
-        """Evaluate if position should be closed."""
-        # Нет порогов — ничего не делаем
-        if self._cfg.stop_pct <= 0 and self._cfg.take_pct <= 0 and self._cfg.trailing_pct <= 0:
-            return None
+        """Одноразовая оценка (можно вызывать вручную)."""
+        return await self._evaluate_once(symbol)
 
-        pos = self._storage.positions.get_position(symbol)
+    async def tick(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Совместимость: делегируем на evaluate()."""
+        return await self.evaluate(symbol=symbol)
+
+    # ------------------------------ внутренняя логика ---------------------------
+
+    def _cancel_task(self, symbol: str) -> None:
+        t = self._tasks.pop(symbol, None)
+        if t:
+            t.cancel()
+
+    async def _ensure_task(self, symbol: str) -> None:
+        if symbol in self._tasks and not self._tasks[symbol].done():
+            return
+        self._tasks[symbol] = asyncio.create_task(self._loop(symbol))
+        _log.info("exits_loop_started", extra={"symbol": symbol})
+
+    async def _loop(self, symbol: str) -> None:
+        try:
+            while True:
+                try:
+                    res = await self._evaluate_once(symbol)
+                    if res and res.get("closed_all"):
+                        _log.info("exits_loop_stop_all_closed", extra={"symbol": symbol})
+                        break
+                except Exception:
+                    _log.error("exits_loop_iteration_failed", extra={"symbol": symbol}, exc_info=True)
+                await asyncio.sleep(self._cfg.tick_interval_sec)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._tasks.pop(symbol, None)
+
+    async def _evaluate_once(self, symbol: str) -> Optional[Dict[str, Any]]:
+        # позиция
+        pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
         if not pos:
             return None
 
         base = getattr(pos, "base_qty", dec("0")) or dec("0")
-        avg = getattr(pos, "avg_entry_price", dec("0")) or dec("0")
-        if base <= 0 or avg <= 0:
+        entry = getattr(pos, "avg_entry_price", dec("0")) or dec("0")
+        if base <= 0 or entry <= 0:
             return None
 
+        # тикер
         try:
             t = await self._broker.fetch_ticker(symbol)
             last = dec(str(t.get("last") or t.get("bid") or t.get("ask") or "0"))
@@ -102,68 +206,82 @@ class ProtectiveExits:
         if last <= 0:
             return None
 
-        stop_price: Optional[Decimal] = None
-        take_price: Optional[Decimal] = None
-        
-        if self._cfg.stop_pct > 0:
-            stop_price = avg * (dec("1") - (self._cfg.stop_pct / dec("100")))
-        if self._cfg.take_pct > 0:
-            take_price = avg * (dec("1") + (self._cfg.take_pct / dec("100")))
-
-        # Trailing
-        trail_trigger: Optional[Decimal] = None
-        if self._cfg.trailing_pct > 0:
-            try:
-                max_seen = getattr(pos, "max_price", None)
-                if max_seen is None or last > max_seen:
-                    max_seen = last
-                    if hasattr(self._storage.positions, "update_max_price"):
-                        self._storage.positions.update_max_price(symbol, max_seen)
-                trail_trigger = max_seen * (dec("1") - (self._cfg.trailing_pct / dec("100")))
-            except Exception:
-                trail_trigger = last * (dec("1") - (self._cfg.trailing_pct / dec("100")))
-
-        should_close = False
-        reason = ""
-
-        if stop_price and last <= stop_price:
-            should_close = True
-            reason = f"stop_loss@{self._cfg.stop_pct}%"
-        elif take_price and last >= take_price:
-            should_close = True
-            reason = f"take_profit@{self._cfg.take_pct}%"
-        elif trail_trigger and last <= trail_trigger:
-            should_close = True
-            reason = f"trailing_stop@{self._cfg.trailing_pct}%"
-
-        if not should_close:
-            inc("protective_exits_tick_total", symbol=symbol)
+        # ATR
+        atr = await _atr(self._broker, symbol, self._cfg.timeframe, self._cfg.ohlcv_limit, self._cfg.atr_period)
+        if atr is None or atr <= 0:
+            inc("protective_exits_tick_total", symbol=symbol, reason="no_atr")
             return None
 
-        qty: Decimal = base
-            
-        if self._cfg.min_base > 0 and qty < self._cfg.min_base:
+        # уровни
+        tp1_px = entry + self._cfg.tp1_atr * atr
+        tp2_px = entry + self._cfg.tp2_atr * atr
+        sl_px  = entry - self._cfg.sl_atr  * atr
+
+        # breakeven после TP1
+        if self._tp1_done.get(symbol, False) and self._cfg.enable_breakeven and symbol not in self._breakeven_px:
+            self._breakeven_px[symbol] = entry
+
+        # решения
+        if last <= sl_px:
+            return await self._sell_all(symbol, base, reason=f"SL_ATR({self._cfg.sl_atr}×ATR)")
+
+        if not self._tp1_done.get(symbol, False) and last >= tp1_px:
+            # продать часть
+            part_pct = max(1, min(100, int(self._cfg.tp1_close_pct)))
+            qty = (base * dec(str(part_pct))) / dec("100")
+            if self._cfg.min_base_to_exit > 0 and qty < self._cfg.min_base_to_exit:
+                return None
+            ok = await self._sell_qty(symbol, qty, reason=f"TP1_{part_pct}%@{self._cfg.tp1_atr}×ATR")
+            if ok:
+                self._tp1_done[symbol] = True
+                if self._cfg.enable_breakeven:
+                    self._breakeven_px[symbol] = entry
+                # обновим позицию
+                pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
+                base = getattr(pos, "base_qty", dec("0")) or dec("0")
+                if base <= 0:
+                    self._cancel_task(symbol)
+                    return {"closed_all": True, "side": "sell", "qty": "0", "reason": "tp1_all"}
+                return {"closed_part": True, "side": "sell", "qty": str(qty), "reason": "tp1"}
             return None
-            
+
+        # breakeven логика
+        if self._tp1_done.get(symbol, False) and self._cfg.enable_breakeven:
+            be = self._breakeven_px.get(symbol, None)
+            if be and last <= be:
+                return await self._sell_all(symbol, base, reason="BREAKEVEN")
+
+        if last >= tp2_px:
+            return await self._sell_all(symbol, base, reason=f"TP2@{self._cfg.tp2_atr}×ATR")
+
+        inc("protective_exits_tick_total", symbol=symbol)
+        return None
+
+    async def _sell_all(self, symbol: str, base: Decimal, reason: str) -> Dict[str, Any] | None:
+        if self._cfg.min_base_to_exit > 0 and base < self._cfg.min_base_to_exit:
+            return None
         try:
-            await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
-            await self._bus.publish("trade.completed", {"symbol": symbol, "action": "sell", "reason": reason, "amount": str(qty)})
-            _log.info("protective_exit_sell", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
-            return {"closed": True, "qty": str(qty), "reason": reason}
+            await self._broker.create_market_sell_base(symbol=symbol, base_amount=base)
+            await self._bus.publish("trade.completed", {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)})
+            _log.info("protective_exit_sell_all", extra={"symbol": symbol, "qty": str(base), "reason": reason})
+            self._cancel_task(symbol)
+            return {"closed_all": True, "side": "sell", "qty": str(base), "reason": reason}
         except Exception as e:
-            await self._bus.publish("trade.failed", {"symbol": symbol, "action": "sell", "reason": str(e)})
+            await self._bus.publish("trade.failed", {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return None
 
-    async def tick(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Process tick for protective exits."""
-        return await self.evaluate(symbol=symbol)
-
-    async def on_hint(self, evt: Dict[str, Any]) -> None:
-        """Handle hint events."""
-        pass
+    async def _sell_qty(self, symbol: str, qty: Decimal, reason: str) -> bool:
+        try:
+            await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
+            await self._bus.publish("trade.completed", {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)})
+            _log.info("protective_exit_sell_qty", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
+            return True
+        except Exception as e:
+            await self._bus.publish("trade.failed", {"symbol": symbol, "side": "sell", "reason": str(e)})
+            _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
+            return False
 
 
 def make_protective_exits(*, broker: Any, storage: Any, bus: Any, settings: Any) -> ProtectiveExits:
-    """Factory function for creating ProtectiveExits instance."""
     return ProtectiveExits(broker=broker, storage=storage, bus=bus, settings=settings)

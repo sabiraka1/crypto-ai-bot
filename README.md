@@ -1,357 +1,220 @@
-# crypto-ai-bot
+ФИНАЛЬНЫЙ README.md (идеальная целевая версия)
 
-Автотрейдинг криптовалют (Gate.io через CCXT) с единой логикой для **paper** и **live**:
-`strategies → regime filter → risk/limits → execute_trade → protective_exits → reconcile → watchdog`.
+Включает: строгие границы слоёв и инварианты, контроль зависимостей, безопасность по умолчанию, многоуровневую Telegram-интеграцию, фиксированную архитектуру сигналов и веса/пороговые правила, бизнес-конвейер, PnL(FIFO)/fee, наблюдаемость, API, конфигурацию и структуру с краткими функциями файлов (основных). Факты и настройки берутся из текущих документов и структуры. 
+ 
+ 
 
-- **Чистая архитектура**: разделение `app / core (application → domain → infrastructure) / utils`.
-- **Безопасность по умолчанию**: идемпотентность, ограничители рисков, защитные выходы, DMS/InstanceLock.
-- **Наблюдаемость**: Prometheus-метрики, структурные логи, Telegram-алерты.
-- **Восстановление**: пересбор позиций и фиксация частичных исполнений через reconciliation/settlement.
+Crypto-AI-Bot (Gate.io via CCXT) — Clean Architecture, paper & live
 
----
+Бизнес-конвейер (единый для paper/live):
+evaluate → risk → execute_trade → protective_exits → reconcile (+settlement) → watchdog. 
 
-## 📦 Установка и запуск
+Ключевые гарантии
 
-### 1) Подготовка окружения
-```bash
-python -m venv .venv
-# Windows (PowerShell)
-.\.venv\Scripts\Activate.ps1
-# Linux/macOS
-source .venv/bin/activate
+Чистая архитектура: строгое разделение app / core(application→domain→infrastructure) / utils, с контрактами import-linter. 
 
-pip install -U pip wheel
-pip install -e .
-2) Конфигурация
-Скопируйте .env.example → .env и задайте переменные (режим, символы, лимиты, ключи для live).
-Секреты поддерживаются как *_FILE, *_B64 или единым SECRETS_FILE (JSON).
+PnL FIFO + fee_quote: /pnl/today считает реализованный PnL по FIFO, учитывая частичные исполнения и комиссии. 
 
-3) Запуск API (локально)
-bash
-Копировать код
-uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000
-4) CLI (сервисные команды)
-bash
-Копировать код
-# Быстрая проверка сборки/запуска
-cab-smoke
+Risk by default: LossStreak, MaxDrawdown, дневные бюджеты, капы на 5м/час/день, cooldown, spread-cap, daily loss. Всё проходит через один «воротный» RiskManager. 
 
-# Обслуживание БД
-cab-maintenance backup
-cab-maintenance rotate --days 30
-cab-maintenance vacuum
-cab-maintenance integrity
-cab-maintenance list
+Idempotency: уникальные client_order_id + ключи в БД, окно IDEMPOTENCY_BUCKET_MS, TTL. 
 
-# Сверки
-cab-reconcile
+Наблюдаемость: /metrics, /health, /ready, алерты в Telegram, webhook Alertmanager. (Prometheus/Alertmanager/Grafana — на Railway, конфиги вне репо). 
 
-# Мониторинг health (когда API запущен)
-cab-health --oneshot --url http://127.0.0.1:8000/health
+Архитектура слоёв и жёсткие границы
 
-# Отчёт по сделкам/PNL/частоте за сегодня (FIFO)
-cab-perf
-🔌 HTTP-эндпойнты
-GET /health — мгновенное состояние (сердцебиение сервисов, шины, БД).
+Слои:
 
-GET /ready — готовность (200/503), если включена.
+app/ — HTTP/CLI/Telegram, DI-композиция зависимостей, подписчики (без бизнес-логики).
+
+core/application/ — оркестрация сценариев (orchestrator, use-cases, reconciliation, monitoring, regime gating), работает через порты.
+
+core/domain/ — чистая бизнес-модель: стратегии, сигналы, риск-правила, макро-типажи; без IO и внешних SDK.
+
+core/infrastructure/ — адаптеры: брокеры (Paper/CCXT), storage (SQLite+миграции, репозитории), events (InMem/Redis), market_data, safety (DMS/locks), settings/schema.
+
+utils/ — Decimal/metrics/retry/trace/pnl/symbols/…
+
+Инварианты импортов (контроль линтером):
+
+domain ↛ infrastructure|app запрещено.
+
+application ↛ infrastructure|app запрещено (только через ports.py).
+
+app может зависеть от application и инстанциировать адаптеры infrastructure.
+
+Все интеграции — только внедрением через compose.py.
+(Контракты import-linter + требования к PR — см. ниже) 
+
+Инварианты (выполняются всегда)
+
+Деньги/объёмы = Decimal. Все преобразования — в utils/decimal.py. 
+
+Idempotency для критичных операций (заказ, settle, reconcile). 
+
+Signals/Strategies возвращают чистые DTO: тип, score, confidence, без побочных эффектов. 
+
+Risk-rules — отдельные объекты в core/domain/risk/rules/*, агрегирует RiskManager. 
+
+IO-вызовы обёрнуты таймаутами/ретраями/метриками; логирование структурированное. 
+
+Ни одного прямого CCXT-вызова вне инфраструктурного адаптера. 
+
+Одна реализация логики (никаких дубликатов путей исполнения). PR не мержим, если дублирует. 
+
+Безопасность по умолчанию
+
+Live-режим только с DeadMansSwitch и InstanceLock. 
+
+Жёсткие дефолты Risk включены (loss streak, max DD, budgets, cooldown, spread cap). 
+
+Идемпотентность (БД+индексы), уникальные client_order_id. 
+
+Telegram-алерты по ERROR (вкл. LOG_TG_ERRORS=1). 
+
+Секреты — только через ENV, без хранения в репозитории.
+
+Многоуровневая Telegram-интеграция
+
+Операторский бот (app/adapters/telegram_bot.py) — команды статуса/паузы/рестарта, запросы PnL/перф.
+
+Алерты трейдинга (app/subscribers/telegram_alerts.py) — trade.completed/failed/settled/blocked, budget.exceeded, safety.dms.*, reconcile.*, dlq.*. Топики объявлены на уровне application. 
+
+Алерты SRE — webhook /alertmanager/webhook из Railway Prometheus → выделенный чат. ENV раздельные: TELEGRAM_CHAT_ID (операционный), TELEGRAM_ALERTS_CHAT_ID (SRE). 
+
+Архитектура сигналов (фиксированная)
+Multi-Timeframe (MTF)
+
+15m (вес 0.40) — основной вход,
+
+1h (0.25) — подтверждение тренда,
+
+4h (0.20) — среднесрочный тренд,
+
+1d (0.10) — дневной bias,
+
+1w (0.05) — долгосрочный контекст.
+Веса — дефолт в settings_schema.py, меняются только через код-ревью, не ENV. 
+
+Fusion
+
+Технический скор (RSI/MACD/EMA/BB/ATR, свечные паттерны) — 65%,
+
+ИИ-скор (ONNX/логистическая) — 35%,
+
+Макро-множитель: 0.90…1.10 на пороги/долю позиции. 
+ 
+
+Пороговые профили после macro:
+
+bull: ind ≥ 60 и ai ≥ 65,
+
+neutral: ind ≥ 65 и ai ≥ 65,
+
+bear: ind ≥ 70 и ai ≥ 70;
+если ai_score=None — требуем ind ≥ (порог + 5), и зона воздержания AI 45..55. 
+
+Risk Management (одни ворота)
+
+RiskManager.check() агрегирует: LossStreak, MaxDrawdown, дневной убыток/бюджет, частотные капы (5m/час/день), cooldown, spread-cap, антикорреляцию крипто-мажоров. Нарушение → trade.blocked. 
+ 
+
+Execute Trade (единственный путь)
+
+Идемпотентный client_order_id (например, sha1(symbol|side|slot)), выравнивание под precision/step, проверки minQty/minNotional, учёт max_slippage. Никаких альтернативных «place_order» путей. 
+
+Protective Exits
+
+ATR-модель: TP1=+1×ATR (50% + перенос SL в б/у), TP2=+2×ATR (остаток), SL=−1.5×ATR; либо фиксированные TP/SL/Trailing по настройкам. 
+
+Reconcile & Settlement
+
+Сверка позиций/балансов/ордеров, доведение частичных исполнений до финала (trade.settled/failed_settlement). Есть таблица orders и миграции V0012__orders_table.sql. 
+
+PnL FIFO и комиссии
+
+FIFO в utils/pnl.py, /pnl/today считает реализованный PnL за «сегодня», оборот и количество сделок, учитывая fee_quote и частичные исполнения. 
+
+События и шина
+
+In-Memory по умолчанию; для надёжности — EVENT_BUS_URL=redis://.... Темы: trade.completed/failed/settled/blocked, budget.exceeded, orchestrator.auto_*, safety.dms.*, reconcile.*, dlq.* — определены в core/application/events_topics.py. 
+
+Конфигурация (ENV, проверяется schema)
+
+Примеры:
+
+Режимы/интеграции: MODE=paper|live, EXCHANGE=gateio, API_KEY/SECRET, EVENT_BUS_URL, TELEGRAM_*. 
+
+Символы/интервалы: SYMBOLS=BTC/USDT,ETH/USDT, EVAL_INTERVAL_SEC, EXITS_INTERVAL_SEC, RECONCILE_INTERVAL_SEC.
+
+Стратегии: STRATEGY_SET, STRATEGY_MODE=first|vote|weighted, POSITION_SIZER=.... 
+
+Риски: RISK_MAX_SPREAD_PCT, RISK_MAX_DRAWDOWN_PCT, RISK_LOSS_STREAK_LIMIT, RISK_DAILY_LOSS_LIMIT_QUOTE, RISK_MAX_ORDERS_PER_HOUR, IDEMPOTENCY_BUCKET_MS. 
+
+Прежние SAFETY_* поддерживаются как алиасы (обратная совместимость). 
+
+REST-API
+
+GET /health — проверка DB/Bus/Broker + публикация health.report.
+
+GET /ready — готовность.
 
 GET /metrics — Prometheus.
 
-GET /orchestrator/status?symbol=BTC/USDT — состояние оркестратора.
-
-POST /orchestrator/(start|stop|pause|resume)?symbol=... — управление (через Bearer API_TOKEN).
-
-GET /pnl/today?symbol=... — PnL за сегодня (FIFO) и статистика.
-
-🤖 Telegram-бот (операторский пульт)
-Примеры полезных команд:
-
-/status — состояние оркестратора (running/paused, циклы, интервалы).
-
-/today — сделки/turnover/PnL за сегодня.
-
-/pnl — PnL (FIFO) и короткая статистика.
-
-/position — позиция по символу.
-
-/balance — балансы base/quote.
-
-/limits — активные лимиты риска.
-
-/pause / /resume / /stop — управление.
-
-/health — сводка зависимостей (биржа, БД, шина, сеть).
-
-Если TELEGRAM_* не заданы — все telegram-интеграции работают в no-op (безопасно).
-
-🧱 Архитектура и правила
-Слои:
-
-app/ — HTTP API (FastAPI), DI/compose, адаптер Telegram.
-
-core/application/ — оркестратор, use-cases, protective exits, reconciliation, monitoring.
-
-core/domain/ — чистая бизнес-логика: risk-политики, стратегии, сигналы, макро-режимы.
-
-core/infrastructure/ — брокеры (CCXT/Paper), шина (Redis/in-memory), storage/migrations, safety (DMS/lock), settings.
-
-utils/ — базовые утилиты: Decimal, время, логи, метрики, retry, breaker, http, pnl, trace (CID).
-
-Инварианты:
-
-Переменные окружения читаются только в core/infrastructure/settings.py.
-
-Денежные величины — через utils.decimal.dec(...) (Decimal).
-
-В async-коде нет time.sleep (только asyncio.sleep).
-
-domain не импортирует application/infrastructure.
-
-Слои контролируются import-linter; нарушение — ошибка CI.
-
-🗂️ Полная файловая структура (эталон)
-csharp
-Копировать код
-crypto-ai-bot/
-├─ README.md
-├─ pyproject.toml
-├─ requirements.txt  requirements-dev.txt
-├─ Makefile  Procfile  .gitignore  pytest.ini  importlinter.ini
-├─ ops/
-│  └─ prometheus/
-│     ├─ prometheus.yml  alertmanager.yml  alerts.yml  docker-compose.yml
-├─ scripts/
-│  ├─ backup_db.py  rotate_backups.py  integrity_check.py
-│  ├─ run_server.sh  run_server.ps1
-└─ src/crypto_ai_bot/
-   ├─ app/
-   │  ├─ server.py
-   │  ├─ compose.py
-   │  └─ adapters/
-   │     └─ telegram.py
-   ├─ cli/
-   │  ├─ smoke.py
-   │  ├─ maintenance.py
-   │  ├─ reconcile.py
-   │  └─ performance.py
-   ├─ core/
-   │  ├─ application/
-   │  │  ├─ orchestrator.py
-   │  │  ├─ protective_exits.py
-   │  │  ├─ use_cases/
-   │  │  │  ├─ eval_and_execute.py
-   │  │  │  ├─ execute_trade.py
-   │  │  │  ├─ place_order.py
-   │  │  │  └─ partial_fills.py
-   │  │  ├─ reconciliation/
-   │  │  │  ├─ orders.py  positions.py  balances.py
-   │  │  └─ monitoring/
-   │  │     ├─ health_checker.py  dlq_subscriber.py
-   │  ├─ domain/
-   │  │  ├─ risk/
-   │  │  │  └─ manager.py
-   │  │  ├─ strategies/
-   │  │  │  ├─ __init__.py  base.py  manager.py
-   │  │  │  ├─ ema_cross.py  rsi_momentum.py  bollinger_bands.py  ema_atr.py
-   │  │  │  ├─ position_sizing.py
-   │  │  │  └─ exit_policies.py
-   │  │  ├─ signals/
-   │  │  │  ├─ _build.py  _fusion.py  policy.py
-   │  │  └─ macro/
-   │  │     └─ types.py
-   │  └─ infrastructure/
-   │     ├─ settings.py
-   │     ├─ events/
-   │     │  ├─ topics.py  bus.py  redis_bus.py
-   │     ├─ brokers/
-   │     │  ├─ base.py  ccxt_adapter.py  paper.py  symbols.py
-   │     ├─ safety/
-   │     │  ├─ dead_mans_switch.py  instance_lock.py
-   │     ├─ storage/
-   │     │  ├─ facade.py  sqlite_adapter.py  backup.py
-   │     │  ├─ migrations/
-   │     │  │  ├─ V0001__init.sql
-   │     │  │  ├─ ...
-   │     │  │  ├─ V0006__trades_indexes.sql
-   │     │  │  └─ V0007__idempotency_unique.sql
-   │     │  └─ repositories/
-   │     │     ├─ trades.py  positions.py  market_data.py  audit.py  idempotency.py
-   │     └─ macro/
-   │        └─ sources/
-   │           ├─ http_dxy.py  http_btc_dominance.py  http_fomc.py
-   └─ utils/
-      ├─ decimal.py  time.py  ids.py  logging.py
-      ├─ metrics.py  retry.py  circuit_breaker.py  exceptions.py
-      ├─ http_client.py  pnl.py  symbols.py  trace.py
-Папки вроде core/application/signals или core/domain/indicators должны отсутствовать, если пустые (во избежание путаницы).
+GET /pnl/today?symbol=... — PnL(реализ.)/оборот/сделки.
 
-🔄 Торговый конвейер (логика)
-MarketData: получение OHLCV/ticker из брокера (в paper и live одинаково).
+GET /orchestrator/status?symbol=..., POST /orchestrator/{start|stop|pause|resume}?symbol=....
 
-StrategyManager: пул стратегий (ema_cross, ema_atr, rsi_momentum, bollinger_bands, signals_policy) и режим агрегирования:
+POST /alertmanager/webhook — входящих алертов. 
 
-first (по умолчанию), vote или weighted (веса можно задать ENV-ом).
+Структура и краткий функционал файлов (главные узлы)
 
-Regime filter (опционально): по DXY/BTC.D/FOMC — блокирует новые buy в risk_off или уменьшает вес в weighted.
+app/server.py — FastAPI: /health, /ready, /metrics, /pnl, /orchestrator/*, /alertmanager/webhook. 
 
-Position Sizer: fixed | fractional | volatility | kelly — рассчитывает сумму в котируемой валюте с учётом ограничений.
+app/compose.py — DI: Settings/Storage/EventBus/Broker/Orchestrator/Telegram.
 
-RiskManager: финальные лимиты/бюджет/спред/кулдауны/идемпотентность (одно место истины). При нарушении — trade.blocked.
+app/adapters/telegram_bot.py — команды оператора (статус/пауза/перезапуск, PnL).
 
-Execute trade: размещение маркет-ордера через брокер/CCXT (в paper — симулируется теми же интерфейсами).
+app/subscribers/telegram_alerts.py — подписчик на торговые/сервисные события.
 
-ProtectiveExits: стоп-лосс, тейк, трейлинг (модуль включается по настройкам).
+core/application/orchestrator.py — главный цикл; monitoring/*, reconciliation/*. 
 
-Reconcile: сверка позиций/балансов и открытых ордеров, очистка «хвостов», фиксация частичных исполнений.
+core/application/use_cases/eval_and_execute.py — оценка сигналов + вызов risk + execute_trade. 
 
-Settlement: доведение сделок до финального статуса (trade.settled/trade.failed_settlement).
+core/application/use_cases/execute_trade.py — единственный путь постановки ордеров. 
 
-💼 Risk & Idempotency
-Idempotency: ключ в БД с TTL и UNIQUE(clientOrderId); окно IDEMPOTENCY_BUCKET_MS.
+core/application/use_cases/partial_fills.py — settle частичных исполнений. 
 
-Лимиты:
+core/application/events_topics.py — единый словарь тем (теперь на слое application). 
 
-RISK_MAX_SPREAD_PCT — максимум допустимого спреда, иначе блок.
+core/domain/strategies/* — EMA/RSI/BB/ATR, position sizing, manager (first/vote/weighted). 
 
-RISK_MAX_POSITION_BASE — максимум позиции в базовой валюте.
+core/domain/signals/* — MTF, fusion, ai_scoring, policy, macro-bias. 
 
-RISK_DAILY_LOSS_LIMIT_QUOTE — дневной убыток (котируемая).
+core/domain/risk/manager.py + risk/rules/* — все лимиты/правила в одном месте. 
 
-RISK_MAX_ORDERS_PER_HOUR и обратная совместимость RISK_MAX_ORDERS_5M.
+core/infrastructure/brokers/* — CCXT-адаптер Gate.io + paper, фабрика. 
 
-RISK_MAX_FEE_PCT, RISK_MAX_SLIPPAGE_PCT.
+core/infrastructure/storage/sqlite_adapter.py + migrations/* + repositories/* — БД, миграции (в т.ч. V0012__orders_table.sql). 
 
-DMS/InstanceLock (только live) — защита от зависаний и двойного запуска.
+utils/pnl.py — FIFO-PnL; utils/metrics.py — Prometheus; utils/decimal.py — Decimal. 
 
-🧮 PnL и FIFO
-Единственный источник истины — FIFO-алгоритм в utils/pnl.py.
-/pnl/today и CLI-отчёты считают реализованный PnL через репозиторий trades, учитывая частичные исполнения и комиссии.
+Контроль слоёв (import-linter) и проверки PR
 
-🛰️ Шина событий
-По умолчанию in-memory; для надёжности укажите EVENT_BUS_URL=redis://....
+Нельзя мержить PR, если красный import-linter/mypy/pytest, нет миграций при изменении схемы, не обновлён README/.env.example, добавлен «мёртвый код», дублируется логика. 
 
-Темы: trade.completed/failed/settled/blocked, budget.exceeded, orchestrator.auto_*, safety.dms.*, reconcile.*, dlq.*.
+В каждом PR ответь на вопросы: «куда ложится в архитектуре? есть порт? какие инварианты затрагиваю? где мониторится? нет ли дублей?» (см. чек-лист). 
 
-Подписчики переподключаются после реконнекта.
+Запуск
+uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000
+# CLI:
+cab-smoke | cab-health-monitor | cab-perf | cab-reconcile
 
-📈 Наблюдаемость
-/metrics — Prometheus; utils/metrics.py поддерживает Counter/Gauge/Histogram и helper observe(...).
 
-Структурные логи (JSON) со стеком для ошибок; корреляция по CID (см. utils/trace.py).
+Деплой и наблюдаемость
 
-Telegram-алерты по ключевым событиям (если настроен токен/чат/секрет).
+Railway: web (FastAPI), worker (health/оркестрация), Redis (шина), Prometheus/Alertmanager/Grafana — вне репозитория, webhook в /alertmanager/webhook, алерты в Telegram. 
 
-⚙️ ENV (сводная таблица)
-Режимы и биржа
-MODE=paper|live
+Готовность к production
 
-EXCHANGE=gateio
-
-SYMBOL=BTC/USDT или SYMBOLS=BTC/USDT,ETH/USDT
-
-Стратегии и режим агрегирования
-STRATEGY_SET=ema_cross,ema_atr,signals_policy
-
-STRATEGY_MODE=first|vote|weighted (по умолчанию first)
-
-STRATEGY_SCORES=ema_cross:1.0,ema_atr:1.2,signals_policy:1.5
-
-MarketData / окна
-STRAT_TIMEFRAME=1m
-
-STRAT_OHLCV_LIMIT=200
-
-Regime filter
-REGIME_ENABLED=1
-
-REGIME_BLOCK_BUY=1
-
-REGIME_WEIGHT_MULT_RISK_OFF=0.5
-
-DXY_SOURCE_URL=
-
-BTC_DOM_SOURCE_URL=
-
-FOMC_CALENDAR_URL=
-
-Пороги: REGIME_DXY_UP_PCT=0.5, REGIME_DXY_DOWN_PCT=-0.2, REGIME_BTC_DOM_UP_PCT=0.5, REGIME_BTC_DOM_DOWN_PCT=-0.5, REGIME_FOMC_BLOCK_MIN=60
-
-Position sizing
-POSITION_SIZER=fixed|fractional|volatility|kelly (дефолт: fractional)
-
-STRAT_QUOTE_FRACTION=0.05
-
-Ограничения:
-SIZE_MAX_QUOTE_PCT=0.2, SIZE_MIN_QUOTE=0, SIZE_MAX_QUOTE=0
-
-Для Kelly:
-KELLY_WIN_RATE=0.5, KELLY_AVG_WIN_PCT=1.0, KELLY_AVG_LOSS_PCT=1.0
-
-Риски/идемпотентность/интервалы
-FEE_PCT_ESTIMATE=0.001
-
-RISK_COOLDOWN_SEC=0
-
-RISK_MAX_SPREAD_PCT=0.5
-
-RISK_MAX_POSITION_BASE=0
-
-RISK_MAX_ORDERS_PER_HOUR=10 (RISK_MAX_ORDERS_5M=10 — совместимость)
-
-RISK_DAILY_LOSS_LIMIT_QUOTE=50
-
-RISK_MAX_FEE_PCT=0.2
-
-RISK_MAX_SLIPPAGE_PCT=1.0
-
-IDEMPOTENCY_BUCKET_MS=60000
-
-IDEMPOTENCY_TTL_SEC=120
-
-Интервалы циклов:
-EVAL_INTERVAL_SEC=3, EXITS_INTERVAL_SEC=5, RECONCILE_INTERVAL_SEC=10, WATCHDOG_INTERVAL_SEC=3, SETTLEMENT_INTERVAL_SEC=7
-
-Ключи/секреты/интеграции
-API_KEY, API_SECRET или API_KEY_FILE/API_SECRET_FILE или API_KEY_B64/API_SECRET_B64 или SECRETS_FILE
-
-Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_SECRET, TELEGRAM_CHAT_ID
-
-Bus/Store/Service: EVENT_BUS_URL, DB_PATH, HTTP_TIMEOUT_SEC, LOG_LEVEL, API_TOKEN
-
-🧪 Тестирование
-Unit: стратегии/риск/сайзинг/PnL (pytest).
-
-Smoke: cab-smoke — быстрый прогон API и циклов.
-
-Интеграция: paper-запуск на коротком окне; проверка алертов и идемпотентности.
-
-(Опц.) Backtest/Replay: модуль воспроизведения OHLCV со сводкой метрик (планируется).
-
-🚀 Деплой (стандартный)
-Контейнер с uvicorn + Prometheus sidecar (или node-exporter).
-
-Redis как шина (рекомендовано для live).
-
-Отдельный каталог для DB_PATH и бэкапов.
-
-CI: ruff + mypy + import-linter + pytest.
-
-🛠️ Обслуживание
-Бэкапы: cab-maintenance backup + rotate.
-
-Целостность: cab-maintenance integrity.
-
-Сверки: cab-reconcile.
-
-Отчётность: cab-perf и GET /pnl/today.
-
-❓ Траблшутинг
-Нет сделок в paper: проверь STRATEGY_SET/STRATEGY_MODE, POSITION_SIZER, пороги риска и REGIME_* (в risk_off новые buy могут блокироваться).
-
-429/таймауты: увеличьте интервалы, включите кэш OHLCV, проверьте лимиты API.
-
-Нет метрик/алертов: проверь /metrics, токены/чат Telegram, уровень логов.
-
-📜 Лицензия
-MIT (если не указано иное в корне репозитория).
+Блокеры сняты при: единый execute_trade, DI-regime, settle partial fills, инварианты ENV и линтер-контракты — всё отмечено в дорожной карте. (Сейчас по коду это достижимо короткими правками.)
