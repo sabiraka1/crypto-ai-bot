@@ -1,8 +1,9 @@
+from collections.abc import Callable, Awaitable, AsyncGenerator
 ﻿from __future__ import annotations
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -27,7 +28,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             ok = await tg.send(text)
             if not ok:
                 _log.warning("telegram_send_not_ok")
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("telegram_send_exception", exc_info=True)
 
     def _sub(topic: str, coro: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
@@ -35,8 +36,8 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             if hasattr(bus, attr):
                 try:
                     getattr(bus, attr)(topic, coro)
-                    return
-                except Exception:
+                    return  # noqa: TRY300
+                except Exception:  # noqa: BLE001
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 

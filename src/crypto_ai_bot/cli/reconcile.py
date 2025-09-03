@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     async def _get_symbol() -> str:
         c = await build_container_async()
         return args.symbol or c.settings.SYMBOL
-    
+
     symbol = asyncio.run(_get_symbol())
     result = asyncio.run(_run_reconcile(symbol))
     print(json.dumps(result, ensure_ascii=False))

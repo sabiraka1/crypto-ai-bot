@@ -1,9 +1,10 @@
+from collections.abc import Callable, Awaitable, AsyncGenerator
 ﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, Callable
+from typing import Any
 
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
@@ -36,7 +37,7 @@ class Container:
     risk: Any
     exits: Any
     health: Any
-    orchestrators: Dict[str, Orchestrator]
+    orchestrators: dict[str, Orchestrator]
     tg_bot_task: asyncio.Task | None
     instance_lock: InstanceLock | None = None
 
@@ -58,8 +59,8 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
         while True:
             try:
                 await orig(topic, payload)
-                return
-            except Exception:
+                return  # noqa: TRY300
+            except Exception:  # noqa: BLE001
                 tries += 1
                 inc("bus_publish_error_total", symbol=payload.get("symbol", ""), topic=topic)
                 if tries >= 3:
@@ -155,9 +156,9 @@ def _make_dms_factory(*, st: Any, br: Any, s: Settings, bus: Any) -> Callable[[s
             try:
                 str_val = str(val).strip()
                 if not str_val or str_val.lower() in ("none", "null", ""):
-                    return dec(default)
+                    return dec(default)  # noqa: TRY300
                 float(str_val)
-                return dec(str_val)
+                return dec(str_val)  # noqa: TRY300
             except (ValueError, TypeError, AttributeError):
                 return dec(default)
 
@@ -222,7 +223,7 @@ async def build_container_async() -> Container:
         async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
             try:
                 await exits.on_hint(evt)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol", "")}, exc_info=True)
         bus.on(EVT.TRADE_COMPLETED, _on_trade_completed_hint)
 
@@ -234,7 +235,7 @@ async def build_container_async() -> Container:
         if raw_users:
             try:
                 users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
-            except Exception:
+            except Exception:  # noqa: BLE001
                 _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
 
         container_view = type(

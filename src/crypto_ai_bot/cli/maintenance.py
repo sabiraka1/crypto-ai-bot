@@ -43,7 +43,7 @@ def _rotate(retention_days: int) -> None:
             # db-YYYYmmdd-HHMMSS
             ts = stem.split("-")[1]
             dt = datetime.strptime(ts, "%Y%m%d%H%M%S") if len(ts) > 8 else datetime.strptime(ts, "%Y%m%d")
-        except Exception:
+        except Exception:  # noqa: BLE001
             continue
         if dt < cutoff:
             p.unlink(missing_ok=True)

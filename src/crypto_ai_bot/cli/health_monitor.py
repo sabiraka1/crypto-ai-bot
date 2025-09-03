@@ -62,7 +62,6 @@ def main() -> None:
 
     if args.oneshot:
         raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
-    else:
         # Ğ²ĞµÑ‡Ğ½Ğ¾Ğµ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ğµ
         try:
             asyncio.run(_watch(args.url, args.timeout, args.interval))

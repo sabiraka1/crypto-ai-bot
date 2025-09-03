@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-from typing import Any, Dict, cast
+from typing import Any, cast
 import asyncio
 import html
 import os
@@ -14,10 +14,10 @@ def _getv(d: Any) -> Any:
         if isinstance(d, dict):
             return d.get(k, {})
         try:
-            return getattr(d, k.lower(), {})
-        except Exception:
-            return {}
-    return _inner
+            return getattr(d, k.lower(), {})  # noqa: TRY300
+        except Exception:  # noqa: BLE001
+            return {}  # noqa: TRY300
+    return _inner  # noqa: TRY300
 
 _log = get_logger("adapters.telegram_bot")
 
@@ -25,16 +25,16 @@ _TTL = float(os.environ.get("TELEGRAM_BOT_TTL_SECS", "30") or 30.0)
 _THR = os.environ.get("TELEGRAM_BOT_THROTTLE", "3/5")
 try:
     _THR_N, _THR_WIN = [int(x) for x in _THR.split("/", 1)]
-except Exception:  # fallback
+except Exception:  # noqa: BLE001  # fallback
     _THR_N, _THR_WIN = 3, 5
 
 
 def _split_symbol(sym: str) -> tuple[str, str]:
     try:
         b, q = sym.split("/", 1)
-        return b.upper(), q.upper()
-    except Exception:
-        return sym.upper(), ""
+        return b.upper(), q.upper()  # noqa: TRY300
+    except Exception:  # noqa: BLE001
+        return sym.upper(), ""  # noqa: TRY300
 
 
 class TelegramBotCommands:
@@ -68,9 +68,9 @@ class TelegramBotCommands:
         if not self._allowed:
             return True
         try:
-            return int(user_id or 0) in self._allowed
-        except Exception:
-            return False
+            return int(user_id or 0) in self._allowed  # noqa: TRY300
+        except Exception:  # noqa: BLE001
+            return False  # noqa: TRY300
 
     def _throttle(self, user_id: int) -> bool:
         now = time.time()
@@ -99,15 +99,15 @@ class TelegramBotCommands:
     def _endpoint(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self._token}/{method}"
 
-    async def _get_updates(self) -> Dict[str, Any]:
+    async def _get_updates(self) -> dict[str, Any]:
         try:
             params = {"timeout": self._lp_sec, "offset": self._offset}
             resp = await aget(self._endpoint("getUpdates"), params=params, timeout=self._lp_sec + 5)
             if resp.status_code != 200:
                 _log.warning("tg_get_updates_non_200", extra={"status": resp.status_code})
-                return {"ok": False, "result": []}
-            return cast(Dict[str, Any], resp.json())
-        except Exception:
+                return {"ok": False, "result": []}  # noqa: TRY300
+            return cast(dict[str, Any], resp.json())
+        except Exception:  # noqa: BLE001
             _log.error("tg_get_updates_failed", exc_info=True)
             return {"ok": False, "result": []}
 
@@ -115,7 +115,7 @@ class TelegramBotCommands:
         try:
             t = TelegramAlerts(bot_token=self._token, chat_id=str(chat_id))
             await t.send(text)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("tg_reply_failed", extra={"chat_id": chat_id}, exc_info=True)
 
     def _pick_symbol(self, chat_id: int, text: str) -> str:
@@ -245,7 +245,7 @@ class TelegramBotCommands:
             if st and hasattr(st, "trades") and hasattr(st.trades, "daily_turnover_quote"):
                 tq = st.trades.daily_turnover_quote(symbol)
                 parts.append(f"turnover_today: <code>{tq}</code>")
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("risk_calc_turnover_failed", exc_info=True)
 
         try:
@@ -253,7 +253,7 @@ class TelegramBotCommands:
                 cnt = st.trades.count_orders_last_minutes(symbol, 60)
                 mx = getattr(cfg, "max_orders_per_hour", 0)
                 parts.append(f"orders_60m: <code>{cnt}/{mx}</code>")
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("risk_calc_orders_failed", exc_info=True)
 
         await self._reply(chat_id, "\n".join(parts))
@@ -272,45 +272,45 @@ class TelegramBotCommands:
             quote_free = gv(quote).get('free') or gv(quote).get('total') or '0'
             await self._reply(chat_id, f"ğŸ’› <b>Ğ‘Ğ°Ğ»Ğ°Ğ½Ñ</b> <code>{html.escape(symbol)}</code>\n"
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
-        except Exception:
+        except Exception:  # noqa: BLE001
             await self._reply(chat_id, "âš ï¸ ĞĞµ ÑƒĞ´Ğ°Ğ»Ğ¾ÑÑŒ Ğ¿Ğ¾Ğ»ÑƒÑ‡Ğ¸Ñ‚ÑŒ Ğ±Ğ°Ğ»Ğ°Ğ½Ñ")
 
     # --------------------- Ğ³Ğ»Ğ°Ğ²Ğ½Ñ‹Ğ¹ Ğ¼ĞµÑ‚Ğ¾Ğ´ run() ---------------------
-    
+
     async def run(self) -> None:
         """Ğ“Ğ»Ğ°Ğ²Ğ½Ñ‹Ğ¹ Ñ†Ğ¸ĞºĞ» long-polling Ğ´Ğ»Ñ Ğ¿Ğ¾Ğ»ÑƒÑ‡ĞµĞ½Ğ¸Ñ ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´ Ğ¸Ğ· Telegram"""
         _log.info("telegram_bot_commands_started")
-        
+
         while True:
             try:
                 data = await self._get_updates()
-                
+
                 if data.get("ok"):
                     for update in data.get("result", []):
                         self._offset = update.get("update_id", 0) + 1
-                        
+
                         msg = update.get("message", {})
                         if not msg:
                             continue
-                            
+
                         user_id = msg.get("from", {}).get("id")
                         chat_id = msg.get("chat", {}).get("id")
                         text = msg.get("text", "").strip()
-                        
+
                         if not text or not chat_id:
                             continue
-                        
+
                         if not self._allow(user_id):
                             await self._reply(chat_id, "âŒ Ğ”Ğ¾ÑÑ‚ÑƒĞ¿ Ğ·Ğ°Ğ¿Ñ€ĞµÑ‰ĞµĞ½")
                             continue
-                        
+
                         if not self._throttle(user_id):
                             await self._reply(chat_id, "âš ï¸ Ğ¡Ğ»Ğ¸ÑˆĞºĞ¾Ğ¼ Ğ¼Ğ½Ğ¾Ğ³Ğ¾ Ğ·Ğ°Ğ¿Ñ€Ğ¾ÑĞ¾Ğ², Ğ¿Ğ¾Ğ´Ğ¾Ğ¶Ğ´Ğ¸Ñ‚Ğµ")
                             continue
-                        
+
                         if text.startswith("/"):
                             cmd = text.split()[0].lower()
-                            
+
                             if cmd == "/help":
                                 await self._cmd_help(chat_id)
                             elif cmd == "/symbols":
@@ -321,7 +321,7 @@ class TelegramBotCommands:
                                 await self._cmd_limits(chat_id)
                             else:
                                 symbol = self._pick_symbol(chat_id, text)
-                                
+
                                 if cmd == "/status":
                                     await self._cmd_status(chat_id, symbol)
                                 elif cmd == "/pause":
@@ -334,9 +334,9 @@ class TelegramBotCommands:
                                     await self._cmd_balance(chat_id, symbol)
                                 elif cmd == "/risk":
                                     await self._cmd_risk(chat_id, symbol)
-                
+
                 await asyncio.sleep(1)
-                
-            except Exception:
+
+            except Exception:  # noqa: BLE001
                 _log.error("telegram_bot_run_error", exc_info=True)
                 await asyncio.sleep(5)

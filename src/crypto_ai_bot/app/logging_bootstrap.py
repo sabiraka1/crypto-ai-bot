@@ -14,7 +14,7 @@ def setup_telegram_error_handler() -> None:
         handler = TelegramErrorHandler()
     except Exception as exc:  # когда нет токена или httpx не установлен
         logging.getLogger(__name__).warning("TG error handler disabled: %s", exc)
-        return
+        return  # noqa: TRY300
 
     handler.setLevel(logging.ERROR)
     fmt = logging.Formatter(

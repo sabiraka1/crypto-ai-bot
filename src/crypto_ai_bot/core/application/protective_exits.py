@@ -3,9 +3,9 @@
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -34,10 +34,10 @@ def _safe_dec(settings: Any, name: str, default: str) -> Decimal:
     try:
         s = str(val).strip()
         if not s or s.lower() in ("none", "null"):
-            return dec(default)
+            return dec(default)  # noqa: TRY300
         float(s)
-        return dec(s)
-    except Exception:
+        return dec(s)  # noqa: TRY300
+    except Exception:  # noqa: BLE001
         return dec(default)
 
 def _cfg_from_settings(s: Any) -> AtrExitConfig:
@@ -82,7 +82,7 @@ async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int
     try:
         ohlcv_raw = await broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if not ohlcv_raw:
-            return None
+            return None  # noqa: TRY300
         # ĞŸÑ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ Ğ² Decimal
         ohlcv: list[list[Decimal]] = []
         for r in ohlcv_raw:
@@ -91,7 +91,7 @@ async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int
         if len(trs) < period:
             return None
         return _ema_last(trs, period)
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("atr_fetch_failed", extra={"symbol": symbol, "tf": timeframe}, exc_info=True)
         return None
 
@@ -127,7 +127,7 @@ class ProtectiveExits:
             self._tasks.pop(sym, None)
 
     # ---- ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ñ/Ğ¿Ğ¾Ğ´ÑĞºĞ°Ğ·ĞºĞ¸ Ğ¾Ñ‚ ÑˆĞ¸Ğ½Ñ‹ (compose ÑƒĞ¶Ğµ Ğ¿Ğ¾Ğ´Ğ¿Ğ¸ÑÑ‹Ğ²Ğ°ĞµÑ‚ trade.completed) ----
-    async def on_hint(self, evt: Dict[str, Any]) -> None:
+    async def on_hint(self, evt: dict[str, Any]) -> None:
         """
         ĞŸĞ¾Ğ»ÑƒÑ‡Ğ°ĞµĞ¼ trade.completed; ĞµÑĞ»Ğ¸ ÑÑ‚Ğ¾ BUY â€” ÑÑ‚Ğ°Ñ€Ñ‚ÑƒĞµĞ¼ Ñ„Ğ¾Ğ½Ğ¾Ğ²Ñ‹Ğ¹ Ğ¼Ğ¾Ğ½Ğ¸Ñ‚Ğ¾Ñ€,
         ĞµÑĞ»Ğ¸ SELL Ğ¸ Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¸ Ğ±Ğ¾Ğ»ÑŒÑˆĞµ Ğ½ĞµÑ‚ â€” ÑÑ‚Ğ¾Ğ¿Ğ¸Ğ¼ Ğ¼Ğ¾Ğ½Ğ¸Ñ‚Ğ¾Ñ€.
@@ -149,11 +149,11 @@ class ProtectiveExits:
                 self._cancel_task(sym)
 
     # ---- Ğ¿ÑƒĞ±Ğ»Ğ¸Ñ‡Ğ½Ñ‹Ğµ Ğ¸Ğ½Ñ‚ĞµÑ€Ñ„ĞµĞ¹ÑÑ‹ (ÑĞ¾Ñ…Ñ€Ğ°Ğ½ÑĞµĞ¼ ÑĞ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ñ‹) ----
-    async def evaluate(self, *, symbol: str) -> Optional[Dict[str, Any]]:
+    async def evaluate(self, *, symbol: str) -> Optional[dict[str, Any]]:
         """ĞĞ´Ğ½Ğ¾Ñ€Ğ°Ğ·Ğ¾Ğ²Ğ°Ñ Ğ¾Ñ†ĞµĞ½ĞºĞ° (Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ²Ñ‹Ğ·Ñ‹Ğ²Ğ°Ñ‚ÑŒ Ğ²Ñ€ÑƒÑ‡Ğ½ÑƒÑ)."""
         return await self._evaluate_once(symbol)
 
-    async def tick(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def tick(self, symbol: str) -> Optional[dict[str, Any]]:
         """Ğ¡Ğ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚ÑŒ: Ğ´ĞµĞ»ĞµĞ³Ğ¸Ñ€ÑƒĞµĞ¼ Ğ½Ğ° evaluate()."""
         return await self.evaluate(symbol=symbol)
 
@@ -178,7 +178,7 @@ class ProtectiveExits:
                     if res and res.get("closed_all"):
                         _log.info("exits_loop_stop_all_closed", extra={"symbol": symbol})
                         break
-                except Exception:
+                except Exception:  # noqa: BLE001
                     _log.error("exits_loop_iteration_failed", extra={"symbol": symbol}, exc_info=True)
                 await asyncio.sleep(self._cfg.tick_interval_sec)
         except asyncio.CancelledError:
@@ -186,7 +186,7 @@ class ProtectiveExits:
         finally:
             self._tasks.pop(symbol, None)
 
-    async def _evaluate_once(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def _evaluate_once(self, symbol: str) -> Optional[dict[str, Any]]:
         # Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ñ
         pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
         if not pos:
@@ -203,7 +203,7 @@ class ProtectiveExits:
             last = dec(str(t.get("last") or t.get("bid") or t.get("ask") or "0"))
         except Exception as e:
             _log.warning("ticker_fetch_failed", extra={"symbol": symbol, "error": str(e)})
-            return None
+            return None  # noqa: TRY300
         if last <= 0:
             return None
 
@@ -258,7 +258,7 @@ class ProtectiveExits:
         inc("protective_exits_tick_total", symbol=symbol)
         return None
 
-    async def _sell_all(self, symbol: str, base: Decimal, reason: str) -> Dict[str, Any] | None:
+    async def _sell_all(self, symbol: str, base: Decimal, reason: str) -> dict[str, Any] | None:
         if self._cfg.min_base_to_exit > 0 and base < self._cfg.min_base_to_exit:
             return None
         try:
@@ -266,7 +266,7 @@ class ProtectiveExits:
             await self._bus.publish(EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)})
             _log.info("protective_exit_sell_all", extra={"symbol": symbol, "qty": str(base), "reason": reason})
             self._cancel_task(symbol)
-            return {"closed_all": True, "side": "sell", "qty": str(base), "reason": reason}
+            return {"closed_all": True, "side": "sell", "qty": str(base), "reason": reason}  # noqa: TRY300
         except Exception as e:
             await self._bus.publish(EVT.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
@@ -277,7 +277,7 @@ class ProtectiveExits:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
             await self._bus.publish(EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)})
             _log.info("protective_exit_sell_qty", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
-            return True
+            return True  # noqa: TRY300
         except Exception as e:
             await self._bus.publish(EVT.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})

@@ -4,9 +4,9 @@ import asyncio
 import time
 import hashlib
 import hmac
-from collections.abc import Callable, Awaitable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, Body
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -15,7 +15,7 @@ from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.core.application import events_topics as EVT  # нужен в /health и alertmanager/webhook
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812  # нужен в /health и alertmanager/webhook
 
 _log = get_logger("app.server")
 _container: Any | None = None
@@ -76,11 +76,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 for oc in orchs.values():
                     try:
                         tasks.append(asyncio.create_task(oc.stop()))
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         _log.error("orchestrator_stop_schedule_failed", exc_info=True)
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("orchestrators_stop_failed", exc_info=True)
 
         try:
@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await bus.stop()
             elif bus and hasattr(bus, "close"):
                 await bus.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("bus_shutdown_failed", exc_info=True)
 
         try:
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             exch = getattr(broker, "exchange", None) if broker else None
             if exch and hasattr(exch, "close"):
                 await exch.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("exchange_close_failed", exc_info=True)
         _log.info("lifespan_shutdown_end")
 
@@ -155,7 +155,7 @@ async def health() -> JSONResponse:
     try:
         c = _ctx_or_500()
     except HTTPException:
-        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
+        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)  # noqa: TRY300
 
     settings = getattr(c, "settings", None)
     default_symbol = getattr(settings, "SYMBOL", "BTC/USDT") if settings else "BTC/USDT"
@@ -202,7 +202,7 @@ async def health() -> JSONResponse:
     if bus and hasattr(bus, "publish"):
         try:
             await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.debug("health_bus_publish_failed", exc_info=True)
 
     body = {"ok": ok, "default_symbol": default_symbol, "symbols": symbols, **details}
@@ -217,23 +217,23 @@ async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     try:
         c = _ctx_or_500()
     except HTTPException:
-        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
+        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)  # noqa: TRY300
 
     bus = getattr(c, "bus", None)
     if bus and hasattr(bus, "publish"):
         try:
             await bus.publish(EVT.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.debug("alert_bus_publish_failed", exc_info=True)
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True})  # noqa: TRY300
 
 @router.get("/metrics")
 async def metrics() -> PlainTextResponse:
     try:
-        return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
-    except Exception:
+        return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")  # noqa: TRY300
+    except Exception:  # noqa: BLE001
         _log.error("metrics_failed", exc_info=True)
-        return PlainTextResponse("", status_code=500)
+        return PlainTextResponse("", status_code=500)  # noqa: TRY300
 
 @router.get("/orchestrator/status")
 async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
@@ -241,7 +241,7 @@ async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
     try:
         st = orch.status()
         st["symbol"] = sym
-        return JSONResponse(st)
+        return JSONResponse(st)  # noqa: TRY300
     except Exception as e:
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="status_failed") from e
@@ -254,7 +254,7 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
         await orch.start()
         st = orch.status()
         st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
+        return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
     except Exception as e:
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="start_failed") from e
@@ -267,7 +267,7 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)) 
         await orch.stop()
         st = orch.status()
         st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
+        return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
     except Exception as e:
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="stop_failed") from e
@@ -280,7 +280,7 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
         await orch.pause()
         st = orch.status()
         st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
+        return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
     except Exception as e:
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="pause_failed") from e
@@ -293,7 +293,7 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
         await orch.resume()
         st = orch.status()
         st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
+        return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
     except Exception as e:
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed") from e
@@ -320,7 +320,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
             if hasattr(st.trades, "daily_pnl_quote"):
                 try:
                     pnl_quote_str = str(st.trades.daily_pnl_quote(sym))
-                except Exception:
+                except Exception:  # noqa: BLE001
                     _log.error("pnl_today_calc_failed", extra={"symbol": sym}, exc_info=True)
             else:
                 _log.warning("pnl_today_missing_method_daily_pnl_quote", extra={"symbol": sym})
@@ -328,7 +328,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
             if hasattr(st.trades, "daily_turnover_quote"):
                 try:
                     turnover_quote_str = str(st.trades.daily_turnover_quote(sym))
-                except Exception:
+                except Exception:  # noqa: BLE001
                     _log.error("turnover_today_calc_failed", extra={"symbol": sym}, exc_info=True)
             else:
                 _log.warning("pnl_today_missing_method_daily_turnover_quote", extra={"symbol": sym})
@@ -336,7 +336,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
             if hasattr(st.trades, "count_orders_today"):
                 try:
                     orders_count_int = int(st.trades.count_orders_today(sym))
-                except Exception:
+                except Exception:  # noqa: BLE001
                     _log.error("orders_today_count_failed", extra={"symbol": sym}, exc_info=True)
             else:
                 _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": sym})
@@ -346,7 +346,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         )
     except HTTPException:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("pnl_today_failed", exc_info=True)
         raise HTTPException(status_code=500, detail="pnl_today_failed")
 
@@ -369,7 +369,7 @@ async def telegram_webhook(request: Request) -> JSONResponse:
         _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
         # если нужно — передать в tg_bot.process_webhook_update(data)
         return JSONResponse({"ok": True})
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("telegram_webhook_error", exc_info=True)
         return JSONResponse({"ok": False}, status_code=500)
 

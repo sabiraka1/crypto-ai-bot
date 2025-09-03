@@ -1,5 +1,5 @@
 ﻿from __future__ import annotations
-from typing import Any, Dict
+from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort
 from crypto_ai_bot.utils.logging import get_logger
@@ -24,8 +24,8 @@ class HealthChecker:
         self._s = settings
         self._symbol = getattr(settings, "SYMBOL", "BTC/USDT")
 
-    async def ready(self) -> Dict[str, str]:
-        res: Dict[str, str] = {"db": "ok", "broker": "ok", "bus": "ok"}
+    async def ready(self) -> dict[str, str]:
+        res: dict[str, str] = {"db": "ok", "broker": "ok", "bus": "ok"}
 
         # DB
         try:
@@ -56,5 +56,5 @@ class HealthChecker:
         inc("health_ready_ok_total" if ok else "health_ready_fail_total")
         return res
 
-    async def tick(self) -> Dict[str, str]:
+    async def tick(self) -> dict[str, str]:
         return await self.ready()
