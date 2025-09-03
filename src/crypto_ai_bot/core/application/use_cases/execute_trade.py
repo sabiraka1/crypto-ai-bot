@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 import hashlib
 
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
@@ -14,7 +14,7 @@ from crypto_ai_bot.utils.symbols import canonical
 
 _log = get_logger("usecase.execute_trade")
 
-# сѰ я Ѿѽ ѵ ( ѵѿѵя B008)
+# ĞšĞ¾Ğ½ÑÑ‚Ğ°Ğ½Ñ‚Ñ‹ Ğ´Ğ»Ñ Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚Ğ½Ñ‹Ñ… Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ğ¹ (Ğ¸Ğ·Ğ±ĞµĞ³Ğ°ĞµĞ¼ Ğ¿Ñ€ĞµĞ´ÑƒĞ¿Ñ€ĞµĞ¶Ğ´ĞµĞ½Ğ¸Ñ B008)
 _DEFAULT_ZERO = dec("0")
 _DEFAULT_KELLY_CAP = dec("0.5")
 
@@ -25,11 +25,11 @@ class ExecuteTradeResult:
     executed: bool
     order: Any | None = None
     reason: str = ""
-    why: str = ""  # . яс (я ѸѸ Ѿ)
+    why: str = ""  # Ğ´Ğ¾Ğ¿. Ğ¿Ğ¾ÑÑĞ½ĞµĞ½Ğ¸Ğµ (Ğ´Ğ»Ñ Ğ¿Ñ€Ğ¸Ñ‡Ğ¸Ğ½ Ğ±Ğ»Ğ¾ĞºĞ¸Ñ€Ğ¾Ğ²ĞºĞ¸)
 
 
 async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, Any]]:
-    """с сѰѼ с N с, с storage Ѷ."""
+    """Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ¾ Ğ´Ğ¾ÑÑ‚Ğ°Ñ‘Ğ¼ Ğ¿Ğ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ N ÑĞ´ĞµĞ»Ğ¾Ğº, ĞµÑĞ»Ğ¸ storage Ğ¿Ğ¾Ğ´Ğ´ĞµÑ€Ğ¶Ğ¸Ğ²Ğ°ĞµÑ‚."""
     try:
         repo = getattr(storage, "trades", None)
         if not repo:
@@ -44,7 +44,7 @@ async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, An
 
 
 async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
-    """с ѸѰ  PnL  Ѹѵ юѵ (с сѿ)."""
+    """Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ¾ Ñ‡Ğ¸Ñ‚Ğ°ĞµĞ¼ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ PnL Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ (ĞµÑĞ»Ğ¸ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ½Ğ¾)."""
     try:
         repo = getattr(storage, "trades", None)
         if not repo:
@@ -58,7 +58,7 @@ async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
 
 
 async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
-    """сѾѸя с я ѵ Ѿс (с с ѵѾѸ Ѹ/с)."""
+    """Ğ˜ÑÑ‚Ğ¾Ñ€Ğ¸Ñ Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ² Ğ´Ğ»Ñ Ğ¾Ñ†ĞµĞ½ĞºĞ¸ Ğ¿Ñ€Ğ¾ÑĞ°Ğ´ĞºĞ¸ (ĞµÑĞ»Ğ¸ ĞµÑÑ‚ÑŒ Ñ€ĞµĞ¿Ğ¾Ğ·Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ğ¹ Ğ¼ĞµÑ‚Ñ€Ğ¸Ğº/Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ²)."""
     try:
         repo = getattr(storage, "balances", None)
         if not repo:
@@ -88,41 +88,41 @@ async def execute_trade(
     protective_exits: Any | None = None,
 ) -> dict[str, Any]:
     """
-    ѹ  ся Ѿѳ ѵѵя (buy/sell) с Ѿ ѵѽсѸ,
-    Ѹс-Ѱѵ, Ѱѵ  сѵ/ѰсѾ/Ѿ,  с  Ѱѵ.
+    Ğ•Ğ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ¿ÑƒÑ‚ÑŒ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ñ Ñ‚Ğ¾Ñ€Ğ³Ğ¾Ğ²Ğ¾Ğ³Ğ¾ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ (buy/sell) Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚Ğ¸,
+    Ñ€Ğ¸ÑĞº-Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹, Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹ Ğ½Ğ° ÑĞ¿Ñ€ĞµĞ´/Ñ‡Ğ°ÑÑ‚Ğ¾Ñ‚Ñƒ/Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚, Ğ¸ Ğ·Ğ°Ğ¿Ğ¸ÑĞ¸ Ğ² Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğµ.
     """
 
-    # --- ѵ Ѿ ---
+    # --- ĞºĞ°Ğ½Ğ¾Ğ½Ğ¸Ğ·Ğ¸Ñ€ÑƒĞµĞ¼ Ğ²Ñ…Ğ¾Ğ´Ñ‹ ---
     sym = canonical(symbol)
     act = (side or "").lower()
 
-    # Ѿ сѼ
+    # Ğ”ĞµÑ„Ğ¾Ğ»Ñ‚Ñ‹ ÑÑƒĞ¼Ğ¼
     q_in = _DEFAULT_ZERO if quote_amount is None else dec(str(quote_amount))
     b_in = _DEFAULT_ZERO if base_amount is None else dec(str(base_amount))
 
-    # ---- ѵѽс: ѾѺ ѱѰ ----
+    # ---- Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚ÑŒ: Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ĞºĞ° Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚Ğ° ----
     session = getattr(settings, "SESSION_RUN_ID", "") or ""
     key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"
-    idem_key = f"po:{hashlib.sha1(  # noqa: S324key_payload.encode('utf-8')).hexdigest()}"
+    idem_key = f"po:{hashlib.sha1(key_payload.encode('utf-8')).hexdigest()  # noqa: S324}"
 
     idem_repo = None
     try:
         idem = getattr(storage, "idempotency", None)
-        idem_repo = idem() if callable(idem) else idem  # Ѷ  ѰѸ,  сѰс
+        idem_repo = idem() if callable(idem) else idem  # Ğ¿Ğ¾Ğ´Ğ´ĞµÑ€Ğ¶ĞºĞ° Ğ¸ Ñ„Ğ°Ğ±Ñ€Ğ¸ĞºĞ¸, Ğ¸ Ğ¸Ğ½ÑÑ‚Ğ°Ğ½ÑĞ°
         if idem_repo is not None and hasattr(idem_repo, "check_and_store"):
             if not bool(idem_repo.check_and_store(idem_key, idempotency_ttl_sec)):
-                #  с Ѱ ѵѵ (ѱ)
+                # Ğ£Ğ¶Ğµ ĞµÑÑ‚ÑŒ Ñ‚Ğ°ĞºĞ¾Ğµ Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ (Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚)
                 await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
                 _log.warning("trade_blocked_duplicate", extra={"symbol": sym})
                 return {"action": "skip", "executed": False, "reason": "duplicate"}
     except Exception:  # noqa: BLE001
         _log.error("idempotency_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ѹс-: Ѹ ----
+    # ---- Ñ€Ğ¸ÑĞº-Ğ¼ĞµĞ½ĞµĞ´Ğ¶ĞµÑ€: ĞºĞ¾Ğ½Ñ„Ğ¸Ğ³ ----
     cfg: RiskConfig = (risk_manager.cfg if isinstance(risk_manager, RiskManager)
                        else RiskConfig.from_settings(settings))
 
-    # ---- (Ѹѽ) Ѱ: сѸя ѱѾѽ с ----
+    # ---- (Ğ¾Ğ¿Ñ†Ğ¸Ğ¾Ğ½Ğ°Ğ»ÑŒĞ½Ğ¾) Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾: ÑĞµÑ€Ğ¸Ñ ÑƒĞ±Ñ‹Ñ‚Ğ¾Ñ‡Ğ½Ñ‹Ñ… ÑĞ´ĞµĞ»Ğ¾Ğº ----
     try:
         if getattr(settings, "RISK_USE_LOSS_STREAK", 0):
             try:
@@ -137,11 +137,11 @@ async def execute_trade(
                     _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
-                pass  # Ѱ  юѵ
+                pass  # Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾ Ğ½Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾
     except Exception:  # noqa: BLE001
         _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- (Ѹѽ) Ѱ: Ѿс/  ѱѺ ----
+    # ---- (Ğ¾Ğ¿Ñ†Ğ¸Ğ¾Ğ½Ğ°Ğ»ÑŒĞ½Ğ¾) Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾: Ğ¿Ñ€Ğ¾ÑĞ°Ğ´ĞºĞ°/Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ Ğ»Ğ¸Ğ¼Ğ¸Ñ‚ ÑƒĞ±Ñ‹Ñ‚ĞºĞ¾Ğ² ----
     try:
         if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0):
             try:
@@ -165,7 +165,7 @@ async def execute_trade(
     except Exception:  # noqa: BLE001
         _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ѱѵ  сѵ (с. сѸѹ сѵ  %) ----
+    # ---- Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğµ Ğ½Ğ° ÑĞ¿Ñ€ĞµĞ´ (Ğ¼Ğ°ĞºÑ. Ğ´Ğ¾Ğ¿ÑƒÑÑ‚Ğ¸Ğ¼Ñ‹Ğ¹ ÑĞ¿Ñ€ĞµĞ´ Ğ² %) ----
     try:
         limit_spread = dec(str(getattr(cfg, "max_spread_pct", 0.0) or 0))
     except Exception:  # noqa: BLE001
@@ -188,7 +188,7 @@ async def execute_trade(
         except Exception:  # noqa: BLE001
             _log.error("spread_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ѱѵ ѰсѾ ѴѾ  5  (с ) ----
+    # ---- Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğµ Ñ‡Ğ°ÑÑ‚Ğ¾Ñ‚Ñ‹ Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ² Ğ·Ğ° 5 Ğ¼Ğ¸Ğ½ÑƒÑ‚ (ĞµÑĞ»Ğ¸ Ğ·Ğ°Ğ´Ğ°Ğ½Ğ¾) ----
     if getattr(cfg, "max_orders_5m", 0) and cfg.max_orders_5m > 0:
         try:
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
@@ -205,7 +205,7 @@ async def execute_trade(
         except Exception:  # noqa: BLE001
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ѱѵ  ѾѰ  Ѹѵ (с ) ----
+    # ---- Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğµ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ³Ğ¾ Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚Ğ° Ğ¿Ğ¾ ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ (ĞµÑĞ»Ğ¸ Ğ·Ğ°Ğ´Ğ°Ğ½Ğ¾) ----
     max_turnover = getattr(cfg, "max_turnover_quote_per_day", Decimal("0"))
     try:
         max_turnover = dec(str(max_turnover))
@@ -227,9 +227,9 @@ async def execute_trade(
         except Exception:  # noqa: BLE001
             _log.error("turnover_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- с ѴѰ ѵѵ ѾѰ ----
+    # ---- Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ğµ Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ñ‡ĞµÑ€ĞµĞ· Ğ±Ñ€Ğ¾ĞºĞµÑ€Ğ° ----
     try:
-        client_order_id = idem_key  # сѷѵ ѵѽѹ ю  client_order_id
+        client_order_id = idem_key  # Ğ¸ÑĞ¿Ğ¾Ğ»ÑŒĞ·ÑƒĞµĞ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ñ‹Ğ¹ ĞºĞ»ÑÑ‡ ĞºĞ°Ğº client_order_id
         if act == "buy":
             q_amt = q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
             _log.info("execute_order_buy", extra={"symbol": sym, "quote_amount": str(q_amt)})
@@ -248,7 +248,7 @@ async def execute_trade(
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
 
-    # ---- с с/ѴѰ  Ѱѵ ----
+    # ---- Ğ·Ğ°Ğ¿Ğ¸ÑÑŒ ÑĞ´ĞµĞ»ĞºĞ¸/Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ğ² Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğµ ----
     try:
         if hasattr(storage, "trades") and hasattr(storage.trades, "add_from_order"):
             storage.trades.add_from_order(order)
@@ -261,7 +261,7 @@ async def execute_trade(
     except Exception:  # noqa: BLE001
         _log.error("upsert_order_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- сѸ  ѿ с (я settlement/Ѿ) ----
+    # ---- ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ¾ Ğ²Ñ‹Ğ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ğ¸ ÑĞ´ĞµĞ»ĞºĞ¸ (Ğ´Ğ»Ñ settlement/Ğ°Ğ»ĞµÑ€Ñ‚Ğ¾Ğ²) ----
     try:
         await bus.publish(
             EVT.TRADE_COMPLETED,
