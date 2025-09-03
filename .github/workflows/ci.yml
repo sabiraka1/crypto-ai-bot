@@ -47,7 +47,7 @@ jobs:
           python --version
           ruff --version
           mypy --version
-          lint-imports --version
+          echo "import-linter: $(pip show import-linter | grep Version | cut -d' ' -f2 || echo 'installed')"
           pytest --version
 
       - name: Ruff (lint + format)
