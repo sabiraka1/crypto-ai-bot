@@ -28,7 +28,7 @@ select = [
     "ARG",                   # unused arguments
 ]
 
-# Pragmatic ignores (tests/scripts — см. per-file-ignores ниже)
+# Pragmatic ignores
 ignore = [
     "E501",   # long lines
     "E701",   # multiple statements on one line (colon)
@@ -130,16 +130,11 @@ section-order = [
 [lint.flake8-bandit]
 # CRYPTO-SPECIFIC: Allow patterns needed for trading systems
 check-typed-exception = true
-
-# Allow subprocess in operational scripts  
-[lint.flake8-bandit.hardcoded-tmp-directory]
-extend-immutable-calls = ["pathlib.Path"]
+# Note: hardcoded-tmp-directory config removed - not supported in this format
 
 [lint.pylint]
 # Financial calculations can be complex
 max-args = 8
 max-branches = 15
 
-
-[lint.flake8-logging-format] 
-# Structured logging for trading systems
+# Note: flake8-logging-format removed - use LOG rules in select instead
