@@ -1,11 +1,10 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
-import hashlib
 from typing import Any
+import hashlib
 
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
@@ -15,7 +14,7 @@ from crypto_ai_bot.utils.symbols import canonical
 
 _log = get_logger("usecase.execute_trade")
 
-# ĞšĞ¾Ğ½ÑÑ‚Ğ°Ğ½Ñ‚Ñ‹ Ğ´Ğ»Ñ Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚Ğ½Ñ‹Ñ… Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ğ¹ (Ğ¸Ğ·Ğ±ĞµĞ³Ğ°ĞµĞ¼ Ğ¿Ñ€ĞµĞ´ÑƒĞ¿Ñ€ĞµĞ¶Ğ´ĞµĞ½Ğ¸Ñ B008)
+# сѰ я Ѿѽ ѵ ( ѵѿѵя B008)
 _DEFAULT_ZERO = dec("0")
 _DEFAULT_KELLY_CAP = dec("0.5")
 
@@ -26,11 +25,11 @@ class ExecuteTradeResult:
     executed: bool
     order: Any | None = None
     reason: str = ""
-    why: str = ""  # Ğ´Ğ¾Ğ¿. Ğ¿Ğ¾ÑÑĞ½ĞµĞ½Ğ¸Ğµ (Ğ´Ğ»Ñ Ğ¿Ñ€Ğ¸Ñ‡Ğ¸Ğ½ Ğ±Ğ»Ğ¾ĞºĞ¸Ñ€Ğ¾Ğ²ĞºĞ¸)
+    why: str = ""  # . яс (я ѸѸ Ѿ)
 
 
 async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, Any]]:
-    """Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ¾ Ğ´Ğ¾ÑÑ‚Ğ°Ñ‘Ğ¼ Ğ¿Ğ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ N ÑĞ´ĞµĞ»Ğ¾Ğº, ĞµÑĞ»Ğ¸ storage Ğ¿Ğ¾Ğ´Ğ´ĞµÑ€Ğ¶Ğ¸Ğ²Ğ°ĞµÑ‚."""
+    """с сѰѼ с N с, с storage Ѷ."""
     try:
         repo = getattr(storage, "trades", None)
         if not repo:
@@ -39,13 +38,13 @@ async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, An
             return list(repo.last_trades(symbol, n) or [])
         if hasattr(repo, "list_recent"):
             return list(repo.list_recent(symbol=symbol, limit=n) or [])
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     return []
 
 
 async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
-    """Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ¾ Ñ‡Ğ¸Ñ‚Ğ°ĞµĞ¼ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ PnL Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ (ĞµÑĞ»Ğ¸ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ½Ğ¾)."""
+    """с ѸѰ  PnL  Ѹѵ юѵ (с сѿ)."""
     try:
         repo = getattr(storage, "trades", None)
         if not repo:
@@ -53,13 +52,13 @@ async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
         if hasattr(repo, "daily_pnl_quote"):
             v = repo.daily_pnl_quote(symbol)
             return dec(str(v))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return dec("0")
     return dec("0")
 
 
 async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
-    """Ğ˜ÑÑ‚Ğ¾Ñ€Ğ¸Ñ Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ² Ğ´Ğ»Ñ Ğ¾Ñ†ĞµĞ½ĞºĞ¸ Ğ¿Ñ€Ğ¾ÑĞ°Ğ´ĞºĞ¸ (ĞµÑĞ»Ğ¸ ĞµÑÑ‚ÑŒ Ñ€ĞµĞ¿Ğ¾Ğ·Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ğ¹ Ğ¼ĞµÑ‚Ñ€Ğ¸Ğº/Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ²)."""
+    """сѾѸя с я ѵ Ѿс (с с ѵѾѸ Ѹ/с)."""
     try:
         repo = getattr(storage, "balances", None)
         if not repo:
@@ -67,7 +66,7 @@ async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[D
         if hasattr(repo, "recent_total_quote"):
             xs = repo.recent_total_quote(symbol=symbol, limit=limit)
             return [dec(str(x)) for x in (xs or [])]
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
     return []
 
@@ -89,41 +88,41 @@ async def execute_trade(
     protective_exits: Any | None = None,
 ) -> dict[str, Any]:
     """
-    Ğ•Ğ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ¿ÑƒÑ‚ÑŒ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ñ Ñ‚Ğ¾Ñ€Ğ³Ğ¾Ğ²Ğ¾Ğ³Ğ¾ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ (buy/sell) Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚Ğ¸,
-    Ñ€Ğ¸ÑĞº-Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹, Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹ Ğ½Ğ° ÑĞ¿Ñ€ĞµĞ´/Ñ‡Ğ°ÑÑ‚Ğ¾Ñ‚Ñƒ/Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚, Ğ¸ Ğ·Ğ°Ğ¿Ğ¸ÑĞ¸ Ğ² Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğµ.
+    ѹ  ся Ѿѳ ѵѵя (buy/sell) с Ѿ ѵѽсѸ,
+    Ѹс-Ѱѵ, Ѱѵ  сѵ/ѰсѾ/Ѿ,  с  Ѱѵ.
     """
 
-    # --- ĞºĞ°Ğ½Ğ¾Ğ½Ğ¸Ğ·Ğ¸Ñ€ÑƒĞµĞ¼ Ğ²Ñ…Ğ¾Ğ´Ñ‹ ---
+    # --- ѵ Ѿ ---
     sym = canonical(symbol)
     act = (side or "").lower()
 
-    # Ğ”ĞµÑ„Ğ¾Ğ»Ñ‚Ñ‹ ÑÑƒĞ¼Ğ¼
+    # Ѿ сѼ
     q_in = _DEFAULT_ZERO if quote_amount is None else dec(str(quote_amount))
     b_in = _DEFAULT_ZERO if base_amount is None else dec(str(base_amount))
 
-    # ---- Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚ÑŒ: Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ĞºĞ° Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚Ğ° ----
+    # ---- ѵѽс: ѾѺ ѱѰ ----
     session = getattr(settings, "SESSION_RUN_ID", "") or ""
     key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"
-    idem_key = f"po:{hashlib.sha1(key_payload.encode('utf-8')).hexdigest()}"
+    idem_key = f"po:{hashlib.sha1(  # noqa: S324key_payload.encode('utf-8')).hexdigest()}"
 
     idem_repo = None
     try:
         idem = getattr(storage, "idempotency", None)
-        idem_repo = idem() if callable(idem) else idem  # Ğ¿Ğ¾Ğ´Ğ´ĞµÑ€Ğ¶ĞºĞ° Ğ¸ Ñ„Ğ°Ğ±Ñ€Ğ¸ĞºĞ¸, Ğ¸ Ğ¸Ğ½ÑÑ‚Ğ°Ğ½ÑĞ°
+        idem_repo = idem() if callable(idem) else idem  # Ѷ  ѰѸ,  сѰс
         if idem_repo is not None and hasattr(idem_repo, "check_and_store"):
             if not bool(idem_repo.check_and_store(idem_key, idempotency_ttl_sec)):
-                # Ğ£Ğ¶Ğµ ĞµÑÑ‚ÑŒ Ñ‚Ğ°ĞºĞ¾Ğµ Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ (Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚)
+                #  с Ѱ ѵѵ (ѱ)
                 await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
                 _log.warning("trade_blocked_duplicate", extra={"symbol": sym})
                 return {"action": "skip", "executed": False, "reason": "duplicate"}
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("idempotency_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ñ€Ğ¸ÑĞº-Ğ¼ĞµĞ½ĞµĞ´Ğ¶ĞµÑ€: ĞºĞ¾Ğ½Ñ„Ğ¸Ğ³ ----
+    # ---- Ѹс-: Ѹ ----
     cfg: RiskConfig = (risk_manager.cfg if isinstance(risk_manager, RiskManager)
                        else RiskConfig.from_settings(settings))
 
-    # ---- (Ğ¾Ğ¿Ñ†Ğ¸Ğ¾Ğ½Ğ°Ğ»ÑŒĞ½Ğ¾) Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾: ÑĞµÑ€Ğ¸Ñ ÑƒĞ±Ñ‹Ñ‚Ğ¾Ñ‡Ğ½Ñ‹Ñ… ÑĞ´ĞµĞ»Ğ¾Ğº ----
+    # ---- (Ѹѽ) Ѱ: сѸя ѱѾѽ с ----
     try:
         if getattr(settings, "RISK_USE_LOSS_STREAK", 0):
             try:
@@ -138,11 +137,11 @@ async def execute_trade(
                     _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
-                pass  # Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾ Ğ½Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾
-    except Exception:
+                pass  # Ѱ  юѵ
+    except Exception:  # noqa: BLE001
         _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- (Ğ¾Ğ¿Ñ†Ğ¸Ğ¾Ğ½Ğ°Ğ»ÑŒĞ½Ğ¾) Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾: Ğ¿Ñ€Ğ¾ÑĞ°Ğ´ĞºĞ°/Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ Ğ»Ğ¸Ğ¼Ğ¸Ñ‚ ÑƒĞ±Ñ‹Ñ‚ĞºĞ¾Ğ² ----
+    # ---- (Ѹѽ) Ѱ: Ѿс/  ѱѺ ----
     try:
         if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0):
             try:
@@ -163,13 +162,13 @@ async def execute_trade(
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
                 pass
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğµ Ğ½Ğ° ÑĞ¿Ñ€ĞµĞ´ (Ğ¼Ğ°ĞºÑ. Ğ´Ğ¾Ğ¿ÑƒÑÑ‚Ğ¸Ğ¼Ñ‹Ğ¹ ÑĞ¿Ñ€ĞµĞ´ Ğ² %) ----
+    # ---- Ѱѵ  сѵ (с. сѸѹ сѵ  %) ----
     try:
         limit_spread = dec(str(getattr(cfg, "max_spread_pct", 0.0) or 0))
-    except Exception:
+    except Exception:  # noqa: BLE001
         limit_spread = dec("0")
     if limit_spread > dec("0"):
         try:
@@ -186,10 +185,10 @@ async def execute_trade(
                         extra={"symbol": sym, "spread_pct": f"{spread_pct:.4f}", "limit_pct": str(limit_spread)},
                     )
                     return {"action": "skip", "executed": False, "why": f"blocked: spread {spread_pct:.4f}%>{limit_spread}%"}
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("spread_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğµ Ñ‡Ğ°ÑÑ‚Ğ¾Ñ‚Ñ‹ Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ² Ğ·Ğ° 5 Ğ¼Ğ¸Ğ½ÑƒÑ‚ (ĞµÑĞ»Ğ¸ Ğ·Ğ°Ğ´Ğ°Ğ½Ğ¾) ----
+    # ---- Ѱѵ ѰсѾ ѴѾ  5  (с ) ----
     if getattr(cfg, "max_orders_5m", 0) and cfg.max_orders_5m > 0:
         try:
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
@@ -203,14 +202,14 @@ async def execute_trade(
                     extra={"symbol": sym, "count_5m": recent_count, "limit": cfg.max_orders_5m},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğµ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ³Ğ¾ Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚Ğ° Ğ¿Ğ¾ ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ (ĞµÑĞ»Ğ¸ Ğ·Ğ°Ğ´Ğ°Ğ½Ğ¾) ----
+    # ---- Ѱѵ  ѾѰ  Ѹѵ (с ) ----
     max_turnover = getattr(cfg, "max_turnover_quote_per_day", Decimal("0"))
     try:
         max_turnover = dec(str(max_turnover))
-    except Exception:
+    except Exception:  # noqa: BLE001
         max_turnover = dec("0")
     if max_turnover > dec("0"):
         try:
@@ -225,12 +224,12 @@ async def execute_trade(
                     extra={"symbol": sym, "turnover": str(current_turnover), "limit": str(max_turnover)},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("turnover_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ğµ Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ñ‡ĞµÑ€ĞµĞ· Ğ±Ñ€Ğ¾ĞºĞµÑ€Ğ° ----
+    # ---- с ѴѰ ѵѵ ѾѰ ----
     try:
-        client_order_id = idem_key  # Ğ¸ÑĞ¿Ğ¾Ğ»ÑŒĞ·ÑƒĞµĞ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ñ‹Ğ¹ ĞºĞ»ÑÑ‡ ĞºĞ°Ğº client_order_id
+        client_order_id = idem_key  # сѷѵ ѵѽѹ ю  client_order_id
         if act == "buy":
             q_amt = q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
             _log.info("execute_order_buy", extra={"symbol": sym, "quote_amount": str(q_amt)})
@@ -241,28 +240,28 @@ async def execute_trade(
             order = await broker.create_market_sell_base(symbol=sym, base_amount=b_amt, client_order_id=client_order_id)
         else:
             return {"action": "skip", "executed": False, "reason": "invalid_side"}
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
             await bus.publish(EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
 
-    # ---- Ğ·Ğ°Ğ¿Ğ¸ÑÑŒ ÑĞ´ĞµĞ»ĞºĞ¸/Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ğ² Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğµ ----
+    # ---- с с/ѴѰ  Ѱѵ ----
     try:
         if hasattr(storage, "trades") and hasattr(storage.trades, "add_from_order"):
             storage.trades.add_from_order(order)
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("add_trade_failed", extra={"symbol": sym}, exc_info=True)
 
     try:
         if hasattr(storage, "orders") and hasattr(storage.orders, "upsert_open"):
             storage.orders.upsert_open(order)
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("upsert_order_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ¾ Ğ²Ñ‹Ğ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ğ¸ ÑĞ´ĞµĞ»ĞºĞ¸ (Ğ´Ğ»Ñ settlement/Ğ°Ğ»ĞµÑ€Ñ‚Ğ¾Ğ²) ----
+    # ---- сѸ  ѿ с (я settlement/Ѿ) ----
     try:
         await bus.publish(
             EVT.TRADE_COMPLETED,
@@ -276,7 +275,7 @@ async def execute_trade(
                 "fee_quote": str(getattr(order, "fee_quote", "")),
             },
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("publish_trade_completed_failed", extra={"symbol": sym}, exc_info=True)
 
     return {"action": act, "executed": True, "order": order}

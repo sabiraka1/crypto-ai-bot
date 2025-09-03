@@ -1,7 +1,6 @@
-﻿from __future__ import annotations
-
-import asyncio
+from __future__ import annotations
 from typing import Any
+import asyncio
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.decimal import dec

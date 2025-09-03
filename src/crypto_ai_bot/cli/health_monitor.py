@@ -1,10 +1,9 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
+from typing import Any
 import argparse
 import asyncio
 import json
 import os
-from typing import Any
 
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
@@ -17,7 +16,7 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:
+async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:  # noqa: ASYNC109
     try:
         resp = await aget(url, timeout=timeout)
         return {
@@ -26,30 +25,30 @@ async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:
             "text": resp.text,
             "json": (resp.json() if resp.headers.get("content-type", "").startswith("application/json") else None),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("health_fetch_failed", extra={"url": url}, exc_info=True)
         return {"status_code": 0, "ok": False, "text": "", "json": None}
 
 
-async def _oneshot(url: str, timeout: float) -> int:
+async def _oneshot(url: str, timeout: float) -> int:  # noqa: ASYNC109
     res = await _fetch_health(url, timeout)
     pretty = res.get("json") or res.get("text")
     try:
         out = json.dumps(pretty, ensure_ascii=False, indent=2) if isinstance(pretty, (dict, list)) else str(pretty)
-    except Exception:
+    except Exception:  # noqa: BLE001
         out = str(pretty)
     print(out)
     return 0 if res.get("ok") else 1
 
 
-async def _watch(url: str, timeout: float, interval: float) -> int:
+async def _watch(url: str, timeout: float, interval: float) -> int:  # noqa: ASYNC109
     while True:
         code = await _oneshot(url, timeout)
         await asyncio.sleep(max(0.5, interval))
         if code != 0:
-            # Ğ¿Ñ€Ğ¾Ğ´Ğ¾Ğ»Ğ¶Ğ°ĞµĞ¼ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ğµ, Ğ½Ğ¾ Ğ¿Ğ¸ÑˆĞµĞ¼ Ğ¿Ñ€ĞµĞ´ÑƒĞ¿Ñ€ĞµĞ¶Ğ´ĞµĞ½Ğ¸Ğµ
+            # Ѿ ю,  ѵ ѵѿѵ
             _log.warning("health_not_ok", extra={"url": url})
-    # Ğ½ĞµĞ´Ğ¾ÑÑ‚Ğ¸Ğ¶Ğ¸Ğ¼Ğ¾
+    # сѸ
     # return 0
 
 
@@ -63,7 +62,7 @@ def main() -> None:
 
     if args.oneshot:
         raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
-        # Ğ²ĞµÑ‡Ğ½Ğ¾Ğµ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ğµ
+        # ѽ ю
         try:
             asyncio.run(_watch(args.url, args.timeout, args.interval))
         except KeyboardInterrupt:
