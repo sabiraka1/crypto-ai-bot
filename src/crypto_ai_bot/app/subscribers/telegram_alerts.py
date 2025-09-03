@@ -11,6 +11,59 @@ from crypto_ai_bot.utils.metrics import inc
 _log = get_logger("subscribers.telegram")
 
 
+
+# --- Localization ---
+def _t(lang: str, key: str, **kw: str) -> str:
+    L = {
+        "en": {
+            "ORCH_PAUSED": "⏸️ <b>PAUSED</b> {symbol} (auto)",
+            "ORCH_RESUMED": "▶️ <b>RESUMED</b> {symbol} (auto)",
+            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nDrop: <code>{drop_pct}%</code>",
+            "DMS_SKIPPED": "ℹ️ <b>DMS SKIPPED</b> {symbol}",
+            "TRADE_COMPLETED": "💹 <b>TRADE</b> {symbol} {side}\nAmt: <code>{amount}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>",
+            "TRADE_FAILED": "❌ <b>TRADE FAILED</b> {symbol}\n<code>{error}</code>",
+            "TRADE_SETTLED": "✅ <b>SETTLED</b> {symbol} {side} id=<code>{order_id}</code>",
+            "SETTLEMENT_TIMEOUT": "⏱️ <b>SETTLEMENT TIMEOUT</b> {symbol} id=<code>{order_id}</code>",
+            "BUDGET_BLOCK": "⏳ <b>RISK/BUDGET BLOCK</b> {symbol}\n{detail}",
+            "RISK_BLOCKED": "⛔ <b>RISK/BLOCKED</b> {symbol}\nReason: <code>{reason}</code>",
+            "BROKER_ERROR": "⚠️ <b>BROKER ERROR</b> {symbol}\n<code>{error}</code>",
+            "HEALTH_FAIL": "🩻 <b>HEALTH FAIL</b>\n<code>{summary}</code>",
+        },
+        "ru": {
+            "ORCH_PAUSED": "⏸️ <b>ПАУЗА</b> {symbol} (авто)",
+            "ORCH_RESUMED": "▶️ <b>ВОЗОБНОВЛЕНО</b> {symbol} (авто)",
+            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nПадение: <code>{drop_pct}%</code>",
+            "DMS_SKIPPED": "ℹ️ <b>DMS ПРОПУЩЕН</b> {symbol}",
+            "TRADE_COMPLETED": "💹 <b>СДЕЛКА</b> {symbol} {side}\nКол-во: <code>{amount}</code> @ <code>{price}</code>\nСтоимость: <code>{cost}</code> Комиссия: <code>{fee}</code>",
+            "TRADE_FAILED": "❌ <b>ОШИБКА СДЕЛКИ</b> {symbol}\n<code>{error}</code>",
+            "TRADE_SETTLED": "✅ <b>ЗАВЕРШЕНО</b> {symbol} {side} id=<code>{order_id}</code>",
+            "SETTLEMENT_TIMEOUT": "⏱️ <b>ТАЙМАУТ ЗАВЕРШЕНИЯ</b> {symbol} id=<code>{order_id}</code>",
+            "BUDGET_BLOCK": "⏳ <b>РИСК/БЮДЖЕТ БЛОК</b> {symbol}\n{detail}",
+            "RISK_BLOCKED": "⛔ <b>РИСК/БЛОК</b> {symbol}\nПричина: <code>{reason}</code>",
+            "BROKER_ERROR": "⚠️ <b>ОШИБКА БРОКЕРА</b> {symbol}\n<code>{error}</code>",
+            "HEALTH_FAIL": "🩻 <b>НЕЗДОРОВО</b>\n<code>{summary}</code>",
+        },
+        "tr": {
+            "ORCH_PAUSED": "⏸️ <b>DURAKLATILDI</b> {symbol} (otomatik)",
+            "ORCH_RESUMED": "▶️ <b>DEVAM</b> {symbol} (otomatik)",
+            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nDüşüş: <code>{drop_pct}%</code>",
+            "DMS_SKIPPED": "ℹ️ <b>DMS ATLANDI</b> {symbol}",
+            "TRADE_COMPLETED": "💹 <b>İŞLEM</b> {symbol} {side}\nMiktar: <code>{amount}</code> @ <code>{price}</code>\nTutar: <code>{cost}</code> Ücret: <code>{fee}</code>",
+            "TRADE_FAILED": "❌ <b>İŞLEM HATASI</b> {symbol}\n<code>{error}</code>",
+            "TRADE_SETTLED": "✅ <b>KAPANDI</b> {symbol} {side} id=<code>{order_id}</code>",
+            "SETTLEMENT_TIMEOUT": "⏱️ <b>KAPANMA ZAMANI AŞIMI</b> {symbol} id=<code>{order_id}</code>",
+            "BUDGET_BLOCK": "⏳ <b>RİSK/BÜTÇE ENGELİ</b> {symbol}\n{detail}",
+            "RISK_BLOCKED": "⛔ <b>RİSK/ENGELLENDİ</b> {symbol}\nNeden: <code>{reason}</code>",
+            "BROKER_ERROR": "⚠️ <b>ARACI HATASI</b> {symbol}\n<code>{error}</code>",
+            "HEALTH_FAIL": "🩻 <b>SAĞLIK SORUNU</b>\n<code>{summary}</code>",
+        },
+    }
+    lang = (lang or "en").lower()
+    if lang not in L: lang = "en"
+    tpl = L[lang].get(key, L["en"].get(key, key))
+    return tpl.format(**kw)
+
+
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
     Subscribe EventBus alerts and forward to Telegram.
@@ -68,7 +121,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
 
     async def on_dms_skipped(evt: dict[str, Any]) -> None:
         inc("dms_skipped_total", symbol=evt.get("symbol", ""))
-        await _send(f" <b>DMS SKIPPED</b> {evt.get('symbol', '')}\n: <code>{evt.get('drop_pct', '')}%</code>")
+        await _send(_t(lang, 'DMS_TRIGGERED', symbol=evt.get('symbol',''), drop_pct=str(evt.get('drop_pct',''))))
 
     async def on_trade_completed(evt: dict[str, Any]) -> None:
         inc("trade_completed_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
@@ -78,13 +131,12 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         fee = evt.get("fee_quote", "")
         price = evt.get("price", "")
         amt = evt.get("amount", "")
-        await _send(
-            f" <b>TRADE</b> {s} {side.upper()}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>"
+        await _send(_t(lang, 'TRADE_COMPLETED', symbol=s, side=side.upper(), amount=str(amt), price=str(price), cost=str(cost), fee=str(fee)))}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>"
         )
 
     async def on_trade_failed(evt: dict[str, Any]) -> None:
         inc("trade_failed_total", symbol=evt.get("symbol", ""), reason=evt.get("error", ""))
-        await _send(f" <b>TRADE FAILED</b> {evt.get('symbol', '')}\n<code>{evt.get('error', '')}</code>")
+        await _send(_t(lang, 'TRADE_FAILED', symbol=evt.get('symbol',''), error=str(evt.get('error',''))))
 
     async def on_settled(evt: dict[str, Any]) -> None:
         inc("trade_settled_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
@@ -107,13 +159,11 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             if kind == "max_orders_5m"
             else f"turnover={evt.get('turnover', '')}/{evt.get('limit', '')}"
         )
-        await _send(f"⏳ <b>RISK/BUDGET BLOCK</b> {s}
-{detail}")
+        await _send(_t(lang, 'BUDGET_BLOCK', symbol=s, detail=detail))
 
     async def on_trade_blocked(evt: dict[str, Any]) -> None:
         inc("trade_blocked_total", symbol=evt.get("symbol", ""), reason=evt.get("reason", ""))
-        await _send(f"⛔ <b>RISK/BLOCKED</b> {evt.get('symbol', '')}
-Reason: <code>{evt.get('reason', '')}</code>")
+        await _send(_t(lang, 'RISK_BLOCKED', symbol=evt.get('symbol',''), reason=str(evt.get('reason',''))))
 
     async def on_broker_error(evt: dict[str, Any]) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
@@ -128,7 +178,7 @@ Reason: <code>{evt.get('reason', '')}</code>")
             if v and v != "ok":
                 parts.append(f"{k}={v}")
         summary = ", ".join(parts) or "degraded"
-        await _send(f" <b>HEALTH FAIL</b>\n<code>{summary}</code>")
+        await _send(_t(lang, 'HEALTH_FAIL', summary=summary))
 
     async def on_alertmanager(evt: dict[str, Any]) -> None:
         p = evt.get("payload", {}) or {}

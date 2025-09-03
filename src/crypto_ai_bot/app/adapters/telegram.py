@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio, time
+
 from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
@@ -10,9 +12,7 @@ _log = get_logger("adapters.telegram")
 
 
 class TelegramAlerts:
-    """
-    Adapter for Telegram (Bot API).
-    """
+    """Adapter for Telegram (Bot API)."""
 
     def __init__(
         self,
@@ -73,3 +73,20 @@ class TelegramAlerts:
             _log.error("telegram_send_exception", exc_info=True)
             success = False
         return success
+
+
+async def _bucket_acquire(self) -> None:
+    async with self._bucket_lock:
+        now = time.time()
+        elapsed = max(0.0, now - self._bucket_last)
+        self._bucket_last = now
+        # refill
+        self._bucket_tokens = min(5.0, self._bucket_tokens + elapsed * self._bucket_rate)
+        if self._bucket_tokens >= 1.0:
+            self._bucket_tokens -= 1.0
+            return
+        # need to wait for next token
+        need = 1.0 - self._bucket_tokens
+        await asyncio.sleep(need / self._bucket_rate)
+        # consume after wait
+        self._bucket_tokens = max(0.0, self._bucket_tokens - 1.0)
