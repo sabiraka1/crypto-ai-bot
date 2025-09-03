@@ -1,5 +1,5 @@
 from __future__ import annotations
-# src/crypto_ai_bot/core/application/use_cases/execute_trade.py
+
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
@@ -9,10 +9,11 @@ from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, Stora
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.symbols import canonical
 
 _log = get_logger("usecase.execute_trade")
 
-# Константы для дефолтных значений B008
+# Константы для дефолтных значений (избегаем предупреждения B008)
 _DEFAULT_ZERO = dec("0")
 _DEFAULT_KELLY_CAP = dec("0.5")
 
@@ -85,27 +86,33 @@ async def execute_trade(
     risk_manager: RiskManager | None = None,
     protective_exits: Any | None = None,
 ) -> Dict[str, Any]:
-    """Исполняет торговое решение (покупку или продажу) с учетом идемпотентности и риск-лимитов."""
-    # Обработка дефолтных значений для B008
-    if quote_amount is None:
-        quote_amount = _DEFAULT_ZERO
-    if base_amount is None:
-        base_amount = _DEFAULT_ZERO
-        
-    sym = symbol
-    act = side.lower()
+    """
+    Единый путь исполнения торгового решения (buy/sell) с учётом идемпотентности,
+    риск-ограничений, ограничений на спред/частоту/оборот, и записи в хранилище.
+    """
+
+    # --- канонизируем входы ---
+    sym = canonical(symbol)
+    act = (side or "").lower()
+
+    # Дефолты сумм
+    q_in = _DEFAULT_ZERO if quote_amount is None else dec(str(quote_amount))
+    b_in = _DEFAULT_ZERO if base_amount is None else dec(str(base_amount))
 
     # ---- идемпотентность: проверка дубликата ----
-    key_payload = f"{symbol}|{side}|{quote_amount}|{base_amount}|{getattr(settings, 'SESSION_RUN_ID', '') or ''}"
-    key = f"po:{hashlib.sha1(key_payload.encode('utf-8')).hexdigest()}"
-    idem = getattr(storage, "idempotency", None)
-    idem_repo = idem() if callable(idem) else None
+    session = getattr(settings, "SESSION_RUN_ID", "") or ""
+    key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"
+    idem_key = f"po:{hashlib.sha1(key_payload.encode('utf-8')).hexdigest()}"
+
+    idem_repo = None
     try:
+        idem = getattr(storage, "idempotency", None)
+        idem_repo = idem() if callable(idem) else None
         if idem_repo is not None:
-            if not bool(idem_repo.check_and_store(key, idempotency_ttl_sec)):
+            if not bool(idem_repo.check_and_store(idem_key, idempotency_ttl_sec)):
                 # Уже есть такое решение (дубликат)
                 await bus.publish("trade.blocked", {"symbol": sym, "reason": "duplicate"})
-                _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "duplicate"})
+                _log.warning("trade_blocked_duplicate", extra={"symbol": sym})
                 return {"action": "skip", "executed": False, "reason": "duplicate"}
     except Exception:
         _log.error("idempotency_check_failed", extra={"symbol": sym}, exc_info=True)
@@ -125,10 +132,10 @@ async def execute_trade(
                 allowed, reason = ls_rule.check(trades)
                 if not allowed:
                     await bus.publish("budget.exceeded", {"symbol": sym, "type": "loss_streak", "reason": reason})
-                    _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "loss_streak", "reason": reason})
+                    _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
-                pass  # LossStreakRule не найден
+                pass  # правило не подключено
     except Exception:
         _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
 
@@ -149,10 +156,10 @@ async def execute_trade(
                 allowed, reason = md_rule.check(current_balance=current, peak_balance=peak, daily_pnl=daily_pnl)
                 if not allowed:
                     await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_drawdown", "reason": reason})
-                    _log.warning("trade_blocked_budget", extra={"symbol": sym, "type": "max_drawdown", "reason": reason})
+                    _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
-                pass  # MaxDrawdownRule не найден
+                pass
     except Exception:
         _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
 
@@ -168,8 +175,8 @@ async def execute_trade(
                 if spread_pct > cfg.max_spread_pct:
                     await bus.publish("trade.blocked", {"symbol": sym, "reason": "spread"})
                     _log.warning(
-                        "trade_blocked_budget",
-                        extra={"symbol": sym, "type": "spread", "spread_pct": f"{spread_pct:.4f}", "limit_pct": str(cfg.max_spread_pct)},
+                        "trade_blocked_spread",
+                        extra={"symbol": sym, "spread_pct": f"{spread_pct:.4f}", "limit_pct": str(cfg.max_spread_pct)},
                     )
                     return {"action": "skip", "executed": False, "why": f"blocked: spread {spread_pct:.4f}%>{cfg.max_spread_pct}%"}
         except Exception:
@@ -180,10 +187,13 @@ async def execute_trade(
         try:
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
             if recent_count >= cfg.max_orders_5m:
-                await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_orders_5m", "count_5m": recent_count, "limit": cfg.max_orders_5m})
+                await bus.publish(
+                    "budget.exceeded",
+                    {"symbol": sym, "type": "max_orders_5m", "count_5m": recent_count, "limit": cfg.max_orders_5m},
+                )
                 _log.warning(
-                    "trade_blocked_budget",
-                    extra={"symbol": sym, "type": "max_orders_5m", "count_5m": recent_count, "limit": cfg.max_orders_5m},
+                    "trade_blocked_max_orders_5m",
+                    extra={"symbol": sym, "count_5m": recent_count, "limit": cfg.max_orders_5m},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
         except Exception:
@@ -200,8 +210,8 @@ async def execute_trade(
                     {"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(max_turnover_attr)},
                 )
                 _log.warning(
-                    "trade_blocked_budget",
-                    extra={"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(max_turnover_attr)},
+                    "trade_blocked_max_turnover_day",
+                    extra={"symbol": sym, "turnover": str(current_turnover), "limit": str(max_turnover_attr)},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
         except Exception:
@@ -209,13 +219,13 @@ async def execute_trade(
 
     # ---- исполнение ордера через брокера ----
     try:
-        client_id = key  # уникальный идентификатор ордера (идемпотентный ключ)
+        client_id = idem_key  # используем идемпотентный ключ как client_order_id
         if act == "buy":
-            q_amt = quote_amount if quote_amount and quote_amount > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
+            q_amt = q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
             _log.info("execute_order_buy", extra={"symbol": sym, "quote_amount": str(q_amt)})
             order = await broker.create_market_buy_quote(symbol=sym, quote_amount=q_amt, client_order_id=client_id)
         elif act == "sell":
-            b_amt = base_amount if base_amount and base_amount > dec("0") else dec("0")
+            b_amt = b_in if b_in and b_in > dec("0") else dec("0")
             _log.info("execute_order_sell", extra={"symbol": sym, "base_amount": str(b_amt)})
             order = await broker.create_market_sell_base(symbol=sym, base_amount=b_amt, client_order_id=client_id)
         else:
@@ -228,13 +238,22 @@ async def execute_trade(
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
 
-    # ---- запись сделки в хранилище + обновление позиции ----
+    # ---- запись сделки/ордера в хранилище ----
     try:
-        storage.trades.add_from_order(order)
+        # trades — событие совершения
+        if hasattr(storage, "trades") and hasattr(storage.trades, "add_from_order"):
+            storage.trades.add_from_order(order)
     except Exception:
         _log.error("add_trade_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- событие о выполнении сделки (для settlement) ----
+    try:
+        # orders — фиксируем открытый ордер для последующего settle (best-effort)
+        if hasattr(storage, "orders") and hasattr(storage.orders, "upsert_open"):
+            storage.orders.upsert_open(order)
+    except Exception:
+        _log.error("upsert_order_failed", extra={"symbol": sym}, exc_info=True)
+
+    # ---- событие о выполнении сделки (для settlement/алертов) ----
     try:
         await bus.publish(
             "trade.completed",
