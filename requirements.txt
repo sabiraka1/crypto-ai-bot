@@ -2,7 +2,7 @@
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<0.31
 gunicorn>=21.2,<22
-pydantic>=2.7,<3
+pydantic>=2.7,<2.10  # Ограничено до 2.10 для совместимости с safety
 
 # ASYNC / HTTP
 httpx>=0.27,<0.28
@@ -16,13 +16,8 @@ prometheus-client>=0.20,<0.21
 
 # STORAGE / BUS
 redis>=5.0,<6
+aioredis>=2.0,<3  # Добавлен для async Redis
 
 # UTIL
 requests>=2.31,<3
 python-dotenv>=1.0,<2
-
-# DEV (можно вынести в requirements-dev.txt, но оставим вместе для удобства CI)
-ruff>=0.6,<1
-mypy>=1.11,<2
-pytest>=8.2,<9
-import-linter>=2.0,<3
