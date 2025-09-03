@@ -142,7 +142,7 @@ class CcxtBroker:
         notional = amount * price
         limits = md.get("limits", {}) or {}
         min_notional = None
-        if "cost" in limits and "min" in limits["cost"]:
+        if "cost" in limits and "min" in limits["cost"] and limits["cost"]["min"] is not None:
             try:
                 min_notional = dec(str(limits["cost"]["min"]))
             except Exception:
@@ -183,6 +183,25 @@ class CcxtBroker:
             }
         except Exception as exc:
             inc("broker.request.error", fn="fetch_balance")
+            raise self._map_error(exc) from exc
+
+    async def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """Минимальная реализация для сверок ордеров."""
+        await self._ensure_markets()
+        gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
+        await self._bucket.acquire()
+        try:
+            t0 = asyncio.get_event_loop().time()
+            orders = await self._with_cb(self._cb_order, lambda: self.exchange.fetch_open_orders(gate))
+            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_open_orders"})
+            if not isinstance(orders, list):
+                return []
+            out: list[dict[str, Any]] = []
+            for o in orders:
+                out.append(dict(o) if not isinstance(o, dict) else o)
+            return out
+        except Exception as exc:
+            inc("broker.request.error", fn="fetch_open_orders")
             raise self._map_error(exc) from exc
 
     async def create_market_buy_quote(self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None) -> Any:

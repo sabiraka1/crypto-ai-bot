@@ -42,27 +42,29 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
     if md in ("paper", "sim", "simulation"):
         mod = _import_first(
             "crypto_ai_bot.core.infrastructure.brokers.paper",
-            # "crypto_ai_bot.core.infrastructure.brokers.simulator",  # удалён тобой — оставим как комментарий
         )
-        # Берём PaperBroker и его порт-адаптер
         PaperBroker = getattr(mod, "PaperBroker", None)
         PaperBrokerPortAdapter = getattr(mod, "PaperBrokerPortAdapter", None)
         if PaperBroker is None or PaperBrokerPortAdapter is None:
             raise ImportError("Paper broker or its port adapter not found in module")
 
         _log.info("make_broker_paper", extra={"exchange": ex})
-        # ВНИМАНИЕ: сохраняем текущую сигнатуру — PaperBroker(settings=...)
         core = PaperBroker(settings=settings)
         return PaperBrokerPortAdapter(core)
 
     if md in ("live", "real", "prod", "production"):
-        mod = _import_first(
+        # 1) Загружаем нашу обёртку
+        ccxt_mod = _import_first(
             "crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter",
-            "crypto_ai_bot.core.infrastructure.brokers.live",
         )
-        CcxtBroker = getattr(mod, "CcxtBroker", None)
+        CcxtBroker = getattr(ccxt_mod, "CcxtBroker", None)
         if CcxtBroker is None:
             raise ImportError("CcxtBroker class not found in ccxt broker module(s)")
+
+        # 2) Создаём реальный CCXT-клиент
+        import ccxt  # локальный импорт, чтобы не тянуть в paper-режиме
+        if not hasattr(ccxt, ex):
+            raise ValueError(f"Unsupported exchange {exchange!r} for ccxt")
 
         api_key = getattr(settings, "API_KEY", "") or ""
         api_secret = getattr(settings, "API_SECRET", "") or ""
@@ -70,15 +72,18 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
         http_timeout_sec = float(getattr(settings, "HTTP_TIMEOUT_SEC", 30) or 30)
         proxy = getattr(settings, "HTTP_PROXY", "") or None
 
+        cls = getattr(ccxt, ex)
+        exch = cls({
+            "apiKey": api_key,
+            "secret": api_secret,
+            "password": api_password or None,
+            "timeout": int(http_timeout_sec * 1000),
+            "enableRateLimit": True,
+            **({"proxy": proxy} if proxy else {}),
+        })
+
         _log.info("make_broker_live", extra={"exchange": ex})
-        return CcxtBroker(
-            exchange=ex,
-            api_key=api_key,
-            api_secret=api_secret,
-            api_password=api_password if api_password else None,
-            timeout_sec=http_timeout_sec,
-            proxy=proxy,
-            settings=settings,
-        )
+        # 3) Отдаём в обёртку готовый ccxt-инстанс
+        return CcxtBroker(exchange=exch, settings=settings)
 
     raise ValueError(f"Unsupported MODE={mode!r}. Use 'paper' or 'live'.")

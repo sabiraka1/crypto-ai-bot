@@ -1,4 +1,7 @@
-# События (единый реестр тем шины)
+from __future__ import annotations
+
+# Единая точка истинны темы — импортируем реестр и прокидываем константы наружу.
+from crypto_ai_bot.core.application import events_topics as EVT
 
 # Брокер/ордера
 ORDER_EXECUTED = EVT.ORDER_EXECUTED
@@ -10,7 +13,7 @@ TRADE_FAILED = EVT.TRADE_FAILED
 TRADE_SETTLED = EVT.TRADE_SETTLED
 TRADE_SETTLEMENT_TIMEOUT = EVT.TRADE_SETTLEMENT_TIMEOUT
 TRADE_BLOCKED = EVT.TRADE_BLOCKED
-TRADE_PARTIAL_FOLLOWUP = EVT.TRADE_PARTIAL_FOLLOWUP  # <-- добавлено
+TRADE_PARTIAL_FOLLOWUP = EVT.TRADE_PARTIAL_FOLLOWUP
 
 # Здоровье и наблюдаемость
 WATCHDOG_HEARTBEAT = EVT.WATCHDOG_HEARTBEAT
@@ -20,7 +23,7 @@ HEALTH_REPORT = EVT.HEALTH_REPORT
 RISK_BLOCKED = EVT.RISK_BLOCKED
 BUDGET_EXCEEDED = EVT.BUDGET_EXCEEDED
 
-# Оценка/решение
+# Оценка/решение (локальные рабочие темы)
 EVALUATION_STARTED = "evaluation.started"
 DECISION_EVALUATED = "decision.evaluated"
 

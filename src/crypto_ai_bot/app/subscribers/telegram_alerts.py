@@ -40,7 +40,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
-    # ====== Хэндлеры ======
+    # ====== Handlers ======
 
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
@@ -131,7 +131,6 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             lines.append(f"- `{name}` {text}")
         await _send("\n".join(lines))
 
-    # Подписки на тематику (через константы)
     for topic, handler in [
         (EVT.ORCH_AUTO_PAUSED, on_auto_paused),
         (EVT.ORCH_AUTO_RESUMED, on_auto_resumed),

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from __future__ import annotations
+
+import asyncio
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -8,7 +11,8 @@ from decimal import Decimal
 from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
-from crypto_ai_bot.app.subscribers.telegram_alerts import attach_alerts  # <-- use subscriber, not inline
+from crypto_ai_bot.app.subscribers.telegram_alerts import attach_alerts
+from crypto_ai_bot.core.application import events_topics as EVT  # ← добавлено
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort, BrokerPort

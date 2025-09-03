@@ -21,6 +21,7 @@ class MarketDataRepository:
             )
             """
         )
+        self._c.execute("CREATE INDEX IF NOT EXISTS idx_md_symbol_ts ON market_data(symbol, ts_ms)")
         self._c.commit()
 
     def store_ticker(self, ticker: TickerDTO) -> None:
@@ -32,12 +33,16 @@ class MarketDataRepository:
 
     def list_recent(self, symbol: str, limit: int = 100) -> list[dict[str, Any]]:
         cur = self._c.execute(
-            "SELECT symbol,last,bid,ask,ts_ms FROM market_data WHERE symbol=? ORDER BY ts_ms DESC LIMIT ?",
-            (symbol, limit),
+            """
+            SELECT symbol,last,bid,ask,ts_ms
+            FROM market_data
+            WHERE symbol=?
+            ORDER BY ts_ms DESC
+            LIMIT ?
+            """,
+            (symbol, int(limit)),
         )
         return [dict(r) for r in cur.fetchall()]
 
 
-# РЎРѕРІРјРµСЃС‚РёРјРѕСЃС‚СЊ СЃРѕ СЃС‚Р°СЂС‹Рј РёРјРµРЅРµРј
-MarketDataRepository = MarketDataRepository
-
+__all__ = ["MarketDataRepository"]
