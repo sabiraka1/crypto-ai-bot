@@ -1,22 +1,28 @@
 ﻿from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Optional
 
-from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.settings_keys import per_symbol_override
+from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
 
 
-def check(storage: Any, symbol: str, settings: Any) -> dict[str, str] | None:  # Ğ˜ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¾: Ğ´Ğ¾Ğ±Ğ°Ğ²Ğ»ĞµĞ½ Ñ‚Ğ¸Ğ¿ storage
-    # max orders / 5m
-    max_orders_5m = per_symbol_override(settings, symbol, "BUDGET_MAX_ORDERS_5M", lambda s: int(float(s)), 0)
-    if max_orders_5m > 0:
-        cnt5 = storage.trades.count_orders_last_minutes(symbol, 5)
-        if cnt5 >= max_orders_5m:
-            return {"type": "max_orders_5m", "count_5m": str(cnt5), "limit": str(int(max_orders_5m))}
-    # daily turnover (quote)
-    max_turnover = per_symbol_override(settings, symbol, "BUDGET_MAX_TURNOVER_DAY_QUOTE", lambda s: dec(s), dec("0"))
-    if max_turnover > 0:
-        day_turn = storage.trades.daily_turnover_quote(symbol)
-        if day_turn >= max_turnover:
-            return {"type": "max_turnover_day", "turnover": str(day_turn), "limit": str(max_turnover)}
-    return None
+def check(
+    storage: Any,
+    symbol: str,
+    settings: Any,
+    *,
+    risk_manager: Optional[RiskManager] = None,
+) -> Optional[Dict[str, str]]:
+    """
+    Тонкая обёртка над RiskManager: никакой собственной логики.
+    Возвращает dict-описание превышения лимита или None (если можно торговать).
+    """
+    rm = risk_manager or RiskManager(cfg=RiskConfig.from_settings(settings))
+    ok, reason, extra = rm.check(symbol=symbol, storage=storage)
+    if ok:
+        return None
+
+    out: Dict[str, str] = {"type": (extra or {}).get("type", "risk"), "reason": (reason or "blocked")}
+    for k, v in (extra or {}).items():
+        if v is not None:
+            out[k] = str(v)
+    return out

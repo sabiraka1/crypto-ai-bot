@@ -1,10 +1,7 @@
 ﻿from __future__ import annotations
-import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort
-from crypto_ai_bot.core.infrastructure.storage.facade import Storage
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -13,13 +10,14 @@ _log = get_logger("health")
 
 class HealthChecker:
     """
-    Простые проверки состояния компонентов:
-      - DB: SELECT 1
-      - Broker: легкий вызов (fetch_ticker на дефолтном символе) или ping(), если доступно
-      - Bus: пробный publish без исключения
+    Проверки компонент:
+      - DB: SELECT 1 (через storage.conn)
+      - Broker: ping() или fetch_ticker на дефолтном символе
+      - Bus: пробный publish
+    Только application-порты, без прямых импортов infra-классов.
     """
 
-    def __init__(self, *, storage: Storage, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
+    def __init__(self, *, storage: Any, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
         self._st = storage
         self._br = broker
         self._bus = bus
@@ -28,6 +26,7 @@ class HealthChecker:
 
     async def ready(self) -> Dict[str, str]:
         res: Dict[str, str] = {"db": "ok", "broker": "ok", "bus": "ok"}
+
         # DB
         try:
             self._st.conn.execute("SELECT 1;")
@@ -48,20 +47,16 @@ class HealthChecker:
         # Bus
         try:
             if hasattr(self._bus, "publish"):
-                await self._bus.publish(EVT.WATCHDOG_HEARTBEAT, {"source": "health", "ts": None})
+                # публикация пробного сообщения; шина может его игнорировать
+                await self._bus.publish("watchdog.heartbeat", {"source": "health"})
         except Exception as e:
             _log.error("bus_ready_fail", exc_info=True)
             res["bus"] = f"bus:{type(e).__name__}"
 
         ok = all(v == "ok" for v in res.values())
-        if not ok and hasattr(self._bus, "publish"):
-            try:
-                await self._bus.publish(EVT.HEALTH_REPORT, {"ok": False, **res})
-            except Exception:
-                pass
-        if ok:
-            inc("health_ready_ok_total")
-        else:
-            inc("health_ready_fail_total")
-
+        inc("health_ready_ok_total" if ok else "health_ready_fail_total")
         return res
+
+    async def tick(self) -> Dict[str, str]:
+        # Алиас для совместимости с оркестратором
+        return await self.ready()

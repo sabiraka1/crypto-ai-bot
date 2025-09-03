@@ -1,57 +1,66 @@
 ﻿from __future__ import annotations
-
-from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Optional
+from decimal import Decimal
 
+from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.logging import get_logger
+from crypto_ai_bot.utils.metrics import hist
 
-# ==== РЎРѕРІРјРµСЃС‚РёРјС‹Р№ РїСѓР±Р»РёС‡РЅС‹Р№ API РґР»СЏ СЃС‚СЂР°С‚РµРіРёР№ ====
-
-@dataclass(frozen=True)
-class Decision:
-    """
-    Р РµС€РµРЅРёРµ СЃС‚СЂР°С‚РµРіРёРё:
-    - action: 'buy' | 'sell' | 'hold'
-    - confidence: 0..1 (РІРµСЃ)
-    - quote_amount/base_amount: Р¶РµР»Р°РµРјС‹Рµ РѕР±СЉС‘РјС‹
-    - reason: РїРѕСЏСЃРЅРµРЅРёРµ (РґР»СЏ Р»РѕРіРѕРІ/СѓРІРµРґРѕРјР»РµРЅРёР№)
-    """
-    action: str
-    confidence: float = 0.0
-    quote_amount: str | None = None
-    base_amount: str | None = None
-    reason: str = ""
+_log = get_logger("strategy.base")
 
 
 @dataclass(frozen=True)
-class StrategyContext:
-    """РљРѕРЅС‚РµРєСЃС‚ РіРµРЅРµСЂР°С†РёРё СЃРёРіРЅР°Р»Р°."""
-    symbol: str
-    settings: Any
-    data: dict[str, Any] | None = None  # Р”РѕР±Р°РІР»РµРЅ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРј РєРѕРґРѕРј
+class Signal:
+    side: str            # "buy" | "sell" | "none"
+    score: Decimal       # [-1..+1]
+    reason: str = ""     # краткая причина
 
 
-class MarketData(Protocol):
-    """РџРѕСЂС‚ РґР»СЏ РїРѕР»СѓС‡РµРЅРёСЏ СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С…."""
-    async def get_ohlcv(
-        self, symbol: str, timeframe: str = "1m", limit: int = 200
-    ) -> Sequence[tuple[Any, ...]]: ...
-    async def get_ticker(self, symbol: str) -> dict[str, Any]: ...
+class BaseStrategy:
+    """
+    Шаблонный метод:
+      - prepare()  -> подготовка фич/кэша (опционально)
+      - signal()   -> сторона/score
+      - sizing()   -> целевой размер (quote/base) (опционально)
+      - validate() -> инварианты, фильтры
+    Внешний контракт: generate(ctx, md) -> dict
+    """
 
+    name: str = "base"
 
-# Р”Р»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃРѕ СЃС‚Р°СЂС‹Рј РёРјРµРЅРѕРІР°РЅРёРµРј:
-MarketData = MarketData
+    async def prepare(self, ctx: Any, md: Any) -> None:
+        return None
 
+    async def signal(self, ctx: Any, md: Any) -> Signal:  # override
+        return Signal(side="none", score=dec("0"), reason="noimpl")
 
-class BaseStrategy(ABC):
-    """Р‘Р°Р·РѕРІС‹Р№ РєРѕРЅС‚СЂР°РєС‚ СЃС‚СЂР°С‚РµРіРёРё."""
+    async def sizing(self, ctx: Any, md: Any, sig: Signal) -> dict[str, str | Decimal]:
+        # по умолчанию — без изменения размера; конкретные стратегии переопределяют
+        return {"mode": "fixed_quote", "quote_amount": dec(str(getattr(ctx, "FIXED_AMOUNT", "0") or "0"))}
 
-    @abstractmethod
-    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision: ...
-    
-    # Р”РѕР±Р°РІР»СЏРµРј РјРµС‚РѕРґ decide РґР»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
-    def decide(self, ctx: StrategyContext) -> tuple[str, dict[str, Any]]:
-        """Р›РµРіР°СЃРё РјРµС‚РѕРґ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃРѕ СЃС‚Р°СЂС‹Рј РєРѕРґРѕРј."""
-        # Р‘СѓРґРµС‚ РїРµСЂРµРѕРїСЂРµРґРµР»РµРЅ РІ РєРѕРЅРєСЂРµС‚РЅС‹С… СЃС‚СЂР°С‚РµРіРёСЏС…
-        return "hold", {"reason": "not_implemented"}
+    async def validate(self, ctx: Any, md: Any, sig: Signal) -> tuple[bool, str]:
+        # общий фильтр: запрещаем бессмысленные сигналы
+        if sig.side not in ("buy", "sell", "none"):
+            return False, "invalid_side"
+        return True, ""
+
+    async def generate(self, ctx: Any, md: Any) -> dict[str, Any]:
+        t0 = getattr(__import__("time"), "time")()
+        await self.prepare(ctx, md)
+
+        sig = await self.signal(ctx, md)
+        ok, why = await self.validate(ctx, md, sig)
+        if not ok or sig.side == "none":
+            hist("strategy.generate.ms", ( __import__("time").time() - t0 ) * 1000, {"name": self.name, "side": "none"})
+            return {"action": "skip", "reason": why or sig.reason, "score": str(sig.score)}
+
+        size = await self.sizing(ctx, md, sig)
+        out = {
+            "action": sig.side,
+            "score": str(sig.score),
+            "sizing": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in size.items()},
+            "reason": sig.reason,
+        }
+        hist("strategy.generate.ms", ( __import__("time").time() - t0 ) * 1000, {"name": self.name, "side": sig.side})
+        return out
