@@ -9,8 +9,12 @@ from crypto_ai_bot.utils.logging import get_logger
 _log = get_logger("macro.btc_dom_http")
 
 
-class BtcDominanceHttp(BtcDomPort):  # Ğ•Ğ´Ğ¸Ğ½Ğ¾Ğµ Ğ¸Ğ¼Ñ BtcDominanceHttp
-    """HTTP-Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº BTC Dominance. JSON: {"change_pct": -0.25}"""
+class BtcDominanceHttp(BtcDomPort):
+    """
+    HTTP-источник BTC Dominance.
+    Ожидаемый JSON: {"change_pct": -0.25}
+    """
+
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
         self._url = url
         self._timeout = float(timeout_sec)
@@ -22,9 +26,13 @@ class BtcDominanceHttp(BtcDomPort):  # Ğ•Ğ´Ğ¸Ğ½Ğ¾Ğµ Ğ¸Ğ¼Ñ Bt
                 r.raise_for_status()
                 data: Any = r.json()
                 return self._parse_change_pct(data)
+        except httpx.HTTPStatusError as e:
+            _log.warning("btc_dom_http_status", extra={"url": self._url, "status": e.response.status_code})
+        except httpx.RequestError as e:
+            _log.warning("btc_dom_http_request", extra={"url": self._url, "error": str(e)})
         except Exception:
-            _log.warning("btc_dom_http_failed", extra={"url": self._url}, exc_info=True)
-            return None
+            _log.error("btc_dom_http_failed", extra={"url": self._url}, exc_info=True)
+        return None
 
     @staticmethod
     def _parse_change_pct(data: Any) -> Optional[float]:
@@ -32,5 +40,5 @@ class BtcDominanceHttp(BtcDomPort):  # Ğ•Ğ´Ğ¸Ğ½Ğ¾Ğµ Ğ¸Ğ¼Ñ Bt
             if isinstance(data, dict) and "change_pct" in data:
                 return float(data["change_pct"])
         except Exception:
-            return None
+            _log.debug("btc_dom_parse_failed", exc_info=True)
         return None

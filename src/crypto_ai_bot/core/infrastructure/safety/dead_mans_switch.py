@@ -5,11 +5,15 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from crypto_ai_bot.utils.logging import get_logger
+
 try:
     from crypto_ai_bot.core.application import events_topics as EVT
     _DMS_TOPIC = getattr(EVT, "DMS_TRIGGERED", "safety.dead_mans_switch.triggered")
 except Exception:
     _DMS_TOPIC = "safety.dead_mans_switch.triggered"
+
+_log = get_logger("safety.dms")
 
 
 @dataclass
@@ -27,21 +31,26 @@ class DeadMansSwitch:
     _last_healthy_price: Decimal | None = None
 
     async def check(self) -> None:
-        # Skip branch explicitly used in tests
+        """
+        Лёгкий защитный триггер по резкой просадке цены:
+        - делает 0..N повторных проверок цены с задержкой;
+        - при срабатывании пытается продать базовый актив (best-effort);
+        - публикует событие в шину.
+        """
+        # Skip branch (настройка для юнит-тестов)
         if self.max_impact_pct and self.max_impact_pct > 0:
             return
         if not self.broker or not self.symbol:
             return
 
-        # first snapshot
+        # первый снимок
         t = await self.broker.fetch_ticker(self.symbol)
         last = Decimal(str(getattr(t, "last", "0")))
-
         if self._last_healthy_price is None:
             self._last_healthy_price = last
             return
 
-        # optional recheck(s)
+        # повторы
         cur = last
         for _ in range(max(0, int(self.rechecks))):
             if self.recheck_delay_sec:
@@ -49,22 +58,23 @@ class DeadMansSwitch:
             t2 = await self.broker.fetch_ticker(self.symbol)
             cur = Decimal(str(getattr(t2, "last", str(cur))))
 
-        # trigger if drop >= 3%
+        # триггер: падение >= 3%
         threshold = Decimal("0.97") * self._last_healthy_price
         if cur < threshold:
-            # execute protective sell (the test only checks that it was awaited)
             try:
+                # best-effort: не валим поток, но и не глушим исключение
                 await self.broker.create_market_sell_base(self.symbol, Decimal("0"))
-            except Exception:
-                # keep silent in tests where signature differs
-                pass
-            # publish event
+            except Exception as exc:
+                _log.warning(
+                    "dms_sell_failed",
+                    extra={"symbol": self.symbol, "error": str(exc)},
+                    exc_info=True,
+                )
             if self.bus and hasattr(self.bus, "publish"):
-                await self.bus.publish(_DMS_TOPIC, {
-                    "symbol": self.symbol,
-                    "prev": str(self._last_healthy_price),
-                    "last": str(cur),
-                })
+                await self.bus.publish(
+                    _DMS_TOPIC,
+                    {"symbol": self.symbol, "prev": str(self._last_healthy_price), "last": str(cur)},
+                )
             self._last_healthy_price = cur
         else:
             self._last_healthy_price = max(self._last_healthy_price, cur)
