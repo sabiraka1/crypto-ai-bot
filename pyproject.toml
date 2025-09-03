@@ -5,46 +5,51 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crypto-ai-bot"
 version = "0.1.0"
-description = "Production-ready ASGI trading bot (Gate.io via CCXT), long-only, paper/live parity, protective exits, reconciliation, observability"
+description = "Production-ready ASGI trading bot (Gate.io via CCXT)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Sabir Sahbaz" }]
 
 dependencies = [
-  "fastapi>=0.115,<1.0",
-  "uvicorn[standard]>=0.30,<0.31",
-  "gunicorn>=21.2,<22",
-  "httpx>=0.27,<0.28",
-  "ccxt>=4.2,<5",
-  "prometheus-client>=0.20,<0.21",
-  "pydantic>=2.7,<3",
-  "requests>=2.31,<3",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<0.31",
+    "gunicorn>=21.2,<22",
+    "httpx>=0.27,<0.28",
+    "ccxt>=4.2,<5",
+    "prometheus-client>=0.20,<0.21",
+    "pydantic>=2.7,<3",
+    "requests>=2.31,<3",
 ]
 
 [project.optional-dependencies]
-charts = ["matplotlib>=3.8,<3.10"]
-backtest = ["numpy>=1.26,<2.0", "pandas>=2.2,<3.0"]
+charts = [
+    "matplotlib>=3.8,<3.10"
+]
+backtest = [
+    "numpy>=1.26,<2.0",
+    "pandas>=2.2,<3.0"
+]
 dev = [
-  "pytest>=8.2,<9",
-  "pytest-asyncio>=0.23,<1",
-  "pytest-mock>=3.12,<4",
-  "coverage>=7.4,<8",
-  "ruff>=0.6,<0.7",
-  "pre-commit>=3.6,<4",
-  "mypy>=1.8,<2",
-  "import-linter>=2.0,<3",
-  "black>=24.0,<25",
-  "isort>=5.13,<6",
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-mock>=3.12,<4",
+    "coverage>=7.4,<8",
+    "ruff>=0.6,<0.7",
+    "pre-commit>=3.6,<4",
+    "mypy>=1.8,<2",
+    "import-linter>=2.0,<3",
+    "black>=24.0,<25",
+    "isort>=5.13,<6",
 ]
 
 [project.scripts]
-# CLI-команды (см. README)
-cab-maintenance   = "crypto_ai_bot.cli.maintenance:main"
-cab-reconcile     = "crypto_ai_bot.cli.reconcile:main"
-cab-health        = "crypto_ai_bot.cli.health_monitor:main"
-cab-perf          = "crypto_ai_bot.cli.performance:main"
-cab-smoke         = "crypto_ai_bot.cli.smoke:main"
+# CLI commands
+cab-maintenance = "crypto_ai_bot.cli.maintenance:main"
+cab-reconcile = "crypto_ai_bot.cli.reconcile:main"
+cab-health = "crypto_ai_bot.cli.health_monitor:main"
+cab-perf = "crypto_ai_bot.cli.performance:main"
+cab-smoke = "crypto_ai_bot.cli.smoke:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -53,57 +58,88 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["crypto_ai_bot*"]
 
-# ✂️ Блоки tool.ruff удалены — конфигурация Ruff теперь только в .ruff.toml
-
-[tool.mypy]
-python_version = "3.11"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-no_implicit_optional = true
-strict_optional = true
-
-[[tool.mypy.overrides]]
-module = "ccxt.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "prometheus_client.*"
-ignore_missing_imports = true
-
+# ──────────────────────────────────────────────────────
+# PYTEST CONFIGURATION
+# ──────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = [
-  "-ra",
-  "--strict-markers",
-  "--strict-config",
-  "--cov=crypto_ai_bot",
-  "--cov-report=term-missing:skip-covered",
-  "--cov-report=html",
-  "--cov-fail-under=80",
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=crypto_ai_bot",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-report=html",
 ]
 testpaths = ["tests"]
+pythonpath = ["src"]
 asyncio_mode = "auto"
 markers = [
-  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-  "integration: marks tests as integration tests",
-  "unit: marks tests as unit tests",
+    "slow: marks tests as slow",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
 ]
 
+# ──────────────────────────────────────────────────────
+# COVERAGE CONFIGURATION
+# ──────────────────────────────────────────────────────
 [tool.coverage.run]
-source = ["crypto_ai_bot"]
-omit = ["*/tests/*","*/backtest/*","*/types/*","*/analytics/*"]
+source_pkgs = ["crypto_ai_bot"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__init__.py",
+    "*/migrations/*",
+]
+
+[tool.coverage.paths]
+source = [
+    "src/crypto_ai_bot",
+    "*/site-packages/crypto_ai_bot",
+]
 
 [tool.coverage.report]
 exclude_lines = [
-  "pragma: no cover",
-  "def __repr__",
-  "if self.debug:",
-  "if settings.DEBUG",
-  "raise AssertionError",
-  "raise NotImplementedError",
-  "if 0:",
-  "if __name__ == \"__main__\":",
-  "class .*\\bProtocol\\):",
-  "@(abc\\.)?abstractmethod",
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == \"__main__\":",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "pass",
 ]
+skip_covered = true
+show_missing = true
+
+# ──────────────────────────────────────────────────────
+# BLACK CONFIGURATION (if used)
+# ──────────────────────────────────────────────────────
+[tool.black]
+line-length = 110
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.mypy_cache
+  | \.pytest_cache
+  | \.ruff_cache
+  | __pycache__
+  | migrations
+)/
+'''
+
+# ──────────────────────────────────────────────────────
+# ISORT CONFIGURATION (backup, primary in ruff.toml)
+# ──────────────────────────────────────────────────────
+[tool.isort]
+profile = "black"
+line_length = 110
+known_first_party = ["crypto_ai_bot"]
+known_third_party = ["ccxt", "redis", "fastapi", "pydantic", "httpx", "prometheus_client"]
+src_paths = ["src", "tests"]
+skip_glob = ["*/migrations/*"]

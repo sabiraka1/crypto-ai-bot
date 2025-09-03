@@ -1,272 +1,124 @@
 # Crypto AI Bot - Balanced Ruff Configuration
-# Focus: catch critical errors, maintain code quality, avoid false positives
+# Paths are relative to repo root, without 'src/' prefix
 target-version = "py311"
-line-length = 110  # Balanced: not too strict, not too loose
+line-length = 110
 
 [lint]
 select = [
-    # CRITICAL - Always needed
-    "E",           # pycodestyle errors
-    "F",           # pyflakes (undefined names, imports)
-    "W",           # pycodestyle warnings
-    
-    # IMPORTANT - Code quality
-    "I",           # isort (import sorting)
-    "UP",          # pyupgrade (modern Python patterns)
-    "N",           # pep8-naming (naming conventions)
-    "B",           # flake8-bugbear (common bugs)
-    
-    # SECURITY - Critical for trading
-    "S",           # bandit (security issues)
-    "BLE",         # blind-except (catch Exception handling)
-    
-    # ASYNC - Critical for trading bot
-    "ASYNC",       # async/await best practices
-    
-    # PERFORMANCE - Important for trading
-    "PERF",        # performance anti-patterns
-    "C4",          # list/dict/set comprehensions
-    
-    # CODE QUALITY - Medium priority
-    "SIM",         # simplify (code simplification)
-    "RET",         # return statements
-    "ARG",         # unused arguments
-    "TRY",         # try/except patterns
-    
-    # TRADING SPECIFIC
-    "A",           # builtin shadowing (important for 'id', 'type')
+    "E", "F", "W",       # pycodestyle + pyflakes
+    "B", "C90",          # bugbear + complexity
+    "I",                 # isort
+    "UP",                # pyupgrade
+    "S",                 # bandit security
+    "N",                 # pep8-naming
+    "SIM", "RET", "PERF",# simplify + return + performance
+    "ASYNC",             # async/await patterns
+    "A",                 # flake8-builtins
+    "BLE",               # blind-except
+    "C4",                # comprehensions
+    "ARG",               # unused arguments
+    "TRY",               # exception handling
 ]
 
-# Minimal ignores - only what's really needed
 ignore = [
-    # Line length - controlled by line-length setting
-    "E501",        # line too long
-    
-    # Complexity - handle per-file for specific cases
-    "C901",        # function too complex
-    
-    # Lambda - sometimes useful
-    "E731",        # don't assign lambda
-    
-    # Common in trading APIs
-    "B008",        # function call in default argument
-    "B904",        # raise without from in except
-    
-    # Assert is OK in domain validation
-    "S101",        # use of assert
-    
-    # Trading APIs often have these
-    "A003",        # class attribute shadows builtin (type, id)
-    "ARG002",      # unused method argument (interfaces)
-    
-    # Too strict for now
-    "SIM108",      # ternary operator (sometimes less readable)
-    "TRY003",      # long exception messages (need context in trading)
+    "E501",              # line too long (controlled by line-length)
+    "E731",              # lambda assignment
+    "B904",              # raise without from
+    "B008",              # function call in default argument
+    "S101",              # assert statements
+    "A003",              # builtin attribute shadowing
+    "ARG002",            # unused method argument
+    "TRY003",            # long exception messages
 ]
 
 [lint.per-file-ignores]
-# =============================================================================
-# TEST FILES - More relaxed
-# =============================================================================
+# Tests
 "tests/**/*.py" = [
-    "S",           # security not critical in tests
-    "ARG",         # unused arguments OK in fixtures
-    "BLE001",      # bare except OK in tests
-    "B018",        # useless expression OK in tests
-    "SIM",         # simplification not critical
-    "N802",        # function names can be test_CamelCase
+    "S", "ARG", "BLE001", "SIM", "N802"
 ]
 
-# =============================================================================
-# SCRIPTS & CLI - Operational tools
-# =============================================================================
+# Scripts
 "scripts/**/*.py" = [
-    "T20",         # print() OK in scripts
-    "S",           # security checks can be relaxed
+    "T20", "S"
 ]
 
-"src/crypto_ai_bot/cli/*.py" = [
-    "T20",         # print statements OK in CLI
-    "BLE001",      # broad exception handling for user-friendly errors
-    "TRY301",      # raise in try block OK for CLI
-    "ARG001",      # unused arguments in CLI commands
+# CLI tools - note: no src/ prefix
+"crypto_ai_bot/cli/*.py" = [
+    "T20", "BLE001", "TRY301", "ARG001"
 ]
 
-# =============================================================================
-# APP LAYER - API and composition
-# =============================================================================
-"src/crypto_ai_bot/app/server.py" = [
-    "ARG001",      # FastAPI requires unused args (request, app)
-    "ASYNC109",    # async-function-with-timeout OK
-    "B008",        # FastAPI Depends() in defaults
+# App layer
+"crypto_ai_bot/app/server.py" = [
+    "ARG001", "ASYNC109", "B008"
 ]
 
-"src/crypto_ai_bot/app/compose.py" = [
-    "BLE001",      # broad exception for startup failures
-    "C901",        # complexity OK in DI composition
+"crypto_ai_bot/app/compose.py" = [
+    "BLE001", "C901"
 ]
 
-# Telegram adapters - external API integration
-"src/crypto_ai_bot/app/adapters/telegram*.py" = [
-    "BLE001",      # broad except for network errors
-    "TRY301",      # raise within try for retries
-    "S101",        # assert for message validation
+"crypto_ai_bot/app/adapters/telegram*.py" = [
+    "BLE001", "TRY301", "S101"
 ]
 
-"src/crypto_ai_bot/app/subscribers/*.py" = [
-    "BLE001",      # broad except for event handling
-    "ARG001",      # unused event data OK
+"crypto_ai_bot/app/subscribers/*.py" = [
+    "BLE001", "ARG001"
 ]
 
-# =============================================================================
-# CORE APPLICATION - Business logic (moderate strictness)
-# =============================================================================
-"src/crypto_ai_bot/core/application/orchestrator.py" = [
-    "C901",        # orchestrator can be complex
-    "BLE001",      # catch-all for graceful degradation
+# Core application
+"crypto_ai_bot/core/application/orchestrator.py" = [
+    "C901", "BLE001"
 ]
 
-"src/crypto_ai_bot/core/application/use_cases/execute_trade.py" = [
-    # CRITICAL FILE - minimal ignores only
-    "TRY301",      # raise in try block for retries
-    "BLE001",      # broad except for broker errors
+"crypto_ai_bot/core/application/use_cases/execute_trade.py" = [
+    "TRY301", "BLE001"
 ]
 
-"src/crypto_ai_bot/core/application/protective_exits.py" = [
-    "BLE001",      # broad except for exit safety
-    "PERF401",     # list comprehension OK for readability
+"crypto_ai_bot/core/application/protective_exits.py" = [
+    "BLE001", "PERF401"
 ]
 
-"src/crypto_ai_bot/core/application/reconciliation/*.py" = [
-    "BLE001",      # broad except for reconciliation safety
+"crypto_ai_bot/core/application/events_topics.py" = [
+    "N812"
 ]
 
-# Event topics registry
-"src/crypto_ai_bot/core/application/events_topics.py" = [
-    "N812",        # lowercase 'EVT' alias OK
+# Core domain
+"crypto_ai_bot/core/domain/strategies/*.py" = [
+    "C901"
 ]
 
-# =============================================================================
-# CORE DOMAIN - Strictest (minimal ignores)
-# =============================================================================
-# Risk management - CRITICAL, no additional ignores
-
-# Strategies might need some flexibility
-"src/crypto_ai_bot/core/domain/strategies/*.py" = [
-    "C901",        # strategy logic can be complex
+"crypto_ai_bot/core/domain/signals/*.py" = [
+    "C901"
 ]
 
-# Signals processing
-"src/crypto_ai_bot/core/domain/signals/*.py" = [
-    "C901",        # signal fusion can be complex
+# Infrastructure
+"crypto_ai_bot/core/infrastructure/brokers/*.py" = [
+    "BLE001", "ARG", "C901", "TRY301", "S324"
 ]
 
-# =============================================================================
-# INFRASTRUCTURE - External integrations
-# =============================================================================
-# Broker adapters - external API
-"src/crypto_ai_bot/core/infrastructure/brokers/*.py" = [
-    "BLE001",      # broad except for exchange errors
-    "ARG",         # CCXT has many unused params
-    "C901",        # broker logic can be complex
-    "TRY301",      # raise in try for retries
-    "S324",        # hashlib for order IDs OK
+"crypto_ai_bot/core/infrastructure/storage/*.py" = [
+    "S608", "BLE001"
 ]
 
-# Storage and migrations
-"src/crypto_ai_bot/core/infrastructure/storage/*.py" = [
-    "S608",        # SQL injection - controlled queries
-    "BLE001",      # broad except for DB errors
+"crypto_ai_bot/core/infrastructure/storage/migrations/*.py" = [
+    "S608", "E501"
 ]
 
-"src/crypto_ai_bot/core/infrastructure/storage/migrations/*.py" = [
-    "S608",        # hardcoded SQL by design
-    "E501",        # long SQL lines OK
+"crypto_ai_bot/core/infrastructure/settings.py" = [
+    "S105", "S106", "C901"
 ]
 
-# Settings - special case
-"src/crypto_ai_bot/core/infrastructure/settings.py" = [
-    "S105",        # hardcoded password - false positive on env names
-    "S106",        # hardcoded password - false positive
-    "C901",        # validation can be complex
-]
+# Utils - critical files have no ignores
+"crypto_ai_bot/utils/decimal.py" = []
+"crypto_ai_bot/utils/pnl.py" = []
 
-# Event bus
-"src/crypto_ai_bot/core/infrastructure/events/*.py" = [
-    "BLE001",      # broad except for event handling
-    "ARG001",      # unused handler args OK
-]
-
-# Market data
-"src/crypto_ai_bot/core/infrastructure/market_data/*.py" = [
-    "BLE001",      # broad except for data fetching
-]
-
-# =============================================================================
-# UTILS - Should be clean but practical
-# =============================================================================
-# Financial calculations - CRITICAL, no additional ignores
-"src/crypto_ai_bot/utils/decimal.py" = []
-"src/crypto_ai_bot/utils/pnl.py" = []
-
-# Other utils can be more flexible
-"src/crypto_ai_bot/utils/retry.py" = [
-    "BLE001",      # broad except for retry logic
-]
-
-"src/crypto_ai_bot/utils/logging.py" = [
-    "ARG001",      # unused args in formatters
-]
-
-# =============================================================================
-# SPECIAL FILES
-# =============================================================================
-# Package init files
+# Package inits
 "**/__init__.py" = [
-    "F401",        # unused imports (re-exports)
-    "F403",        # star imports OK in __init__
+    "F401", "F403"
 ]
 
 [lint.isort]
-# Import organization
 known-first-party = ["crypto_ai_bot"]
 known-third-party = ["ccxt", "redis", "prometheus_client", "fastapi", "pydantic", "httpx"]
 combine-as-imports = true
 force-single-line = false
 force-sort-within-sections = true
-lines-after-imports = 2
-section-order = [
-    "future",
-    "standard-library", 
-    "third-party",
-    "first-party",
-    "local-folder"
-]
-
-[lint.flake8-bugbear]
-# Allow some common patterns
-extend-immutable-calls = [
-    "fastapi.Depends",
-    "fastapi.Query", 
-    "fastapi.Body",
-    "pydantic.Field"
-]
-
-[lint.flake8-bandit]
-# Security settings
-check-typed-exception = false  # too many false positives
-
-[lint.pylint]
-# Complexity limits (reasonable for trading logic)
-max-args = 7           # function arguments
-max-branches = 12      # if/else branches
-max-returns = 6        # return statements
-max-statements = 50    # statements in function
-
-[lint.pycodestyle]
-# E501 line length is already in ignore list
-max-doc-length = 200   # docstring line length
-
-[lint.mccabe]
-# Complexity score (handled per-file where needed)
-max-complexity = 10
