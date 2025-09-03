@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -11,9 +11,9 @@ from crypto_ai_bot.utils.decimal import dec
 @dataclass
 class PnLItem:
     side: str               # "buy" | "sell"
-    base_qty: Decimal       # количество в базовой валюте
-    price: Decimal          # цена (quote/base)
-    fee_quote: Decimal      # комиссия в котируемой валюте
+    base_qty: Decimal       # ĞºĞ¾Ğ»Ğ¸Ñ‡ĞµÑÑ‚Ğ²Ğ¾ Ğ² Ğ±Ğ°Ğ·Ğ¾Ğ²Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ
+    price: Decimal          # Ñ†ĞµĞ½Ğ° (quote/base)
+    fee_quote: Decimal      # ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ñ Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ
     ts_ms: int | None = None
 
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import asyncio
@@ -46,9 +46,9 @@ async def _watch(url: str, timeout: float, interval: float) -> int:
         code = await _oneshot(url, timeout)
         await asyncio.sleep(max(0.5, interval))
         if code != 0:
-            # продолжаем наблюдение, но пишем предупреждение
+            # Ğ¿Ñ€Ğ¾Ğ´Ğ¾Ğ»Ğ¶Ğ°ĞµĞ¼ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ğµ, Ğ½Ğ¾ Ğ¿Ğ¸ÑˆĞµĞ¼ Ğ¿Ñ€ĞµĞ´ÑƒĞ¿Ñ€ĞµĞ¶Ğ´ĞµĞ½Ğ¸Ğµ
             _log.warning("health_not_ok", extra={"url": url})
-    # недостижимо
+    # Ğ½ĞµĞ´Ğ¾ÑÑ‚Ğ¸Ğ¶Ğ¸Ğ¼Ğ¾
     # return 0
 
 
@@ -63,7 +63,7 @@ def main() -> None:
     if args.oneshot:
         raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
     else:
-        # вечное наблюдение
+        # Ğ²ĞµÑ‡Ğ½Ğ¾Ğµ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ğµ
         try:
             asyncio.run(_watch(args.url, args.timeout, args.interval))
         except KeyboardInterrupt:

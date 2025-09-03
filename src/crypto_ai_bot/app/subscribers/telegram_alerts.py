@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
@@ -11,8 +11,8 @@ _log = get_logger("subscribers.telegram")
 
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
-    Подписчик Telegram: слушает события из EventBus и отправляет в Telegram.
-    Роутинг простой и безопасный: короткие тексты, HTML, без чувствительных данных.
+    ĞŸĞ¾Ğ´Ğ¿Ğ¸ÑÑ‡Ğ¸Ğº Telegram: ÑĞ»ÑƒÑˆĞ°ĞµÑ‚ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ñ Ğ¸Ğ· EventBus Ğ¸ Ğ¾Ñ‚Ğ¿Ñ€Ğ°Ğ²Ğ»ÑĞµÑ‚ Ğ² Telegram.
+    Ğ Ğ¾ÑƒÑ‚Ğ¸Ğ½Ğ³ Ğ¿Ñ€Ğ¾ÑÑ‚Ğ¾Ğ¹ Ğ¸ Ğ±ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ñ‹Ğ¹: ĞºĞ¾Ñ€Ğ¾Ñ‚ĞºĞ¸Ğµ Ñ‚ĞµĞºÑÑ‚Ñ‹, HTML, Ğ±ĞµĞ· Ñ‡ÑƒĞ²ÑÑ‚Ğ²Ğ¸Ñ‚ĞµĞ»ÑŒĞ½Ñ‹Ñ… Ğ´Ğ°Ğ½Ğ½Ñ‹Ñ….
     """
     tg = TelegramAlerts(
         bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
@@ -44,27 +44,27 @@ def attach_alerts(bus: Any, settings: Any) -> None:
 
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
-        await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
+        await _send(f"âš ï¸ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nĞŸÑ€Ğ¸Ñ‡Ğ¸Ğ½Ğ°: <code>{evt.get('reason','')}</code>")
 
     async def on_auto_resumed(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
-        await _send(f"🟢 <b>AUTO-RESUME</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
+        await _send(f"ğŸŸ¢ <b>AUTO-RESUME</b> {evt.get('symbol','')}\nĞŸÑ€Ğ¸Ñ‡Ğ¸Ğ½Ğ°: <code>{evt.get('reason','')}</code>")
 
     async def on_pos_mm(evt: dict[str, Any]) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
         await _send(
-            "🔄 <b>RECONCILE</b> {s}\nБиржа: <code>{b}</code>\nЛокально: <code>{l}</code>".format(
+            "ğŸ”„ <b>RECONCILE</b> {s}\nĞ‘Ğ¸Ñ€Ğ¶Ğ°: <code>{b}</code>\nĞ›Ğ¾ĞºĞ°Ğ»ÑŒĞ½Ğ¾: <code>{l}</code>".format(
                 s=evt.get("symbol", ""), b=evt.get("exchange", ""), l=evt.get("local", "")
             )
         )
 
     async def on_dms_triggered(evt: dict[str, Any]) -> None:
         inc("dms_triggered_total", symbol=evt.get("symbol", ""))
-        await _send(f"🛑 <b>DMS TRIGGERED</b> {evt.get('symbol','')}\nПродано базового: <code>{evt.get('amount','')}</code>")
+        await _send(f"ğŸ›‘ <b>DMS TRIGGERED</b> {evt.get('symbol','')}\nĞŸÑ€Ğ¾Ğ´Ğ°Ğ½Ğ¾ Ğ±Ğ°Ğ·Ğ¾Ğ²Ğ¾Ğ³Ğ¾: <code>{evt.get('amount','')}</code>")
 
     async def on_dms_skipped(evt: dict[str, Any]) -> None:
         inc("dms_skipped_total", symbol=evt.get("symbol", ""))
-        await _send(f"⛔ <b>DMS SKIPPED</b> {evt.get('symbol','')}\nПадение: <code>{evt.get('drop_pct','')}%</code>")
+        await _send(f"â›” <b>DMS SKIPPED</b> {evt.get('symbol','')}\nĞŸĞ°Ğ´ĞµĞ½Ğ¸Ğµ: <code>{evt.get('drop_pct','')}%</code>")
 
     async def on_trade_completed(evt: dict[str, Any]) -> None:
         inc("trade_completed_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
@@ -74,19 +74,19 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         fee = evt.get("fee_quote", "")
         price = evt.get("price", "")
         amt = evt.get("amount", "")
-        await _send(f"✅ <b>TRADE</b> {s} {side.upper()}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>")
+        await _send(f"âœ… <b>TRADE</b> {s} {side.upper()}\nAmt: <code>{amt}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>")
 
     async def on_trade_failed(evt: dict[str, Any]) -> None:
         inc("trade_failed_total", symbol=evt.get("symbol", ""), reason=evt.get("error", ""))
-        await _send(f"❌ <b>TRADE FAILED</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
+        await _send(f"âŒ <b>TRADE FAILED</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
     async def on_settled(evt: dict[str, Any]) -> None:
         inc("trade_settled_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
-        await _send(f"📦 <b>SETTLED</b> {evt.get('symbol','')} {evt.get('side','').upper()} id=<code>{evt.get('order_id','')}</code>")
+        await _send(f"ğŸ“¦ <b>SETTLED</b> {evt.get('symbol','')} {evt.get('side','').upper()} id=<code>{evt.get('order_id','')}</code>")
 
     async def on_settlement_timeout(evt: dict[str, Any]) -> None:
         inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
-        await _send(f"⏱️ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol','')} id=<code>{evt.get('order_id','')}</code>")
+        await _send(f"â±ï¸ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol','')} id=<code>{evt.get('order_id','')}</code>")
 
     async def on_budget_exceeded(evt: dict[str, Any]) -> None:
         inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))
@@ -97,15 +97,15 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             if kind == "max_orders_5m"
             else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
         )
-        await _send(f"⏳ <b>BUDGET</b> {s} превышен ({kind})\n{detail}")
+        await _send(f"â³ <b>BUDGET</b> {s} Ğ¿Ñ€ĞµĞ²Ñ‹ÑˆĞµĞ½ ({kind})\n{detail}")
 
     async def on_trade_blocked(evt: dict[str, Any]) -> None:
         inc("trade_blocked_total", symbol=evt.get("symbol", ""), reason=evt.get("reason", ""))
-        await _send(f"🚫 <b>BLOCKED</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
+        await _send(f"ğŸš« <b>BLOCKED</b> {evt.get('symbol','')}\nĞŸÑ€Ğ¸Ñ‡Ğ¸Ğ½Ğ°: <code>{evt.get('reason','')}</code>")
 
     async def on_broker_error(evt: dict[str, Any]) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
-        await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
+        await _send(f"ğŸ§¯ <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
     async def on_health_report(evt: dict[str, Any]) -> None:
         if evt.get("ok", True):
@@ -116,7 +116,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             if v and v != "ok":
                 parts.append(f"{k}={v}")
         summary = ", ".join(parts) or "degraded"
-        await _send(f"❗ <b>HEALTH FAIL</b>\n<code>{summary}</code>")
+        await _send(f"â— <b>HEALTH FAIL</b>\n<code>{summary}</code>")
 
     async def on_alertmanager(evt: dict[str, Any]) -> None:
         p = evt.get("payload", {}) or {}

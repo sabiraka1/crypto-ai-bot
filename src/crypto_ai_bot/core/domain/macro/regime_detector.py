@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from dataclasses import dataclass
 from .ports import DxyPort, BtcDomPort, FomcCalendarPort
 from .types import MacroSnapshot, Regime
@@ -12,7 +12,7 @@ class RegimeConfig:
     fomc_block_minutes: int = 60
 
 class RegimeDetector:
-    """Инференс режима рынка по DXY/BTC.D/FOMC (чистая доменная логика)."""
+    """Ğ˜Ğ½Ñ„ĞµÑ€ĞµĞ½Ñ Ñ€ĞµĞ¶Ğ¸Ğ¼Ğ° Ñ€Ñ‹Ğ½ĞºĞ° Ğ¿Ğ¾ DXY/BTC.D/FOMC (Ñ‡Ğ¸ÑÑ‚Ğ°Ñ Ğ´Ğ¾Ğ¼ĞµĞ½Ğ½Ğ°Ñ Ğ»Ğ¾Ğ³Ğ¸ĞºĞ°)."""
     def __init__(self, *, dxy: DxyPort | None, btc_dom: BtcDomPort | None, fomc: FomcCalendarPort | None, cfg: RegimeConfig | None = None) -> None:
         self._dxy = dxy
         self._btc = btc_dom

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Optional
 import httpx
@@ -9,8 +9,8 @@ from crypto_ai_bot.utils.logging import get_logger
 _log = get_logger("macro.btc_dom_http")
 
 
-class BtcDominanceHttp(BtcDomPort):  # Единое имя BtcDominanceHttp
-    """HTTP-источник BTC Dominance. JSON: {"change_pct": -0.25}"""
+class BtcDominanceHttp(BtcDomPort):  # Ğ•Ğ´Ğ¸Ğ½Ğ¾Ğµ Ğ¸Ğ¼Ñ BtcDominanceHttp
+    """HTTP-Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº BTC Dominance. JSON: {"change_pct": -0.25}"""
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
         self._url = url
         self._timeout = float(timeout_sec)

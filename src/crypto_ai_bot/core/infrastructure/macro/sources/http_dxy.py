@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Optional
 import httpx
@@ -11,8 +11,8 @@ _log = get_logger("macro.dxy_http")
 
 class DxyHttp(DxyPort):
     """
-    HTTP-источник DXY. Ожидаемый JSON: {"change_pct": 0.37}
-    При другом формате — поправь _parse_change_pct().
+    HTTP-Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº DXY. ĞĞ¶Ğ¸Ğ´Ğ°ĞµĞ¼Ñ‹Ğ¹ JSON: {"change_pct": 0.37}
+    ĞŸÑ€Ğ¸ Ğ´Ñ€ÑƒĞ³Ğ¾Ğ¼ Ñ„Ğ¾Ñ€Ğ¼Ğ°Ñ‚Ğµ â€” Ğ¿Ğ¾Ğ¿Ñ€Ğ°Ğ²ÑŒ _parse_change_pct().
     """
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
         self._url = url

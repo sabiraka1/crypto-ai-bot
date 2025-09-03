@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Dict
 
@@ -44,7 +44,7 @@ class OrdersRepository:
     # ---------- public API ----------
 
     def upsert_open(self, order: Any) -> None:
-        """Вставляет открытый ордер, если такого ещё нет (по broker_id или client_id)."""
+        """Ğ’ÑÑ‚Ğ°Ğ²Ğ»ÑĞµÑ‚ Ğ¾Ñ‚ĞºÑ€Ñ‹Ñ‚Ñ‹Ğ¹ Ğ¾Ñ€Ğ´ĞµÑ€, ĞµÑĞ»Ğ¸ Ñ‚Ğ°ĞºĞ¾Ğ³Ğ¾ ĞµÑ‰Ñ‘ Ğ½ĞµÑ‚ (Ğ¿Ğ¾ broker_id Ğ¸Ğ»Ğ¸ client_id)."""
         self.ensure_schema()
         broker_id = getattr(order, "id", None) or getattr(order, "order_id", None)
         client_id = getattr(order, "client_order_id", None)
@@ -68,7 +68,7 @@ class OrdersRepository:
         self.conn.commit()
 
     def list_open(self, symbol: str) -> List[Dict[str, Any]]:
-        """Открытые (или частично исполненные) ордера по символу, старые → новые."""
+        """ĞÑ‚ĞºÑ€Ñ‹Ñ‚Ñ‹Ğµ (Ğ¸Ğ»Ğ¸ Ñ‡Ğ°ÑÑ‚Ğ¸Ñ‡Ğ½Ğ¾ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ½Ñ‹Ğµ) Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ, ÑÑ‚Ğ°Ñ€Ñ‹Ğµ â†’ Ğ½Ğ¾Ğ²Ñ‹Ğµ."""
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -90,7 +90,7 @@ class OrdersRepository:
         return result
 
     def update_progress(self, broker_order_id: str, filled: str) -> None:
-        """Обновляет filled, не меняя статус."""
+        """ĞĞ±Ğ½Ğ¾Ğ²Ğ»ÑĞµÑ‚ filled, Ğ½Ğµ Ğ¼ĞµĞ½ÑÑ ÑÑ‚Ğ°Ñ‚ÑƒÑ."""
         if not broker_order_id:
             return
         self.ensure_schema()
@@ -102,7 +102,7 @@ class OrdersRepository:
         self.conn.commit()
 
     def mark_closed(self, broker_order_id: str, filled: str) -> None:
-        """Помечает ордер закрытым и фиксирует финальный filled."""
+        """ĞŸĞ¾Ğ¼ĞµÑ‡Ğ°ĞµÑ‚ Ğ¾Ñ€Ğ´ĞµÑ€ Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚Ñ‹Ğ¼ Ğ¸ Ñ„Ğ¸ĞºÑĞ¸Ñ€ÑƒĞµÑ‚ Ñ„Ğ¸Ğ½Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ filled."""
         if not broker_order_id:
             return
         self.ensure_schema()

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any, Tuple
@@ -54,7 +54,7 @@ class PositionGuard:
 # --- Reconciliation logic (from original) -------------------------------------------------
 async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort) -> None:
     """
-    Простая сверка: подтягиваем текущую цену и обновляем нереализованный PnL.
+    ĞŸÑ€Ğ¾ÑÑ‚Ğ°Ñ ÑĞ²ĞµÑ€ĞºĞ°: Ğ¿Ğ¾Ğ´Ñ‚ÑĞ³Ğ¸Ğ²Ğ°ĞµĞ¼ Ñ‚ĞµĞºÑƒÑ‰ÑƒÑ Ñ†ĞµĞ½Ñƒ Ğ¸ Ğ¾Ğ±Ğ½Ğ¾Ğ²Ğ»ÑĞµĞ¼ Ğ½ĞµÑ€ĞµĞ°Ğ»Ğ¸Ğ·Ğ¾Ğ²Ğ°Ğ½Ğ½Ñ‹Ğ¹ PnL.
     """
     for sym in symbols:
         try:
@@ -72,7 +72,7 @@ async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort,
             if avg <= 0:
                 continue
             unreal = (last - avg) * base
-            # оптимистичное обновление
+            # Ğ¾Ğ¿Ñ‚Ğ¸Ğ¼Ğ¸ÑÑ‚Ğ¸Ñ‡Ğ½Ğ¾Ğµ Ğ¾Ğ±Ğ½Ğ¾Ğ²Ğ»ĞµĞ½Ğ¸Ğµ
             storage.positions.apply_trade(
                 symbol=sym, side="buy", base_amount=dec("0"), price=last, fee_quote=dec("0"), last_price=last
             )
@@ -81,9 +81,9 @@ async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort,
             _log.warning("reconcile_error", extra={"symbol": sym, "error": str(exc)})
 
 
-# Функция-обертка для совместимости с orchestrator
+# Ğ¤ÑƒĞ½ĞºÑ†Ğ¸Ñ-Ğ¾Ğ±ĞµÑ€Ñ‚ĞºĞ° Ğ´Ğ»Ñ ÑĞ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚Ğ¸ Ñ orchestrator
 async def reconcile_positions(symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
-    """Функция-обертка для совместимости с orchestrator."""
+    """Ğ¤ÑƒĞ½ĞºÑ†Ğ¸Ñ-Ğ¾Ğ±ĞµÑ€Ñ‚ĞºĞ° Ğ´Ğ»Ñ ÑĞ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚Ğ¸ Ñ orchestrator."""
     await reconcile_positions_batch(
         symbols=[symbol],
         storage=storage,

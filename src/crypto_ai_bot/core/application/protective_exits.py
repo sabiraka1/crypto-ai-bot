@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -12,20 +12,20 @@ from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("protective_exits")
 
-# ----------------------------- Конфиг по умолчанию -----------------------------
+# ----------------------------- ĞšĞ¾Ğ½Ñ„Ğ¸Ğ³ Ğ¿Ğ¾ ÑƒĞ¼Ğ¾Ğ»Ñ‡Ğ°Ğ½Ğ¸Ñ -----------------------------
 
 @dataclass(frozen=True)
 class AtrExitConfig:
-    atr_period: int = 14          # период ATR
+    atr_period: int = 14          # Ğ¿ĞµÑ€Ğ¸Ğ¾Ğ´ ATR
     tp1_atr: Decimal = dec("1.0") # TP1 = entry + 1.0 * ATR
     tp2_atr: Decimal = dec("2.0") # TP2 = entry + 2.0 * ATR
     sl_atr:  Decimal = dec("1.5") # SL  = entry - 1.5 * ATR
-    tp1_close_pct: int = 50       # процент позиции, закрываемый на TP1
-    enable_breakeven: bool = True # перенос SL в б/у после TP1
-    min_base_to_exit: Decimal = dec("0")  # не закрывать крошечные объёмы
-    tick_interval_sec: float = 2.0        # период фоновой проверки
-    ohlcv_limit: int = 200                # свечи на загрузку
-    timeframe: str = "15m"                # рабочий TF
+    tp1_close_pct: int = 50       # Ğ¿Ñ€Ğ¾Ñ†ĞµĞ½Ñ‚ Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¸, Ğ·Ğ°ĞºÑ€Ñ‹Ğ²Ğ°ĞµĞ¼Ñ‹Ğ¹ Ğ½Ğ° TP1
+    enable_breakeven: bool = True # Ğ¿ĞµÑ€ĞµĞ½Ğ¾Ñ SL Ğ² Ğ±/Ñƒ Ğ¿Ğ¾ÑĞ»Ğµ TP1
+    min_base_to_exit: Decimal = dec("0")  # Ğ½Ğµ Ğ·Ğ°ĞºÑ€Ñ‹Ğ²Ğ°Ñ‚ÑŒ ĞºÑ€Ğ¾ÑˆĞµÑ‡Ğ½Ñ‹Ğµ Ğ¾Ğ±ÑŠÑ‘Ğ¼Ñ‹
+    tick_interval_sec: float = 2.0        # Ğ¿ĞµÑ€Ğ¸Ğ¾Ğ´ Ñ„Ğ¾Ğ½Ğ¾Ğ²Ğ¾Ğ¹ Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ĞºĞ¸
+    ohlcv_limit: int = 200                # ÑĞ²ĞµÑ‡Ğ¸ Ğ½Ğ° Ğ·Ğ°Ğ³Ñ€ÑƒĞ·ĞºÑƒ
+    timeframe: str = "15m"                # Ñ€Ğ°Ğ±Ğ¾Ñ‡Ğ¸Ğ¹ TF
 
 def _safe_dec(settings: Any, name: str, default: str) -> Decimal:
     val = getattr(settings, name, None)
@@ -54,7 +54,7 @@ def _cfg_from_settings(s: Any) -> AtrExitConfig:
         timeframe=str(getattr(s, "STRAT_TIMEFRAME", "15m") or "15m"),
     )
 
-# ------------------------------- ATR утилиты -----------------------------------
+# ------------------------------- ATR ÑƒÑ‚Ğ¸Ğ»Ğ¸Ñ‚Ñ‹ -----------------------------------
 
 def _true_ranges(ohlcv: list[list[Decimal]]) -> list[Decimal]:
     # ohlcv: [ts, open, high, low, close, volume]
@@ -83,7 +83,7 @@ async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int
         ohlcv_raw = await broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if not ohlcv_raw:
             return None
-        # Преобразование в Decimal
+        # ĞŸÑ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ Ğ² Decimal
         ohlcv: list[list[Decimal]] = []
         for r in ohlcv_raw:
             ohlcv.append([dec(str(r[0])), dec(str(r[1])), dec(str(r[2])), dec(str(r[3])), dec(str(r[4])), dec(str(r[5]))])
@@ -95,15 +95,15 @@ async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int
         _log.error("atr_fetch_failed", extra={"symbol": symbol, "tf": timeframe}, exc_info=True)
         return None
 
-# ------------------------------- Основной класс --------------------------------
+# ------------------------------- ĞÑĞ½Ğ¾Ğ²Ğ½Ğ¾Ğ¹ ĞºĞ»Ğ°ÑÑ --------------------------------
 
 class ProtectiveExits:
     """
-    ATR-выходы для LONG-позиции:
-      - TP1 = +tp1_atr*ATR (закрыть tp1_close_pct, перенос SL в б/у)
-      - TP2 = +tp2_atr*ATR (закрыть остаток)
+    ATR-Ğ²Ñ‹Ñ…Ğ¾Ğ´Ñ‹ Ğ´Ğ»Ñ LONG-Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¸:
+      - TP1 = +tp1_atr*ATR (Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚ÑŒ tp1_close_pct, Ğ¿ĞµÑ€ĞµĞ½Ğ¾Ñ SL Ğ² Ğ±/Ñƒ)
+      - TP2 = +tp2_atr*ATR (Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚ÑŒ Ğ¾ÑÑ‚Ğ°Ñ‚Ğ¾Ğº)
       - SL  = -sl_atr*ATR
-    Фоновая петля на символ запускается после BUY через on_hint().
+    Ğ¤Ğ¾Ğ½Ğ¾Ğ²Ğ°Ñ Ğ¿ĞµÑ‚Ğ»Ñ Ğ½Ğ° ÑĞ¸Ğ¼Ğ²Ğ¾Ğ» Ğ·Ğ°Ğ¿ÑƒÑĞºĞ°ĞµÑ‚ÑÑ Ğ¿Ğ¾ÑĞ»Ğµ BUY Ñ‡ĞµÑ€ĞµĞ· on_hint().
     """
     def __init__(self, *, broker: Any, storage: Any, bus: Any, settings: Any) -> None:
         self._broker = broker
@@ -112,12 +112,12 @@ class ProtectiveExits:
         self._settings = settings
         self._cfg = _cfg_from_settings(settings)
 
-        # состояние по символам
+        # ÑĞ¾ÑÑ‚Ğ¾ÑĞ½Ğ¸Ğµ Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ğ°Ğ¼
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._tp1_done: dict[str, bool] = {}     # TP1 пройден
-        self._breakeven_px: dict[str, Decimal] = {}  # цена б/у после TP1
+        self._tp1_done: dict[str, bool] = {}     # TP1 Ğ¿Ñ€Ğ¾Ğ¹Ğ´ĞµĞ½
+        self._breakeven_px: dict[str, Decimal] = {}  # Ñ†ĞµĞ½Ğ° Ğ±/Ñƒ Ğ¿Ğ¾ÑĞ»Ğµ TP1
 
-    # API совместимости (оркестратор не трогаем)
+    # API ÑĞ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚Ğ¸ (Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€ Ğ½Ğµ Ñ‚Ñ€Ğ¾Ğ³Ğ°ĞµĞ¼)
     async def start(self) -> None:
         pass
 
@@ -126,11 +126,11 @@ class ProtectiveExits:
             t.cancel()
             self._tasks.pop(sym, None)
 
-    # ---- события/подсказки от шины (compose уже подписывает trade.completed) ----
+    # ---- ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ñ/Ğ¿Ğ¾Ğ´ÑĞºĞ°Ğ·ĞºĞ¸ Ğ¾Ñ‚ ÑˆĞ¸Ğ½Ñ‹ (compose ÑƒĞ¶Ğµ Ğ¿Ğ¾Ğ´Ğ¿Ğ¸ÑÑ‹Ğ²Ğ°ĞµÑ‚ trade.completed) ----
     async def on_hint(self, evt: Dict[str, Any]) -> None:
         """
-        Получаем trade.completed; если это BUY — стартуем фоновый монитор,
-        если SELL и позиции больше нет — стопим монитор.
+        ĞŸĞ¾Ğ»ÑƒÑ‡Ğ°ĞµĞ¼ trade.completed; ĞµÑĞ»Ğ¸ ÑÑ‚Ğ¾ BUY â€” ÑÑ‚Ğ°Ñ€Ñ‚ÑƒĞµĞ¼ Ñ„Ğ¾Ğ½Ğ¾Ğ²Ñ‹Ğ¹ Ğ¼Ğ¾Ğ½Ğ¸Ñ‚Ğ¾Ñ€,
+        ĞµÑĞ»Ğ¸ SELL Ğ¸ Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¸ Ğ±Ğ¾Ğ»ÑŒÑˆĞµ Ğ½ĞµÑ‚ â€” ÑÑ‚Ğ¾Ğ¿Ğ¸Ğ¼ Ğ¼Ğ¾Ğ½Ğ¸Ñ‚Ğ¾Ñ€.
         """
         sym = str(evt.get("symbol", "") or "")
         if not sym:
@@ -138,26 +138,26 @@ class ProtectiveExits:
         side = str(evt.get("side", evt.get("action", "") or "")).lower()
 
         if side == "buy":
-            # сброс состояния и старт фонового мониторинга
+            # ÑĞ±Ñ€Ğ¾Ñ ÑĞ¾ÑÑ‚Ğ¾ÑĞ½Ğ¸Ñ Ğ¸ ÑÑ‚Ğ°Ñ€Ñ‚ Ñ„Ğ¾Ğ½Ğ¾Ğ²Ğ¾Ğ³Ğ¾ Ğ¼Ğ¾Ğ½Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ğ½Ğ³Ğ°
             self._tp1_done[sym] = False
             self._breakeven_px.pop(sym, None)
             await self._ensure_task(sym)
         elif side == "sell":
-            # если позиции нет — останавливаем
+            # ĞµÑĞ»Ğ¸ Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¸ Ğ½ĞµÑ‚ â€” Ğ¾ÑÑ‚Ğ°Ğ½Ğ°Ğ²Ğ»Ğ¸Ğ²Ğ°ĞµĞ¼
             pos = self._storage.positions.get_position(sym) if hasattr(self._storage, "positions") else None
             if not pos or (getattr(pos, "base_qty", dec("0")) or dec("0")) <= 0:
                 self._cancel_task(sym)
 
-    # ---- публичные интерфейсы (сохраняем сигнатуры) ----
+    # ---- Ğ¿ÑƒĞ±Ğ»Ğ¸Ñ‡Ğ½Ñ‹Ğµ Ğ¸Ğ½Ñ‚ĞµÑ€Ñ„ĞµĞ¹ÑÑ‹ (ÑĞ¾Ñ…Ñ€Ğ°Ğ½ÑĞµĞ¼ ÑĞ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ñ‹) ----
     async def evaluate(self, *, symbol: str) -> Optional[Dict[str, Any]]:
-        """Одноразовая оценка (можно вызывать вручную)."""
+        """ĞĞ´Ğ½Ğ¾Ñ€Ğ°Ğ·Ğ¾Ğ²Ğ°Ñ Ğ¾Ñ†ĞµĞ½ĞºĞ° (Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ²Ñ‹Ğ·Ñ‹Ğ²Ğ°Ñ‚ÑŒ Ğ²Ñ€ÑƒÑ‡Ğ½ÑƒÑ)."""
         return await self._evaluate_once(symbol)
 
     async def tick(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Совместимость: делегируем на evaluate()."""
+        """Ğ¡Ğ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚ÑŒ: Ğ´ĞµĞ»ĞµĞ³Ğ¸Ñ€ÑƒĞµĞ¼ Ğ½Ğ° evaluate()."""
         return await self.evaluate(symbol=symbol)
 
-    # ------------------------------ внутренняя логика ---------------------------
+    # ------------------------------ Ğ²Ğ½ÑƒÑ‚Ñ€ĞµĞ½Ğ½ÑÑ Ğ»Ğ¾Ğ³Ğ¸ĞºĞ° ---------------------------
 
     def _cancel_task(self, symbol: str) -> None:
         t = self._tasks.pop(symbol, None)
@@ -187,7 +187,7 @@ class ProtectiveExits:
             self._tasks.pop(symbol, None)
 
     async def _evaluate_once(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # позиция
+        # Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ñ
         pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
         if not pos:
             return None
@@ -197,7 +197,7 @@ class ProtectiveExits:
         if base <= 0 or entry <= 0:
             return None
 
-        # тикер
+        # Ñ‚Ğ¸ĞºĞµÑ€
         try:
             t = await self._broker.fetch_ticker(symbol)
             last = dec(str(t.get("last") or t.get("bid") or t.get("ask") or "0"))
@@ -213,31 +213,31 @@ class ProtectiveExits:
             inc("protective_exits_tick_total", symbol=symbol, reason="no_atr")
             return None
 
-        # уровни
+        # ÑƒÑ€Ğ¾Ğ²Ğ½Ğ¸
         tp1_px = entry + self._cfg.tp1_atr * atr
         tp2_px = entry + self._cfg.tp2_atr * atr
         sl_px  = entry - self._cfg.sl_atr  * atr
 
-        # breakeven после TP1
+        # breakeven Ğ¿Ğ¾ÑĞ»Ğµ TP1
         if self._tp1_done.get(symbol, False) and self._cfg.enable_breakeven and symbol not in self._breakeven_px:
             self._breakeven_px[symbol] = entry
 
-        # решения
+        # Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ
         if last <= sl_px:
-            return await self._sell_all(symbol, base, reason=f"SL_ATR({self._cfg.sl_atr}×ATR)")
+            return await self._sell_all(symbol, base, reason=f"SL_ATR({self._cfg.sl_atr}Ã—ATR)")
 
         if not self._tp1_done.get(symbol, False) and last >= tp1_px:
-            # продать часть
+            # Ğ¿Ñ€Ğ¾Ğ´Ğ°Ñ‚ÑŒ Ñ‡Ğ°ÑÑ‚ÑŒ
             part_pct = max(1, min(100, int(self._cfg.tp1_close_pct)))
             qty = (base * dec(str(part_pct))) / dec("100")
             if self._cfg.min_base_to_exit > 0 and qty < self._cfg.min_base_to_exit:
                 return None
-            ok = await self._sell_qty(symbol, qty, reason=f"TP1_{part_pct}%@{self._cfg.tp1_atr}×ATR")
+            ok = await self._sell_qty(symbol, qty, reason=f"TP1_{part_pct}%@{self._cfg.tp1_atr}Ã—ATR")
             if ok:
                 self._tp1_done[symbol] = True
                 if self._cfg.enable_breakeven:
                     self._breakeven_px[symbol] = entry
-                # обновим позицию
+                # Ğ¾Ğ±Ğ½Ğ¾Ğ²Ğ¸Ğ¼ Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ñ
                 pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
                 base = getattr(pos, "base_qty", dec("0")) or dec("0")
                 if base <= 0:
@@ -246,14 +246,14 @@ class ProtectiveExits:
                 return {"closed_part": True, "side": "sell", "qty": str(qty), "reason": "tp1"}
             return None
 
-        # breakeven логика
+        # breakeven Ğ»Ğ¾Ğ³Ğ¸ĞºĞ°
         if self._tp1_done.get(symbol, False) and self._cfg.enable_breakeven:
             be = self._breakeven_px.get(symbol, None)
             if be and last <= be:
                 return await self._sell_all(symbol, base, reason="BREAKEVEN")
 
         if last >= tp2_px:
-            return await self._sell_all(symbol, base, reason=f"TP2@{self._cfg.tp2_atr}×ATR")
+            return await self._sell_all(symbol, base, reason=f"TP2@{self._cfg.tp2_atr}Ã—ATR")
 
         inc("protective_exits_tick_total", symbol=symbol)
         return None

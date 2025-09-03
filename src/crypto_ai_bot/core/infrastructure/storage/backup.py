@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import shutil
@@ -10,7 +10,7 @@ _log = get_logger("storage.backup")
 
 
 def backup_database(src_path: str, backup_dir: str) -> str:
-    """Создает резервную копию БД."""
+    """Ğ¡Ğ¾Ğ·Ğ´Ğ°ĞµÑ‚ Ñ€ĞµĞ·ĞµÑ€Ğ²Ğ½ÑƒÑ ĞºĞ¾Ğ¿Ğ¸Ñ Ğ‘Ğ”."""
     try:
         src = Path(src_path)
         if not src.exists():
@@ -18,15 +18,15 @@ def backup_database(src_path: str, backup_dir: str) -> str:
             
         os.makedirs(backup_dir, exist_ok=True)
         
-        # Генерируем имя для бэкапа
+        # Ğ“ĞµĞ½ĞµÑ€Ğ¸Ñ€ÑƒĞµĞ¼ Ğ¸Ğ¼Ñ Ğ´Ğ»Ñ Ğ±ÑĞºĞ°Ğ¿Ğ°
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_name = f"{src.stem}_backup_{timestamp}{src.suffix}"
         dst = Path(backup_dir) / backup_name
         
-        # Копируем файл
+        # ĞšĞ¾Ğ¿Ğ¸Ñ€ÑƒĞµĞ¼ Ñ„Ğ°Ğ¹Ğ»
         if hasattr(src, "backup"):
-            src.backup(dst)  # для sqlite3 Connection
+            src.backup(dst)  # Ğ´Ğ»Ñ sqlite3 Connection
         else:
             shutil.copy2(src, dst)
             

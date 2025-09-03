@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 import time
@@ -16,8 +16,8 @@ class InstanceLock:
     owner: str
 
     def acquire(self, ttl_sec: int = 300) -> bool:
-        """Пытаемся взять эксклюзивный лок. Возвращает True при успехе.
-        Схема: таблица app_locks(app TEXT PK, owner TEXT, expire_at INTEGER).
+        """ĞŸÑ‹Ñ‚Ğ°ĞµĞ¼ÑÑ Ğ²Ğ·ÑÑ‚ÑŒ ÑĞºÑĞºĞ»ÑĞ·Ğ¸Ğ²Ğ½Ñ‹Ğ¹ Ğ»Ğ¾Ğº. Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ True Ğ¿Ñ€Ğ¸ ÑƒÑĞ¿ĞµÑ…Ğµ.
+        Ğ¡Ñ…ĞµĞ¼Ğ°: Ñ‚Ğ°Ğ±Ğ»Ğ¸Ñ†Ğ° app_locks(app TEXT PK, owner TEXT, expire_at INTEGER).
         """
         expire_at = int(time.time()) + int(ttl_sec)
         self.conn.execute(
@@ -29,7 +29,7 @@ class InstanceLock:
             )
             """
         )
-        # попытаться вставить лок, если его нет или истёк — захватить
+        # Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚Ğ°Ñ‚ÑŒÑÑ Ğ²ÑÑ‚Ğ°Ğ²Ğ¸Ñ‚ÑŒ Ğ»Ğ¾Ğº, ĞµÑĞ»Ğ¸ ĞµĞ³Ğ¾ Ğ½ĞµÑ‚ Ğ¸Ğ»Ğ¸ Ğ¸ÑÑ‚Ñ‘Ğº â€” Ğ·Ğ°Ñ…Ğ²Ğ°Ñ‚Ğ¸Ñ‚ÑŒ
         cur = self.conn.execute(
             """
             INSERT INTO app_locks(app, owner, expire_at)
@@ -41,7 +41,7 @@ class InstanceLock:
             """,
             (self.app, self.owner, expire_at),
         )
-        # sqlite не даёт rowcount по upsert условно; перепроверь владение
+        # sqlite Ğ½Ğµ Ğ´Ğ°Ñ‘Ñ‚ rowcount Ğ¿Ğ¾ upsert ÑƒÑĞ»Ğ¾Ğ²Ğ½Ğ¾; Ğ¿ĞµÑ€ĞµĞ¿Ñ€Ğ¾Ğ²ĞµÑ€ÑŒ Ğ²Ğ»Ğ°Ğ´ĞµĞ½Ğ¸Ğµ
         cur = self.conn.execute("SELECT owner, expire_at FROM app_locks WHERE app=?", (self.app,))
         row = cur.fetchone()
         ok = bool(row and row[0] == self.owner)

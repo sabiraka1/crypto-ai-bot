@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import shutil
@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# ВАЖНО: новый путь до Settings после стратификации:
+# Ğ’ĞĞ–ĞĞ: Ğ½Ğ¾Ğ²Ñ‹Ğ¹ Ğ¿ÑƒÑ‚ÑŒ Ğ´Ğ¾ Settings Ğ¿Ğ¾ÑĞ»Ğµ ÑÑ‚Ñ€Ğ°Ñ‚Ğ¸Ñ„Ğ¸ĞºĞ°Ñ†Ğ¸Ğ¸:
 from crypto_ai_bot.core.infrastructure.settings import Settings
 
 BACKUPS_DIR = Path("./backups")
@@ -38,7 +38,7 @@ def _rotate(retention_days: int) -> None:
     removed = 0
     for p in BACKUPS_DIR.glob("db-*.sqlite3"):
         try:
-            # поддержка двух именований
+            # Ğ¿Ğ¾Ğ´Ğ´ĞµÑ€Ğ¶ĞºĞ° Ğ´Ğ²ÑƒÑ… Ğ¸Ğ¼ĞµĞ½Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğ¹
             stem = p.stem
             # db-YYYYmmdd-HHMMSS
             ts = stem.split("-")[1]

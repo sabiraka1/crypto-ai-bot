@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -6,7 +6,7 @@ from typing import Any, cast, List, Tuple
 
 
 def _get(obj: Any, attr: str, key: str | None = None, default: Any = None) -> Any:
-    """Достаём значение из объекта ИЛИ dict (универсально для CCXT-ответов)."""
+    """Ğ”Ğ¾ÑÑ‚Ğ°Ñ‘Ğ¼ Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ğµ Ğ¸Ğ· Ğ¾Ğ±ÑŠĞµĞºÑ‚Ğ° Ğ˜Ğ›Ğ˜ dict (ÑƒĞ½Ğ¸Ğ²ĞµÑ€ÑĞ°Ğ»ÑŒĞ½Ğ¾ Ğ´Ğ»Ñ CCXT-Ğ¾Ñ‚Ğ²ĞµÑ‚Ğ¾Ğ²)."""
     if hasattr(obj, attr):
         try:
             return getattr(obj, attr)
@@ -61,7 +61,7 @@ class TradesRepository:
     # ---------- INSERTS / LISTS ----------
 
     def add_from_order(self, order: Any) -> None:
-        """Сохраняем исполненный ордер в trades. Поддерживает и объекты, и dict-ответ CCXT."""
+        """Ğ¡Ğ¾Ñ…Ñ€Ğ°Ğ½ÑĞµĞ¼ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ½Ñ‹Ğ¹ Ğ¾Ñ€Ğ´ĞµÑ€ Ğ² trades. ĞŸĞ¾Ğ´Ğ´ĞµÑ€Ğ¶Ğ¸Ğ²Ğ°ĞµÑ‚ Ğ¸ Ğ¾Ğ±ÑŠĞµĞºÑ‚Ñ‹, Ğ¸ dict-Ğ¾Ñ‚Ğ²ĞµÑ‚ CCXT."""
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -76,7 +76,7 @@ class TradesRepository:
                 str(_get(order, "filled", "filled", _get(order, "amount", "amount", Decimal("0")))),
                 str(_get(order, "price", "price", Decimal("0"))),
                 str(_get(order, "cost", "cost", Decimal("0"))),
-                # fee может быть dict: {"cost": ..., "currency": "..."}
+                # fee Ğ¼Ğ¾Ğ¶ĞµÑ‚ Ğ±Ñ‹Ñ‚ÑŒ dict: {"cost": ..., "currency": "..."}
                 str(
                     _get(order, "fee_quote", "fee_quote")
                     if _get(order, "fee_quote", "fee_quote") is not None
@@ -101,7 +101,7 @@ class TradesRepository:
         return cast(list[Any], cur.fetchall())
 
     def last_trades(self, symbol: str, limit: int = 50) -> list[Any]:
-        """Последние N сделок по символу (DESC)."""
+        """ĞŸĞ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ N ÑĞ´ĞµĞ»Ğ¾Ğº Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ (DESC)."""
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -143,7 +143,7 @@ class TradesRepository:
         return int(result[0] if result else 0)
 
     def count_orders_today(self, symbol: str) -> int:
-        """Сколько исполнений по символу за сегодня (UTC)."""
+        """Ğ¡ĞºĞ¾Ğ»ÑŒĞºĞ¾ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ğ¹ Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ Ğ·Ğ° ÑĞµĞ³Ğ¾Ğ´Ğ½Ñ (UTC)."""
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -156,7 +156,7 @@ class TradesRepository:
         row = cur.fetchone()
         return int(row[0] if row else 0)
 
-    # ---------- FIFO PnL (с учётом fee_quote) ----------
+    # ---------- FIFO PnL (Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ fee_quote) ----------
 
     def _iter_all_asc(self, symbol: str) -> List[Any]:
         cur = self.conn.cursor()
@@ -176,17 +176,17 @@ class TradesRepository:
         return Decimal(str(x if x is not None else "0"))
 
     def pnl_today_quote(self, symbol: str) -> Decimal:
-        """Реализованный PnL за сегодня (UTC, quote), FIFO, с учётом fee_quote."""
+        """Ğ ĞµĞ°Ğ»Ğ¸Ğ·Ğ¾Ğ²Ğ°Ğ½Ğ½Ñ‹Ğ¹ PnL Ğ·Ğ° ÑĞµĞ³Ğ¾Ğ´Ğ½Ñ (UTC, quote), FIFO, Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ fee_quote."""
         return self._pnl_today_fifo_quote(symbol)
 
-    # Алиас для читаемости снаружи:
+    # ĞĞ»Ğ¸Ğ°Ñ Ğ´Ğ»Ñ Ñ‡Ğ¸Ñ‚Ğ°ĞµĞ¼Ğ¾ÑÑ‚Ğ¸ ÑĞ½Ğ°Ñ€ÑƒĞ¶Ğ¸:
     def daily_pnl_quote(self, symbol: str) -> Decimal:
         return self.pnl_today_quote(symbol)
 
     def _pnl_today_fifo_quote(self, symbol: str) -> Decimal:
         rows = self._iter_all_asc(symbol)
 
-        # FIFO-очередь покупок: элементы (qty_left, unit_cost_quote)
+        # FIFO-Ğ¾Ñ‡ĞµÑ€ĞµĞ´ÑŒ Ğ¿Ğ¾ĞºÑƒĞ¿Ğ¾Ğº: ÑĞ»ĞµĞ¼ĞµĞ½Ñ‚Ñ‹ (qty_left, unit_cost_quote)
         # unit_cost_quote = (cost + fee_quote) / filled
         buy_lots: List[Tuple[Decimal, Decimal]] = []
 
@@ -214,7 +214,7 @@ class TradesRepository:
 
             if side == "sell":
                 qty_to_consume = filled
-                unit_sell = price  # выручка до комиссии
+                unit_sell = price  # Ğ²Ñ‹Ñ€ÑƒÑ‡ĞºĞ° Ğ´Ğ¾ ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ğ¸
                 realized = Decimal("0")
 
                 i = 0
@@ -230,7 +230,7 @@ class TradesRepository:
                     else:
                         buy_lots.pop(i)
 
-                # комиссия продажи относится к продаже
+                # ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ñ Ğ¿Ñ€Ğ¾Ğ´Ğ°Ğ¶Ğ¸ Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ÑÑ Ğº Ğ¿Ñ€Ğ¾Ğ´Ğ°Ğ¶Ğµ
                 if ts_day == today_utc:
                     pnl_today += realized - fee_q
 

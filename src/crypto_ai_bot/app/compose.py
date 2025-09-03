@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.app.subscribers.telegram_alerts import attach_alerts
-from crypto_ai_bot.core.application import events_topics as EVT  # ← добавлено
+from crypto_ai_bot.core.application import events_topics as EVT  # â† Ğ´Ğ¾Ğ±Ğ°Ğ²Ğ»ĞµĞ½Ğ¾
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort, EventBusPort, BrokerPort
@@ -81,7 +81,7 @@ def _build_event_bus(settings: Settings) -> EventBusPort:
 
 
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
-    """Оборачиваем publish ретраями и гистограммой, не меняя интерфейс EventBus."""
+    """ĞĞ±Ğ¾Ñ€Ğ°Ñ‡Ğ¸Ğ²Ğ°ĞµĞ¼ publish Ñ€ĞµÑ‚Ñ€Ğ°ÑĞ¼Ğ¸ Ğ¸ Ğ³Ğ¸ÑÑ‚Ğ¾Ğ³Ñ€Ğ°Ğ¼Ğ¼Ğ¾Ğ¹, Ğ½Ğµ Ğ¼ĞµĞ½ÑÑ Ğ¸Ğ½Ñ‚ĞµÑ€Ñ„ĞµĞ¹Ñ EventBus."""
     if not hasattr(bus, "publish"):
         return
     _orig = bus.publish
@@ -103,11 +103,11 @@ def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
 
 
 def _maybe_wrap_with_regime(broker: BrokerPort, settings: Settings) -> BrokerPort:
-    """Включаем regime-gating при REGIME_ENABLED=1 (risk_off блокирует новые входы)."""
+    """Ğ’ĞºĞ»ÑÑ‡Ğ°ĞµĞ¼ regime-gating Ğ¿Ñ€Ğ¸ REGIME_ENABLED=1 (risk_off Ğ±Ğ»Ğ¾ĞºĞ¸Ñ€ÑƒĞµÑ‚ Ğ½Ğ¾Ğ²Ñ‹Ğµ Ğ²Ñ…Ğ¾Ğ´Ñ‹)."""
     if not bool(getattr(settings, "REGIME_ENABLED", False)):
         return broker
 
-    # URLs и таймауты источников — из ENV, с безопасными дефолтами
+    # URLs Ğ¸ Ñ‚Ğ°Ğ¹Ğ¼Ğ°ÑƒÑ‚Ñ‹ Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸ĞºĞ¾Ğ² â€” Ğ¸Ğ· ENV, Ñ Ğ±ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ñ‹Ğ¼Ğ¸ Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚Ğ°Ğ¼Ğ¸
     dxy_url = str(getattr(settings, "REGIME_DXY_URL", "") or "")
     btc_dom_url = str(getattr(settings, "REGIME_BTC_DOM_URL", "") or "")
     fomc_url = str(getattr(settings, "REGIME_FOMC_URL", "") or "")
@@ -158,7 +158,7 @@ async def build_container_async() -> Container:
                 str_val = str(val).strip()
                 if not str_val or str_val.lower() in ("none", "null", ""):
                     return dec(default)
-                float(str_val)  # валидация
+                float(str_val)  # Ğ²Ğ°Ğ»Ğ¸Ğ´Ğ°Ñ†Ğ¸Ñ
                 return dec(str_val)
             except Exception:
                 return dec(default)
@@ -187,10 +187,10 @@ async def build_container_async() -> Container:
             dms=_make_dms(sym),
         )
 
-    # Подписчик Telegram (алёрты из EventBus → Telegram)
+    # ĞŸĞ¾Ğ´Ğ¿Ğ¸ÑÑ‡Ğ¸Ğº Telegram (Ğ°Ğ»Ñ‘Ñ€Ñ‚Ñ‹ Ğ¸Ğ· EventBus â†’ Telegram)
     attach_alerts(bus, s)
 
-    # Hint для ProtectiveExits
+    # Hint Ğ´Ğ»Ñ ProtectiveExits
     if hasattr(exits, "on_hint") and hasattr(bus, "on"):
         bus.on("exits.hint", exits.on_hint)
 
@@ -202,7 +202,7 @@ async def build_container_async() -> Container:
 
         bus.on(EVT.TRADE_COMPLETED, _on_trade_completed_hint)
 
-    # Командный Telegram-бот (входящие команды)
+    # ĞšĞ¾Ğ¼Ğ°Ğ½Ğ´Ğ½Ñ‹Ğ¹ Telegram-Ğ±Ğ¾Ñ‚ (Ğ²Ñ…Ğ¾Ğ´ÑÑ‰Ğ¸Ğµ ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´Ñ‹)
     tg_task: asyncio.Task[None] | None = None
     if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
         raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from typing import Any
@@ -11,7 +11,7 @@ _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}
 _HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
 
 def reset_registry() -> None:
-    """Сброс регистра для тестов."""
+    """Ğ¡Ğ±Ñ€Ğ¾Ñ Ñ€ĞµĞ³Ğ¸ÑÑ‚Ñ€Ğ° Ğ´Ğ»Ñ Ñ‚ĞµÑÑ‚Ğ¾Ğ²."""
     global _REGISTRY, _COUNTERS, _GAUGES, _HISTS
     _REGISTRY = CollectorRegistry()
     _COUNTERS = {}
@@ -43,7 +43,7 @@ def inc(name: str, **labels: Any) -> None:
         try:
             _COUNTERS[k] = Counter(name, name, list(labs.keys()), registry=_REGISTRY)
         except ValueError:
-            # Метрика уже зарегистрирована, попытаемся найти существующую
+            # ĞœĞµÑ‚Ñ€Ğ¸ĞºĞ° ÑƒĞ¶Ğµ Ğ·Ğ°Ñ€ĞµĞ³Ğ¸ÑÑ‚Ñ€Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ°, Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚Ğ°ĞµĞ¼ÑÑ Ğ½Ğ°Ğ¹Ñ‚Ğ¸ ÑÑƒÑ‰ĞµÑÑ‚Ğ²ÑƒÑÑ‰ÑƒÑ
             for metric in _REGISTRY.collect():
                 if metric.name == name and isinstance(metric, Counter):
                     return
@@ -52,7 +52,7 @@ def inc(name: str, **labels: Any) -> None:
         _COUNTERS[k].labels(**labs).inc()
 
 def gauge(name: str, **labels: Any) -> Gauge | None:
-    """Gauge (вернёт объект, чтобы .set())"""
+    """Gauge (Ğ²ĞµÑ€Ğ½Ñ‘Ñ‚ Ğ¾Ğ±ÑŠĞµĞºÑ‚, Ñ‡Ñ‚Ğ¾Ğ±Ñ‹ .set())"""
     name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
@@ -64,7 +64,7 @@ def gauge(name: str, **labels: Any) -> Gauge | None:
     return _GAUGES[k].labels(**labs) if k in _GAUGES else None
 
 def hist(name: str, **labels: Any) -> Histogram | None:
-    """Histogram (секунды)"""
+    """Histogram (ÑĞµĞºÑƒĞ½Ğ´Ñ‹)"""
     name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
@@ -76,7 +76,7 @@ def hist(name: str, **labels: Any) -> Histogram | None:
     return _HISTS[k].labels(**labs) if k in _HISTS else None
 
 def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
-    """Шорткат для наблюдения значения (миллисекунды -> секунды)."""
+    """Ğ¨Ğ¾Ñ€Ñ‚ĞºĞ°Ñ‚ Ğ´Ğ»Ñ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ñ Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ñ (Ğ¼Ğ¸Ğ»Ğ»Ğ¸ÑĞµĞºÑƒĞ½Ğ´Ñ‹ -> ÑĞµĞºÑƒĞ½Ğ´Ñ‹)."""
     name = _sanitize_name(name)
     value_sec = float(value) / 1000.0
     h = hist(name, **(labels or {}))
@@ -84,5 +84,5 @@ def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> No
         h.observe(value_sec)
 
 def export_text() -> str:
-    """Для /metrics в FastAPI"""
+    """Ğ”Ğ»Ñ /metrics Ğ² FastAPI"""
     return generate_latest(_REGISTRY).decode("utf-8")

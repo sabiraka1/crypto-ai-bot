@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -11,7 +11,7 @@ class CorrelationManager:
         self.cfg = cfg
 
     def _open_symbols(self, positions_repo: Any) -> set[str]:
-        # пробуем универсально: list_open() -> items с полем symbol
+        # Ğ¿Ñ€Ğ¾Ğ±ÑƒĞµĞ¼ ÑƒĞ½Ğ¸Ğ²ĞµÑ€ÑĞ°Ğ»ÑŒĞ½Ğ¾: list_open() -> items Ñ Ğ¿Ğ¾Ğ»ĞµĞ¼ symbol
         try:
             items = None
             if hasattr(positions_repo, "list_open"):

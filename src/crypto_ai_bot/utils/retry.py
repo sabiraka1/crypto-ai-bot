@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import random
@@ -27,7 +27,7 @@ async def async_retry(
     if last_exc:
         raise last_exc
 
-# Удобные обёртки поверх http_client
+# Ğ£Ğ´Ğ¾Ğ±Ğ½Ñ‹Ğµ Ğ¾Ğ±Ñ‘Ñ€Ñ‚ĞºĞ¸ Ğ¿Ğ¾Ğ²ĞµÑ€Ñ… http_client
 from crypto_ai_bot.utils.http_client import aget, apost
 
 

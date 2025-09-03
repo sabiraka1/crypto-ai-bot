@@ -1,4 +1,4 @@
-## `core/signals/policy.py`
+﻿## `core/signals/policy.py`
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,7 +13,7 @@ class Policy:
     sell_threshold: float = 0.38
     
     def decide(self, features: dict[str, Any]) -> tuple[str, float, str]:
-        """Метод класса Policy для принятия решения."""
+        """ĞœĞµÑ‚Ğ¾Ğ´ ĞºĞ»Ğ°ÑÑĞ° Policy Ğ´Ğ»Ñ Ğ¿Ñ€Ğ¸Ğ½ÑÑ‚Ğ¸Ñ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ."""
         score, explain = fuse_score(features)
         if score >= self.buy_threshold:
             return "buy", score, explain
@@ -23,6 +23,6 @@ class Policy:
 
 
 def decide(features: dict[str, Any], policy: Policy | None = None) -> tuple[str, float, str]:
-    """Функция для обратной совместимости: решение 'buy' | 'sell' | 'hold' + (score, explain)."""
+    """Ğ¤ÑƒĞ½ĞºÑ†Ğ¸Ñ Ğ´Ğ»Ñ Ğ¾Ğ±Ñ€Ğ°Ñ‚Ğ½Ğ¾Ğ¹ ÑĞ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚Ğ¸: Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ 'buy' | 'sell' | 'hold' + (score, explain)."""
     p = policy or Policy()
     return p.decide(features)

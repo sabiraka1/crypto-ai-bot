@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 import httpx
@@ -10,7 +10,7 @@ _log = get_logger("macro.fomc_http")
 
 
 class FomcHttp(FomcCalendarPort):
-    """HTTP-источник FOMC календаря. JSON: {"event_today": true}"""
+    """HTTP-Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº FOMC ĞºĞ°Ğ»ĞµĞ½Ğ´Ğ°Ñ€Ñ. JSON: {"event_today": true}"""
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
         self._url = url
         self._timeout = float(timeout_sec)

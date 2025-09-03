@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
@@ -186,7 +186,7 @@ class CcxtBroker:
             raise self._map_error(exc) from exc
 
     async def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
-        """Минимальная реализация для сверок ордеров."""
+        """ĞœĞ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ğ°Ñ Ñ€ĞµĞ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ğ´Ğ»Ñ ÑĞ²ĞµÑ€Ğ¾Ğº Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ²."""
         await self._ensure_markets()
         gate = self._sym_to_gate.get(symbol) or self._to_gate(symbol)
         await self._bucket.acquire()
@@ -280,8 +280,8 @@ class CcxtBroker:
 
 def _extract_fee_quote(order: dict[str, Any], *, symbol: str) -> str:
     """
-    Возвращает сумму комиссии в котируемой валюте (quote), если она совпадает с валютой fee.
-    Иначе возвращает "0". Безопасная best-effort логика.
+    Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ ÑÑƒĞ¼Ğ¼Ñƒ ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ğ¸ Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ (quote), ĞµÑĞ»Ğ¸ Ğ¾Ğ½Ğ° ÑĞ¾Ğ²Ğ¿Ğ°Ğ´Ğ°ĞµÑ‚ Ñ Ğ²Ğ°Ğ»ÑÑ‚Ğ¾Ğ¹ fee.
+    Ğ˜Ğ½Ğ°Ñ‡Ğµ Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ "0". Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ°Ñ best-effort Ğ»Ğ¾Ğ³Ğ¸ĞºĞ°.
     """
     try:
         fee = (order or {}).get("fee") or {}

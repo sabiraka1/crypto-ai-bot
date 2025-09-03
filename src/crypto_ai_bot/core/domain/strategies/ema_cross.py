@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
@@ -10,20 +10,20 @@ from .base import BaseStrategy, Decision, StrategyContext, MarketData
 
 
 class EmaCrossStrategy(BaseStrategy):
-    """EMA crossover с фильтрами спреда/волатильности.
+    """EMA crossover Ñ Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€Ğ°Ğ¼Ğ¸ ÑĞ¿Ñ€ĞµĞ´Ğ°/Ğ²Ğ¾Ğ»Ğ°Ñ‚Ğ¸Ğ»ÑŒĞ½Ğ¾ÑÑ‚Ğ¸.
 
-    По контракту возвращает строку-решение ('buy'|'sell'|'hold') и explain.
+    ĞŸĞ¾ ĞºĞ¾Ğ½Ñ‚Ñ€Ğ°ĞºÑ‚Ñƒ Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ ÑÑ‚Ñ€Ğ¾ĞºÑƒ-Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ ('buy'|'sell'|'hold') Ğ¸ explain.
     """
 
     def __init__(
         self,
         fast_period: int = 9,
         slow_period: int = 21,
-        threshold_pct: float = 0.1,      # 0.1% дивергенция fast/slow
-        max_spread_pct: float = 0.5,     # фильтр спреда
+        threshold_pct: float = 0.1,      # 0.1% Ğ´Ğ¸Ğ²ĞµÑ€Ğ³ĞµĞ½Ñ†Ğ¸Ñ fast/slow
+        max_spread_pct: float = 0.5,     # Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€ ÑĞ¿Ñ€ĞµĞ´Ğ°
         use_volatility_filter: bool = True,
         max_volatility_pct: float = 10.0,
-        min_volatility_pct: float = 0.0, # можно задать >0 для «слишком низкая вола»
+        min_volatility_pct: float = 0.0, # Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ·Ğ°Ğ´Ğ°Ñ‚ÑŒ >0 Ğ´Ğ»Ñ Â«ÑĞ»Ğ¸ÑˆĞºĞ¾Ğ¼ Ğ½Ğ¸Ğ·ĞºĞ°Ñ Ğ²Ğ¾Ğ»Ğ°Â»
     ) -> None:
         assert fast_period > 0 and slow_period > 0 and fast_period < slow_period
         self.fast_period = fast_period
@@ -44,12 +44,12 @@ class EmaCrossStrategy(BaseStrategy):
         alpha_s = dec(2) / (dec(self.slow_period) + dec(1))
 
         if self._ema_fast is None or self._ema_slow is None:
-            # Инициализация через SMA
+            # Ğ˜Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ñ‡ĞµÑ€ĞµĞ· SMA
             if len(self._prices) >= self.slow_period:
                 self._ema_fast = sum(list(self._prices)[-self.fast_period:]) / dec(self.fast_period)
                 self._ema_slow = sum(list(self._prices)[-self.slow_period:]) / dec(self.slow_period)
             else:
-                # недостаточно истории для SMA инициализации
+                # Ğ½ĞµĞ´Ğ¾ÑÑ‚Ğ°Ñ‚Ğ¾Ñ‡Ğ½Ğ¾ Ğ¸ÑÑ‚Ğ¾Ñ€Ğ¸Ğ¸ Ğ´Ğ»Ñ SMA Ğ¸Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ğ¸
                 return
         else:
             self._ema_fast = price * alpha_f + self._ema_fast * (dec(1) - alpha_f)
@@ -82,7 +82,7 @@ class EmaCrossStrategy(BaseStrategy):
             explain["reason"] = "no_price"
             return "hold", explain
 
-        # История и EMA
+        # Ğ˜ÑÑ‚Ğ¾Ñ€Ğ¸Ñ Ğ¸ EMA
         self._prices.append(last)
         if len(self._prices) < self.slow_period:
             explain["reason"] = "warming_up"
@@ -96,13 +96,13 @@ class EmaCrossStrategy(BaseStrategy):
 
         explain["indicators"] = {"ema_fast": float(self._ema_fast), "ema_slow": float(self._ema_slow), "price": float(last)}
 
-        # Фильтры
+        # Ğ¤Ğ¸Ğ»ÑŒÑ‚Ñ€Ñ‹
         ok, why = self._filters_ok(d)
         if not ok:
             explain["reason"] = why
             return "hold", explain
 
-        # Сигнал
+        # Ğ¡Ğ¸Ğ³Ğ½Ğ°Ğ»
         upper = self._ema_slow * (dec(1) + self.threshold)
         lower = self._ema_slow * (dec(1) - self.threshold)
 
@@ -117,8 +117,8 @@ class EmaCrossStrategy(BaseStrategy):
         return "hold", explain
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        """Адаптер для BaseStrategy.generate() - вызывает decide() и преобразует результат."""
-        # Получаем данные из MarketData если их нет в контексте
+        """ĞĞ´Ğ°Ğ¿Ñ‚ĞµÑ€ Ğ´Ğ»Ñ BaseStrategy.generate() - Ğ²Ñ‹Ğ·Ñ‹Ğ²Ğ°ĞµÑ‚ decide() Ğ¸ Ğ¿Ñ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·ÑƒĞµÑ‚ Ñ€ĞµĞ·ÑƒĞ»ÑŒÑ‚Ğ°Ñ‚."""
+        # ĞŸĞ¾Ğ»ÑƒÑ‡Ğ°ĞµĞ¼ Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ Ğ¸Ğ· MarketData ĞµÑĞ»Ğ¸ Ğ¸Ñ… Ğ½ĞµÑ‚ Ğ² ĞºĞ¾Ğ½Ñ‚ĞµĞºÑÑ‚Ğµ
         if ctx.data is None:
             ticker = await md.get_ticker(ctx.symbol)
             ctx = StrategyContext(
@@ -130,9 +130,9 @@ class EmaCrossStrategy(BaseStrategy):
         action, explain = self.decide(ctx)
         reason = explain.get("reason", "")
         
-        # Преобразуем в Decision
+        # ĞŸÑ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·ÑƒĞµĞ¼ Ğ² Decision
         return Decision(
             action=action,
-            confidence=0.6,  # Можно вычислять на основе индикаторов
+            confidence=0.6,  # ĞœĞ¾Ğ¶Ğ½Ğ¾ Ğ²Ñ‹Ñ‡Ğ¸ÑĞ»ÑÑ‚ÑŒ Ğ½Ğ° Ğ¾ÑĞ½Ğ¾Ğ²Ğµ Ğ¸Ğ½Ğ´Ğ¸ĞºĞ°Ñ‚Ğ¾Ñ€Ğ¾Ğ²
             reason=reason
         )

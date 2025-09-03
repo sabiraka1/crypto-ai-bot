@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
@@ -6,7 +6,7 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.settings_keys import per_symbol_override
 
 
-def check(storage: Any, symbol: str, settings: Any) -> dict[str, str] | None:  # Исправлено: добавлен тип storage
+def check(storage: Any, symbol: str, settings: Any) -> dict[str, str] | None:  # Ğ˜ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¾: Ğ´Ğ¾Ğ±Ğ°Ğ²Ğ»ĞµĞ½ Ñ‚Ğ¸Ğ¿ storage
     # max orders / 5m
     max_orders_5m = per_symbol_override(settings, symbol, "BUDGET_MAX_ORDERS_5M", lambda s: int(float(s)), 0)
     if max_orders_5m > 0:

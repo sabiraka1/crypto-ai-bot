@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -17,7 +17,7 @@ from crypto_ai_bot.core.domain.strategies.position_sizing import (
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 
-# === AI skeleton imports (безопасные, есть фолбэк) ===
+# === AI skeleton imports (Ğ±ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ñ‹Ğµ, ĞµÑÑ‚ÑŒ Ñ„Ğ¾Ğ»Ğ±ÑĞº) ===
 try:
     from crypto_ai_bot.core.domain.signals.feature_pipeline import Candle, last_features
     from crypto_ai_bot.core.domain.signals.ai_scoring import AIScorer, AIScoringConfig
@@ -185,7 +185,7 @@ async def eval_and_execute(
         manager = StrategyManager(settings=settings, regime_provider=lambda: regime)
         decision, explain = await manager.decide(ctx=ctx, md=md)
 
-        # === AI-gating (опционально) ===
+        # === AI-gating (Ğ¾Ğ¿Ñ†Ğ¸Ğ¾Ğ½Ğ°Ğ»ÑŒĞ½Ğ¾) ===
         ai_gating = bool(int(getattr(settings, "AI_GATING_ENABLED", 0) or 0))
         if ai_gating and decision in ("buy", "sell") and AIScorer and last_features and Candle:
             limit = int(getattr(settings, "STRAT_OHLCV_LIMIT", 200) or 200)

@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import asyncio
 import time
 from typing import Any
 
 class CircuitBreaker:
     """
-    Простой async circuit breaker: closed -> open (на timeout) -> half-open (1 попытка) -> closed
+    ĞŸÑ€Ğ¾ÑÑ‚Ğ¾Ğ¹ async circuit breaker: closed -> open (Ğ½Ğ° timeout) -> half-open (1 Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚ĞºĞ°) -> closed
     """
     def __init__(self, *, name: str = "cb", failure_threshold: int = 5, reset_timeout_sec: float = 10.0):
         self.name = name
@@ -24,7 +24,7 @@ class CircuitBreaker:
                     self._failures = 0
                 else:
                     raise RuntimeError(f"{self.name}: open")
-            # closed or half-open — разрешаем попытку
+            # closed or half-open â€” Ñ€Ğ°Ğ·Ñ€ĞµÑˆĞ°ĞµĞ¼ Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚ĞºÑƒ
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None:
         async with self._lock:
@@ -38,4 +38,4 @@ class CircuitBreaker:
                     self._state = "open"
                     self._opened_at = time.time()
                 return False
-        return None  # Добавлен return для успешного пути
+        return None  # Ğ”Ğ¾Ğ±Ğ°Ğ²Ğ»ĞµĞ½ return Ğ´Ğ»Ñ ÑƒÑĞ¿ĞµÑˆĞ½Ğ¾Ğ³Ğ¾ Ğ¿ÑƒÑ‚Ğ¸

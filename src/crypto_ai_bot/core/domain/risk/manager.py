@@ -1,14 +1,14 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Optional, Tuple
 
-# Domain-правила (чистый слой)
+# Domain-Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ñ‡Ğ¸ÑÑ‚Ñ‹Ğ¹ ÑĞ»Ğ¾Ğ¹)
 from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule, LossStreakConfig
 from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule, MaxDrawdownConfig
 
-# Доп. правила (мягкое подключение)
+# Ğ”Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ğ¼ÑĞ³ĞºĞ¾Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ)
 try:
     from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mRule, MaxOrders5mConfig
 except Exception:
@@ -40,7 +40,7 @@ except Exception:
     CorrelationManager = None  # type: ignore
     CorrelationConfig = None  # type: ignore
 
-# utils в domain допустимы
+# utils Ğ² domain Ğ´Ğ¾Ğ¿ÑƒÑÑ‚Ğ¸Ğ¼Ñ‹
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -49,23 +49,23 @@ _log = get_logger("risk.manager")
 
 @dataclass(frozen=True)
 class RiskConfig:
-    # базовые
+    # Ğ±Ğ°Ğ·Ğ¾Ğ²Ñ‹Ğµ
     loss_streak_limit: int = 0
     max_drawdown_pct: float = 0.0
     max_orders_per_day: int = 0
     max_turnover_quote_per_day: Decimal = Decimal("0")
 
-    # мягкие лимиты (0 = выключено)
+    # Ğ¼ÑĞ³ĞºĞ¸Ğµ Ğ»Ğ¸Ğ¼Ğ¸Ñ‚Ñ‹ (0 = Ğ²Ñ‹ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾)
     max_orders_5m: int = 0
     max_turnover_5m_quote: Decimal = Decimal("0")
     cooldown_sec: int = 0
     max_spread_pct: float = 0.0
     daily_loss_limit_quote: Decimal = Decimal("0")
 
-    # антикорреляция
+    # Ğ°Ğ½Ñ‚Ğ¸ĞºĞ¾Ñ€Ñ€ĞµĞ»ÑÑ†Ğ¸Ñ
     anti_corr_groups: list[list[str]] | None = None
 
-    # провайдер спрэда (если None — SpreadCapRule пропускается)
+    # Ğ¿Ñ€Ğ¾Ğ²Ğ°Ğ¹Ğ´ĞµÑ€ ÑĞ¿Ñ€ÑĞ´Ğ° (ĞµÑĞ»Ğ¸ None â€” SpreadCapRule Ğ¿Ñ€Ğ¾Ğ¿ÑƒÑĞºĞ°ĞµÑ‚ÑÑ)
     spread_provider: Optional[callable] = None
 
     @classmethod
@@ -97,19 +97,19 @@ class RiskConfig:
 
 class RiskManager:
     """
-    Чистый API для application слоя:
+    Ğ§Ğ¸ÑÑ‚Ñ‹Ğ¹ API Ğ´Ğ»Ñ application ÑĞ»Ğ¾Ñ:
     check(symbol, storage) -> (ok: bool, reason: str, extra: dict)
-    Никаких публикаций/шины внутри domain.
+    ĞĞ¸ĞºĞ°ĞºĞ¸Ñ… Ğ¿ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ†Ğ¸Ğ¹/ÑˆĞ¸Ğ½Ñ‹ Ğ²Ğ½ÑƒÑ‚Ñ€Ğ¸ domain.
     """
 
     def __init__(self, cfg: RiskConfig) -> None:
         self.cfg = cfg
 
-        # базовые
+        # Ğ±Ğ°Ğ·Ğ¾Ğ²Ñ‹Ğµ
         self._loss = LossStreakRule(LossStreakConfig(limit=cfg.loss_streak_limit))
         self._dd = MaxDrawdownRule(MaxDrawdownConfig(max_drawdown_pct=cfg.max_drawdown_pct))
 
-        # доп. правила
+        # Ğ´Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ°
         self._orders5 = MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m)) if (MaxOrders5mRule and cfg.max_orders_5m > 0) else None
         self._turn5 = MaxTurnover5mRule(MaxTurnover5mConfig(limit_quote=cfg.max_turnover_5m_quote)) if (MaxTurnover5mRule and cfg.max_turnover_5m_quote > 0) else None
         self._cool = CooldownRule(CooldownConfig(cooldown_sec=cfg.cooldown_sec)) if (CooldownRule and cfg.cooldown_sec > 0) else None
@@ -119,7 +119,7 @@ class RiskManager:
 
     def _budget_check(self, *, symbol: str, storage: Any) -> Tuple[bool, str, dict]:
         """
-        Дневные бюджеты: кол-во ордеров и дневной оборот (quote). 0 = выключено.
+        Ğ”Ğ½ĞµĞ²Ğ½Ñ‹Ğµ Ğ±ÑĞ´Ğ¶ĞµÑ‚Ñ‹: ĞºĞ¾Ğ»-Ğ²Ğ¾ Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ² Ğ¸ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚ (quote). 0 = Ğ²Ñ‹ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾.
         reason: 'budget:max_orders_per_day' | 'budget:max_turnover_quote_per_day'
         """
         limit_n = int(self.cfg.max_orders_per_day or 0)
@@ -155,14 +155,14 @@ class RiskManager:
 
     def check(self, *, symbol: str, storage: Any) -> Tuple[bool, str, dict]:
         """
-        Возвращает (ok, reason, extra). Никаких side-effects.
+        Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ (ok, reason, extra). ĞĞ¸ĞºĞ°ĞºĞ¸Ñ… side-effects.
         reason:
           - 'ok'
           - 'budget:*'
           - 'cooldown' | 'orders_5m' | 'turnover_5m' | 'spread' | 'daily_loss' | 'correlation'
           - 'loss_streak' | 'max_drawdown'
         """
-        # бюджеты
+        # Ğ±ÑĞ´Ğ¶ĞµÑ‚Ñ‹
         ok, why, extra = self._budget_check(symbol=symbol, storage=storage)
         if not ok:
             inc("budget_exceeded_total", symbol=symbol, type=why.split(":", 1)[-1])
@@ -178,7 +178,7 @@ class RiskManager:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # 5m капы
+        # 5m ĞºĞ°Ğ¿Ñ‹
         if self._orders5 and trades:
             ok, why, extra = self._orders5.check(symbol=symbol, trades_repo=trades)
             if not ok:
@@ -191,21 +191,21 @@ class RiskManager:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # антикорреляция
+        # Ğ°Ğ½Ñ‚Ğ¸ĞºĞ¾Ñ€Ñ€ĞµĞ»ÑÑ†Ğ¸Ñ
         if self._corr and positions:
             ok, why, extra = self._corr.check(symbol=symbol, positions_repo=positions)
             if not ok:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # спред
+        # ÑĞ¿Ñ€ĞµĞ´
         if self._spread:
             ok, why, extra = self._spread.check(symbol=symbol)
             if not ok:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # дневной убыток
+        # Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ ÑƒĞ±Ñ‹Ñ‚Ğ¾Ğº
         if self._dailoss and trades:
             ok, why, extra = self._dailoss.check(symbol=symbol, trades_repo=trades)
             if not ok:
@@ -229,7 +229,7 @@ class RiskManager:
 
         return True, "ok", {}
 
-    # ---- Бэкомпат для старых вызовов ----
+    # ---- Ğ‘ÑĞºĞ¾Ğ¼Ğ¿Ğ°Ñ‚ Ğ´Ğ»Ñ ÑÑ‚Ğ°Ñ€Ñ‹Ñ… Ğ²Ñ‹Ğ·Ğ¾Ğ²Ğ¾Ğ² ----
     def can_execute(self, symbol: str, storage: Any) -> bool:
         ok, _, _ = self.check(symbol=symbol, storage=storage)
         return ok

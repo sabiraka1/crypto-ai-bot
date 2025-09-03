@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 from typing import Any, Dict, cast
 import asyncio
 import html
@@ -39,7 +39,7 @@ def _split_symbol(sym: str) -> tuple[str, str]:
 
 class TelegramBotCommands:
     """
-    Long-poll командный бот.
+    Long-poll ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´Ğ½Ñ‹Ğ¹ Ğ±Ğ¾Ñ‚.
     """
 
     def __init__(
@@ -62,7 +62,7 @@ class TelegramBotCommands:
         self._cache: dict[tuple[int, str], tuple[float, str]] = {}
         self._recent: dict[int, list[float]] = {}
 
-    # --------------------- утилиты ---------------------
+    # --------------------- ÑƒÑ‚Ğ¸Ğ»Ğ¸Ñ‚Ñ‹ ---------------------
 
     def _allow(self, user_id: int | None) -> bool:
         if not self._allowed:
@@ -130,7 +130,7 @@ class TelegramBotCommands:
         orchs = getattr(self._container, "orchestrators", {}) or {}
         return orchs.get(symbol) or orchs.get(symbol.replace("-", "/").upper())
 
-    # --------------------- команды ---------------------
+    # --------------------- ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´Ñ‹ ---------------------
 
     async def _cmd_help(self, chat_id: int) -> None:
         key = "help"
@@ -139,14 +139,14 @@ class TelegramBotCommands:
             await self._reply(chat_id, cached)
             return
         txt = (
-            "📋 <b>Команды</b>\n"
-            "/help – список команд\n"
-            "/symbols – доступные символы\n"
-            "/set &lt;SYM&gt; – запомнить для чата\n"
-            "/status [SYM] – статус оркестратора\n"
-            "/balance [SYM] – баланс на бирже\n"
-            "/limits – текущие лимиты риска\n"
-            "/risk [SYM] – использование лимитов\n"
+            "ğŸ“‹ <b>ĞšĞ¾Ğ¼Ğ°Ğ½Ğ´Ñ‹</b>\n"
+            "/help â€“ ÑĞ¿Ğ¸ÑĞ¾Ğº ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´\n"
+            "/symbols â€“ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ½Ñ‹Ğµ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñ‹\n"
+            "/set &lt;SYM&gt; â€“ Ğ·Ğ°Ğ¿Ğ¾Ğ¼Ğ½Ğ¸Ñ‚ÑŒ Ğ´Ğ»Ñ Ñ‡Ğ°Ñ‚Ğ°\n"
+            "/status [SYM] â€“ ÑÑ‚Ğ°Ñ‚ÑƒÑ Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€Ğ°\n"
+            "/balance [SYM] â€“ Ğ±Ğ°Ğ»Ğ°Ğ½Ñ Ğ½Ğ° Ğ±Ğ¸Ñ€Ğ¶Ğµ\n"
+            "/limits â€“ Ñ‚ĞµĞºÑƒÑ‰Ğ¸Ğµ Ğ»Ğ¸Ğ¼Ğ¸Ñ‚Ñ‹ Ñ€Ğ¸ÑĞºĞ°\n"
+            "/risk [SYM] â€“ Ğ¸ÑĞ¿Ğ¾Ğ»ÑŒĞ·Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ Ğ»Ğ¸Ğ¼Ğ¸Ñ‚Ğ¾Ğ²\n"
         )
         self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
@@ -158,44 +158,44 @@ class TelegramBotCommands:
             await self._reply(chat_id, cached)
             return
         orchs = getattr(self._container, "orchestrators", {}) or {}
-        syms = ", ".join(sorted(orchs.keys())) or "—"
+        syms = ", ".join(sorted(orchs.keys())) or "â€”"
         cur = self._chat_symbol.get(chat_id, self._default_symbol)
-        txt = f"📣 <b>Символы</b>\nДоступно: <code>{html.escape(syms)}</code>\nТекущий: <code>{html.escape(cur)}</code>"
+        txt = f"ğŸ“£ <b>Ğ¡Ğ¸Ğ¼Ğ²Ğ¾Ğ»Ñ‹</b>\nĞ”Ğ¾ÑÑ‚ÑƒĞ¿Ğ½Ğ¾: <code>{html.escape(syms)}</code>\nĞ¢ĞµĞºÑƒÑ‰Ğ¸Ğ¹: <code>{html.escape(cur)}</code>"
         self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
 
     async def _cmd_set(self, chat_id: int, text: str) -> None:
         parts = text.strip().split()
         if len(parts) < 2 or "/" not in parts[1]:
-            await self._reply(chat_id, "Использование: <code>/set BTC/USDT</code>")
+            await self._reply(chat_id, "Ğ˜ÑĞ¿Ğ¾Ğ»ÑŒĞ·Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ: <code>/set BTC/USDT</code>")
             return
         sym = canonical(parts[1])
         orchs = getattr(self._container, "orchestrators", {}) or {}
         if sym not in orchs:
-            await self._reply(chat_id, f"❌ Оркестратор для <code>{html.escape(sym)}</code> не найден")
+            await self._reply(chat_id, f"âŒ ĞÑ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€ Ğ´Ğ»Ñ <code>{html.escape(sym)}</code> Ğ½Ğµ Ğ½Ğ°Ğ¹Ğ´ĞµĞ½")
             return
         self._chat_symbol[chat_id] = sym
-        await self._reply(chat_id, f"✅ Установлен текущий символ: <code>{html.escape(sym)}</code>")
+        await self._reply(chat_id, f"âœ… Ğ£ÑÑ‚Ğ°Ğ½Ğ¾Ğ²Ğ»ĞµĞ½ Ñ‚ĞµĞºÑƒÑ‰Ğ¸Ğ¹ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»: <code>{html.escape(sym)}</code>")
 
     async def _cmd_status(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f"âŒ Ğ½ĞµÑ‚ Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€Ğ° Ğ´Ğ»Ñ <code>{html.escape(symbol)}</code>")
             return
         st = orch.status()
-        started = "🟢" if st.get("started") else "⚪"
-        paused = "⏸" if st.get("paused") else "▶️"
+        started = "ğŸŸ¢" if st.get("started") else "âšª"
+        paused = "â¸" if st.get("paused") else "â–¶ï¸"
         lines = [f"{started} <b>Status</b> {paused} <code>{html.escape(symbol)}</code>"]
         loops = st.get("loops", {})
         for name, info in loops.items():
-            mark = "✅" if info.get("task_alive") else "—"
+            mark = "âœ…" if info.get("task_alive") else "â€”"
             lines.append(f"{mark} {name} (int={info.get('interval_sec')}, enabled={info.get('enabled')})")
         await self._reply(chat_id, "\n".join(lines))
 
     async def _cmd_pause(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f"âŒ Ğ½ĞµÑ‚ Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€Ğ° Ğ´Ğ»Ñ <code>{html.escape(symbol)}</code>")
             return
         await orch.pause()
         await self._cmd_status(chat_id, symbol)
@@ -203,7 +203,7 @@ class TelegramBotCommands:
     async def _cmd_resume(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f"âŒ Ğ½ĞµÑ‚ Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€Ğ° Ğ´Ğ»Ñ <code>{html.escape(symbol)}</code>")
             return
         await orch.resume()
         await self._cmd_status(chat_id, symbol)
@@ -211,7 +211,7 @@ class TelegramBotCommands:
     async def _cmd_stop(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"❌ нет оркестратора для <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f"âŒ Ğ½ĞµÑ‚ Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€Ğ° Ğ´Ğ»Ñ <code>{html.escape(symbol)}</code>")
             return
         await orch.stop()
         await self._cmd_status(chat_id, symbol)
@@ -225,10 +225,10 @@ class TelegramBotCommands:
         risk = getattr(self._container, "risk", None)
         cfg = getattr(risk, "config", None)
         if not cfg:
-            await self._reply(chat_id, "❌ RiskConfig недоступен")
+            await self._reply(chat_id, "âŒ RiskConfig Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½")
             return
         txt = (
-            "🧰 <b>Лимиты</b>\n"
+            "ğŸ§° <b>Ğ›Ğ¸Ğ¼Ğ¸Ñ‚Ñ‹</b>\n"
             f"cooldown: <code>{getattr(cfg, 'cooldown_sec', 0)}s</code>\n"
             f"max_spread: <code>{getattr(cfg, 'max_spread_pct', 0)}</code>%\n"
             f"max_position_base: <code>{getattr(cfg, 'max_position_base', 0)}</code>\n"
@@ -238,7 +238,7 @@ class TelegramBotCommands:
         await self._reply(chat_id, txt)
 
     async def _cmd_risk(self, chat_id: int, symbol: str) -> None:
-        parts = ["🔍 <b>Риск (оценка)</b>"]
+        parts = ["ğŸ” <b>Ğ Ğ¸ÑĞº (Ğ¾Ñ†ĞµĞ½ĞºĞ°)</b>"]
         st = getattr(self._container, "storage", None)
         cfg = getattr(getattr(self._container, "risk", None), "config", None)
         try:
@@ -261,7 +261,7 @@ class TelegramBotCommands:
     async def _cmd_balance(self, chat_id: int, symbol: str) -> None:
         broker = getattr(self._container, "broker", None)
         if not broker:
-            await self._reply(chat_id, "❌ broker недоступен")
+            await self._reply(chat_id, "âŒ broker Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½")
             return
         base, quote = _split_symbol(symbol)
         try:
@@ -270,15 +270,15 @@ class TelegramBotCommands:
             base, quote = (symbol.split('/') + ['',''])[:2]
             base_free = gv(base).get('free') or gv(base).get('total') or '0'
             quote_free = gv(quote).get('free') or gv(quote).get('total') or '0'
-            await self._reply(chat_id, f"💛 <b>Баланс</b> <code>{html.escape(symbol)}</code>\n"
+            await self._reply(chat_id, f"ğŸ’› <b>Ğ‘Ğ°Ğ»Ğ°Ğ½Ñ</b> <code>{html.escape(symbol)}</code>\n"
                                        f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
         except Exception:
-            await self._reply(chat_id, "⚠️ Не удалось получить баланс")
+            await self._reply(chat_id, "âš ï¸ ĞĞµ ÑƒĞ´Ğ°Ğ»Ğ¾ÑÑŒ Ğ¿Ğ¾Ğ»ÑƒÑ‡Ğ¸Ñ‚ÑŒ Ğ±Ğ°Ğ»Ğ°Ğ½Ñ")
 
-    # --------------------- главный метод run() ---------------------
+    # --------------------- Ğ³Ğ»Ğ°Ğ²Ğ½Ñ‹Ğ¹ Ğ¼ĞµÑ‚Ğ¾Ğ´ run() ---------------------
     
     async def run(self) -> None:
-        """Главный цикл long-polling для получения команд из Telegram"""
+        """Ğ“Ğ»Ğ°Ğ²Ğ½Ñ‹Ğ¹ Ñ†Ğ¸ĞºĞ» long-polling Ğ´Ğ»Ñ Ğ¿Ğ¾Ğ»ÑƒÑ‡ĞµĞ½Ğ¸Ñ ĞºĞ¾Ğ¼Ğ°Ğ½Ğ´ Ğ¸Ğ· Telegram"""
         _log.info("telegram_bot_commands_started")
         
         while True:
@@ -301,11 +301,11 @@ class TelegramBotCommands:
                             continue
                         
                         if not self._allow(user_id):
-                            await self._reply(chat_id, "❌ Доступ запрещен")
+                            await self._reply(chat_id, "âŒ Ğ”Ğ¾ÑÑ‚ÑƒĞ¿ Ğ·Ğ°Ğ¿Ñ€ĞµÑ‰ĞµĞ½")
                             continue
                         
                         if not self._throttle(user_id):
-                            await self._reply(chat_id, "⚠️ Слишком много запросов, подождите")
+                            await self._reply(chat_id, "âš ï¸ Ğ¡Ğ»Ğ¸ÑˆĞºĞ¾Ğ¼ Ğ¼Ğ½Ğ¾Ğ³Ğ¾ Ğ·Ğ°Ğ¿Ñ€Ğ¾ÑĞ¾Ğ², Ğ¿Ğ¾Ğ´Ğ¾Ğ¶Ğ´Ğ¸Ñ‚Ğµ")
                             continue
                         
                         if text.startswith("/"):
