@@ -111,7 +111,7 @@ async def execute_trade(
         if idem_repo is not None:
             if not bool(idem_repo.check_and_store(idem_key, idempotency_ttl_sec)):
                 # Уже есть такое решение (дубликат)
-                await bus.publish("trade.blocked", {"symbol": sym, "reason": "duplicate"})
+                await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
                 _log.warning("trade_blocked_duplicate", extra={"symbol": sym})
                 return {"action": "skip", "executed": False, "reason": "duplicate"}
     except Exception:
@@ -131,7 +131,7 @@ async def execute_trade(
                 trades = await _recent_trades(storage, sym, n=max(lookback, 10))
                 allowed, reason = ls_rule.check(trades)
                 if not allowed:
-                    await bus.publish("budget.exceeded", {"symbol": sym, "type": "loss_streak", "reason": reason})
+                    await bus.publish(EVT.BUDGET_EXCEEDED, {"symbol": sym, "type": "loss_streak", "reason": reason})
                     _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
@@ -155,7 +155,7 @@ async def execute_trade(
 
                 allowed, reason = md_rule.check(current_balance=current, peak_balance=peak, daily_pnl=daily_pnl)
                 if not allowed:
-                    await bus.publish("budget.exceeded", {"symbol": sym, "type": "max_drawdown", "reason": reason})
+                    await bus.publish(EVT.BUDGET_EXCEEDED, {"symbol": sym, "type": "max_drawdown", "reason": reason})
                     _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
@@ -173,7 +173,7 @@ async def execute_trade(
                 mid = (bid + ask) / 2
                 spread_pct = (ask - bid) / mid * 100
                 if spread_pct > cfg.max_spread_pct:
-                    await bus.publish("trade.blocked", {"symbol": sym, "reason": "spread"})
+                    await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "spread"})
                     _log.warning(
                         "trade_blocked_spread",
                         extra={"symbol": sym, "spread_pct": f"{spread_pct:.4f}", "limit_pct": str(cfg.max_spread_pct)},
@@ -188,7 +188,7 @@ async def execute_trade(
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
             if recent_count >= cfg.max_orders_5m:
                 await bus.publish(
-                    "budget.exceeded",
+                    EVT.BUDGET_EXCEEDED,
                     {"symbol": sym, "type": "max_orders_5m", "count_5m": recent_count, "limit": cfg.max_orders_5m},
                 )
                 _log.warning(
@@ -206,7 +206,7 @@ async def execute_trade(
             current_turnover = storage.trades.daily_turnover_quote(sym)
             if current_turnover >= max_turnover_attr:
                 await bus.publish(
-                    "budget.exceeded",
+                    EVT.BUDGET_EXCEEDED,
                     {"symbol": sym, "type": "max_turnover_day", "turnover": str(current_turnover), "limit": str(max_turnover_attr)},
                 )
                 _log.warning(
@@ -233,7 +233,7 @@ async def execute_trade(
     except Exception:
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
-            await bus.publish("trade.failed", {"symbol": sym, "side": act, "error": "broker_exception"})
+            await bus.publish(EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
         except Exception:
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
@@ -256,7 +256,7 @@ async def execute_trade(
     # ---- событие о выполнении сделки (для settlement/алертов) ----
     try:
         await bus.publish(
-            "trade.completed",
+            EVT.TRADE_COMPLETED,
             {
                 "symbol": sym,
                 "side": act,

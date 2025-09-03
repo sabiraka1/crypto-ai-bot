@@ -262,23 +262,23 @@ class ProtectiveExits:
             return None
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=base)
-            await self._bus.publish("trade.completed", {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)})
+            await self._bus.publish(EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)})
             _log.info("protective_exit_sell_all", extra={"symbol": symbol, "qty": str(base), "reason": reason})
             self._cancel_task(symbol)
             return {"closed_all": True, "side": "sell", "qty": str(base), "reason": reason}
         except Exception as e:
-            await self._bus.publish("trade.failed", {"symbol": symbol, "side": "sell", "reason": str(e)})
+            await self._bus.publish(EVT.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return None
 
     async def _sell_qty(self, symbol: str, qty: Decimal, reason: str) -> bool:
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
-            await self._bus.publish("trade.completed", {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)})
+            await self._bus.publish(EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)})
             _log.info("protective_exit_sell_qty", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
             return True
         except Exception as e:
-            await self._bus.publish("trade.failed", {"symbol": symbol, "side": "sell", "reason": str(e)})
+            await self._bus.publish(EVT.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return False
 

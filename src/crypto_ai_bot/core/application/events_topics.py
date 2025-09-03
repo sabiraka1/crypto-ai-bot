@@ -1,43 +1,43 @@
 # События (единый реестр тем шины)
 
 # Брокер/ордера
-ORDER_EXECUTED = "order.executed"
-ORDER_FAILED = "order.failed"
+ORDER_EXECUTED = EVT.ORDER_EXECUTED
+ORDER_FAILED = EVT.ORDER_FAILED
 
 # Торговый шаг (high-level)
-TRADE_COMPLETED = "trade.completed"
-TRADE_FAILED = "trade.failed"
-TRADE_SETTLED = "trade.settled"
-TRADE_SETTLEMENT_TIMEOUT = "trade.settlement_timeout"
-TRADE_BLOCKED = "trade.blocked"
-TRADE_PARTIAL_FOLLOWUP = "trade.partial_followup"  # <-- добавлено
+TRADE_COMPLETED = EVT.TRADE_COMPLETED
+TRADE_FAILED = EVT.TRADE_FAILED
+TRADE_SETTLED = EVT.TRADE_SETTLED
+TRADE_SETTLEMENT_TIMEOUT = EVT.TRADE_SETTLEMENT_TIMEOUT
+TRADE_BLOCKED = EVT.TRADE_BLOCKED
+TRADE_PARTIAL_FOLLOWUP = EVT.TRADE_PARTIAL_FOLLOWUP  # <-- добавлено
 
 # Здоровье и наблюдаемость
-WATCHDOG_HEARTBEAT = "watchdog.heartbeat"
-HEALTH_REPORT = "health.report"
+WATCHDOG_HEARTBEAT = EVT.WATCHDOG_HEARTBEAT
+HEALTH_REPORT = EVT.HEALTH_REPORT
 
 # Риски/бюджеты
-RISK_BLOCKED = "risk.blocked"
-BUDGET_EXCEEDED = "budget.exceeded"
+RISK_BLOCKED = EVT.RISK_BLOCKED
+BUDGET_EXCEEDED = EVT.BUDGET_EXCEEDED
 
 # Оценка/решение
 EVALUATION_STARTED = "evaluation.started"
 DECISION_EVALUATED = "decision.evaluated"
 
 # Сверки
-RECONCILIATION_COMPLETED = "reconciliation.completed"
-RECONCILE_POSITION_MISMATCH = "reconcile.position_mismatch"
+RECONCILIATION_COMPLETED = EVT.RECONCILIATION_COMPLETED
+RECONCILE_POSITION_MISMATCH = EVT.RECONCILE_POSITION_MISMATCH
 
 # Оркестратор
-ORCH_AUTO_PAUSED = "orchestrator.auto_paused"
-ORCH_AUTO_RESUMED = "orchestrator.auto_resumed"
+ORCH_AUTO_PAUSED = EVT.ORCH_AUTO_PAUSED
+ORCH_AUTO_RESUMED = EVT.ORCH_AUTO_RESUMED
 
 # Safety
-DMS_TRIGGERED = "safety.dms.triggered"
-DMS_SKIPPED = "safety.dms.skipped"
+DMS_TRIGGERED = EVT.DMS_TRIGGERED
+DMS_SKIPPED = EVT.DMS_SKIPPED
 
 # Alertmanager (Prometheus/Grafana)
-ALERTS_ALERTMANAGER = "alerts.alertmanager"
+ALERTS_ALERTMANAGER = EVT.ALERTS_ALERTMANAGER
 
 # Ошибки брокера
-BROKER_ERROR = "broker.error"
+BROKER_ERROR = EVT.BROKER_ERROR

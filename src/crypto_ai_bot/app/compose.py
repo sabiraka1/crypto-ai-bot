@@ -196,7 +196,7 @@ async def build_container_async() -> Container:
             except Exception:
                 _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol", "")}, exc_info=True)
 
-        bus.on("trade.completed", _on_trade_completed_hint)
+        bus.on(EVT.TRADE_COMPLETED, _on_trade_completed_hint)
 
     # Командный Telegram-бот (входящие команды)
     tg_task: asyncio.Task[None] | None = None

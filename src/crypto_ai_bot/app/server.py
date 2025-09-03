@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import time
@@ -141,9 +141,9 @@ async def _call_with_timeout(coro, *, timeout: float = 2.5):
 @router.get("/health")
 async def health() -> JSONResponse:
     """
-    Реальный health: DB, EventBus, Broker (если доступны).
-    Каждый чек — с тайм-аутом. Публикует событие в шину.
-    Возвращает также прежние поля (default_symbol, symbols) для совместимости.
+    ???????? health: DB, EventBus, Broker (???? ????????).
+    ?????? ??? � ? ????-?????. ????????? ??????? ? ????.
+    ?????????? ????? ??????? ???? (default_symbol, symbols) ??? ?????????????.
     """
     ok = True
     details: dict[str, Any] = {"ts_ms": now_ms()}
@@ -151,7 +151,7 @@ async def health() -> JSONResponse:
     try:
         c = _ctx_or_500()
     except HTTPException:
-        # контейнер ещё не готов
+        # ????????? ??? ?? ?????
         return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
 
     settings = getattr(c, "settings", None)
@@ -184,7 +184,7 @@ async def health() -> JSONResponse:
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
-    # Broker check (мягкий)
+    # Broker check (??????)
     try:
         if broker and hasattr(broker, "get_balance"):
             await _call_with_timeout(broker.get_balance(), timeout=2.0)
@@ -195,10 +195,10 @@ async def health() -> JSONResponse:
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
-    # Публикуем событие о состоянии (для подписчиков/Telegram)
+    # ????????? ??????? ? ????????? (??? ???????????/Telegram)
     if bus and hasattr(bus, "publish"):
         try:
-            await bus.publish("health.report", {"ok": ok, **details})
+            await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
         except Exception:
             _log.debug("health_bus_publish_failed", exc_info=True)
 
@@ -208,8 +208,8 @@ async def health() -> JSONResponse:
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     """
-    Webhook от Alertmanager → транслируем в EventBus на 'alerts.alertmanager'.
-    Дальше это подберёт Telegram-подписчик и выведет уведомление.
+    Webhook ?? Alertmanager � ??????????? ? EventBus ?? EVT.ALERTS_ALERTMANAGER.
+    ?????? ??? ???????? Telegram-????????? ? ??????? ???????????.
     """
     try:
         c = _ctx_or_500()
@@ -219,7 +219,7 @@ async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     bus = getattr(c, "bus", None)
     if bus and hasattr(bus, "publish"):
         try:
-            await bus.publish("alerts.alertmanager", {"payload": payload, "ts_ms": now_ms()})
+            await bus.publish(EVT.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
         except Exception:
             _log.debug("alert_bus_publish_failed", exc_info=True)
     return JSONResponse({"ok": True})
@@ -344,28 +344,28 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
-    """Webhook endpoint для Telegram бота (подготовка для будущего)"""
+    """Webhook endpoint ??? Telegram ???? (?????????? ??? ????????)"""
     try:
-        # Получаем данные
+        # ???????? ??????
         body = await request.body()
         data = await request.json()
 
-        # Проверяем секрет если он есть
+        # ????????? ?????? ???? ?? ????
         c = _ctx_or_500()
         settings = getattr(c, "settings", None)
         secret = getattr(settings, "TELEGRAM_BOT_SECRET", "")
 
         if secret:
-            # Проверка заголовка X-Telegram-Bot-Api-Secret-Token
+            # ???????? ????????? X-Telegram-Bot-Api-Secret-Token
             provided_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
             if provided_token != secret:
                 _log.warning("telegram_webhook_invalid_secret")
                 return JSONResponse({"ok": False}, status_code=401)
 
-        # Пока просто логируем - бот работает в polling режиме
+        # ???? ?????? ???????? - ??? ???????? ? polling ??????
         _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
 
-        # В будущем здесь будет:
+        # ? ??????? ????? ?????:
         # tg_bot = getattr(c, "tg_bot", None)
         # if tg_bot and hasattr(tg_bot, "process_webhook_update"):
         #     await tg_bot.process_webhook_update(data)
