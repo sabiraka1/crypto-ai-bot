@@ -2,9 +2,13 @@ name: Crypto AI Bot CI
 
 on:
   push:
-    branches: [ "**" ]
+    branches: ["**"]
   pull_request:
-    branches: [ "**" ]
+    branches: ["**"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHONPATH: ./src
@@ -25,21 +29,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip wheel setuptools --disable-pip-version-check
           # Install base requirements first
           pip install -r requirements.txt
-          # Install dev requirements (which includes -r requirements.txt)
+          # Install dev requirements (may include -r requirements.txt)
           pip install -r requirements-dev.txt
           # NO safety here - it causes version conflicts
 
@@ -48,7 +46,7 @@ jobs:
           python --version
           ruff --version
           mypy --version
-          echo "import-linter: $(pip show import-linter | grep Version | cut -d' ' -f2 || echo 'installed')"
+          echo "import-linter: $(pip show import-linter | grep Version | cut -d' ' -f2 || echo 'not installed')"
           pytest --version
 
       - name: Ruff (lint + format)
@@ -78,18 +76,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip wheel setuptools --disable-pip-version-check
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
@@ -186,7 +178,7 @@ jobs:
               runner.run_migrations()
               
               # Verify key tables exist
-              adapter.execute('SELECT name FROM sqlite_master WHERE type=\"table\"')
+              adapter.execute('SELECT name FROM sqlite_master WHERE type="table"')
               tables = [row[0] for row in adapter.fetchall()]
               
               required_tables = ['trades', 'positions', 'orders', 'audit', 'idempotency']
@@ -252,10 +244,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
 
       - name: Install dependencies and security tools
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip --disable-pip-version-check
           pip install -r requirements.txt
           pip install bandit pip-audit
 
@@ -284,6 +278,7 @@ jobs:
     timeout-minutes: 20
     needs: [lint-and-type, crypto-validation]
     strategy:
+      fail-fast: false
       matrix:
         test-suite: ["unit", "integration"]
 
@@ -295,18 +290,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-test-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip wheel setuptools --disable-pip-version-check
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
@@ -318,7 +307,7 @@ jobs:
         run: |
           pytest tests/unit/ -v --cov=crypto_ai_bot --cov-report=xml --cov-report=term-missing || true
 
-      - name: Run Integration Tests  
+      - name: Run Integration Tests
         if: matrix.test-suite == 'integration'
         env:
           SYMBOLS: BTC/USDT
@@ -351,10 +340,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install --upgrade pip wheel setuptools --disable-pip-version-check
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
@@ -459,16 +450,16 @@ jobs:
           echo "Test: ${{ needs.test.result }}"
           echo "Production Readiness: ${{ needs.production-readiness.result }}"
           
-          if [[ "${{ needs.lint-and-type.result }}" != "success" || 
-                "${{ needs.crypto-validation.result }}" != "success" || 
-                "${{ needs.test.result }}" != "success" ]]; then
-            echo "❌ Critical checks failed"
+          if [[ \"${{ needs.lint-and-type.result }}\" != \"success\" || 
+                \"${{ needs.crypto-validation.result }}\" != \"success\" || 
+                \"${{ needs.test.result }}\" != \"success\" ]]; then
+            echo \"❌ Critical checks failed\"
             exit 1
           fi
           
-          if [[ "${{ needs.production-readiness.result }}" != "success" && "${{ needs.production-readiness.result }}" != "skipped" ]]; then
-            echo "❌ Production readiness failed"  
+          if [[ \"${{ needs.production-readiness.result }}\" != \"success\" && \"${{ needs.production-readiness.result }}\" != \"skipped\" ]]; then
+            echo \"❌ Production readiness failed\"  
             exit 1
           fi
           
-          echo "✅ All critical checks passed"
+          echo \"✅ All critical checks passed\"
