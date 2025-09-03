@@ -1,9 +1,8 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
+from typing import Any
 import argparse
 import asyncio
 import json
-from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler

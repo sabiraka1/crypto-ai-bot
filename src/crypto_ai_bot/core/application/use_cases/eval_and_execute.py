@@ -1,5 +1,4 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,7 +38,7 @@ async def eval_and_execute(
         # 1) Получаем решение стратегии (единый контракт generate -> dict)
         try:
             decision = await strategy.generate(settings, {"symbol": symbol})
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("strategy_generate_failed", extra={"symbol": symbol, "strategy": getattr(strategy, "name", type(strategy).__name__)}, exc_info=True)
             return EvalResult(decided=False, action="skip", reason="strategy_error")
 
@@ -55,7 +54,7 @@ async def eval_and_execute(
         why = ""
         try:
             ok, why, _ = risk_manager.check(symbol=symbol, storage=storage)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("risk_check_failed", extra={"symbol": symbol}, exc_info=True)
             ok = False
             why = "risk_check_exception"
@@ -65,7 +64,7 @@ async def eval_and_execute(
             try:
                 from crypto_ai_bot.core.application import events_topics as EVT
                 await bus.publish(EVT.TRADE_BLOCKED, {"symbol": symbol, "reason": why})
-            except Exception:
+            except Exception:  # noqa: BLE001
                 _log.error("publish_trade_blocked_failed", extra={"symbol": symbol}, exc_info=True)
             return EvalResult(decided=True, action="skip", reason=why)
 
@@ -89,6 +88,6 @@ async def eval_and_execute(
             order=exec_res.get("order"),
             score=str(decision.get("score", "0")),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         _log.error("eval_and_execute_failed", extra={"symbol": symbol}, exc_info=True)
         return EvalResult(decided=False, action="skip", reason="eval_execute_exception")

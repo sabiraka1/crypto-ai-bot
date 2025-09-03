@@ -1,5 +1,4 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
 from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort
@@ -32,7 +31,7 @@ class HealthChecker:
         # DB
         try:
             self._st.conn.execute("SELECT 1;")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _log.error("db_ready_fail", exc_info=True)
             res["db"] = f"db:{type(e).__name__}"
 
@@ -42,7 +41,7 @@ class HealthChecker:
                 await self._br.ping()
             else:
                 await self._br.fetch_ticker(self._symbol)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _log.error("broker_ready_fail", exc_info=True)
             res["broker"] = f"broker:{type(e).__name__}"
 
@@ -50,7 +49,7 @@ class HealthChecker:
         try:
             if hasattr(self._bus, "publish"):
                 await self._bus.publish("watchdog.heartbeat", {"source": "health"})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _log.error("bus_ready_fail", exc_info=True)
             res["bus"] = f"bus:{type(e).__name__}"
 

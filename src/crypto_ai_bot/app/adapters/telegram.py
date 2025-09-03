@@ -1,5 +1,4 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
 from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
@@ -12,7 +11,7 @@ _log = get_logger("adapters.telegram")
 
 class TelegramAlerts:
     """
-    Ğ˜ÑÑ…Ğ¾Ğ´ÑÑ‰Ğ¸Ğµ ÑƒĞ²ĞµĞ´Ğ¾Ğ¼Ğ»ĞµĞ½Ğ¸Ñ Ğ² Telegram (Bot API).
+    сѾяѸ Ѳя  Telegram (Bot API).
     """
 
     def __init__(
@@ -40,8 +39,8 @@ class TelegramAlerts:
 
     async def send(self, text: str) -> bool:
         """
-        Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ True, ĞµÑĞ»Ğ¸ HTTP 200 Ğ¸ {"ok":true}.
-        Ğ ĞµÑ‚Ñ€Ğ°Ğ¸ Ğ¿Ğ¾ ÑĞµÑ‚Ğ¸ â†’ ÑĞ¼. utils.retry.apost_retry.
+        ѰѰ True, с HTTP 200  {"ok":true}.
+        Ѱ  сѸ  с. utils.retry.apost_retry.
         """
         if not self.enabled():
             _log.info("telegram_disabled")

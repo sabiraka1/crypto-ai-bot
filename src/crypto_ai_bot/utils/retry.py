@@ -1,5 +1,4 @@
-﻿from __future__ import annotations
-
+from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import random
@@ -22,13 +21,13 @@ async def async_retry(
             last_exc = e
             delay = min(max_delay, base_delay * (2 ** attempt))
             if jitter:
-                delay *= (0.5 + random.random())
+                delay *= (0.5 + random.random()  # noqa: S311)
             await asyncio.sleep(delay)
     if last_exc:
         raise last_exc
 
-# Ğ£Ğ´Ğ¾Ğ±Ğ½Ñ‹Ğµ Ğ¾Ğ±Ñ‘Ñ€Ñ‚ĞºĞ¸ Ğ¿Ğ¾Ğ²ĞµÑ€Ñ… http_client
-from crypto_ai_bot.utils.http_client import aget, apost
+# ѵ Ѻ  http_client
+from crypto_ai_bot.utils.http_client import aget, apost  # noqa: E402
 
 
 async def aget_retry(*args: Any, **kwargs: Any) -> Any:

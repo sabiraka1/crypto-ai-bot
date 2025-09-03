@@ -1,10 +1,9 @@
-﻿from __future__ import annotations
-
-import asyncio
+from __future__ import annotations
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
-import time
 from typing import Any
+import asyncio
+import time
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -139,7 +138,7 @@ def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
     return orch, sym
 
 # -------- helpers --------
-async def _call_with_timeout(coro, *, timeout: float = 2.5):
+async def _call_with_timeout(coro, *, timeout: float = 2.5):  # noqa: ASYNC109
     return await asyncio.wait_for(coro, timeout=timeout)
 
 # -------- endpoints --------
@@ -173,7 +172,7 @@ async def health() -> JSONResponse:
             details["db"] = "ok"
         else:
             details["db"] = "n/a"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         ok = False
         details["db"] = f"fail: {exc!s}"
 
@@ -184,7 +183,7 @@ async def health() -> JSONResponse:
             details["bus"] = "ok"
         else:
             details["bus"] = "n/a"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
@@ -195,7 +194,7 @@ async def health() -> JSONResponse:
             details["broker"] = "ok"
         else:
             details["broker"] = "n/a"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
@@ -243,7 +242,7 @@ async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse(st)  # noqa: TRY300
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="status_failed") from e
 
@@ -256,7 +255,7 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="start_failed") from e
 
@@ -269,7 +268,7 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)) 
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="stop_failed") from e
 
@@ -282,7 +281,7 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="pause_failed") from e
 
@@ -295,7 +294,7 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})  # noqa: TRY300
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed") from e
 
