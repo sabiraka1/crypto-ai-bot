@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc

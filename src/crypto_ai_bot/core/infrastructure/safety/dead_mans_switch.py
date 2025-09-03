@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+try:
+    from crypto_ai_bot.core.application import events_topics as EVT
+    _DMS_TOPIC = getattr(EVT, "DMS_TRIGGERED", "safety.dead_mans_switch.triggered")
+except Exception:
+    _DMS_TOPIC = "safety.dead_mans_switch.triggered"
+
+
 @dataclass
 class DeadMansSwitch:
     storage: Any | None = None
@@ -53,7 +60,7 @@ class DeadMansSwitch:
                 pass
             # publish event
             if self.bus and hasattr(self.bus, "publish"):
-                await self.bus.publish("safety.dead_mans_switch.triggered", {
+                await self.bus.publish(_DMS_TOPIC, {
                     "symbol": self.symbol,
                     "prev": str(self._last_healthy_price),
                     "last": str(cur),
