@@ -47,11 +47,8 @@ except Exception:
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
-# топики
-try:
-    from crypto_ai_bot.core.infrastructure.events.topics import RISK_BLOCKED
-except Exception:
-    RISK_BLOCKED = "risk.blocked"
+# ЕДИНЫЕ ТЕМЫ СОБЫТИЙ (без магических строк)
+from crypto_ai_bot.core.application import events_topics as EVT
 
 _log = get_logger("risk.manager")
 
@@ -185,7 +182,7 @@ class RiskManager:
             inc("budget_exceeded_total", symbol=symbol, type=why)
             try:
                 import asyncio
-                asyncio.create_task(self._publish("budget.exceeded", {"symbol": symbol, "type": why, **extra}))
+                asyncio.create_task(self._publish(EVT.BUDGET_EXCEEDED, {"symbol": symbol, "type": why, **extra}))
             except Exception:
                 pass
             return False, f"budget:{why}"
@@ -243,7 +240,7 @@ class RiskManager:
             inc("risk_block_total", symbol=symbol, reason=why)
             try:
                 import asyncio
-                asyncio.create_task(self._publish(RISK_BLOCKED, {"symbol": symbol, "reason": why, **extra}))
+                asyncio.create_task(self._publish(EVT.RISK_BLOCKED, {"symbol": symbol, "reason": why, **extra}))
             except Exception:
                 pass
             return False, why
@@ -254,7 +251,7 @@ class RiskManager:
             inc("risk_block_total", symbol=symbol, reason=why)
             try:
                 import asyncio
-                asyncio.create_task(self._publish(RISK_BLOCKED, {"symbol": symbol, "reason": why, **extra}))
+                asyncio.create_task(self._publish(EVT.RISK_BLOCKED, {"symbol": symbol, "reason": why, **extra}))
             except Exception:
                 pass
             return False, why

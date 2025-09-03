@@ -1,10 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, List, Dict
 
 @dataclass
 class OrdersRepository:
-    conn: Any
+    conn: Any  # sqlite3.Connection
 
     def ensure_schema(self) -> None:
         cur = self.conn.cursor()
@@ -25,6 +25,8 @@ class OrdersRepository:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
         self.conn.commit()
 
+    # ---------- helpers ----------
+
     def _exists_by_broker_id(self, broker_order_id: str | None) -> bool:
         if not broker_order_id:
             return False
@@ -39,7 +41,10 @@ class OrdersRepository:
         cur.execute("SELECT 1 FROM orders WHERE client_order_id = ? LIMIT 1", (client_order_id,))
         return cur.fetchone() is not None
 
+    # ---------- public API ----------
+
     def upsert_open(self, order: Any) -> None:
+        """Вставляет открытый ордер, если такого ещё нет (по broker_id или client_id)."""
         self.ensure_schema()
         broker_id = getattr(order, "id", None) or getattr(order, "order_id", None)
         client_id = getattr(order, "client_order_id", None)
@@ -62,7 +67,8 @@ class OrdersRepository:
         )
         self.conn.commit()
 
-    def list_open(self, symbol: str) -> list[dict[str, Any]]:
+    def list_open(self, symbol: str) -> List[Dict[str, Any]]:
+        """Открытые (или частично исполненные) ордера по символу, старые → новые."""
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -83,7 +89,22 @@ class OrdersRepository:
                 })
         return result
 
+    def update_progress(self, broker_order_id: str, filled: str) -> None:
+        """Обновляет filled, не меняя статус."""
+        if not broker_order_id:
+            return
+        self.ensure_schema()
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE orders SET filled=? WHERE broker_order_id=? AND status!='closed'",
+            (str(filled), broker_order_id),
+        )
+        self.conn.commit()
+
     def mark_closed(self, broker_order_id: str, filled: str) -> None:
+        """Помечает ордер закрытым и фиксирует финальный filled."""
+        if not broker_order_id:
+            return
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -91,4 +112,3 @@ class OrdersRepository:
             (str(filled), broker_order_id),
         )
         self.conn.commit()
-

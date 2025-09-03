@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, Callable, Awaitable
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -11,7 +12,7 @@ _log = get_logger("subscribers.telegram")
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
     Подписчик Telegram: слушает события из EventBus и отправляет в Telegram.
-    Никакой бизнес-логики не добавляет; формат сообщений — короткий и безопасный.
+    Роутинг простой и безопасный: короткие тексты, HTML, без чувствительных данных.
     """
     tg = TelegramAlerts(
         bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
@@ -39,7 +40,8 @@ def attach_alerts(bus: Any, settings: Any) -> None:
                     _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
         _log.error("bus_has_no_subscribe_api")
 
-    # ======= Базовые оповещения (как было) =======
+    # ====== Хэндлеры ======
+
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
         await _send(f"⚠️ <b>AUTO-PAUSE</b> {evt.get('symbol','')}\nПричина: <code>{evt.get('reason','')}</code>")
@@ -90,7 +92,11 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))
         s = evt.get("symbol", "")
         kind = evt.get("type", "")
-        detail = f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}" if kind == "max_orders_5m" else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
+        detail = (
+            f"count_5m={evt.get('count_5m','')}/{evt.get('limit','')}"
+            if kind == "max_orders_5m"
+            else f"turnover={evt.get('turnover','')}/{evt.get('limit','')}"
+        )
         await _send(f"⏳ <b>BUDGET</b> {s} превышен ({kind})\n{detail}")
 
     async def on_trade_blocked(evt: dict[str, Any]) -> None:
@@ -101,11 +107,9 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
         await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
 
-    # ======= Новые: health + alertmanager =======
     async def on_health_report(evt: dict[str, Any]) -> None:
         if evt.get("ok", True):
             return
-        # краткая сводка по деградации
         parts = []
         for k in ("db", "bus", "broker"):
             v = evt.get(k)
@@ -127,22 +131,22 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             lines.append(f"- `{name}` {text}")
         await _send("\n".join(lines))
 
+    # Подписки на тематику (через константы)
     for topic, handler in [
-        ("orchestrator.auto_paused", on_auto_paused),
-        ("orchestrator.auto_resumed", on_auto_resumed),
-        ("reconcile.position_mismatch", on_pos_mm),
-        ("safety.dms.triggered", on_dms_triggered),
-        ("safety.dms.skipped", on_dms_skipped),
-        ("trade.completed", on_trade_completed),
-        ("trade.failed", on_trade_failed),
-        ("trade.settled", on_settled),
-        ("trade.settlement_timeout", on_settlement_timeout),
-        ("budget.exceeded", on_budget_exceeded),
-        ("trade.blocked", on_trade_blocked),
-        ("broker.error", on_broker_error),
-        # новые подписки
-        ("health.report", on_health_report),
-        ("alerts.alertmanager", on_alertmanager),
+        (EVT.ORCH_AUTO_PAUSED, on_auto_paused),
+        (EVT.ORCH_AUTO_RESUMED, on_auto_resumed),
+        (EVT.RECONCILE_POSITION_MISMATCH, on_pos_mm),
+        (EVT.DMS_TRIGGERED, on_dms_triggered),
+        (EVT.DMS_SKIPPED, on_dms_skipped),
+        (EVT.TRADE_COMPLETED, on_trade_completed),
+        (EVT.TRADE_FAILED, on_trade_failed),
+        (EVT.TRADE_SETTLED, on_settled),
+        (EVT.TRADE_SETTLEMENT_TIMEOUT, on_settlement_timeout),
+        (EVT.BUDGET_EXCEEDED, on_budget_exceeded),
+        (EVT.TRADE_BLOCKED, on_trade_blocked),
+        (EVT.BROKER_ERROR, on_broker_error),
+        (EVT.HEALTH_REPORT, on_health_report),
+        (EVT.ALERTS_ALERTMANAGER, on_alertmanager),
     ]:
         _sub(topic, handler)
 
