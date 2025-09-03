@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.core.application import (
-    events_topics as EVT,  # noqa: N812  # РЅСѓР¶РµРЅ РІ /health Рё alertmanager/webhook
+    events_topics as EVT,  # noqa: N812  # needed in /health and alertmanager/webhook
 )
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
@@ -79,9 +79,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield
         # --- graceful shutdown section ---
         try:
-            container.instance_lock.release()
+            inst_lock = getattr(_container, "instance_lock", None)
+            if inst_lock and hasattr(inst_lock, "release"):
+                inst_lock.release()
         except Exception:
-            pass
+            _log.debug("instance_lock_release_failed", exc_info=True)
     finally:
         _log.info("lifespan_shutdown_begin")
         try:
@@ -100,7 +102,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         try:
             bus = getattr(_container, "bus", None)
-            # Р±РµР·РѕРїР°СЃРЅС‹Р№ shutdown С€РёРЅС‹: СЃРЅР°С‡Р°Р»Р° stop(), РµСЃР»Рё РЅРµС‚ вЂ” close()
+            # safe shutdown of bus: prefer stop(), fallback to close()
             if bus and hasattr(bus, "stop"):
                 await bus.stop()
             elif bus and hasattr(bus, "close"):
@@ -168,9 +170,8 @@ async def _call_with_timeout(coro, *, timeout: float = 2.5):  # noqa: ASYNC109
 @router.get("/health")
 async def health() -> JSONResponse:
     """
-    Р”РµС‚Р°Р»СЊРЅР°СЏ РїСЂРѕРІРµСЂРєР° health: DB, EventBus, Broker (СЃ С‚Р°Р№РјР°СѓС‚Р°РјРё).
-    Р‘С‹СЃС‚СЂС‹Р№ РїСѓС‚СЊ вЂ” РІ memory-only. РџСѓР±Р»РёРєСѓРµРј СЃРѕР±С‹С‚РёРµ РІ С€РёРЅСѓ.
-    Р’РѕР·РІСЂР°С‰Р°РµРј С‚Р°РєР¶Рµ СѓРґРѕР±РЅС‹Рµ РїРѕР»СЏ (default_symbol, symbols) РґР»СЏ РёРЅС‚РµСЂС„РµР№СЃР°.
+    Health check for DB, EventBus, Broker (with timeouts).
+    Also returns default_symbol and symbols for UI.
     """
     ok = True
     details: dict[str, Any] = {"ts_ms": now_ms()}
@@ -210,7 +211,7 @@ async def health() -> JSONResponse:
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
-    # Broker check (РѕР±Р»РµРіС‡С‘РЅРЅС‹Р№)
+    # Broker check (light)
     try:
         if broker and hasattr(broker, "get_balance"):
             await _call_with_timeout(broker.get_balance(), timeout=2.0)
@@ -221,7 +222,7 @@ async def health() -> JSONResponse:
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
-    # РїСѓР±Р»РёРєР°С†РёСЏ СЃРѕР±С‹С‚РёСЏ РІ С€РёРЅСѓ (РґР»СЏ РЅР°Р±Р»СЋРґР°РµРјРѕСЃС‚Рё/Telegram)
+    # publish event for observability/Telegram
     if bus and hasattr(bus, "publish"):
         try:
             await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
@@ -234,10 +235,7 @@ async def health() -> JSONResponse:
 
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
-    """
-    Webhook РѕС‚ Alertmanager -> РїРµСЂРµРЅР°РїСЂР°РІР»СЏРµРј РІ EventBus РЅР° EVT.ALERTS_ALERTMANAGER.
-    РќСѓР¶РµРЅ РґР»СЏ С‚РµР»РµРіСЂР°Рј-Р°Р»С‘СЂС‚РѕРІ Рё РѕР±С‰РµРіРѕ РјРѕРЅРёС‚РѕСЂРёРЅРіР°.
-    """
+    """Alertmanager webhook -> forward to EventBus (EVT.ALERTS_ALERTMANAGER)."""
     try:
         c = _ctx_or_500()
     except HTTPException:
@@ -332,9 +330,8 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
     """
-    Р•Р”РРќР«Р™ РёСЃС‚РѕС‡РЅРёРє РёСЃС‚РёРЅС‹ вЂ” СЂРµРїРѕР·РёС‚РѕСЂРёР№ С‚СЂРµР№РґРѕРІ:
+    Single source of truth — trades repository:
     daily_pnl_quote / daily_turnover_quote / count_orders_today.
-    Р‘РµР· Р·Р°РїР°СЃРЅС‹С… РѕР±С…РѕРґРѕРІ.
     """
     c = _ctx_or_500()
     try:
@@ -389,7 +386,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
-    """Webhook endpoint Telegram-Р±РѕС‚Р° (РјРѕР¶РЅРѕ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РІРјРµСЃС‚Рѕ polling)."""
+    """Webhook endpoint for Telegram bot (optional alternative to polling)."""
     try:
         _ = await request.body()
         data = await request.json()
@@ -404,7 +401,7 @@ async def telegram_webhook(request: Request) -> JSONResponse:
                 return JSONResponse({"ok": False}, status_code=401)
 
         _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
-        # РµСЃР»Рё РЅСѓР¶РЅРѕ вЂ” РїРµСЂРµРґР°С‚СЊ РІ tg_bot.process_webhook_update(data)
+        # if needed, forward to tg_bot.process_webhook_update(data)
         return JSONResponse({"ok": True})
     except Exception:  # noqa: BLE001
         _log.error("telegram_webhook_error", exc_info=True)

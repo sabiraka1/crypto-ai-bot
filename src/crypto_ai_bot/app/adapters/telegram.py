@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import asyncio, time
-
+import asyncio
+import time
 from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
@@ -12,7 +12,7 @@ _log = get_logger("adapters.telegram")
 
 
 class TelegramAlerts:
-    """Adapter for Telegram (Bot API)."""
+    """Adapter for Telegram (Bot API). Provides a simple token-bucket anti-storm."""
 
     def __init__(
         self,
@@ -31,20 +31,44 @@ class TelegramAlerts:
         self._disable_web_page_preview = bool(disable_web_page_preview)
         self._disable_notification = bool(disable_notification)
 
+        # token-bucket anti-storm (avg 1 msg/sec, burst up to 5)
+        self._bucket_tokens = 5.0
+        self._bucket_rate = 1.0
+        self._bucket_last = time.time()
+        self._bucket_lock = asyncio.Lock()
+
     def enabled(self) -> bool:
         return bool(self._token and self._chat_id)
 
     def _endpoint(self) -> str:
         return f"https://api.telegram.org/bot{self._token}/sendMessage"
 
+    async def _bucket_acquire(self) -> None:
+        async with self._bucket_lock:
+            now = time.time()
+            elapsed = max(0.0, now - self._bucket_last)
+            self._bucket_last = now
+            # refill
+            self._bucket_tokens = min(5.0, self._bucket_tokens + elapsed * self._bucket_rate)
+            if self._bucket_tokens >= 1.0:
+                self._bucket_tokens -= 1.0
+                return
+            # need to wait for next token
+            need = 1.0 - self._bucket_tokens
+            await asyncio.sleep(need / self._bucket_rate)
+            # consume after wait
+            self._bucket_tokens = max(0.0, self._bucket_tokens - 1.0)
+
     async def send(self, text: str) -> bool:
         """
-        С°С° True, СЃ HTTP 200  {"ok":true}.
-        С°  СЃСё  СЃ. utils.retry.apost_retry.
+        Returns True when HTTP 200 and {"ok": true}.
+        Retries are handled by utils.retry.apost_retry.
         """
         if not self.enabled():
             _log.info("telegram_disabled")
             return False
+
+        await self._bucket_acquire()
 
         cid = get_cid()
         if cid:
@@ -73,20 +97,3 @@ class TelegramAlerts:
             _log.error("telegram_send_exception", exc_info=True)
             success = False
         return success
-
-
-async def _bucket_acquire(self) -> None:
-    async with self._bucket_lock:
-        now = time.time()
-        elapsed = max(0.0, now - self._bucket_last)
-        self._bucket_last = now
-        # refill
-        self._bucket_tokens = min(5.0, self._bucket_tokens + elapsed * self._bucket_rate)
-        if self._bucket_tokens >= 1.0:
-            self._bucket_tokens -= 1.0
-            return
-        # need to wait for next token
-        need = 1.0 - self._bucket_tokens
-        await asyncio.sleep(need / self._bucket_rate)
-        # consume after wait
-        self._bucket_tokens = max(0.0, self._bucket_tokens - 1.0)
