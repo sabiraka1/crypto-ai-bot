@@ -17,19 +17,19 @@ _log = get_logger("broker.ccxt")
 class BrokerError(Exception): ...
 
 
-class InsufficientFunds(BrokerError): ...
+class InsufficientFunds(BrokerError): ...  # noqa: N818
 
 
-class RateLimited(BrokerError): ...
+class RateLimited(BrokerError): ...  # noqa: N818
 
 
-class OrderNotFound(BrokerError): ...
+class OrderNotFound(BrokerError): ...  # noqa: N818
 
 
 class ValidationError(BrokerError): ...
 
 
-class ExchangeUnavailable(BrokerError): ...
+class ExchangeUnavailable(BrokerError): ...  # noqa: N818
 
 
 class _TokenBucket:

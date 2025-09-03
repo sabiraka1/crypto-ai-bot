@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Any
 import hashlib
 
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
@@ -58,7 +58,7 @@ async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
 
 
 async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
-    """Ğ˜ÑÑ‚Ğ¾Ñ€Ğ¸Ñ Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ² Ğ´Ğ»Ñ Ğ¾Ñ†ĞµĞ½ĞºĞ¸ Ğ¿Ñ€Ğ¾ÑĞ°Ğ´ĞºĞ¸ (ĞµÑĞ»Ğ¸ ĞµÑÑ‚ÑŒ Ñ€ĞµĞ¿Ğ¾Ğ·Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ğ¹ Ğ¼ĞµÑ‚Ñ€Ğ¸Ğº/Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ²)."""
+    """Ğ˜ÑÑ‚Ğ¾Ñ€Ğ¸Ñ Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ² Ğ´Ğ»Ñ Ğ¾Ñ†ĞµÑ‡ĞºĞ¸ Ğ¿Ñ€Ğ¾ÑĞ°Ğ´ĞºĞ¸ (ĞµÑĞ»Ğ¸ ĞµÑÑ‚ÑŒ Ñ€ĞµĞ¿Ğ¾Ğ·Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ğ¹ Ğ¼ĞµÑ‚Ñ€Ğ¸Ğº/Ğ±Ğ°Ğ»Ğ°Ğ½ÑĞ¾Ğ²)."""
     try:
         repo = getattr(storage, "balances", None)
         if not repo:
@@ -88,7 +88,7 @@ async def execute_trade(
     protective_exits: Any | None = None,
 ) -> dict[str, Any]:
     """
-    Ğ•Ğ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ¿ÑƒÑ‚ÑŒ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ñ Ñ‚Ğ¾Ñ€Ğ³Ğ¾Ğ²Ğ¾Ğ³Ğ¾ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ (buy/sell) Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚Ğ¸,
+    Ğ•Ğ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ¿ÑƒÑ‚ÑŒ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ñ Ñ‚Ğ¾Ñ€Ğ³Ğ¾Ğ²Ğ¾Ğ³Ğ¾ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ (buy/sell) Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½ÑÑ‚Ğ¸,
     Ñ€Ğ¸ÑĞº-Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹, Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹ Ğ½Ğ° ÑĞ¿Ñ€ĞµĞ´/Ñ‡Ğ°ÑÑ‚Ğ¾Ñ‚Ñƒ/Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚, Ğ¸ Ğ·Ğ°Ğ¿Ğ¸ÑĞ¸ Ğ² Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğµ.
     """
 
@@ -100,10 +100,11 @@ async def execute_trade(
     q_in = _DEFAULT_ZERO if quote_amount is None else dec(str(quote_amount))
     b_in = _DEFAULT_ZERO if base_amount is None else dec(str(base_amount))
 
-    # ---- Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚ÑŒ: Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ĞºĞ° Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚Ğ° ----
+    # ---- Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½ÑÑ‚ÑŒ: Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ĞºĞ° Ğ´ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ‚Ğ° ----
     session = getattr(settings, "SESSION_RUN_ID", "") or ""
     key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"
-    idem_key = f"po:{hashlib.sha1(key_payload.encode('utf-8')).hexdigest()  # noqa: S324}"
+    # sha1 сохранён намеренно для совместимости протокола хранилища (меняем только синтаксис строки)  # noqa: S324
+    idem_key = "po:" + hashlib.sha1(key_payload.encode("utf-8")).hexdigest()  # noqa: S324
 
     idem_repo = None
     try:
@@ -118,7 +119,7 @@ async def execute_trade(
     except Exception:  # noqa: BLE001
         _log.error("idempotency_check_failed", extra={"symbol": sym}, exc_info=True)
 
-    # ---- Ñ€Ğ¸ÑĞº-Ğ¼ĞµĞ½ĞµĞ´Ğ¶ĞµÑ€: ĞºĞ¾Ğ½Ñ„Ğ¸Ğ³ ----
+    # ---- Ñ€Ğ¸ÑĞº-Ğ¼ĞµĞ½ĞµĞ´Ğ¶ĞµÑ€: ĞºĞ¾Ñ„Ğ¸Ğ³ ----
     cfg: RiskConfig = (risk_manager.cfg if isinstance(risk_manager, RiskManager)
                        else RiskConfig.from_settings(settings))
 
