@@ -1,5 +1,5 @@
 from __future__ import annotations
-from collections.abc import Callable, Awaitable, AsyncGenerator
+from collections.abc import Callable
 
 import asyncio
 from dataclasses import dataclass
