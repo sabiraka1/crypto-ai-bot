@@ -58,16 +58,18 @@ class TelegramAlerts:
             "disable_notification": self._disable_notification,
         }
 
+        success: bool = False
         try:
             resp = await apost_retry(self._endpoint(), json=payload, timeout=self._timeout)
             if resp.status_code != 200:
                 _log.warning("telegram_send_non_200", extra={"status": resp.status_code})
-                return False  # noqa: TRY300
-            data = resp.json()
-            ok = bool(data.get("ok"))
-            if not ok:
-                _log.warning("telegram_send_not_ok", extra={"response": str(data)})
-            return ok
+            else:
+                data = resp.json()
+                ok = bool(data.get("ok"))
+                if not ok:
+                    _log.warning("telegram_send_not_ok", extra={"response": str(data)})
+                success = ok
         except Exception:  # noqa: BLE001
             _log.error("telegram_send_exception", exc_info=True)
-            return False
+            success = False
+        return success
