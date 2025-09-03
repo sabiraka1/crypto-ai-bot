@@ -10,7 +10,7 @@ from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.ports import SafetySwitchPort
-from crypto_ai_bot.core.application.events_topics import EVT
+from crypto_ai_bot.core.application.events_topics import EVT  # noqa: N812
 from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
@@ -18,7 +18,6 @@ from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import open_storage
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
-from crypto_ai_bot.app.subscribers.telegram_alerts import attach_alerts
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
