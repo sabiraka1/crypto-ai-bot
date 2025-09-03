@@ -1,11 +1,14 @@
 from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-
 T = TypeVar("T")
 
-def per_symbol_override(settings: Any, symbol: str, base_key: str, caster: Callable[[str], T], default: T) -> T:
+
+def per_symbol_override(
+    settings: Any, symbol: str, base_key: str, caster: Callable[[str], T], default: T
+) -> T:
     """
     ѵ ю  BASEKEY_BASE_QUOTE с  с.
     с   ѹ  сѵ  ѰѰ; ѵ  Ѽ base_key  default.

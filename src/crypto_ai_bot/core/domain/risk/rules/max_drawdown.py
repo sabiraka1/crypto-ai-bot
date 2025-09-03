@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -86,9 +86,13 @@ class MaxDrawdownRule:
                 dd_pct = max(0.0, float(peak - cum) / abs(denom) * 100.0)
                 worst_dd_pct = max(worst_dd_pct, dd_pct)
                 if dd_pct >= lim_pct:
-                    return False, "max_drawdown", {
-                        "drawdown_pct": round(dd_pct, 6),
-                        "limit_pct": lim_pct,
-                    }
+                    return (
+                        False,
+                        "max_drawdown",
+                        {
+                            "drawdown_pct": round(dd_pct, 6),
+                            "limit_pct": lim_pct,
+                        },
+                    )
 
         return True, "ok", {"drawdown_pct": round(worst_dd_pct, 6), "limit_pct": lim_pct}

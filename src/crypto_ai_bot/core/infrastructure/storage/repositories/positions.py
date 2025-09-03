@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -7,13 +7,13 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-
 # Константа для дефолтного значения B008
 _DEFAULT_FEE_ZERO = dec("0")
 
 
 def _now_ms() -> int:
     return int(datetime.now(UTC).timestamp() * 1000)
+
 
 @dataclass
 class Position:
@@ -24,6 +24,7 @@ class Position:
     unrealized_pnl: Decimal
     updated_ts_ms: int
     version: int
+
 
 @dataclass
 class PositionsRepository:
@@ -59,9 +60,15 @@ class PositionsRepository:
         )
         r = cur.fetchone()
         if not r:
-            return Position(symbol=symbol, base_qty=dec("0"), avg_entry_price=dec("0"),
-                            realized_pnl=dec("0"), unrealized_pnl=dec("0"),
-                            updated_ts_ms=0, version=0)
+            return Position(
+                symbol=symbol,
+                base_qty=dec("0"),
+                avg_entry_price=dec("0"),
+                realized_pnl=dec("0"),
+                unrealized_pnl=dec("0"),
+                updated_ts_ms=0,
+                version=0,
+            )
         return Position(
             symbol=r["symbol"],
             base_qty=dec(str(r["base_qty"] or "0")),
@@ -99,9 +106,15 @@ class PositionsRepository:
         # добиваем отсутствующие дефолтами
         for s in symbols:
             if s not in out:
-                out[s] = Position(symbol=s, base_qty=dec("0"), avg_entry_price=dec("0"),
-                                  realized_pnl=dec("0"), unrealized_pnl=dec("0"),
-                                  updated_ts_ms=0, version=0)
+                out[s] = Position(
+                    symbol=s,
+                    base_qty=dec("0"),
+                    avg_entry_price=dec("0"),
+                    realized_pnl=dec("0"),
+                    unrealized_pnl=dec("0"),
+                    updated_ts_ms=0,
+                    version=0,
+                )
         return out
 
     def set_base_qty(self, symbol: str, value: Decimal) -> None:
@@ -117,9 +130,16 @@ class PositionsRepository:
         )
         self.conn.commit()
 
-    def apply_trade(self, *, symbol: str, side: str, base_amount: Decimal,
-                    price: Decimal, fee_quote: Decimal | None = None,
-                    last_price: Decimal | None = None) -> None:
+    def apply_trade(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        base_amount: Decimal,
+        price: Decimal,
+        fee_quote: Decimal | None = None,
+        last_price: Decimal | None = None,
+    ) -> None:
         # Обработка дефолтного значения для B008
         if fee_quote is None:
             fee_quote = _DEFAULT_FEE_ZERO
@@ -147,7 +167,9 @@ class PositionsRepository:
             new_avg = avg0 if new_base > 0 else dec("0")
 
         ref_price = (last_price if last_price is not None else price) or dec("0")
-        new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+        new_unreal = (
+            (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+        )
 
         cur = self.conn.cursor()
         ts = _now_ms()
@@ -166,8 +188,18 @@ class PositionsRepository:
                 WHERE positions.version = ?
                 """,
                 (
-                    symbol, str(new_base), str(new_avg), str(new_realized), str(new_unreal), ts,
-                    str(new_base), str(new_avg), str(new_realized), str(new_unreal), ts, ver0
+                    symbol,
+                    str(new_base),
+                    str(new_avg),
+                    str(new_realized),
+                    str(new_unreal),
+                    ts,
+                    str(new_base),
+                    str(new_avg),
+                    str(new_realized),
+                    str(new_unreal),
+                    ts,
+                    ver0,
                 ),
             )
             self.conn.commit()
@@ -185,4 +217,8 @@ class PositionsRepository:
                 new_realized = realized0 + pnl - (fee_quote if fee_quote else dec("0"))
                 new_base = base0 - base_amount
                 new_avg = avg0 if new_base > 0 else dec("0")
-            new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+            new_unreal = (
+                (ref_price - new_avg) * new_base
+                if (new_base > 0 and new_avg > 0 and ref_price > 0)
+                else dec("0")
+            )

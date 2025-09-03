@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -49,6 +49,7 @@ def should_exit(plan: ExitPlan, last: Decimal) -> str:
 # Классы-обертки для совместимости с __init__.py и другими модулями
 class StopLossPolicy:
     """Политика стоп-лосса."""
+
     def __init__(self, sl_pct: float = 2.0):
         self.sl_pct = sl_pct
 
@@ -61,6 +62,7 @@ class StopLossPolicy:
 
 class TakeProfitPolicy:
     """Политика тейк-профита."""
+
     def __init__(self, tp_pct: float = 5.0):
         self.tp_pct = tp_pct
 
@@ -73,15 +75,12 @@ class TakeProfitPolicy:
 
 class TrailingStopPolicy:
     """Политика трейлинг-стопа."""
+
     def __init__(self, trailing_pct: float = 3.0):
         self.trailing_pct = trailing_pct
 
     def create_plan(self, entry_price: Decimal) -> ExitPlan:
-        return ExitPlan(
-            entry_price=entry_price,
-            trailing_pct=self.trailing_pct,
-            trail_max_price=entry_price
-        )
+        return ExitPlan(entry_price=entry_price, trailing_pct=self.trailing_pct, trail_max_price=entry_price)
 
     def update(self, plan: ExitPlan, last: Decimal) -> ExitPlan:
         return update_trailing_stop(plan, last)

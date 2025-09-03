@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+
 def canonical(symbol: str) -> str:
     """
     Ѹ с Ѿѳ   ѵс .

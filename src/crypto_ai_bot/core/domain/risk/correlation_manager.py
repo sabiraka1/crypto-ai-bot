@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -7,6 +7,7 @@ from typing import Any
 @dataclass(frozen=True)
 class CorrelationConfig:
     groups: list[list[str]]  # [["BTC/USDT","ETH/USDT"], ["XRP/USDT","ADA/USDT"]]
+
 
 class CorrelationManager:
     def __init__(self, cfg: CorrelationConfig) -> None:

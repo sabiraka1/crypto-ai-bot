@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -11,15 +11,24 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
 
-
 _log = get_logger("broker.ccxt")
 
 
 class BrokerError(Exception): ...
+
+
 class InsufficientFunds(BrokerError): ...
+
+
 class RateLimited(BrokerError): ...
+
+
 class OrderNotFound(BrokerError): ...
+
+
 class ValidationError(BrokerError): ...
+
+
 class ExchangeUnavailable(BrokerError): ...
 
 
@@ -178,7 +187,9 @@ class CcxtBroker:
         try:
             t0 = asyncio.get_event_loop().time()
             res = await self._with_cb(self._cb_ticker, lambda: self.exchange.fetch_ticker(gate))
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"})
+            observe(
+                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"}
+            )
             return res
         except Exception as exc:
             inc("broker.request.error", fn="fetch_ticker")
@@ -192,7 +203,9 @@ class CcxtBroker:
         try:
             t0 = asyncio.get_event_loop().time()
             bal = await self._with_cb(self._cb_balance, lambda: self.exchange.fetch_balance())
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_balance"})
+            observe(
+                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_balance"}
+            )
             acct_base = bal.get(base, {}) or {}
             acct_quote = bal.get(quote, {}) or {}
             return {
@@ -211,7 +224,11 @@ class CcxtBroker:
         try:
             t0 = asyncio.get_event_loop().time()
             orders = await self._with_cb(self._cb_order, lambda: self.exchange.fetch_open_orders(gate))
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_open_orders"})
+            observe(
+                "broker.request.ms",
+                (asyncio.get_event_loop().time() - t0) * 1000.0,
+                {"fn": "fetch_open_orders"},
+            )
             if not isinstance(orders, list):
                 return []
             out: list[dict[str, Any]] = []
@@ -246,12 +263,14 @@ class CcxtBroker:
             t0 = asyncio.get_event_loop().time()
             order = await self._with_cb(
                 self._cb_create,
-                lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params)
+                lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params),
             )
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})
+            observe(
+                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"}
+            )
             order = order if isinstance(order, dict) else dict(order)
             try:
-                order['fee_quote'] = _extract_fee_quote(order, symbol=symbol)
+                order["fee_quote"] = _extract_fee_quote(order, symbol=symbol)
             except Exception:
                 pass
             return order
@@ -281,12 +300,14 @@ class CcxtBroker:
             t0 = asyncio.get_event_loop().time()
             order = await self._with_cb(
                 self._cb_create,
-                lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params)
+                lambda: self.exchange.create_order(gate, "market", "sell", float(b_amt), None, params),
             )
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"})
+            observe(
+                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_sell"}
+            )
             order = order if isinstance(order, dict) else dict(order)
             try:
-                order['fee_quote'] = _extract_fee_quote(order, symbol=symbol)
+                order["fee_quote"] = _extract_fee_quote(order, symbol=symbol)
             except Exception:
                 pass
             return order
@@ -301,8 +322,12 @@ class CcxtBroker:
         await self._bucket.acquire()
         try:
             t0 = asyncio.get_event_loop().time()
-            res = await self._with_cb(self._cb_order, lambda: self.exchange.fetch_order(broker_order_id, gate))
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_order"})
+            res = await self._with_cb(
+                self._cb_order, lambda: self.exchange.fetch_order(broker_order_id, gate)
+            )
+            observe(
+                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_order"}
+            )
             return res
         except Exception as exc:
             inc("broker.request.error", fn="fetch_order")

@@ -1,4 +1,4 @@
-﻿# src/crypto_ai_bot/core/infrastructure/storage/facade.py
+# src/crypto_ai_bot/core/infrastructure/storage/facade.py
 from __future__ import annotations
 
 from dataclasses import dataclass

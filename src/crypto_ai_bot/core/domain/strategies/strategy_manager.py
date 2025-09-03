@@ -1,11 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
 
 from crypto_ai_bot.core.domain.strategies.base import BaseStrategy, Decision, MarketData
 from crypto_ai_bot.core.domain.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
 from crypto_ai_bot.utils.decimal import dec
-
 
 # РЎРѕР·РґР°РµРј Р°Р»РёР°СЃС‹ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃРѕ СЃС‚Р°СЂС‹Рј РєРѕРґРѕРј
 MarketData = MarketData
@@ -47,6 +46,7 @@ class StrategyManager:
         # РџСЂРѕСЃС‚РѕР№ РїСЂРёРѕСЂРёС‚РµС‚: РїРµСЂРІР°СЏ, РґР°РІС€Р°СЏ directional-СЃРёРіРЅР°Р»
         for strat in self._strategies:
             from crypto_ai_bot.core.domain.strategies.base import StrategyContext
+
             ctx = StrategyContext(symbol=symbol, settings=self._settings)
             sig = await strat.generate(md=self._md, ctx=ctx)
             if sig.action in ("buy", "sell"):

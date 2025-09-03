@@ -1,4 +1,4 @@
-﻿# src/crypto_ai_bot/core/application/orchestrator.py
+# src/crypto_ai_bot/core/application/orchestrator.py
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,6 @@ from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
 from crypto_ai_bot.utils.trace import cid_context, get_cid
-
 
 _log = get_logger("orchestrator")
 
@@ -50,11 +49,36 @@ class Orchestrator:
             return LoopSpec(name=name, interval_sec=float(interval), enabled=bool(enabled), runner=coro)
 
         self._loops = {
-            "eval": _loop(self._eval_loop, getattr(s, "EVAL_INTERVAL_SEC", 5.0), getattr(s, "EVAL_ENABLED", True), "eval"),
-            "exits": _loop(self._exits_loop, getattr(s, "EXITS_INTERVAL_SEC", 5.0), getattr(s, "EXITS_ENABLED", False), "exits"),
-            "reconcile": _loop(self._reconcile_loop, getattr(s, "RECONCILE_INTERVAL_SEC", 15.0), getattr(s, "RECONCILE_ENABLED", True), "reconcile"),
-            "watchdog": _loop(self._watchdog_loop, getattr(s, "WATCHDOG_INTERVAL_SEC", 10.0), getattr(s, "WATCHDOG_ENABLED", True), "watchdog"),
-            "settlement": _loop(self._settlement_loop, getattr(s, "SETTLEMENT_INTERVAL_SEC", 7.0), getattr(s, "SETTLEMENT_ENABLED", True), "settlement"),
+            "eval": _loop(
+                self._eval_loop,
+                getattr(s, "EVAL_INTERVAL_SEC", 5.0),
+                getattr(s, "EVAL_ENABLED", True),
+                "eval",
+            ),
+            "exits": _loop(
+                self._exits_loop,
+                getattr(s, "EXITS_INTERVAL_SEC", 5.0),
+                getattr(s, "EXITS_ENABLED", False),
+                "exits",
+            ),
+            "reconcile": _loop(
+                self._reconcile_loop,
+                getattr(s, "RECONCILE_INTERVAL_SEC", 15.0),
+                getattr(s, "RECONCILE_ENABLED", True),
+                "reconcile",
+            ),
+            "watchdog": _loop(
+                self._watchdog_loop,
+                getattr(s, "WATCHDOG_INTERVAL_SEC", 10.0),
+                getattr(s, "WATCHDOG_ENABLED", True),
+                "watchdog",
+            ),
+            "settlement": _loop(
+                self._settlement_loop,
+                getattr(s, "SETTLEMENT_INTERVAL_SEC", 7.0),
+                getattr(s, "SETTLEMENT_ENABLED", True),
+                "settlement",
+            ),
         }
 
     # ---------------------------
@@ -156,6 +180,7 @@ class Orchestrator:
     async def _eval_loop(self) -> None:
         try:
             from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+
             await eval_and_execute(
                 symbol=self.symbol,
                 storage=self.storage,
@@ -180,6 +205,7 @@ class Orchestrator:
         try:
             from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances
             from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
+
             await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, self.settings)
             await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, self.settings)
         except Exception as exc:
@@ -196,6 +222,7 @@ class Orchestrator:
     async def _settlement_loop(self) -> None:
         try:
             from crypto_ai_bot.core.application.use_cases.partial_fills import settle_orders
+
             await settle_orders(self.symbol, self.storage, self.broker, self.bus, self.settings)
         except Exception as exc:
             _log.error("settlement_loop_error", extra={"error": str(exc)})
@@ -214,6 +241,7 @@ class Orchestrator:
             # 1) evaluate+risk+execute
             try:
                 from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+
                 await eval_and_execute(
                     symbol=self.symbol,
                     storage=self.storage,
@@ -245,6 +273,7 @@ class Orchestrator:
                 try:
                     from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances
                     from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
+
                     await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, s)
                     await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, s)
                     inc("orchestrator_step_ok_total", step="reconcile", symbol=self.symbol)
@@ -267,6 +296,7 @@ class Orchestrator:
             if getattr(s, "SETTLEMENT_ENABLED", True):
                 try:
                     from crypto_ai_bot.core.application.use_cases.partial_fills import settle_orders
+
                     await settle_orders(self.symbol, self.storage, self.broker, self.bus, s)
                     inc("orchestrator_step_ok_total", step="settlement", symbol=self.symbol)
                     await self.bus.publish("trade.settlement.done", {"symbol": self.symbol})

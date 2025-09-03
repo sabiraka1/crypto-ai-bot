@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -8,15 +8,14 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import hist
 
-
 _log = get_logger("strategy.base")
 
 
 @dataclass(frozen=True)
 class Signal:
-    side: str            # "buy" | "sell" | "none"
-    score: Decimal       # [-1..+1]
-    reason: str = ""     # краткая причина
+    side: str  # "buy" | "sell" | "none"
+    score: Decimal  # [-1..+1]
+    reason: str = ""  # краткая причина
 
 
 class BaseStrategy:
@@ -54,7 +53,11 @@ class BaseStrategy:
         sig = await self.signal(ctx, md)
         ok, why = await self.validate(ctx, md, sig)
         if not ok or sig.side == "none":
-            hist("strategy.generate.ms", ( __import__("time").time() - t0 ) * 1000, {"name": self.name, "side": "none"})
+            hist(
+                "strategy.generate.ms",
+                (__import__("time").time() - t0) * 1000,
+                {"name": self.name, "side": "none"},
+            )
             return {"action": "skip", "reason": why or sig.reason, "score": str(sig.score)}
 
         size = await self.sizing(ctx, md, sig)
@@ -64,5 +67,9 @@ class BaseStrategy:
             "sizing": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in size.items()},
             "reason": sig.reason,
         }
-        hist("strategy.generate.ms", ( __import__("time").time() - t0 ) * 1000, {"name": self.name, "side": sig.side})
+        hist(
+            "strategy.generate.ms",
+            (__import__("time").time() - t0) * 1000,
+            {"name": self.name, "side": sig.side},
+        )
         return out

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -91,10 +91,14 @@ class LossStreakRule:
                     streak = 0
 
                 if streak >= lim:
-                    return False, "loss_streak", {
-                        "streak": streak,
-                        "limit": lim,
-                        "worst_trade_pnl": str(worst_trade_pnl),
-                    }
+                    return (
+                        False,
+                        "loss_streak",
+                        {
+                            "streak": streak,
+                            "limit": lim,
+                            "worst_trade_pnl": str(worst_trade_pnl),
+                        },
+                    )
 
         return True, "ok", {"streak": streak, "limit": lim}

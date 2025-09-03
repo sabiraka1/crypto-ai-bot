@@ -1,14 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 import json
 from pathlib import Path
 
-
 try:
     import onnxruntime as rt  # type: ignore
 except Exception:
     rt = None  # type: ignore
+
 
 @dataclass
 class AIModelMeta:
@@ -17,6 +17,7 @@ class AIModelMeta:
     weights: list[float] | None = None
     calibration_a: float | None = None
     calibration_b: float | None = None
+
 
 class AIModel:
     def __init__(self, model_path: str | Path | None = None, meta_path: str | Path | None = None) -> None:
@@ -56,6 +57,7 @@ class AIModel:
 
     def _sigmoid(self, x: float) -> float:
         import math
+
         return 1.0 / (1.0 + math.exp(-x))
 
     def _calibrate(self, p: float) -> float:
@@ -77,6 +79,7 @@ class AIModel:
         if self._sess is not None and self._input_name:
             try:
                 import numpy as np  # type: ignore
+
                 x = np.asarray([feats], dtype=np.float32)
                 out = self._sess.run(None, {self._input_name: x})
                 p = float(out[0].ravel()[0])

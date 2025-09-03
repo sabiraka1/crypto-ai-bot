@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
@@ -84,11 +84,19 @@ class OrdersRepository:
             if hasattr(r, "keys"):
                 result.append(dict(r))
             else:
-                result.append({
-                    "id": r[0], "broker_order_id": r[1], "client_order_id": r[2],
-                    "symbol": r[3], "side": r[4], "amount": r[5], "filled": r[6],
-                    "status": r[7], "ts_ms": r[8]
-                })
+                result.append(
+                    {
+                        "id": r[0],
+                        "broker_order_id": r[1],
+                        "client_order_id": r[2],
+                        "symbol": r[3],
+                        "side": r[4],
+                        "amount": r[5],
+                        "filled": r[6],
+                        "status": r[7],
+                        "ts_ms": r[8],
+                    }
+                )
         return result
 
     def update_progress(self, broker_order_id: str, filled: str) -> None:

@@ -1,12 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
 
 from .macro import MacroContext, macro_coeff
 
-
 Regime = Literal["bull", "neutral", "bear"]
+
 
 @dataclass(frozen=True)
 class FusionThresholds:
@@ -19,11 +19,14 @@ class FusionThresholds:
     abstain_low: float = 45.0
     abstain_high: float = 55.0
 
-def pass_thresholds(ind_score: float,
-                    ai_score: float | None,
-                    regime: Regime,
-                    macro: MacroContext | None = None,
-                    thr: FusionThresholds | None = None) -> tuple[bool, dict]:
+
+def pass_thresholds(
+    ind_score: float,
+    ai_score: float | None,
+    regime: Regime,
+    macro: MacroContext | None = None,
+    thr: FusionThresholds | None = None,
+) -> tuple[bool, dict]:
     thr = thr or FusionThresholds()
     coeff = macro_coeff(macro)
     if regime == "bull":

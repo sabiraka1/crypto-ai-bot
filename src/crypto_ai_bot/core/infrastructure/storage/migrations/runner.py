@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -9,6 +9,7 @@ import sqlite3
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
 
 def _backup_file(src: str, *, dest_dir: str, now_ms: int) -> str | None:
     if not src or not os.path.exists(src):
@@ -65,6 +66,7 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     cur = conn.execute(f"PRAGMA table_info({table});")
     return any(row[1] == column for row in cur.fetchall())
 
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
     if not _column_exists(conn, table, column):
         with conn:
@@ -113,7 +115,7 @@ def _pymigrations() -> list[PyMigration]:
                 last              TEXT,
                 ts_ms             INTEGER NOT NULL
             );
-            """
+            """,
         )
 
     migs.append(PyMigration(1, "init", _v1))
@@ -138,7 +140,7 @@ def _pymigrations() -> list[PyMigration]:
                 WHERE client_order_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_trades_ts
                 ON trades(ts_ms);
-            """
+            """,
         )
 
     migs.append(PyMigration(6, "trades_indexes", _v6))
@@ -152,7 +154,7 @@ def _pymigrations() -> list[PyMigration]:
                 ON idempotency(key);
             CREATE INDEX IF NOT EXISTS idx_idempotency_ts
                 ON idempotency(ts_ms);
-            """
+            """,
         )
 
     migs.append(PyMigration(7, "idempotency_unique_and_ts", _v7))
@@ -164,7 +166,7 @@ def _pymigrations() -> list[PyMigration]:
             """
             CREATE INDEX IF NOT EXISTS idx_positions_symbol
                 ON positions(symbol);
-            """
+            """,
         )
 
     migs.append(PyMigration(8, "positions_idx", _v8))
@@ -179,7 +181,7 @@ def _pymigrations() -> list[PyMigration]:
             CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_broker_order_id
                 ON trades(broker_order_id)
                 WHERE broker_order_id IS NOT NULL;
-            """
+            """,
         )
 
     migs.append(PyMigration(10, "audit_ts_idx", _v10))
@@ -194,7 +196,9 @@ def _pymigrations() -> list[PyMigration]:
 
         try:
             with conn:
-                conn.execute("UPDATE positions SET avg_entry_price = COALESCE(avg_entry_price, avg_price, '0')")
+                conn.execute(
+                    "UPDATE positions SET avg_entry_price = COALESCE(avg_entry_price, avg_price, '0')"
+                )
         except Exception:
             pass
         try:
@@ -223,7 +227,7 @@ def _pymigrations() -> list[PyMigration]:
             );
             CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
             CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
-            """
+            """,
         )
 
     migs.append(PyMigration(12, "orders_table", _v12))

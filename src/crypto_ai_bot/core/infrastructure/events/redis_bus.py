@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
@@ -11,7 +11,6 @@ from redis.asyncio.client import PubSub
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
-
 
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
 _log = get_logger("events.redis")

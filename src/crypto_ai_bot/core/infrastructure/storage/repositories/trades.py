@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -80,7 +80,11 @@ class TradesRepository:
                 str(
                     _get(order, "fee_quote", "fee_quote")
                     if _get(order, "fee_quote", "fee_quote") is not None
-                    else ((_get(order, "fee", "fee") or {}).get("cost", "0") if isinstance(_get(order, "fee", "fee"), dict) else "0")
+                    else (
+                        (_get(order, "fee", "fee") or {}).get("cost", "0")
+                        if isinstance(_get(order, "fee", "fee"), dict)
+                        else "0"
+                    )
                 ),
                 int(_get(order, "ts_ms", "timestamp", 0)),
             ),
@@ -193,6 +197,7 @@ class TradesRepository:
         pnl_today = Decimal("0")
 
         import datetime as _dt
+
         today_utc = _dt.datetime.utcnow().date()
 
         for r in rows:

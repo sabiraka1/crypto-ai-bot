@@ -1,11 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
 import shutil
 
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("storage.backup")
 
@@ -21,6 +20,7 @@ def backup_database(src_path: str, backup_dir: str) -> str:
 
         # Ğ“ĞµĞ½ĞµÑ€Ğ¸Ñ€ÑƒĞµĞ¼ Ğ¸Ğ¼Ñ Ğ´Ğ»Ñ Ğ±ÑĞºĞ°Ğ¿Ğ°
         from datetime import datetime
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_name = f"{src.stem}_backup_{timestamp}{src.suffix}"
         dst = Path(backup_dir) / backup_name

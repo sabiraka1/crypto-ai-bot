@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -10,10 +10,10 @@ from crypto_ai_bot.utils.decimal import dec
 
 @dataclass
 class PnLItem:
-    side: str               # "buy" | "sell"
-    base_qty: Decimal       # ĞºĞ¾Ğ»Ğ¸Ñ‡ĞµÑÑ‚Ğ²Ğ¾ Ğ² Ğ±Ğ°Ğ·Ğ¾Ğ²Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ
-    price: Decimal          # Ñ†ĞµĞ½Ğ° (quote/base)
-    fee_quote: Decimal      # ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ñ Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ
+    side: str  # "buy" | "sell"
+    base_qty: Decimal  # ĞºĞ¾Ğ»Ğ¸Ñ‡ĞµÑÑ‚Ğ²Ğ¾ Ğ² Ğ±Ğ°Ğ·Ğ¾Ğ²Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ
+    price: Decimal  # Ñ†ĞµĞ½Ğ° (quote/base)
+    fee_quote: Decimal  # ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ñ Ğ² ĞºĞ¾Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼Ğ¾Ğ¹ Ğ²Ğ°Ğ»ÑÑ‚Ğµ
     ts_ms: int | None = None
 
 
@@ -44,8 +44,15 @@ def _normalize(trades: Iterable[dict[str, Any]]) -> list[PnLItem]:
         price = dec(str(t.get("price", "0") or "0"))
         fee_q = dec(str(t.get("fee_quote", "0") or "0"))
         ts = t.get("ts_ms")
-        items.append(PnLItem(side=side, base_qty=dec(str(base or 0)),
-                             price=price, fee_quote=fee_q, ts_ms=int(ts) if ts else None))
+        items.append(
+            PnLItem(
+                side=side,
+                base_qty=dec(str(base or 0)),
+                price=price,
+                fee_quote=fee_q,
+                ts_ms=int(ts) if ts else None,
+            )
+        )
     items.sort(key=lambda x: (x.ts_ms if x.ts_ms is not None else 0))
     return items
 

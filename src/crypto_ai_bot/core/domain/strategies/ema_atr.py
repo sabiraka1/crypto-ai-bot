@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -47,8 +47,12 @@ class EmaAtrConfig:
     ema_short: int = 12
     ema_long: int = 26
     atr_period: int = 14
-    atr_max_pct: Decimal = dec("1000")  # Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡Ğ¸Ñ‚ĞµĞ»ÑŒ ÑˆÑƒĞ¼Ğ°, 1000% ~ Ñ„Ğ°ĞºÑ‚Ğ¸Ñ‡ĞµÑĞºĞ¸ Ğ¾Ñ‚ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾
-    ema_min_slope: Decimal = dec("0")   # Ğ¼Ğ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ Ğ½Ğ°ĞºĞ»Ğ¾Ğ½ (Ğ² Ğ¿Ñ€Ğ¾Ñ†ĞµĞ½Ñ‚Ğ°Ñ…) ĞºÑ€Ğ°Ñ‚ĞºĞ¾ÑÑ€Ğ¾Ñ‡Ğ½Ğ¾Ğ¹ EMA Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ĞµĞ»ÑŒĞ½Ğ¾ Ñ†ĞµĞ½Ñ‹
+    atr_max_pct: Decimal = dec(
+        "1000"
+    )  # Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡Ğ¸Ñ‚ĞµĞ»ÑŒ ÑˆÑƒĞ¼Ğ°, 1000% ~ Ñ„Ğ°ĞºÑ‚Ğ¸Ñ‡ĞµÑĞºĞ¸ Ğ¾Ñ‚ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾
+    ema_min_slope: Decimal = dec(
+        "0"
+    )  # Ğ¼Ğ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ Ğ½Ğ°ĞºĞ»Ğ¾Ğ½ (Ğ² Ğ¿Ñ€Ğ¾Ñ†ĞµĞ½Ñ‚Ğ°Ñ…) ĞºÑ€Ğ°Ñ‚ĞºĞ¾ÑÑ€Ğ¾Ñ‡Ğ½Ğ¾Ğ¹ EMA Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ĞµĞ»ÑŒĞ½Ğ¾ Ñ†ĞµĞ½Ñ‹
 
 
 class EmaAtrStrategy(BaseStrategy):

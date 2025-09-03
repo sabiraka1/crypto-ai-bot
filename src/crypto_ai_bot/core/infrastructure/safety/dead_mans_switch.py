@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
@@ -7,9 +7,9 @@ from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 
-
 try:
     from crypto_ai_bot.core.application import events_topics as EVT
+
     _DMS_TOPIC = getattr(EVT, "DMS_TRIGGERED", "safety.dead_mans_switch.triggered")
 except Exception:
     _DMS_TOPIC = "safety.dead_mans_switch.triggered"

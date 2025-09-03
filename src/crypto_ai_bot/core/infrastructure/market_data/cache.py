@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
 from typing import Any, Generic, TypeVar
 
-
 T = TypeVar("T")
+
 
 class TTLCache(Generic[T]):
     def __init__(self, ttl_sec: float = 30.0) -> None:

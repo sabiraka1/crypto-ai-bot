@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any
 
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("usecase.eval_and_execute")
 
@@ -12,7 +12,7 @@ _log = get_logger("usecase.eval_and_execute")
 @dataclass(frozen=True)
 class EvalResult:
     decided: bool
-    action: str            # "buy" | "sell" | "skip"
+    action: str  # "buy" | "sell" | "skip"
     reason: str = ""
     score: str = "0"
     executed: bool = False
@@ -39,7 +39,11 @@ async def eval_and_execute(
         try:
             decision = await strategy.generate(settings, {"symbol": symbol})
         except Exception:  # noqa: BLE001
-            _log.error("strategy_generate_failed", extra={"symbol": symbol, "strategy": getattr(strategy, "name", type(strategy).__name__)}, exc_info=True)
+            _log.error(
+                "strategy_generate_failed",
+                extra={"symbol": symbol, "strategy": getattr(strategy, "name", type(strategy).__name__)},
+                exc_info=True,
+            )
             return EvalResult(decided=False, action="skip", reason="strategy_error")
 
         if not isinstance(decision, dict):
@@ -63,6 +67,7 @@ async def eval_and_execute(
             # side-effects (события) — обязанность orchestration/use-case уровня, не domain
             try:
                 from crypto_ai_bot.core.application import events_topics as EVT
+
                 await bus.publish(EVT.TRADE_BLOCKED, {"symbol": symbol, "reason": why})
             except Exception:  # noqa: BLE001
                 _log.error("publish_trade_blocked_failed", extra={"symbol": symbol}, exc_info=True)

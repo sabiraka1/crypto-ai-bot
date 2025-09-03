@@ -1,10 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
 
 from crypto_ai_bot.utils.decimal import dec
-
 
 # Константа для дефолтного значения B008
 _DEFAULT_KELLY_CAP = dec("0.5")
@@ -16,9 +15,10 @@ class SizeConstraints:
     Ограничения размера позиции в котируемой валюте.
     Все поля опциональны: если None или 0 — ограничение не применяется.
     """
+
     max_quote_pct: Decimal | None = None  # доля от доступного баланса, например 0.1 (=10%)
-    min_quote: Decimal | None = None      # минимальная сумма в котируемой
-    max_quote: Decimal | None = None      # абсолютный потолок в котируемой
+    min_quote: Decimal | None = None  # минимальная сумма в котируемой
+    max_quote: Decimal | None = None  # абсолютный потолок в котируемой
 
 
 def _clamp(v: Decimal, *, min_v: Decimal | None, max_v: Decimal | None) -> Decimal:
@@ -29,7 +29,9 @@ def _clamp(v: Decimal, *, min_v: Decimal | None, max_v: Decimal | None) -> Decim
     return v
 
 
-def fixed_quote_amount(*, fixed: Decimal, constraints: SizeConstraints | None, free_quote_balance: Decimal | None = None) -> Decimal:
+def fixed_quote_amount(
+    *, fixed: Decimal, constraints: SizeConstraints | None, free_quote_balance: Decimal | None = None
+) -> Decimal:
     """
     Жёстко заданная сумма (например, FIXED_AMOUNT).
     Учитываем ограничения и (опционально) max_quote_pct от доступного free.
@@ -44,7 +46,9 @@ def fixed_quote_amount(*, fixed: Decimal, constraints: SizeConstraints | None, f
     return max(v, dec("0"))
 
 
-def fixed_fractional(*, free_quote_balance: Decimal, fraction: Decimal, constraints: SizeConstraints | None) -> Decimal:
+def fixed_fractional(
+    *, free_quote_balance: Decimal, fraction: Decimal, constraints: SizeConstraints | None
+) -> Decimal:
     """
     Доля от доступного баланса (например, 5%).
     """
@@ -61,9 +65,9 @@ def fixed_fractional(*, free_quote_balance: Decimal, fraction: Decimal, constrai
 def volatility_target_size(
     *,
     free_quote_balance: Decimal,
-    market_vol_pct: Decimal,         # волатильность рынка в процентах (например, 1.2)
+    market_vol_pct: Decimal,  # волатильность рынка в процентах (например, 1.2)
     target_portfolio_vol_pct: Decimal,  # целевая портфельная вола в процентах (например, 0.5)
-    base_fraction: Decimal,          # базовая доля, напр. 0.05
+    base_fraction: Decimal,  # базовая доля, напр. 0.05
     constraints: SizeConstraints | None,
 ) -> Decimal:
     """
@@ -83,7 +87,9 @@ def volatility_target_size(
     return max(v, dec("0"))
 
 
-def naive_kelly(win_rate: Decimal, avg_win_pct: Decimal, avg_loss_pct: Decimal, cap: Decimal | None = None) -> Decimal:
+def naive_kelly(
+    win_rate: Decimal, avg_win_pct: Decimal, avg_loss_pct: Decimal, cap: Decimal | None = None
+) -> Decimal:
     """
     Наивная Kelly по ожиданию (%): f* = win_rate/avg_loss - (1 - win_rate)/avg_win
     Здесь работаем в долях на сделку, ограничиваем cap (по умолчанию 50%).
@@ -106,7 +112,15 @@ def naive_kelly(win_rate: Decimal, avg_win_pct: Decimal, avg_loss_pct: Decimal, 
     return f
 
 
-def kelly_sized_quote(*, free_quote_balance: Decimal, win_rate: Decimal, avg_win_pct: Decimal, avg_loss_pct: Decimal, base_fraction: Decimal, constraints: SizeConstraints | None) -> Decimal:
+def kelly_sized_quote(
+    *,
+    free_quote_balance: Decimal,
+    win_rate: Decimal,
+    avg_win_pct: Decimal,
+    avg_loss_pct: Decimal,
+    base_fraction: Decimal,
+    constraints: SizeConstraints | None,
+) -> Decimal:
     """
     Конвертируем Kelly-долю в котируемую сумму с ограничением базовой фракцией.
     """

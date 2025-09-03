@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
@@ -35,7 +35,13 @@ class BollingerBandsStrategy(BaseStrategy):
         lower = sma - std * self.std_dev
         width = (upper - lower) / sma if sma > 0 else dec("0")
 
-        explain: dict[str, Any] = {"price": float(price), "upper": float(upper), "middle": float(sma), "lower": float(lower), "width": float(width)}
+        explain: dict[str, Any] = {
+            "price": float(price),
+            "upper": float(upper),
+            "middle": float(sma),
+            "lower": float(lower),
+            "width": float(width),
+        }
 
         if width < self.squeeze_threshold:
             explain["signal"] = "squeeze"
@@ -56,11 +62,7 @@ class BollingerBandsStrategy(BaseStrategy):
         # Получаем данные из MarketData если их нет в контексте
         if ctx.data is None:
             ticker = await md.get_ticker(ctx.symbol)
-            ctx = StrategyContext(
-                symbol=ctx.symbol,
-                settings=ctx.settings,
-                data={"ticker": ticker}
-            )
+            ctx = StrategyContext(symbol=ctx.symbol, settings=ctx.settings, data={"ticker": ticker})
 
         action, explain = self.decide(ctx)
         reason = explain.get("signal", explain.get("reason", ""))
@@ -70,8 +72,4 @@ class BollingerBandsStrategy(BaseStrategy):
         if action in ["buy", "sell"] and "touch" in reason:
             confidence = 0.65
 
-        return Decision(
-            action=action,
-            confidence=confidence,
-            reason=reason
-        )
+        return Decision(action=action, confidence=confidence, reason=reason)

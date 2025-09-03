@@ -1,11 +1,11 @@
 from __future__ import annotations
+
 from typing import Any
 
 import httpx
 
 from crypto_ai_bot.core.domain.macro.ports import FomcCalendarPort
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("macro.fomc_http")
 

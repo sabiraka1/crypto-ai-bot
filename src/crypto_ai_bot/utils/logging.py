@@ -1,18 +1,19 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
 import sys
 from typing import Any
 
-
 __all__ = ["get_correlation_id", "get_logger", "set_correlation_id"]
 
 _CORRELATION_ID: str | None = None
 
+
 def set_correlation_id(value: str | None) -> None:
     global _CORRELATION_ID
     _CORRELATION_ID = value
+
 
 def get_correlation_id() -> str | None:
     return _CORRELATION_ID
@@ -36,9 +37,27 @@ class JsonFormatter(logging.Formatter):
             if key.startswith("_"):
                 continue
             if key in {
-                "args", "asctime", "created", "exc_info", "exc_text", "filename", "levelname", "levelno",
-                "lineno", "module", "msecs", "message", "msg", "name", "pathname", "process",
-                "processName", "relativeCreated", "stack_info", "thread", "threadName",
+                "args",
+                "asctime",
+                "created",
+                "exc_info",
+                "exc_text",
+                "filename",
+                "levelname",
+                "levelno",
+                "lineno",
+                "module",
+                "msecs",
+                "message",
+                "msg",
+                "name",
+                "pathname",
+                "process",
+                "processName",
+                "relativeCreated",
+                "stack_info",
+                "thread",
+                "threadName",
             }:
                 continue
             if key in self.SENSITIVE_KEYS:

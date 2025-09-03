@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -9,6 +9,7 @@ from typing import Any
 @dataclass(frozen=True)
 class MaxTurnover5mConfig:
     limit_quote: Decimal = Decimal("0")
+
 
 class MaxTurnover5mRule:
     def __init__(self, cfg: MaxTurnover5mConfig) -> None:
@@ -26,6 +27,7 @@ class MaxTurnover5mRule:
                 return Decimal("0")
             now_ms = int(time.time() * 1000)
             thr = now_ms - minutes * 60_000
+
             def get_ts(x: Any) -> int:
                 for k in ("ts", "timestamp", "time"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)
@@ -35,6 +37,7 @@ class MaxTurnover5mRule:
                         except Exception:
                             continue
                 return 0
+
             def get_quote(x: Any) -> Decimal:
                 for k in ("quote", "quote_amount", "filled_quote", "amount_quote"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)
@@ -44,6 +47,7 @@ class MaxTurnover5mRule:
                         except Exception:
                             continue
                 return Decimal("0")
+
             s = Decimal("0")
             for it in items:
                 if get_ts(it) >= thr:

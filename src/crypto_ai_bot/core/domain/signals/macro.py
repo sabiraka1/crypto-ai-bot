@@ -1,17 +1,19 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class MacroContext:
-    fear_greed: float | None = None        # 0..100
-    btc_dominance: float | None = None     # 0..100
-    fed_rate: float | None = None          # e.g. 5.25
-    market_trend: float | None = None      # -1..+1 (bear..bull)
+    fear_greed: float | None = None  # 0..100
+    btc_dominance: float | None = None  # 0..100
+    fed_rate: float | None = None  # e.g. 5.25
+    market_trend: float | None = None  # -1..+1 (bear..bull)
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
 
 def macro_coeff(ctx: MacroContext | None) -> float:
     """Return multiplicative coefficient 0.90..1.10 that *adjusts thresholds*."""

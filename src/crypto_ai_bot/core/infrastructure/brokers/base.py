@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -13,6 +13,7 @@ class TickerDTO:
     ask: Decimal | None = None
     symbol: str | None = None
     timestamp: int | None = None
+
 
 class BaseBroker(ABC):
     @abstractmethod

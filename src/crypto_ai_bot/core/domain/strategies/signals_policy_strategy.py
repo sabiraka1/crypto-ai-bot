@@ -1,9 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from .base import BaseStrategy, Decision, MarketData, StrategyContext
-
 
 # ĞŸĞ¾Ğ´ÑĞ¸ÑÑ‚ĞµĞ¼Ğ° signals (Ğ³Ğ¾Ñ‚Ğ¾Ğ²Ğ°Ñ, Ğ½Ğ¾ Ñ€Ğ°Ğ½ĞµĞµ Ğ½Ğµ Ğ²ĞºĞ»ÑÑ‡Ñ‘Ğ½Ğ½Ğ°Ñ Ğ² Ñ€Ğ°Ğ½Ñ‚Ğ°Ğ¹Ğ¼)
 if TYPE_CHECKING:
@@ -45,13 +44,15 @@ class SignalsPolicyStrategy(BaseStrategy):
             "last": ticker.get("last", 0),
             "bid": ticker.get("bid", 0),
             "ask": ticker.get("ask", 0),
-            "spread_pct": ((ticker.get("ask", 0) - ticker.get("bid", 0)) / ticker.get("last", 1)) * 100 if ticker.get("last", 0) > 0 else 0,
+            "spread_pct": ((ticker.get("ask", 0) - ticker.get("bid", 0)) / ticker.get("last", 1)) * 100
+            if ticker.get("last", 0) > 0
+            else 0,
         }
 
         # Ğ¡Ğ¾Ğ·Ğ´Ğ°ĞµĞ¼ ÑĞºĞ·ĞµĞ¼Ğ¿Ğ»ÑÑ€ Ğ¿Ğ¾Ğ»Ğ¸Ñ‚Ğ¸ĞºĞ¸
         try:
             policy = SignalsPolicy()
-            if hasattr(policy, 'decide'):
+            if hasattr(policy, "decide"):
                 decision, score, explain = policy.decide(features)
             else:
                 # Ğ•ÑĞ»Ğ¸ Ğ¼ĞµÑ‚Ğ¾Ğ´Ğ° decide Ğ½ĞµÑ‚, Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµĞ¼ hold

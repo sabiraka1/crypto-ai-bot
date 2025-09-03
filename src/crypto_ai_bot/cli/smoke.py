@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import argparse
 import asyncio
 import importlib
@@ -6,7 +7,6 @@ import os
 
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("cli.smoke")
 
@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=float(_env("HTTP_TIMEOUT_SEC", "30")))
     args = parser.parse_args()
 
-    # 1) ѵ 
+    # 1) ѵ
     ok = True
     ok &= _import_ok("crypto_ai_bot.app.server")
     ok &= _import_ok("crypto_ai_bot.app.compose")

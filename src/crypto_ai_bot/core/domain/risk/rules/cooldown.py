@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 import time
@@ -8,6 +8,7 @@ from typing import Any
 @dataclass(frozen=True)
 class CooldownConfig:
     cooldown_sec: int = 0  # 0 = выключено
+
 
 class CooldownRule:
     def __init__(self, cfg: CooldownConfig) -> None:
@@ -23,6 +24,7 @@ class CooldownRule:
             items = trades_repo.list_today(symbol)
             if not items:
                 return None
+
             # предполагаем, что последний — в конце; иначе сортируем по ts
             def get_ts(x: Any) -> int:
                 for k in ("ts", "timestamp", "time"):
@@ -33,6 +35,7 @@ class CooldownRule:
                         except Exception:
                             continue
                 return 0
+
             last = max(items, key=get_ts)
             ts = get_ts(last)
             return ts if ts > 0 else None

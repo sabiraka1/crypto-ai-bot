@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 class IReconciler(Protocol):
     async def reconcile(self, *, symbol: str) -> dict[str, Any] | None: ...
+
 
 @dataclass(frozen=True)
 class ReconciliationSuite:
@@ -19,4 +20,3 @@ class ReconciliationSuite:
             if isinstance(res, dict):
                 out.append(res)
         return out
-

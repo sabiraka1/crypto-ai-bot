@@ -1,31 +1,33 @@
 from __future__ import annotations
+
+import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-import asyncio
 
 from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
-
 _log = get_logger("protective_exits")
 
 # ----------------------------- Ѹ  ѼѰю -----------------------------
 
+
 @dataclass(frozen=True)
 class AtrExitConfig:
-    atr_period: int = 14          # Ѹ ATR
-    tp1_atr: Decimal = dec("1.0") # TP1 = entry + 1.0 * ATR
-    tp2_atr: Decimal = dec("2.0") # TP2 = entry + 2.0 * ATR
-    sl_atr:  Decimal = dec("1.5") # SL  = entry - 1.5 * ATR
-    tp1_close_pct: int = 50       # Ѿѵ Ѹ, Ѳѹ  TP1
-    enable_breakeven: bool = True # ѵс SL  / с TP1
+    atr_period: int = 14  # Ѹ ATR
+    tp1_atr: Decimal = dec("1.0")  # TP1 = entry + 1.0 * ATR
+    tp2_atr: Decimal = dec("2.0")  # TP2 = entry + 2.0 * ATR
+    sl_atr: Decimal = dec("1.5")  # SL  = entry - 1.5 * ATR
+    tp1_close_pct: int = 50  # Ѿѵ Ѹ, Ѳѹ  TP1
+    enable_breakeven: bool = True  # ѵс SL  / с TP1
     min_base_to_exit: Decimal = dec("0")  #  Ѳ Ѿѵѽѵ Ѽ
-    tick_interval_sec: float = 2.0        # Ѹ Ѿ ѾѺ
-    ohlcv_limit: int = 200                # сѸ  ѷ
-    timeframe: str = "15m"                # ѰѸ TF
+    tick_interval_sec: float = 2.0  # Ѹ Ѿ ѾѺ
+    ohlcv_limit: int = 200  # сѸ  ѷ
+    timeframe: str = "15m"  # ѰѸ TF
+
 
 def _safe_dec(settings: Any, name: str, default: str) -> Decimal:
     val = getattr(settings, name, None)
@@ -40,12 +42,13 @@ def _safe_dec(settings: Any, name: str, default: str) -> Decimal:
     except Exception:  # noqa: BLE001
         return dec(default)
 
+
 def _cfg_from_settings(s: Any) -> AtrExitConfig:
     return AtrExitConfig(
         atr_period=int(getattr(s, "EXITS_ATR_PERIOD", 14) or 14),
         tp1_atr=_safe_dec(s, "EXITS_TP1_ATR", "1.0"),
         tp2_atr=_safe_dec(s, "EXITS_TP2_ATR", "2.0"),
-        sl_atr=_safe_dec(s,  "EXITS_SL_ATR",  "1.5"),
+        sl_atr=_safe_dec(s, "EXITS_SL_ATR", "1.5"),
         tp1_close_pct=int(getattr(s, "EXITS_TP1_CLOSE_PCT", 50) or 50),
         enable_breakeven=bool(int(getattr(s, "EXITS_ENABLE_BREAKEVEN", 1) or 1)),
         min_base_to_exit=_safe_dec(s, "EXITS_MIN_BASE", "0"),
@@ -54,7 +57,9 @@ def _cfg_from_settings(s: Any) -> AtrExitConfig:
         timeframe=str(getattr(s, "STRAT_TIMEFRAME", "15m") or "15m"),
     )
 
+
 # ------------------------------- ATR Ѹ -----------------------------------
+
 
 def _true_ranges(ohlcv: list[list[Decimal]]) -> list[Decimal]:
     # ohlcv: [ts, open, high, low, close, volume]
@@ -63,11 +68,14 @@ def _true_ranges(ohlcv: list[list[Decimal]]) -> list[Decimal]:
     trs: list[Decimal] = []
     prev_close = dec(str(ohlcv[0][4]))
     for row in ohlcv[1:]:
-        high = dec(str(row[2])); low = dec(str(row[3])); close = dec(str(row[4]))
+        high = dec(str(row[2]))
+        low = dec(str(row[3]))
+        close = dec(str(row[4]))
         tr = max(high - low, abs(high - prev_close), abs(prev_close - low))
         trs.append(tr)
         prev_close = close
     return trs
+
 
 def _ema_last(values: list[Decimal], period: int) -> Decimal | None:
     if period <= 0 or len(values) < period:
@@ -78,6 +86,7 @@ def _ema_last(values: list[Decimal], period: int) -> Decimal | None:
         ema = x * k + ema * (dec("1") - k)
     return ema
 
+
 async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int) -> Decimal | None:
     try:
         ohlcv_raw = await broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -86,7 +95,16 @@ async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int
         # ѵѰ  Decimal
         ohlcv: list[list[Decimal]] = []
         for r in ohlcv_raw:
-            ohlcv.append([dec(str(r[0])), dec(str(r[1])), dec(str(r[2])), dec(str(r[3])), dec(str(r[4])), dec(str(r[5]))])
+            ohlcv.append(
+                [
+                    dec(str(r[0])),
+                    dec(str(r[1])),
+                    dec(str(r[2])),
+                    dec(str(r[3])),
+                    dec(str(r[4])),
+                    dec(str(r[5])),
+                ]
+            )
         trs = _true_ranges(ohlcv)
         if len(trs) < period:
             return None
@@ -95,7 +113,9 @@ async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int
         _log.error("atr_fetch_failed", extra={"symbol": symbol, "tf": timeframe}, exc_info=True)
         return None
 
+
 # ------------------------------- с сс --------------------------------
+
 
 class ProtectiveExits:
     """
@@ -105,6 +125,7 @@ class ProtectiveExits:
       - SL  = -sl_atr*ATR
     я ѻя  с сся с BUY ѵѵ on_hint().
     """
+
     def __init__(self, *, broker: Any, storage: Any, bus: Any, settings: Any) -> None:
         self._broker = broker
         self._storage = storage
@@ -114,7 +135,7 @@ class ProtectiveExits:
 
         # ссѾя  с
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._tp1_done: dict[str, bool] = {}     # TP1 Ѿ
+        self._tp1_done: dict[str, bool] = {}  # TP1 Ѿ
         self._breakeven_px: dict[str, Decimal] = {}  # ѵ / с TP1
 
     # API ссѸсѸ (ѺсѰѾ  Ѿ)
@@ -208,7 +229,9 @@ class ProtectiveExits:
             return None
 
         # ATR
-        atr = await _atr(self._broker, symbol, self._cfg.timeframe, self._cfg.ohlcv_limit, self._cfg.atr_period)
+        atr = await _atr(
+            self._broker, symbol, self._cfg.timeframe, self._cfg.ohlcv_limit, self._cfg.atr_period
+        )
         if atr is None or atr <= 0:
             inc("protective_exits_tick_total", symbol=symbol, reason="no_atr")
             return None
@@ -216,10 +239,14 @@ class ProtectiveExits:
         # Ѿ
         tp1_px = entry + self._cfg.tp1_atr * atr
         tp2_px = entry + self._cfg.tp2_atr * atr
-        sl_px  = entry - self._cfg.sl_atr  * atr
+        sl_px = entry - self._cfg.sl_atr * atr
 
         # breakeven с TP1
-        if self._tp1_done.get(symbol, False) and self._cfg.enable_breakeven and symbol not in self._breakeven_px:
+        if (
+            self._tp1_done.get(symbol, False)
+            and self._cfg.enable_breakeven
+            and symbol not in self._breakeven_px
+        ):
             self._breakeven_px[symbol] = entry
 
         # ѵѵя
@@ -238,7 +265,11 @@ class ProtectiveExits:
                 if self._cfg.enable_breakeven:
                     self._breakeven_px[symbol] = entry
                 #  Ѹю
-                pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
+                pos = (
+                    self._storage.positions.get_position(symbol)
+                    if hasattr(self._storage, "positions")
+                    else None
+                )
                 base = getattr(pos, "base_qty", dec("0")) or dec("0")
                 if base <= 0:
                     self._cancel_task(symbol)
@@ -246,7 +277,7 @@ class ProtectiveExits:
                 return {"closed_part": True, "side": "sell", "qty": str(qty), "reason": "tp1"}
             return None
 
-        # breakeven 
+        # breakeven
         if self._tp1_done.get(symbol, False) and self._cfg.enable_breakeven:
             be = self._breakeven_px.get(symbol, None)
             if be and last <= be:
@@ -263,8 +294,12 @@ class ProtectiveExits:
             return None
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=base)
-            await self._bus.publish(EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)})
-            _log.info("protective_exit_sell_all", extra={"symbol": symbol, "qty": str(base), "reason": reason})
+            await self._bus.publish(
+                EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)}
+            )
+            _log.info(
+                "protective_exit_sell_all", extra={"symbol": symbol, "qty": str(base), "reason": reason}
+            )
             self._cancel_task(symbol)
             return {"closed_all": True, "side": "sell", "qty": str(base), "reason": reason}  # noqa: TRY300
         except Exception as e:  # noqa: BLE001
@@ -275,7 +310,9 @@ class ProtectiveExits:
     async def _sell_qty(self, symbol: str, qty: Decimal, reason: str) -> bool:
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
-            await self._bus.publish(EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)})
+            await self._bus.publish(
+                EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)}
+            )
             _log.info("protective_exit_sell_qty", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
             return True  # noqa: TRY300
         except Exception as e:  # noqa: BLE001

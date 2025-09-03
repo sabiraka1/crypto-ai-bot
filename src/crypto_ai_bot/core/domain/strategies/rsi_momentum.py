@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
@@ -12,7 +12,13 @@ from .base import BaseStrategy, Decision, MarketData, StrategyContext
 class RSIMomentumStrategy(BaseStrategy):
     """RSI + Momentum: покупки при перепроданности с положительным моментумом и наоборот."""
 
-    def __init__(self, rsi_period: int = 14, rsi_oversold: float = 30, rsi_overbought: float = 70, momentum_period: int = 10):
+    def __init__(
+        self,
+        rsi_period: int = 14,
+        rsi_oversold: float = 30,
+        rsi_overbought: float = 70,
+        momentum_period: int = 10,
+    ):
         self.rsi_period = rsi_period
         self.rsi_oversold = float(rsi_oversold)
         self.rsi_overbought = float(rsi_overbought)
@@ -59,7 +65,12 @@ class RSIMomentumStrategy(BaseStrategy):
 
         rsi = self._calc_rsi()
         mom = self._calc_momentum()
-        explain: dict[str, Any] = {"rsi": float(rsi), "momentum_pct": float(mom), "oversold": self.rsi_oversold, "overbought": self.rsi_overbought}
+        explain: dict[str, Any] = {
+            "rsi": float(rsi),
+            "momentum_pct": float(mom),
+            "oversold": self.rsi_oversold,
+            "overbought": self.rsi_overbought,
+        }
 
         if float(rsi) < self.rsi_oversold and mom > 0:
             explain["signal"] = "oversold_with_positive_momentum"
@@ -76,22 +87,19 @@ class RSIMomentumStrategy(BaseStrategy):
         # Получаем данные из MarketData если их нет в контексте
         if ctx.data is None:
             ticker = await md.get_ticker(ctx.symbol)
-            ctx = StrategyContext(
-                symbol=ctx.symbol,
-                settings=ctx.settings,
-                data={"ticker": ticker}
-            )
+            ctx = StrategyContext(symbol=ctx.symbol, settings=ctx.settings, data={"ticker": ticker})
 
         action, explain = self.decide(ctx)
         reason = explain.get("signal", explain.get("reason", ""))
 
         # Вычисляем confidence на основе силы сигнала
         confidence = 0.5  # базовая уверенность
-        if action == "buy" and "oversold_with_positive_momentum" in reason or action == "sell" and "overbought_with_negative_momentum" in reason:
+        if (
+            action == "buy"
+            and "oversold_with_positive_momentum" in reason
+            or action == "sell"
+            and "overbought_with_negative_momentum" in reason
+        ):
             confidence = 0.7
 
-        return Decision(
-            action=action,
-            confidence=confidence,
-            reason=reason
-        )
+        return Decision(action=action, confidence=confidence, reason=reason)

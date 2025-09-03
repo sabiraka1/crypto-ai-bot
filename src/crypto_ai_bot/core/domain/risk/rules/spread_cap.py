@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,12 +8,14 @@ from dataclasses import dataclass
 class SpreadCapConfig:
     max_spread_pct: float = 0.0  # 0 = выключено
 
+
 class SpreadCapRule:
     """
     Проверяем текущий спрэд. Источник даём в виде провайдера:
       provider(symbol) -> float (процент спрэда), либо None.
     Если провайдера нет/ошибка — правило молча пропускается.
     """
+
     def __init__(self, cfg: SpreadCapConfig, provider: Callable[[str], float] | None = None) -> None:
         self.cfg = cfg
         self.provider = provider

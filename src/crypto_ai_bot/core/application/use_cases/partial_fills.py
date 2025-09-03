@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -9,7 +9,6 @@ from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, Order
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
-
 
 _log = get_logger("usecase.partial_fills")
 
@@ -55,7 +54,7 @@ class PartialFillHandler:
             if _ratio(filled, amount) >= dec("0.95"):
                 return None
 
-            remaining = (amount - filled)
+            remaining = amount - filled
             symbol = getattr(order, "symbol", "") or ""
             side = (getattr(order, "side", "") or "").lower()
             base_client_id = getattr(order, "client_order_id", "") or ""
@@ -135,6 +134,7 @@ async def settle_orders(
         age_sec = 0
         try:
             import time
+
             age_sec = max(0, int(time.time()) - ts_ms // 1000) if ts_ms else 0
         except Exception:
             pass
@@ -150,7 +150,11 @@ async def settle_orders(
                 _log.warning("fetch_order_skipped_no_ids", extra={"symbol": symbol, "row": row})
                 continue
         except Exception:
-            _log.error("fetch_order_failed", extra={"symbol": symbol, "broker_order_id": broker_order_id}, exc_info=True)
+            _log.error(
+                "fetch_order_failed",
+                extra={"symbol": symbol, "broker_order_id": broker_order_id},
+                exc_info=True,
+            )
             inc("settle_fetch_order_errors_total", symbol=symbol)
             continue
 
@@ -165,7 +169,11 @@ async def settle_orders(
             if broker_order_id and _is_open(status):
                 storage.orders.update_progress(broker_order_id, str(filled))
         except Exception:
-            _log.error("update_progress_failed", extra={"symbol": symbol, "broker_order_id": broker_order_id}, exc_info=True)
+            _log.error(
+                "update_progress_failed",
+                extra={"symbol": symbol, "broker_order_id": broker_order_id},
+                exc_info=True,
+            )
 
         # 3) Если ордер закрыт — фиксируем и публикуем событие
         if _is_closed(status):
@@ -173,7 +181,11 @@ async def settle_orders(
                 if broker_order_id:
                     storage.orders.mark_closed(broker_order_id, str(filled))
             except Exception:
-                _log.error("mark_closed_failed", extra={"symbol": symbol, "broker_order_id": broker_order_id}, exc_info=True)
+                _log.error(
+                    "mark_closed_failed",
+                    extra={"symbol": symbol, "broker_order_id": broker_order_id},
+                    exc_info=True,
+                )
 
             # best-effort: записать трейд (если ещё не записан)
             try:

@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.retry import apost_retry
 from crypto_ai_bot.utils.trace import get_cid
-
 
 _log = get_logger("adapters.telegram")
 

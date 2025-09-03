@@ -1,9 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("brokers.factory")
 
@@ -58,6 +57,7 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
             raise ImportError("CcxtBroker class not found in ccxt broker module(s)")
 
         import ccxt  # локальный импорт
+
         if not hasattr(ccxt, ex):
             raise ValueError(f"Unsupported exchange {exchange!r} for ccxt")
 
@@ -68,14 +68,16 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
         proxy = getattr(settings, "HTTP_PROXY", "") or None
 
         cls = getattr(ccxt, ex)
-        exch = cls({
-            "apiKey": api_key,
-            "secret": api_secret,
-            "password": api_password or None,
-            "timeout": int(http_timeout_sec * 1000),
-            "enableRateLimit": True,
-            **({"proxy": proxy} if proxy else {}),
-        })
+        exch = cls(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "password": api_password or None,
+                "timeout": int(http_timeout_sec * 1000),
+                "enableRateLimit": True,
+                **({"proxy": proxy} if proxy else {}),
+            }
+        )
 
         _log.info("make_broker_live", extra={"exchange": ex})
         return CcxtBroker(exchange=exch, settings=settings)

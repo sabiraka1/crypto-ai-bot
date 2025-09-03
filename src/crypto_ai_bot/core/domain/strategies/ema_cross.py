@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import deque
 from decimal import Decimal
@@ -19,11 +19,11 @@ class EmaCrossStrategy(BaseStrategy):
         self,
         fast_period: int = 9,
         slow_period: int = 21,
-        threshold_pct: float = 0.1,      # 0.1% Ğ´Ğ¸Ğ²ĞµÑ€Ğ³ĞµĞ½Ñ†Ğ¸Ñ fast/slow
-        max_spread_pct: float = 0.5,     # Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€ ÑĞ¿Ñ€ĞµĞ´Ğ°
+        threshold_pct: float = 0.1,  # 0.1% Ğ´Ğ¸Ğ²ĞµÑ€Ğ³ĞµĞ½Ñ†Ğ¸Ñ fast/slow
+        max_spread_pct: float = 0.5,  # Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€ ÑĞ¿Ñ€ĞµĞ´Ğ°
         use_volatility_filter: bool = True,
         max_volatility_pct: float = 10.0,
-        min_volatility_pct: float = 0.0, # Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ·Ğ°Ğ´Ğ°Ñ‚ÑŒ >0 Ğ´Ğ»Ñ Â«ÑĞ»Ğ¸ÑˆĞºĞ¾Ğ¼ Ğ½Ğ¸Ğ·ĞºĞ°Ñ Ğ²Ğ¾Ğ»Ğ°Â»
+        min_volatility_pct: float = 0.0,  # Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ·Ğ°Ğ´Ğ°Ñ‚ÑŒ >0 Ğ´Ğ»Ñ Â«ÑĞ»Ğ¸ÑˆĞºĞ¾Ğ¼ Ğ½Ğ¸Ğ·ĞºĞ°Ñ Ğ²Ğ¾Ğ»Ğ°Â»
     ) -> None:
         assert fast_period > 0 and slow_period > 0 and fast_period < slow_period
         self.fast_period = fast_period
@@ -46,8 +46,8 @@ class EmaCrossStrategy(BaseStrategy):
         if self._ema_fast is None or self._ema_slow is None:
             # Ğ˜Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ñ‡ĞµÑ€ĞµĞ· SMA
             if len(self._prices) >= self.slow_period:
-                self._ema_fast = sum(list(self._prices)[-self.fast_period:]) / dec(self.fast_period)
-                self._ema_slow = sum(list(self._prices)[-self.slow_period:]) / dec(self.slow_period)
+                self._ema_fast = sum(list(self._prices)[-self.fast_period :]) / dec(self.fast_period)
+                self._ema_slow = sum(list(self._prices)[-self.slow_period :]) / dec(self.slow_period)
             else:
                 # Ğ½ĞµĞ´Ğ¾ÑÑ‚Ğ°Ñ‚Ğ¾Ñ‡Ğ½Ğ¾ Ğ¸ÑÑ‚Ğ¾Ñ€Ğ¸Ğ¸ Ğ´Ğ»Ñ SMA Ğ¸Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ğ¸
                 return
@@ -94,7 +94,11 @@ class EmaCrossStrategy(BaseStrategy):
             explain["reason"] = "ema_init"
             return "hold", explain
 
-        explain["indicators"] = {"ema_fast": float(self._ema_fast), "ema_slow": float(self._ema_slow), "price": float(last)}
+        explain["indicators"] = {
+            "ema_fast": float(self._ema_fast),
+            "ema_slow": float(self._ema_slow),
+            "price": float(last),
+        }
 
         # Ğ¤Ğ¸Ğ»ÑŒÑ‚Ñ€Ñ‹
         ok, why = self._filters_ok(d)
@@ -121,11 +125,7 @@ class EmaCrossStrategy(BaseStrategy):
         # ĞŸĞ¾Ğ»ÑƒÑ‡Ğ°ĞµĞ¼ Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ Ğ¸Ğ· MarketData ĞµÑĞ»Ğ¸ Ğ¸Ñ… Ğ½ĞµÑ‚ Ğ² ĞºĞ¾Ğ½Ñ‚ĞµĞºÑÑ‚Ğµ
         if ctx.data is None:
             ticker = await md.get_ticker(ctx.symbol)
-            ctx = StrategyContext(
-                symbol=ctx.symbol,
-                settings=ctx.settings,
-                data={"ticker": ticker}
-            )
+            ctx = StrategyContext(symbol=ctx.symbol, settings=ctx.settings, data={"ticker": ticker})
 
         action, explain = self.decide(ctx)
         reason = explain.get("reason", "")
@@ -134,5 +134,5 @@ class EmaCrossStrategy(BaseStrategy):
         return Decision(
             action=action,
             confidence=0.6,  # ĞœĞ¾Ğ¶Ğ½Ğ¾ Ğ²Ñ‹Ñ‡Ğ¸ÑĞ»ÑÑ‚ÑŒ Ğ½Ğ° Ğ¾ÑĞ½Ğ¾Ğ²Ğµ Ğ¸Ğ½Ğ´Ğ¸ĞºĞ°Ñ‚Ğ¾Ñ€Ğ¾Ğ²
-            reason=reason
+            reason=reason,
         )

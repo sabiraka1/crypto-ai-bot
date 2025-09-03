@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -8,7 +8,6 @@ from crypto_ai_bot.core.application.ports import BrokerPort
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector
 from crypto_ai_bot.core.domain.macro.types import Regime
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("regime.gated_broker")
 
@@ -25,6 +24,7 @@ class GatedBroker(BrokerPort):
     Ğ¡Ğ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ° Ñ Ñ‚Ğ²Ğ¾ĞµĞ¹ ÑĞ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ğ¾Ğ¹:
         GatedBroker(inner=..., regime=<RegimeDetector|None>, allow_sells_when_off=True)
     """
+
     def __init__(
         self,
         inner: BrokerPort,
@@ -53,7 +53,10 @@ class GatedBroker(BrokerPort):
         if self._regime and self._policy.block_new_longs_on_risk_off:
             r: Regime = await self._regime.regime()
             if r == "risk_off":
-                _log.warning("blocked_buy_by_regime", extra={"symbol": symbol, "regime": r, "quote_amount": str(quote_amount)})
+                _log.warning(
+                    "blocked_buy_by_regime",
+                    extra={"symbol": symbol, "regime": r, "quote_amount": str(quote_amount)},
+                )
                 raise RuntimeError("blocked_by_regime:risk_off")
         return await self._inner.create_market_buy_quote(
             symbol=symbol, quote_amount=quote_amount, client_order_id=client_order_id

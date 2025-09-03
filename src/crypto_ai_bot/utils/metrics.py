@@ -1,15 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
-
 _REGISTRY = CollectorRegistry()
 _COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Counter] = {}
 _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}
 _HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
+
 
 def reset_registry() -> None:
     """Ğ¡Ğ±Ñ€Ğ¾Ñ Ñ€ĞµĞ³Ğ¸ÑÑ‚Ñ€Ğ° Ğ´Ğ»Ñ Ñ‚ĞµÑÑ‚Ğ¾Ğ²."""
@@ -19,13 +19,16 @@ def reset_registry() -> None:
     _GAUGES = {}
     _HISTS = {}
 
+
 def _sanitize_name(name: str) -> str:
     """Convert dots and dashes to underscores for Prometheus compatibility."""
     return name.replace(".", "_").replace("-", "_")
 
+
 def _key(name: str, labels: dict[str, str] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
     pairs = tuple(sorted((labels or {}).items()))
     return (name, pairs)
+
 
 def _buckets_ms() -> tuple[float, ...]:
     env = os.environ.get("METRICS_BUCKETS_MS", "5,10,25,50,100,250,500,1000")
@@ -34,6 +37,7 @@ def _buckets_ms() -> tuple[float, ...]:
     except Exception:
         vals = [5, 10, 25, 50, 100, 250, 500, 1000]
     return tuple(v / 1000.0 for v in vals)
+
 
 def inc(name: str, **labels: Any) -> None:
     """Counter +1"""
@@ -52,6 +56,7 @@ def inc(name: str, **labels: Any) -> None:
     if k in _COUNTERS:
         _COUNTERS[k].labels(**labs).inc()
 
+
 def gauge(name: str, **labels: Any) -> Gauge | None:
     """Gauge (Ğ²ĞµÑ€Ğ½Ñ‘Ñ‚ Ğ¾Ğ±ÑŠĞµĞºÑ‚, Ñ‡Ñ‚Ğ¾Ğ±Ñ‹ .set())"""
     name = _sanitize_name(name)
@@ -63,6 +68,7 @@ def gauge(name: str, **labels: Any) -> Gauge | None:
         except ValueError:
             return None
     return _GAUGES[k].labels(**labs) if k in _GAUGES else None
+
 
 def hist(name: str, **labels: Any) -> Histogram | None:
     """Histogram (ÑĞµĞºÑƒĞ½Ğ´Ñ‹)"""
@@ -76,6 +82,7 @@ def hist(name: str, **labels: Any) -> Histogram | None:
             return None
     return _HISTS[k].labels(**labs) if k in _HISTS else None
 
+
 def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
     """Ğ¨Ğ¾Ñ€Ñ‚ĞºĞ°Ñ‚ Ğ´Ğ»Ñ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ñ Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ñ (Ğ¼Ğ¸Ğ»Ğ»Ğ¸ÑĞµĞºÑƒĞ½Ğ´Ñ‹ -> ÑĞµĞºÑƒĞ½Ğ´Ñ‹)."""
     name = _sanitize_name(name)
@@ -83,6 +90,7 @@ def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> No
     h = hist(name, **(labels or {}))
     if h:
         h.observe(value_sec)
+
 
 def export_text() -> str:
     """Ğ”Ğ»Ñ /metrics Ğ² FastAPI"""

@@ -95,7 +95,7 @@ jobs:
           python -c "
           import sys
           sys.path.insert(0, './src')
-          
+
           # Test imports
           try:
               from crypto_ai_bot.core.domain.strategies.strategy_manager import StrategyManager
@@ -108,7 +108,7 @@ jobs:
           except Exception as e:
               print(f'❌ Import failed: {e}')
               sys.exit(1)
-          
+
           # Test component instantiation
           try:
               strategy_mgr = StrategyManager()
@@ -126,7 +126,7 @@ jobs:
           python -c "
           import sys, os
           sys.path.insert(0, './src')
-          
+
           # Set minimal required ENV vars
           os.environ.setdefault('MODE', 'paper')
           os.environ.setdefault('SYMBOLS', 'BTC/USDT')
@@ -137,24 +137,24 @@ jobs:
           os.environ.setdefault('MTF_W_W1', '0.05')
           os.environ.setdefault('FUSION_W_TECHNICAL', '0.65')
           os.environ.setdefault('FUSION_W_AI', '0.35')
-          
+
           try:
               from crypto_ai_bot.core.infrastructure.settings import get_settings
               s = get_settings()
-              
+
               # MTF weights must sum to 1.0
               mtf_sum = s.MTF_W_M15 + s.MTF_W_H1 + s.MTF_W_H4 + s.MTF_W_D1 + s.MTF_W_W1
               assert abs(mtf_sum - 1.0) < 0.001, f'MTF weights sum: {mtf_sum} (expected 1.0)'
-              
-              # Fusion weights must sum to 1.0  
+
+              # Fusion weights must sum to 1.0
               fusion_sum = s.FUSION_W_TECHNICAL + s.FUSION_W_AI
               assert abs(fusion_sum - 1.0) < 0.001, f'Fusion weights sum: {fusion_sum} (expected 1.0)'
-              
+
               # Validate decimal precision
               from crypto_ai_bot.utils.decimal import dec
               test_calc = dec('100.50') * dec('0.1')
               assert test_calc == dec('10.05'), f'Decimal calculation failed: {test_calc}'
-              
+
               print('✅ Architecture invariants validated')
           except Exception as e:
               print(f'❌ Architecture validation failed: {e}')
@@ -167,26 +167,26 @@ jobs:
           python -c "
           import sys
           sys.path.insert(0, './src')
-          
+
           try:
               from crypto_ai_bot.core.infrastructure.storage.migrations.runner import MigrationRunner
               from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import SQLiteAdapter
-              
+
               # Test migrations on in-memory database
               adapter = SQLiteAdapter(':memory:')
               runner = MigrationRunner(':memory:')
               runner.run_migrations()
-              
+
               # Verify key tables exist
               adapter.execute('SELECT name FROM sqlite_master WHERE type="table"')
               tables = [row[0] for row in adapter.fetchall()]
-              
+
               required_tables = ['trades', 'positions', 'orders', 'audit', 'idempotency']
               missing_tables = [t for t in required_tables if t not in tables]
-              
+
               if missing_tables:
                   raise Exception(f'Missing required tables: {missing_tables}')
-              
+
               print('✅ Database migrations successful')
               print(f'✅ Created tables: {sorted(tables)}')
           except Exception as e:
@@ -200,29 +200,29 @@ jobs:
           python -c "
           import sys, os
           sys.path.insert(0, './src')
-          
+
           os.environ.setdefault('RISK_LOSS_STREAK_LIMIT', '3')
           os.environ.setdefault('RISK_MAX_DRAWDOWN_PCT', '5.0')
           os.environ.setdefault('RISK_MAX_SPREAD_PCT', '0.5')
-          
+
           try:
               from crypto_ai_bot.core.domain.risk.manager import RiskManager
               from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
               from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
               from crypto_ai_bot.core.domain.risk.rules.spread_cap import SpreadCapRule
-              
+
               # Test risk rules instantiation
               loss_streak = LossStreakRule()
               max_dd = MaxDrawdownRule()
               spread_cap = SpreadCapRule()
               risk_manager = RiskManager()
-              
+
               print('✅ Risk management components loaded')
-              
+
               # Test correlation manager
               from crypto_ai_bot.core.domain.risk.correlation_manager import CorrelationManager
               corr_mgr = CorrelationManager()
-              
+
               print('✅ Risk system validation completed')
           except Exception as e:
               print(f'❌ Risk validation failed: {e}')
@@ -366,28 +366,28 @@ jobs:
           python -c "
           import sys, asyncio, signal, time
           sys.path.insert(0, './src')
-          
+
           async def test_startup():
               try:
                   from crypto_ai_bot.app.compose import create_app_dependencies
                   from crypto_ai_bot.core.application.orchestrator import Orchestrator
-                  
+
                   # Initialize dependencies
                   deps = await create_app_dependencies()
                   print('✅ Dependencies created')
-                  
+
                   # Test orchestrator startup
                   orchestrator = deps['orchestrator']
                   print('✅ Orchestrator ready')
-                  
+
                   # Simulate brief run
                   await asyncio.sleep(2)
                   print('✅ Production simulation completed')
-                  
+
               except Exception as e:
                   print(f'❌ Production simulation failed: {e}')
                   sys.exit(1)
-          
+
           # Run with timeout
           asyncio.run(test_startup())
           "
@@ -398,27 +398,27 @@ jobs:
           python -c "
           import sys, tempfile, os
           sys.path.insert(0, './src')
-          
+
           try:
               from crypto_ai_bot.core.infrastructure.storage.backup import create_backup
-              
+
               with tempfile.NamedTemporaryFile(suffix='.sqlite3', delete=False) as tmp:
                   db_path = tmp.name
-                  
+
               # Create minimal database
               from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import SQLiteAdapter
               adapter = SQLiteAdapter(db_path)
               adapter.execute('CREATE TABLE test (id INTEGER PRIMARY KEY)')
               adapter.close()
-              
+
               # Test backup
               backup_path = create_backup(db_path)
               assert os.path.exists(backup_path), 'Backup file not created'
-              
+
               # Cleanup
               os.unlink(db_path)
               os.unlink(backup_path)
-              
+
               print('✅ Database backup functionality works')
           except Exception as e:
               print(f'❌ Backup test failed: {e}')
@@ -449,17 +449,17 @@ jobs:
           echo "Security: ${{ needs.security.result }}"
           echo "Test: ${{ needs.test.result }}"
           echo "Production Readiness: ${{ needs.production-readiness.result }}"
-          
-          if [[ \"${{ needs.lint-and-type.result }}\" != \"success\" || 
-                \"${{ needs.crypto-validation.result }}\" != \"success\" || 
+
+          if [[ \"${{ needs.lint-and-type.result }}\" != \"success\" ||
+                \"${{ needs.crypto-validation.result }}\" != \"success\" ||
                 \"${{ needs.test.result }}\" != \"success\" ]]; then
             echo \"❌ Critical checks failed\"
             exit 1
           fi
-          
+
           if [[ \"${{ needs.production-readiness.result }}\" != \"success\" && \"${{ needs.production-readiness.result }}\" != \"skipped\" ]]; then
-            echo \"❌ Production readiness failed\"  
+            echo \"❌ Production readiness failed\"
             exit 1
           fi
-          
+
           echo \"✅ All critical checks passed\"

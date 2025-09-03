@@ -1,11 +1,11 @@
 from __future__ import annotations
+
 from decimal import Decimal
 from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("application.reconcile.positions")
 
@@ -52,7 +52,9 @@ class PositionGuard:
 
 
 # --- Reconciliation logic (from original) -------------------------------------------------
-async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort) -> None:
+async def reconcile_positions_batch(
+    *, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort
+) -> None:
     """
     ѾсѰя сѺ: я ѵю ѵ  я ѵѹ PnL.
     """
@@ -72,7 +74,7 @@ async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort,
             if avg <= 0:
                 continue
             unreal = (last - avg) * base
-            # ѸсѸѽ 
+            # ѸсѸѽ
             storage.positions.apply_trade(
                 symbol=sym, side="buy", base_amount=dec("0"), price=last, fee_quote=dec("0"), last_price=last
             )
@@ -82,11 +84,8 @@ async def reconcile_positions_batch(*, symbols: list[str], storage: StoragePort,
 
 
 # ѽѸя-Ѻ я ссѸсѸ с orchestrator
-async def reconcile_positions(symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:
+async def reconcile_positions(
+    symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any
+) -> None:
     """ѽѸя-Ѻ я ссѸсѸ с orchestrator."""
-    await reconcile_positions_batch(
-        symbols=[symbol],
-        storage=storage,
-        broker=broker,
-        bus=bus
-    )
+    await reconcile_positions_batch(symbols=[symbol], storage=storage, broker=broker, bus=bus)

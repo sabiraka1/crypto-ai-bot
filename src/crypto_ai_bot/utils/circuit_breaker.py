@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import time
@@ -9,6 +9,7 @@ class CircuitBreaker:
     """
     ĞŸÑ€Ğ¾ÑÑ‚Ğ¾Ğ¹ async circuit breaker: closed -> open (Ğ½Ğ° timeout) -> half-open (1 Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚ĞºĞ°) -> closed
     """
+
     def __init__(self, *, name: str = "cb", failure_threshold: int = 5, reset_timeout_sec: float = 10.0):
         self.name = name
         self.failure_threshold = int(failure_threshold)

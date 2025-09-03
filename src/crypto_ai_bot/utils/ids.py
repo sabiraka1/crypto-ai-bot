@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import secrets
 import time
@@ -15,8 +15,4 @@ def make_client_order_id(exchange_id: str, tag: str) -> str:
 
 def sanitize_ascii(value: str) -> str:
     """Ğ¤Ğ¸Ğ»ÑŒÑ‚Ñ€ÑƒĞµÑ‚ ÑÑ‚Ñ€Ğ¾ĞºÑƒ, Ğ¾ÑÑ‚Ğ°Ğ²Ğ»ÑÑ Ñ‚Ğ¾Ğ»ÑŒĞºĞ¾ Ğ±ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ñ‹Ğµ ASCII ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñ‹ [a-z0-9-]."""
-    return "".join(
-        ch.lower() if ch.isalnum() else "-"
-        for ch in value
-        if ch.isalnum() or ch in "-_"
-    )
+    return "".join(ch.lower() if ch.isalnum() else "-" for ch in value if ch.isalnum() or ch in "-_")

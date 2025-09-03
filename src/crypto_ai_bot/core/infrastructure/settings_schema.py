@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any
 
@@ -47,16 +47,21 @@ class OrchestratorIntervals(BaseModel):
 
 class MTFWeights(BaseModel):
     MTF_W_M15: float = Field(0.40, ge=0.0, le=1.0)
-    MTF_W_H1:  float = Field(0.25, ge=0.0, le=1.0)
-    MTF_W_H4:  float = Field(0.20, ge=0.0, le=1.0)
-    MTF_W_D1:  float = Field(0.10, ge=0.0, le=1.0)
-    MTF_W_W1:  float = Field(0.05, ge=0.0, le=1.0)
+    MTF_W_H1: float = Field(0.25, ge=0.0, le=1.0)
+    MTF_W_H4: float = Field(0.20, ge=0.0, le=1.0)
+    MTF_W_D1: float = Field(0.10, ge=0.0, le=1.0)
+    MTF_W_W1: float = Field(0.05, ge=0.0, le=1.0)
 
     @field_validator("MTF_W_W1")
     @classmethod
     def _sum_to_one(cls, v: float, values: Any) -> float:
-        s = float(values.get("MTF_W_M15", 0)) + float(values.get("MTF_W_H1", 0)) \
-            + float(values.get("MTF_W_H4", 0)) + float(values.get("MTF_W_D1", 0)) + float(v)
+        s = (
+            float(values.get("MTF_W_M15", 0))
+            + float(values.get("MTF_W_H1", 0))
+            + float(values.get("MTF_W_H4", 0))
+            + float(values.get("MTF_W_D1", 0))
+            + float(v)
+        )
         if abs(s - 1.0) > 1e-6:
             raise ValueError(f"MTF weights must sum to 1.0, got {s:.6f}")
         return v
@@ -64,7 +69,7 @@ class MTFWeights(BaseModel):
 
 class FusionWeights(BaseModel):
     FUSION_W_TECHNICAL: float = Field(0.65, ge=0.0, le=1.0)
-    FUSION_W_AI:        float = Field(0.35, ge=0.0, le=1.0)
+    FUSION_W_AI: float = Field(0.35, ge=0.0, le=1.0)
 
     @field_validator("FUSION_W_AI")
     @classmethod
@@ -116,12 +121,16 @@ def validate_settings(settings: Any) -> None:
         },
         "safety": {
             "SAFETY_MAX_ORDERS_PER_DAY": int(getattr(settings, "SAFETY_MAX_ORDERS_PER_DAY", 0) or 0),
-            "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY": float(getattr(settings, "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", 0.0) or 0.0),
+            "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY": float(
+                getattr(settings, "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", 0.0) or 0.0
+            ),
         },
         "risk": {
             "RISK_COOLDOWN_SEC": int(getattr(settings, "RISK_COOLDOWN_SEC", 60) or 60),
             "RISK_MAX_SPREAD_PCT": float(getattr(settings, "RISK_MAX_SPREAD_PCT", 0.30) or 0.30),
-            "RISK_DAILY_LOSS_LIMIT_QUOTE": float(getattr(settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", 100.0) or 100.0),
+            "RISK_DAILY_LOSS_LIMIT_QUOTE": float(
+                getattr(settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", 100.0) or 100.0
+            ),
             "RISK_MAX_ORDERS_5M": int(getattr(settings, "RISK_MAX_ORDERS_5M", 0) or 0),
             "RISK_MAX_TURNOVER_5M_QUOTE": float(getattr(settings, "RISK_MAX_TURNOVER_5M_QUOTE", 0.0) or 0.0),
         },
@@ -138,14 +147,14 @@ def validate_settings(settings: Any) -> None:
         },
         "mtf": {
             "MTF_W_M15": float(getattr(settings, "MTF_W_M15", 0.40) or 0.40),
-            "MTF_W_H1":  float(getattr(settings, "MTF_W_H1", 0.25) or 0.25),
-            "MTF_W_H4":  float(getattr(settings, "MTF_W_H4", 0.20) or 0.20),
-            "MTF_W_D1":  float(getattr(settings, "MTF_W_D1", 0.10) or 0.10),
-            "MTF_W_W1":  float(getattr(settings, "MTF_W_W1", 0.05) or 0.05),
+            "MTF_W_H1": float(getattr(settings, "MTF_W_H1", 0.25) or 0.25),
+            "MTF_W_H4": float(getattr(settings, "MTF_W_H4", 0.20) or 0.20),
+            "MTF_W_D1": float(getattr(settings, "MTF_W_D1", 0.10) or 0.10),
+            "MTF_W_W1": float(getattr(settings, "MTF_W_W1", 0.05) or 0.05),
         },
         "fusion": {
             "FUSION_W_TECHNICAL": float(getattr(settings, "FUSION_W_TECHNICAL", 0.65) or 0.65),
-            "FUSION_W_AI":        float(getattr(settings, "FUSION_W_AI", 0.35) or 0.35),
+            "FUSION_W_AI": float(getattr(settings, "FUSION_W_AI", 0.35) or 0.35),
         },
         "telegram": {
             "TELEGRAM_ENABLED": int(getattr(settings, "TELEGRAM_ENABLED", 0) or 0),

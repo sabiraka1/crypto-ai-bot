@@ -1,4 +1,4 @@
-﻿# src/crypto_ai_bot/core/domain/strategies/__init__.py
+# src/crypto_ai_bot/core/domain/strategies/__init__.py
 from __future__ import annotations
 
 # Ğ‘Ğ°Ğ·Ğ¾Ğ²Ñ‹Ğµ ĞºĞ¾Ğ½Ñ‚Ñ€Ğ°ĞºÑ‚Ñ‹/Ñ‚Ğ¸Ğ¿Ñ‹
@@ -26,7 +26,6 @@ from .signals_policy_strategy import SignalsPolicyStrategy
 
 # ĞœĞµĞ½ĞµĞ´Ğ¶ĞµÑ€ - Ğ¸ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¾: Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚ Ğ¸Ğ· strategy_manager
 from .strategy_manager import StrategyManager
-
 
 __all__ = [
     "BaseStrategy",

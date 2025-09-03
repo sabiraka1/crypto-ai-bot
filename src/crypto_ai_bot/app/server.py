@@ -1,9 +1,10 @@
 from __future__ import annotations
+
+import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any
-import asyncio
 import time
+from typing import Any
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -16,9 +17,9 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
 from crypto_ai_bot.utils.time import now_ms
 
-
 _log = get_logger("app.server")
 _container: Any | None = None
+
 
 # -------- rate limiter --------
 class RateLimiter:
@@ -42,7 +43,9 @@ class RateLimiter:
         q.append(now)
         return True
 
+
 _rl = RateLimiter(limit_per_min=10)
+
 
 def limit(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -54,10 +57,17 @@ def limit(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
         if request is None:
             request = kwargs.get("request")
         if isinstance(request, Request) and not _rl.allow(request):
-            inc("http_requests_total", path="rate_limited", method=getattr(request, "method", "GET"), code="429")
+            inc(
+                "http_requests_total",
+                path="rate_limited",
+                method=getattr(request, "method", "GET"),
+                code="429",
+            )
             raise HTTPException(status_code=429, detail="Too Many Requests")
         return await fn(*args, **kwargs)
+
     return wrapper
+
 
 # -------- lifespan --------
 @asynccontextmanager
@@ -102,12 +112,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _log.error("exchange_close_failed", exc_info=True)
         _log.info("lifespan_shutdown_end")
 
+
 app = FastAPI(lifespan=lifespan)
 router = APIRouter()
 
+
 # -------- HTTP metrics middleware --------
 @app.middleware("http")
-async def _metrics_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+async def _metrics_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
     path = request.url.path
     method = request.method
     t = hist("http_request_latency_seconds", path=path, method=method)
@@ -119,16 +133,18 @@ async def _metrics_middleware(request: Request, call_next: Callable[[Request], A
     inc("http_requests_total", path=path, method=method, code=str(response.status_code))
     return response
 
+
 def _ctx_or_500() -> Any:
     if _container is None:
         raise HTTPException(status_code=503, detail="Container not ready")
     return _container
 
+
 def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
     c = _ctx_or_500()
     s = getattr(c, "settings", None)
     default_symbol = getattr(s, "SYMBOL", "BTC/USDT") if s else "BTC/USDT"
-    sym = (symbol or default_symbol)
+    sym = symbol or default_symbol
     orchs = getattr(c, "orchestrators", None)
     if not isinstance(orchs, dict):
         raise HTTPException(status_code=500, detail="orchestrators_missing")
@@ -137,9 +153,11 @@ def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
         raise HTTPException(status_code=404, detail=f"orchestrator_not_found_for_{sym}")
     return orch, sym
 
+
 # -------- helpers --------
 async def _call_with_timeout(coro, *, timeout: float = 2.5):  # noqa: ASYNC109
     return await asyncio.wait_for(coro, timeout=timeout)
+
 
 # -------- endpoints --------
 @router.get("/health")
@@ -208,6 +226,7 @@ async def health() -> JSONResponse:
     body = {"ok": ok, "default_symbol": default_symbol, "symbols": symbols, **details}
     return JSONResponse(body, status_code=200 if ok else 500)
 
+
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     """
@@ -227,6 +246,7 @@ async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
             _log.debug("alert_bus_publish_failed", exc_info=True)
     return JSONResponse({"ok": True})  # noqa: TRY300
 
+
 @router.get("/metrics")
 async def metrics() -> PlainTextResponse:
     try:
@@ -234,6 +254,7 @@ async def metrics() -> PlainTextResponse:
     except Exception:  # noqa: BLE001
         _log.error("metrics_failed", exc_info=True)
         return PlainTextResponse("", status_code=500)  # noqa: TRY300
+
 
 @router.get("/orchestrator/status")
 async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
@@ -245,6 +266,7 @@ async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
     except Exception as e:  # noqa: BLE001
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="status_failed") from e
+
 
 @router.post("/orchestrator/start")
 @limit
@@ -259,6 +281,7 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="start_failed") from e
 
+
 @router.post("/orchestrator/stop")
 @limit
 async def orch_stop(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
@@ -271,6 +294,7 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)) 
     except Exception as e:  # noqa: BLE001
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="stop_failed") from e
+
 
 @router.post("/orchestrator/pause")
 @limit
@@ -285,6 +309,7 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="pause_failed") from e
 
+
 @router.post("/orchestrator/resume")
 @limit
 async def orch_resume(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
@@ -297,6 +322,7 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
     except Exception as e:  # noqa: BLE001
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed") from e
+
 
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
@@ -342,13 +368,19 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
                 _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": sym})
 
         return JSONResponse(
-            {"symbol": sym, "pnl_quote": pnl_quote_str, "turnover_quote": turnover_quote_str, "orders_count": orders_count_int}
+            {
+                "symbol": sym,
+                "pnl_quote": pnl_quote_str,
+                "turnover_quote": turnover_quote_str,
+                "orders_count": orders_count_int,
+            }
         )
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001
         _log.error("pnl_today_failed", exc_info=True)
         raise HTTPException(status_code=500, detail="pnl_today_failed")
+
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
@@ -372,5 +404,6 @@ async def telegram_webhook(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001
         _log.error("telegram_webhook_error", exc_info=True)
         return JSONResponse({"ok": False}, status_code=500)
+
 
 app.include_router(router)

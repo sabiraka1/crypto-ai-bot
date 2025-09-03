@@ -1,13 +1,13 @@
 from __future__ import annotations
+
+import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
-import argparse
 import shutil
 import sqlite3
 
 # : ѹ   Settings с сѰѸѸѸ:
 from crypto_ai_bot.core.infrastructure.settings import Settings
-
 
 BACKUPS_DIR = Path("./backups")
 
@@ -38,7 +38,7 @@ def _rotate(retention_days: int) -> None:
     removed = 0
     for p in BACKUPS_DIR.glob("db-*.sqlite3"):
         try:
-            # Ѷ  
+            # Ѷ
             stem = p.stem
             # db-YYYYmmdd-HHMMSS
             ts = stem.split("-")[1]
@@ -68,8 +68,8 @@ def _integrity(db_path: str) -> None:
     try:
         cur = conn.execute("PRAGMA integrity_check;")
         res = cur.fetchone()[0]
-        ok = (res == "ok")
-        print(f"[{ 'OK' if ok else 'FAIL' }] integrity_check -> {res}")
+        ok = res == "ok"
+        print(f"[{'OK' if ok else 'FAIL'}] integrity_check -> {res}")
         if not ok:
             raise SystemExit(2)
     finally:
@@ -97,15 +97,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "backup":
-        _backup(settings.DB_PATH); return 0
+        _backup(settings.DB_PATH)
+        return 0
     if args.cmd == "rotate":
-        _rotate(args.days); return 0
+        _rotate(args.days)
+        return 0
     if args.cmd == "vacuum":
-        _vacuum(settings.DB_PATH); return 0
+        _vacuum(settings.DB_PATH)
+        return 0
     if args.cmd == "integrity":
-        _integrity(settings.DB_PATH); return 0
+        _integrity(settings.DB_PATH)
+        return 0
     if args.cmd == "list":
-        _list(); return 0
+        _list()
+        return 0
     return 1
 
 

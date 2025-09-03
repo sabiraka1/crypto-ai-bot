@@ -1,6 +1,7 @@
 from __future__ import annotations
-from typing import Any
+
 import asyncio
+from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.decimal import dec
@@ -31,7 +32,9 @@ async def main() -> None:
         total_turnover += turnover
 
     w1, w2, w3, w4 = 18, 18, 18, 12
-    print(f"{'SYMBOL'.ljust(w1)}{'REALIZED_PNL(Q)'.ljust(w2)}{'TURNOVER(Q)'.ljust(w3)}{'ORDERS_5M'.ljust(w4)}")
+    print(
+        f"{'SYMBOL'.ljust(w1)}{'REALIZED_PNL(Q)'.ljust(w2)}{'TURNOVER(Q)'.ljust(w3)}{'ORDERS_5M'.ljust(w4)}"
+    )
     print("-" * (w1 + w2 + w3 + w4))
     for r in rows:
         print(f"{r[0].ljust(w1)}{r[1].ljust(w2)}{r[2].ljust(w3)}{r[3].ljust(w4)}")

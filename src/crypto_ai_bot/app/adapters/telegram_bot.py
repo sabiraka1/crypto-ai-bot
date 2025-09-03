@@ -1,9 +1,10 @@
 from __future__ import annotations
-from typing import Any, cast
+
 import asyncio
 import html
 import os
 import time
+from typing import Any, cast
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.utils.http_client import aget
@@ -19,7 +20,9 @@ def _getv(d: Any) -> Any:
             return getattr(d, k.lower(), {})  # noqa: TRY300
         except Exception:  # noqa: BLE001
             return {}  # noqa: TRY300
+
     return _inner  # noqa: TRY300
+
 
 _log = get_logger("adapters.telegram_bot")
 
@@ -251,7 +254,13 @@ class TelegramBotCommands:
             _log.error("risk_calc_turnover_failed", exc_info=True)
 
         try:
-            if cfg and getattr(cfg, "max_orders_per_hour", 0) and st and hasattr(st, "trades") and hasattr(st.trades, "count_orders_last_minutes"):
+            if (
+                cfg
+                and getattr(cfg, "max_orders_per_hour", 0)
+                and st
+                and hasattr(st, "trades")
+                and hasattr(st.trades, "count_orders_last_minutes")
+            ):
                 cnt = st.trades.count_orders_last_minutes(symbol, 60)
                 mx = getattr(cfg, "max_orders_per_hour", 0)
                 parts.append(f"orders_60m: <code>{cnt}/{mx}</code>")
@@ -269,11 +278,14 @@ class TelegramBotCommands:
         try:
             b = await broker.fetch_balance()
             gv = _getv(b)
-            base, quote = (symbol.split('/') + ['',''])[:2]
-            base_free = gv(base).get('free') or gv(base).get('total') or '0'
-            quote_free = gv(quote).get('free') or gv(quote).get('total') or '0'
-            await self._reply(chat_id, f" <b>с</b> <code>{html.escape(symbol)}</code>\n"
-                                       f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>")
+            base, quote = (symbol.split("/") + ["", ""])[:2]
+            base_free = gv(base).get("free") or gv(base).get("total") or "0"
+            quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
+            await self._reply(
+                chat_id,
+                f" <b>с</b> <code>{html.escape(symbol)}</code>\n"
+                f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>",
+            )
         except Exception:  # noqa: BLE001
             await self._reply(chat_id, "️  Ѵс Ѹ с")
 

@@ -1,11 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import logging
 import os
 import threading
 import time
-
 
 try:
     import httpx
@@ -44,9 +43,7 @@ class TelegramErrorHandler(logging.Handler):
         if not self._enabled:
             return
         if not self._token or not self._chat_id:
-            raise RuntimeError(
-                "TelegramErrorHandler: LOG_TG_ERRORS=1, Ğ½Ğ¾ TELEGRAM_* Ğ½Ğµ Ğ·Ğ°Ğ´Ğ°Ğ½Ñ‹."
-            )
+            raise RuntimeError("TelegramErrorHandler: LOG_TG_ERRORS=1, Ğ½Ğ¾ TELEGRAM_* Ğ½Ğµ Ğ·Ğ°Ğ´Ğ°Ğ½Ñ‹.")
         if httpx is None:
             raise RuntimeError("TelegramErrorHandler: httpx Ğ½Ğµ ÑƒÑÑ‚Ğ°Ğ½Ğ¾Ğ²Ğ»ĞµĞ½.")
 

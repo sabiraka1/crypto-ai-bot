@@ -1,4 +1,4 @@
-﻿# src/crypto_ai_bot/core/infrastructure/events/bus.py
+# src/crypto_ai_bot/core/infrastructure/events/bus.py
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,6 @@ from typing import Any
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 from crypto_ai_bot.utils.time import now_ms
-
 
 _log = get_logger("events.bus")
 
@@ -26,6 +25,7 @@ class Event:
     key     â€” Ğ¾Ğ¿Ñ†Ğ¸Ğ¾Ğ½Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ ĞºĞ»ÑÑ‡ Ğ¿Ğ°Ñ€Ñ‚Ğ¸Ñ†Ğ¸Ğ¾Ğ½Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ¸Ñ/Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚Ğ¸
     ts_ms   â€” Ğ¾Ñ‚Ğ¼ĞµÑ‚ĞºĞ° Ğ²Ñ€ĞµĞ¼ĞµĞ½Ğ¸ Ğ¾Ñ‚Ğ¿Ñ€Ğ°Ğ²ĞºĞ¸ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ñ
     """
+
     topic: str
     payload: dict[str, Any]
     key: str | None = None
@@ -60,7 +60,9 @@ class AsyncEventBus:
     def subscribe(self, topic: str, handler: Handler) -> None:
         """ĞŸĞ¾Ğ´Ğ¿Ğ¸ÑĞºĞ° Ğ½Ğ° ĞºĞ¾Ğ½ĞºÑ€ĞµÑ‚Ğ½Ñ‹Ğ¹ topic (Ñ‚Ğ¾Ñ‡Ğ½Ğ¾Ğµ ÑĞ¾Ğ²Ğ¿Ğ°Ğ´ĞµĞ½Ğ¸Ğµ)."""
         self._subs[topic].append(handler)
-        _log.info("bus_subscribed", extra={"topic": topic, "handler": getattr(handler, "__name__", "handler")})
+        _log.info(
+            "bus_subscribed", extra={"topic": topic, "handler": getattr(handler, "__name__", "handler")}
+        )
 
     # ĞĞ¾Ğ²Ñ‹Ğ¹ Ğ°Ğ»Ğ¸Ğ°Ñ Ğ´Ğ»Ñ ÑĞ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚Ğ¸ Ñ EventBusPort Ğ¸ ĞºĞ¾Ğ´Ğ¾Ğ¼, Ğ²Ñ‹Ğ·Ñ‹Ğ²Ğ°ÑÑ‰Ğ¸Ğ¼ bus.on(...)
     def on(self, topic: str, handler: Handler) -> None:
@@ -101,15 +103,26 @@ class AsyncEventBus:
                     if attempt >= self.max_attempts:
                         _log.error(
                             "bus_handler_failed",
-                            extra={"topic": topic, "handler": getattr(h, "__name__", "handler"), "attempt": attempt},
+                            extra={
+                                "topic": topic,
+                                "handler": getattr(h, "__name__", "handler"),
+                                "attempt": attempt,
+                            },
                             exc_info=True,
                         )
-                        inc("bus_handler_failed_total", topic=topic, handler=getattr(h, "__name__", "handler"))
+                        inc(
+                            "bus_handler_failed_total", topic=topic, handler=getattr(h, "__name__", "handler")
+                        )
                         await self._emit_to_dlq(evt, failed_handler=getattr(h, "__name__", "handler"))
                         break
                     _log.debug(
                         "bus_handler_retry",
-                        extra={"topic": topic, "handler": getattr(h, "__name__", "handler"), "attempt": attempt, "next_delay_ms": delay_ms},
+                        extra={
+                            "topic": topic,
+                            "handler": getattr(h, "__name__", "handler"),
+                            "attempt": attempt,
+                            "next_delay_ms": delay_ms,
+                        },
                     )
                     await asyncio.sleep(max(0.001, delay_ms / 1000))
                     attempt += 1
@@ -154,7 +167,9 @@ class AsyncEventBus:
     # -------------------------
     def attach_logger_dlq(self) -> None:
         """Ğ’ĞºĞ»ÑÑ‡Ğ¸Ñ‚ÑŒ Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚Ğ½Ñ‹Ğ¹ DLQ-Ğ»Ğ¾Ğ³Ğ³ĞµÑ€, ĞµÑĞ»Ğ¸ ÑĞ²Ğ¾Ğ¸Ñ… Ğ¿Ğ¾Ğ´Ğ¿Ğ¸ÑÑ‡Ğ¸ĞºĞ¾Ğ² Ğ½ĞµÑ‚."""
+
         async def _log_dlq(e: Event) -> None:
             _log.error("DLQ", extra={"topic": e.payload.get("original_topic"), "payload": e.payload})
+
         if not self._dlq:
             self.subscribe_dlq(_log_dlq)

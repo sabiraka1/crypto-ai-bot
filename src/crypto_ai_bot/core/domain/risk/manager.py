@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -7,7 +7,6 @@ from typing import Any
 # Domain-Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ñ‡Ğ¸ÑÑ‚Ñ‹Ğ¹ ÑĞ»Ğ¾Ğ¹)
 from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
 from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
-
 
 # Ğ”Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ğ¼ÑĞ³ĞºĞ¾Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ)
 try:
@@ -45,7 +44,6 @@ except Exception:
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
-
 _log = get_logger("risk.manager")
 
 
@@ -82,6 +80,7 @@ class RiskConfig:
                 groups = None
 
         from decimal import Decimal as D
+
         return cls(
             loss_streak_limit=int(getattr(s, "RISK_LOSS_STREAK_LIMIT", 0) or 0),
             max_drawdown_pct=float(getattr(s, "RISK_MAX_DRAWDOWN_PCT", 0.0) or 0.0),
@@ -112,12 +111,36 @@ class RiskManager:
         self._dd = MaxDrawdownRule(MaxDrawdownConfig(max_drawdown_pct=cfg.max_drawdown_pct))
 
         # Ğ´Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ°
-        self._orders5 = MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m)) if (MaxOrders5mRule and cfg.max_orders_5m > 0) else None
-        self._turn5 = MaxTurnover5mRule(MaxTurnover5mConfig(limit_quote=cfg.max_turnover_5m_quote)) if (MaxTurnover5mRule and cfg.max_turnover_5m_quote > 0) else None
-        self._cool = CooldownRule(CooldownConfig(cooldown_sec=cfg.cooldown_sec)) if (CooldownRule and cfg.cooldown_sec > 0) else None
-        self._spread = SpreadCapRule(SpreadCapConfig(max_spread_pct=cfg.max_spread_pct), provider=cfg.spread_provider) if (SpreadCapRule and cfg.max_spread_pct > 0) else None
-        self._dailoss = DailyLossRule(DailyLossConfig(limit_quote=cfg.daily_loss_limit_quote)) if (DailyLossRule and cfg.daily_loss_limit_quote > 0) else None
-        self._corr = CorrelationManager(CorrelationConfig(groups=cfg.anti_corr_groups or [])) if (CorrelationManager and cfg.anti_corr_groups) else None
+        self._orders5 = (
+            MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m))
+            if (MaxOrders5mRule and cfg.max_orders_5m > 0)
+            else None
+        )
+        self._turn5 = (
+            MaxTurnover5mRule(MaxTurnover5mConfig(limit_quote=cfg.max_turnover_5m_quote))
+            if (MaxTurnover5mRule and cfg.max_turnover_5m_quote > 0)
+            else None
+        )
+        self._cool = (
+            CooldownRule(CooldownConfig(cooldown_sec=cfg.cooldown_sec))
+            if (CooldownRule and cfg.cooldown_sec > 0)
+            else None
+        )
+        self._spread = (
+            SpreadCapRule(SpreadCapConfig(max_spread_pct=cfg.max_spread_pct), provider=cfg.spread_provider)
+            if (SpreadCapRule and cfg.max_spread_pct > 0)
+            else None
+        )
+        self._dailoss = (
+            DailyLossRule(DailyLossConfig(limit_quote=cfg.daily_loss_limit_quote))
+            if (DailyLossRule and cfg.daily_loss_limit_quote > 0)
+            else None
+        )
+        self._corr = (
+            CorrelationManager(CorrelationConfig(groups=cfg.anti_corr_groups or []))
+            if (CorrelationManager and cfg.anti_corr_groups)
+            else None
+        )
 
     def _budget_check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
         """
@@ -147,9 +170,11 @@ class RiskManager:
             try:
                 turn = trades.daily_turnover_quote(symbol)
                 if turn >= limit_turn:
-                    return False, "budget:max_turnover_quote_per_day", {
-                        "turnover": str(turn), "limit": str(limit_turn)
-                    }
+                    return (
+                        False,
+                        "budget:max_turnover_quote_per_day",
+                        {"turnover": str(turn), "limit": str(limit_turn)},
+                    )
             except Exception:
                 pass
 

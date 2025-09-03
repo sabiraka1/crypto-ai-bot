@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 import time
@@ -8,6 +8,7 @@ from typing import Any
 @dataclass(frozen=True)
 class MaxOrders5mConfig:
     limit: int = 0  # 0 = выключено
+
 
 class MaxOrders5mRule:
     def __init__(self, cfg: MaxOrders5mConfig) -> None:
@@ -27,6 +28,7 @@ class MaxOrders5mRule:
                 return 0
             now_ms = int(time.time() * 1000)
             thr = now_ms - minutes * 60_000
+
             # пытаемся вытащить timestamp из item.{ts, timestamp, time} или dict
             def get_ts(x: Any) -> int:
                 for k in ("ts", "timestamp", "time"):
@@ -37,6 +39,7 @@ class MaxOrders5mRule:
                         except Exception:
                             continue
                 return 0
+
             return sum(1 for x in items if get_ts(x) >= thr)
         except Exception:
             return None

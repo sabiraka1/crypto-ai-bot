@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import logging
 
 from crypto_ai_bot.core.infrastructure.events.telegram_log_handler import (
@@ -18,9 +19,6 @@ def setup_telegram_error_handler() -> None:
         return  # noqa: TRY300
 
     handler.setLevel(logging.ERROR)
-    fmt = logging.Formatter(
-        fmt="🔴 %(levelname)s | %(name)s | %(message)s\n"
-            "at %(pathname)s:%(lineno)d"
-    )
+    fmt = logging.Formatter(fmt="🔴 %(levelname)s | %(name)s | %(message)s\nat %(pathname)s:%(lineno)d")
     handler.setFormatter(fmt)
     logging.getLogger().addHandler(handler)

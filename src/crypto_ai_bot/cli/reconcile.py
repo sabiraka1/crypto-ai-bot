@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Any
+
 import argparse
 import asyncio
 import json
+from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
@@ -25,12 +26,7 @@ async def _run_reconcile(symbol: str) -> dict[str, Any]:
     # Сверка позиций
     pos = c.storage.positions.get_position(symbol)
 
-    return {
-        "symbol": symbol,
-        "orders": orders,
-        "balances": balances,
-        "position_base": str(pos.base_qty)
-    }
+    return {"symbol": symbol, "orders": orders, "balances": balances, "position_base": str(pos.base_qty)}
 
 
 def main(argv: list[str] | None = None) -> int:

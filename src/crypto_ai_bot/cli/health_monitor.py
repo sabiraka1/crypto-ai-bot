@@ -1,13 +1,13 @@
 from __future__ import annotations
-from typing import Any
+
 import argparse
 import asyncio
 import json
 import os
+from typing import Any
 
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
-
 
 _log = get_logger("cli.health_monitor")
 
@@ -23,7 +23,9 @@ async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:  # noqa: AS
             "status_code": resp.status_code,
             "ok": resp.status_code == 200,
             "text": resp.text,
-            "json": (resp.json() if resp.headers.get("content-type", "").startswith("application/json") else None),
+            "json": (
+                resp.json() if resp.headers.get("content-type", "").startswith("application/json") else None
+            ),
         }
     except Exception:  # noqa: BLE001
         _log.error("health_fetch_failed", extra={"url": url}, exc_info=True)
@@ -34,7 +36,11 @@ async def _oneshot(url: str, timeout: float) -> int:  # noqa: ASYNC109
     res = await _fetch_health(url, timeout)
     pretty = res.get("json") or res.get("text")
     try:
-        out = json.dumps(pretty, ensure_ascii=False, indent=2) if isinstance(pretty, (dict, list)) else str(pretty)
+        out = (
+            json.dumps(pretty, ensure_ascii=False, indent=2)
+            if isinstance(pretty, (dict, list))
+            else str(pretty)
+        )
     except Exception:  # noqa: BLE001
         out = str(pretty)
     print(out)

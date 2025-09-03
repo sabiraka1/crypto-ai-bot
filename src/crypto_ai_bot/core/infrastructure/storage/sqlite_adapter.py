@@ -1,4 +1,4 @@
-﻿## `core/storage/sqlite_adapter.py`
+## `core/storage/sqlite_adapter.py`
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -7,12 +7,16 @@ import sqlite3
 
 
 def connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None)  # autocommit; BEGIN Ğ²Ñ€ÑƒÑ‡Ğ½ÑƒÑ
+    conn = sqlite3.connect(
+        db_path, check_same_thread=False, isolation_level=None
+    )  # autocommit; BEGIN Ğ²Ñ€ÑƒÑ‡Ğ½ÑƒÑ
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
+
+
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
     """BEGIN IMMEDIATE (write txn) + COMMIT/ROLLBACK. Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ ĞºÑƒÑ€ÑĞ¾Ñ€.

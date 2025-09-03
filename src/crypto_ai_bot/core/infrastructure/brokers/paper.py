@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -11,13 +11,13 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
 
-
 _log = get_logger("brokers.paper")
 
 
 @dataclass
 class PaperBroker:
     """Симулятор брокера для paper trading."""
+
     settings: Any
 
     def __post_init__(self) -> None:
@@ -56,14 +56,16 @@ class PaperBroker:
             # Симулируем небольшие колебания цены
             variation = 0.995 + (i % 10) * 0.001
             p = price * variation
-            ohlcv.append([
-                float(ts - (limit - i) * 60000),  # timestamp
-                p * 0.999,  # open
-                p * 1.001,  # high
-                p * 0.998,  # low
-                p,          # close
-                100.0       # volume
-            ])
+            ohlcv.append(
+                [
+                    float(ts - (limit - i) * 60000),  # timestamp
+                    p * 0.999,  # open
+                    p * 1.001,  # high
+                    p * 0.998,  # low
+                    p,  # close
+                    100.0,  # volume
+                ]
+            )
         return ohlcv
 
     async def create_market_buy_quote(
@@ -80,7 +82,7 @@ class PaperBroker:
         # Обновляем балансы
         base, quote = symbol.split("/")
         if quote in self._balances:
-            self._balances[quote] -= (quote_amount + fee)
+            self._balances[quote] -= quote_amount + fee
         if base not in self._balances:
             self._balances[base] = dec("0")
         self._balances[base] = self._balances[base] + amount
@@ -203,7 +205,7 @@ class PaperBrokerPortAdapter(BrokerPort):
         price = dec(ticker["last"])
         if price <= 0:
             raise ValueError("Invalid price from ticker for sell")
-        base_amount = (quote_amount / price)
+        base_amount = quote_amount / price
         return await self._core.create_market_sell_base(
             symbol=symbol,
             base_amount=base_amount,

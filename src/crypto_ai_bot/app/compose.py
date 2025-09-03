@@ -1,27 +1,27 @@
 from __future__ import annotations
-from collections.abc import Callable
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.application.orchestrator import Orchestrator
-from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
-from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
-from crypto_ai_bot.core.application.ports import SafetySwitchPort
+from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.core.application.events_topics import EVT  # noqa: N812
-from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
+from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
+from crypto_ai_bot.core.application.orchestrator import Orchestrator
+from crypto_ai_bot.core.application.ports import SafetySwitchPort
+from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
+from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import open_storage
-from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
-from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
+from crypto_ai_bot.settings import Settings
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
-from crypto_ai_bot.settings import Settings
 from crypto_ai_bot.utils.symbols import canonical
 
 _log = get_logger("compose")
@@ -77,51 +77,53 @@ def attach_alert_subscribers(bus: Any, s: Settings, st: Any) -> None:
 
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
-        await _send(f"⏸️ <b>AUTO-PAUSED</b> {evt.get('symbol','')} — {evt.get('reason','')}")
+        await _send(f"⏸️ <b>AUTO-PAUSED</b> {evt.get('symbol', '')} — {evt.get('reason', '')}")
 
     async def on_auto_resumed(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
-        await _send(f"▶️ <b>AUTO-RESUMED</b> {evt.get('symbol','')}")
+        await _send(f"▶️ <b>AUTO-RESUMED</b> {evt.get('symbol', '')}")
 
     async def on_pos_mm(evt: dict[str, Any]) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
-        await _send(f"⚖️ <b>RECONCILE</b> {evt.get('symbol','')} — mismatch {evt.get('details','')}")
+        await _send(f"⚖️ <b>RECONCILE</b> {evt.get('symbol', '')} — mismatch {evt.get('details', '')}")
 
     async def on_dms_triggered(evt: dict[str, Any]) -> None:
         inc("safety_dms_triggered_total", symbol=evt.get("symbol", ""))
-        await _send(f"🛑 <b>DMS TRIGGERED</b> {evt.get('symbol','')} — {evt.get('reason','')}")
+        await _send(f"🛑 <b>DMS TRIGGERED</b> {evt.get('symbol', '')} — {evt.get('reason', '')}")
 
     async def on_dms_skipped(evt: dict[str, Any]) -> None:
         inc("safety_dms_skipped_total", symbol=evt.get("symbol", ""))
-        await _send(f"⏭️ <b>DMS SKIPPED</b> {evt.get('symbol','')} — {evt.get('reason','')}")
+        await _send(f"⏭️ <b>DMS SKIPPED</b> {evt.get('symbol', '')} — {evt.get('reason', '')}")
 
     async def on_trade_completed(evt: dict[str, Any]) -> None:
         inc("trade_completed_total", symbol=evt.get("symbol", ""))
-        await _send(f"✅ <b>TRADE COMPLETED</b> {evt.get('symbol','')} — {evt.get('side','')} {evt.get('qty','')}")
+        await _send(
+            f"✅ <b>TRADE COMPLETED</b> {evt.get('symbol', '')} — {evt.get('side', '')} {evt.get('qty', '')}"
+        )
 
     async def on_trade_failed(evt: dict[str, Any]) -> None:
         inc("trade_failed_total", symbol=evt.get("symbol", ""))
-        await _send(f"❌ <b>TRADE FAILED</b> {evt.get('symbol','')} — {evt.get('error','')}")
+        await _send(f"❌ <b>TRADE FAILED</b> {evt.get('symbol', '')} — {evt.get('error', '')}")
 
     async def on_settled(evt: dict[str, Any]) -> None:
         inc("trade_settled_total", symbol=evt.get("symbol", ""))
-        await _send(f"🧾 <b>SETTLED</b> {evt.get('symbol','')} — {evt.get('details','')}")
+        await _send(f"🧾 <b>SETTLED</b> {evt.get('symbol', '')} — {evt.get('details', '')}")
 
     async def on_settlement_timeout(evt: dict[str, Any]) -> None:
         inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
-        await _send(f"⏰ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol','')}")
+        await _send(f"⏰ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol', '')}")
 
     async def on_budget_exceeded(evt: dict[str, Any]) -> None:
         inc("budget_exceeded_total", symbol=evt.get("symbol", ""))
-        await _send(f"💳 <b>BUDGET EXCEEDED</b> {evt.get('symbol','')} — {evt.get('reason','')}")
+        await _send(f"💳 <b>BUDGET EXCEEDED</b> {evt.get('symbol', '')} — {evt.get('reason', '')}")
 
     async def on_trade_blocked(evt: dict[str, Any]) -> None:
         inc("trade_blocked_total", symbol=evt.get("symbol", ""))
-        await _send(f"🧱 <b>TRADE BLOCKED</b> {evt.get('symbol','')} — {evt.get('reason','')}")
+        await _send(f"🧱 <b>TRADE BLOCKED</b> {evt.get('symbol', '')} — {evt.get('reason', '')}")
 
     async def on_broker_error(evt: dict[str, Any]) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))
-        await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol','')}\n<code>{evt.get('error','')}</code>")
+        await _send(f"🧯 <b>BROKER ERROR</b> {evt.get('symbol', '')}\n<code>{evt.get('error', '')}</code>")
 
     for topic, handler in [
         ("orchestrator.auto_paused", on_auto_paused),
@@ -198,7 +200,9 @@ async def build_container_async() -> Container:
     exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
     health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
 
-    symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [canonical(s.SYMBOL)]
+    symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [
+        canonical(s.SYMBOL)
+    ]
 
     orchs: dict[str, Orchestrator] = {}
     make_dms = _make_dms_factory(st=st, br=br, s=s, bus=bus)
@@ -219,11 +223,13 @@ async def build_container_async() -> Container:
 
     # Hint для ProtectiveExits + ретрансляция событий
     if hasattr(exits, "on_hint") and hasattr(bus, "on"):
+
         async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
             try:
                 await exits.on_hint(evt)
             except Exception:  # noqa: BLE001
                 _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol", "")}, exc_info=True)
+
         bus.on(EVT.TRADE_COMPLETED, _on_trade_completed_hint)
 
     # Командный Telegram-бот (входящие команды)
@@ -240,7 +246,14 @@ async def build_container_async() -> Container:
         container_view = type(
             "C",
             (),
-            {"storage": st, "broker": br, "risk": risk, "exits": exits, "orchestrators": orchs, "health": health},
+            {
+                "storage": st,
+                "broker": br,
+                "risk": risk,
+                "exits": exits,
+                "orchestrators": orchs,
+                "health": health,
+            },
         )()
         bot = TelegramBotCommands(
             bot_token=s.TELEGRAM_BOT_TOKEN,

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -14,9 +14,18 @@ class RegimeConfig:
     btc_dom_down_pct: float = -0.5
     fomc_block_minutes: int = 60
 
+
 class RegimeDetector:
     """Ğ˜Ğ½Ñ„ĞµÑ€ĞµĞ½Ñ Ñ€ĞµĞ¶Ğ¸Ğ¼Ğ° Ñ€Ñ‹Ğ½ĞºĞ° Ğ¿Ğ¾ DXY/BTC.D/FOMC (Ñ‡Ğ¸ÑÑ‚Ğ°Ñ Ğ´Ğ¾Ğ¼ĞµĞ½Ğ½Ğ°Ñ Ğ»Ğ¾Ğ³Ğ¸ĞºĞ°)."""
-    def __init__(self, *, dxy: DxyPort | None, btc_dom: BtcDomPort | None, fomc: FomcCalendarPort | None, cfg: RegimeConfig | None = None) -> None:
+
+    def __init__(
+        self,
+        *,
+        dxy: DxyPort | None,
+        btc_dom: BtcDomPort | None,
+        fomc: FomcCalendarPort | None,
+        cfg: RegimeConfig | None = None,
+    ) -> None:
         self._dxy = dxy
         self._btc = btc_dom
         self._fomc = fomc
@@ -35,11 +44,17 @@ class RegimeDetector:
         votes_off = 0
         votes_on = 0
         if snap.dxy_change_pct is not None:
-            if snap.dxy_change_pct >= self._cfg.dxy_up_pct: votes_off += 1
-            elif snap.dxy_change_pct <= self._cfg.dxy_down_pct: votes_on += 1
+            if snap.dxy_change_pct >= self._cfg.dxy_up_pct:
+                votes_off += 1
+            elif snap.dxy_change_pct <= self._cfg.dxy_down_pct:
+                votes_on += 1
         if snap.btc_dom_change_pct is not None:
-            if snap.btc_dom_change_pct >= self._cfg.btc_dom_up_pct: votes_off += 1
-            elif snap.btc_dom_change_pct <= self._cfg.btc_dom_down_pct: votes_on += 1
-        if votes_off > votes_on and votes_off > 0: return "risk_off"
-        if votes_on > votes_off and votes_on > 0: return "risk_on"
+            if snap.btc_dom_change_pct >= self._cfg.btc_dom_up_pct:
+                votes_off += 1
+            elif snap.btc_dom_change_pct <= self._cfg.btc_dom_down_pct:
+                votes_on += 1
+        if votes_off > votes_on and votes_off > 0:
+            return "risk_off"
+        if votes_on > votes_off and votes_on > 0:
+            return "risk_on"
         return "range"
