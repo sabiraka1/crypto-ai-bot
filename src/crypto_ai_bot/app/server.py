@@ -77,6 +77,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _container = await build_container_async()
     try:
         yield
+        # --- graceful shutdown section ---
+        try:
+            container.instance_lock.release()
+        except Exception:
+            pass
     finally:
         _log.info("lifespan_shutdown_begin")
         try:

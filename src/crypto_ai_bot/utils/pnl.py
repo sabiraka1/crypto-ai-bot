@@ -86,3 +86,7 @@ def fifo_pnl(trades: Iterable[dict[str, Any]]) -> PnLResult:
                     fifo[0] = (buy_qty, buy_price)
 
     return PnLResult(realized_quote=realized, remaining_base=remaining)
+
+
+# Backward-compatible alias expected by some callers/tests
+calculate_fifo_pnl = fifo_pnl
