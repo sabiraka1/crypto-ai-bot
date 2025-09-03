@@ -16,7 +16,7 @@ from pydantic import (
 class TradingConfig(BaseModel):
     SYMBOL: str = Field("BTC/USDT", min_length=3)
     FIXED_AMOUNT: PositiveFloat = 10.0
-    RISK_MAX_SLIPPAGE_PCT: float = Field(0.10, ge=0.0, le=5.0)  # â‰¤5% Ğ·Ğ°Ñ‰Ğ¸Ñ‚Ğ½Ñ‹Ğ¹ Ğ¼Ğ°ĞºÑĞ¸Ğ¼ÑƒĞ¼
+    RISK_MAX_SLIPPAGE_PCT: float = Field(0.10, ge=0.0, le=5.0)  # ГўвЂ°В¤5% ДћВ·ДћВ°Г‘вЂ°ДћВёГ‘вЂљДћВЅГ‘вЂ№ДћВ№ ДћВјДћВ°ДћВєГ‘ВЃДћВёДћВјГ‘Ж’ДћВј
 
 
 class SafetyConfig(BaseModel):

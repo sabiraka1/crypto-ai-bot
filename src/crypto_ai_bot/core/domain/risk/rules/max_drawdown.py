@@ -7,13 +7,13 @@ from typing import Any
 
 @dataclass(frozen=True)
 class MaxDrawdownConfig:
-    max_drawdown_pct: float  # 0 = отключено
+    max_drawdown_pct: float  # 0 = РѕС‚РєР»СЋС‡РµРЅРѕ
 
 
 class MaxDrawdownRule:
     """
-    Внутридневная кумулятивная equity-линия из реализованного PnL (FIFO, с комиссиями).
-    Блокирует, если относительная просадка от внутридневного пика >= max_drawdown_pct.
+    Р’РЅСѓС‚СЂРёРґРЅРµРІРЅР°СЏ РєСѓРјСѓР»СЏС‚РёРІРЅР°СЏ equity-Р»РёРЅРёСЏ РёР· СЂРµР°Р»РёР·РѕРІР°РЅРЅРѕРіРѕ PnL (FIFO, СЃ РєРѕРјРёСЃСЃРёСЏРјРё).
+    Р‘Р»РѕРєРёСЂСѓРµС‚, РµСЃР»Рё РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅР°СЏ РїСЂРѕСЃР°РґРєР° РѕС‚ РІРЅСѓС‚СЂРёРґРЅРµРІРЅРѕРіРѕ РїРёРєР° >= max_drawdown_pct.
     """
 
     def __init__(self, cfg: MaxDrawdownConfig) -> None:
@@ -24,7 +24,7 @@ class MaxDrawdownRule:
         return Decimal(str(x if x is not None else "0"))
 
     def _iter_today_asc(self, trades_repo: Any, symbol: str) -> list[Any]:
-        # Нужна последовательность за "сегодня" в порядке времени
+        # РќСѓР¶РЅР° РїРѕСЃР»РµРґРѕРІР°С‚РµР»СЊРЅРѕСЃС‚СЊ Р·Р° "СЃРµРіРѕРґРЅСЏ" РІ РїРѕСЂСЏРґРєРµ РІСЂРµРјРµРЅРё
         if hasattr(trades_repo, "list_today"):
             rows = list(reversed(trades_repo.list_today(symbol)))  # type: ignore[attr-defined]
             return rows
@@ -39,7 +39,7 @@ class MaxDrawdownRule:
         if not rows:
             return True, "no_today_trades", {}
 
-        # FIFO склад покупок
+        # FIFO СЃРєР»Р°Рґ РїРѕРєСѓРїРѕРє
         buy_lots: list[tuple[Decimal, Decimal]] = []
         cum: Decimal = Decimal("0")
         peak: Decimal = Decimal("0")
@@ -76,12 +76,12 @@ class MaxDrawdownRule:
                         i += 1
                     else:
                         buy_lots.pop(i)
-                realized -= fee_q  # комиссия продажи
+                realized -= fee_q  # РєРѕРјРёСЃСЃРёСЏ РїСЂРѕРґР°Р¶Рё
 
                 cum += realized
                 if cum > peak:
                     peak = cum
-                # относительная просадка от пика
+                # РѕС‚РЅРѕСЃРёС‚РµР»СЊРЅР°СЏ РїСЂРѕСЃР°РґРєР° РѕС‚ РїРёРєР°
                 denom = float(peak) if float(peak) != 0.0 else 1.0
                 dd_pct = max(0.0, float(peak - cum) / abs(denom) * 100.0)
                 worst_dd_pct = max(worst_dd_pct, dd_pct)

@@ -11,11 +11,11 @@ _log = get_logger("health")
 
 class HealthChecker:
     """
-    Проверки компонент:
-      - DB: SELECT 1 (через storage.conn)
-      - Broker: ping() или fetch_ticker на дефолтном символе
-      - Bus: пробный publish
-    Только application-порты, без прямых импортов infra-классов.
+    РџСЂРѕРІРµСЂРєРё РєРѕРјРїРѕРЅРµРЅС‚:
+      - DB: SELECT 1 (С‡РµСЂРµР· storage.conn)
+      - Broker: ping() РёР»Рё fetch_ticker РЅР° РґРµС„РѕР»С‚РЅРѕРј СЃРёРјРІРѕР»Рµ
+      - Bus: РїСЂРѕР±РЅС‹Р№ publish
+    РўРѕР»СЊРєРѕ application-РїРѕСЂС‚С‹, Р±РµР· РїСЂСЏРјС‹С… РёРјРїРѕСЂС‚РѕРІ infra-РєР»Р°СЃСЃРѕРІ.
     """
 
     def __init__(self, *, storage: Any, broker: BrokerPort, bus: EventBusPort, settings: Any) -> None:

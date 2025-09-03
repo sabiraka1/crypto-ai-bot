@@ -16,46 +16,46 @@ _log = get_logger("subscribers.telegram")
 def _t(lang: str, key: str, **kw: str) -> str:
     L = {
         "en": {
-            "ORCH_PAUSED": "⏸️ <b>PAUSED</b> {symbol} (auto)",
-            "ORCH_RESUMED": "▶️ <b>RESUMED</b> {symbol} (auto)",
-            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nDrop: <code>{drop_pct}%</code>",
-            "DMS_SKIPPED": "ℹ️ <b>DMS SKIPPED</b> {symbol}",
-            "TRADE_COMPLETED": "💹 <b>TRADE</b> {symbol} {side}\nAmt: <code>{amount}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>",
-            "TRADE_FAILED": "❌ <b>TRADE FAILED</b> {symbol}\n<code>{error}</code>",
-            "TRADE_SETTLED": "✅ <b>SETTLED</b> {symbol} {side} id=<code>{order_id}</code>",
-            "SETTLEMENT_TIMEOUT": "⏱️ <b>SETTLEMENT TIMEOUT</b> {symbol} id=<code>{order_id}</code>",
-            "BUDGET_BLOCK": "⏳ <b>RISK/BUDGET BLOCK</b> {symbol}\n{detail}",
-            "RISK_BLOCKED": "⛔ <b>RISK/BLOCKED</b> {symbol}\nReason: <code>{reason}</code>",
-            "BROKER_ERROR": "⚠️ <b>BROKER ERROR</b> {symbol}\n<code>{error}</code>",
-            "HEALTH_FAIL": "🩻 <b>HEALTH FAIL</b>\n<code>{summary}</code>",
+            "ORCH_PAUSED": "вЏёпёЏ <b>PAUSED</b> {symbol} (auto)",
+            "ORCH_RESUMED": "в–¶пёЏ <b>RESUMED</b> {symbol} (auto)",
+            "DMS_TRIGGERED": "рџ›‘ <b>DMS</b> {symbol}\nDrop: <code>{drop_pct}%</code>",
+            "DMS_SKIPPED": "в„№пёЏ <b>DMS SKIPPED</b> {symbol}",
+            "TRADE_COMPLETED": "рџ’№ <b>TRADE</b> {symbol} {side}\nAmt: <code>{amount}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>",
+            "TRADE_FAILED": "вќЊ <b>TRADE FAILED</b> {symbol}\n<code>{error}</code>",
+            "TRADE_SETTLED": "вњ… <b>SETTLED</b> {symbol} {side} id=<code>{order_id}</code>",
+            "SETTLEMENT_TIMEOUT": "вЏ±пёЏ <b>SETTLEMENT TIMEOUT</b> {symbol} id=<code>{order_id}</code>",
+            "BUDGET_BLOCK": "вЏі <b>RISK/BUDGET BLOCK</b> {symbol}\n{detail}",
+            "RISK_BLOCKED": "в›” <b>RISK/BLOCKED</b> {symbol}\nReason: <code>{reason}</code>",
+            "BROKER_ERROR": "вљ пёЏ <b>BROKER ERROR</b> {symbol}\n<code>{error}</code>",
+            "HEALTH_FAIL": "рџ©» <b>HEALTH FAIL</b>\n<code>{summary}</code>",
         },
         "ru": {
-            "ORCH_PAUSED": "⏸️ <b>ПАУЗА</b> {symbol} (авто)",
-            "ORCH_RESUMED": "▶️ <b>ВОЗОБНОВЛЕНО</b> {symbol} (авто)",
-            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nПадение: <code>{drop_pct}%</code>",
-            "DMS_SKIPPED": "ℹ️ <b>DMS ПРОПУЩЕН</b> {symbol}",
-            "TRADE_COMPLETED": "💹 <b>СДЕЛКА</b> {symbol} {side}\nКол-во: <code>{amount}</code> @ <code>{price}</code>\nСтоимость: <code>{cost}</code> Комиссия: <code>{fee}</code>",
-            "TRADE_FAILED": "❌ <b>ОШИБКА СДЕЛКИ</b> {symbol}\n<code>{error}</code>",
-            "TRADE_SETTLED": "✅ <b>ЗАВЕРШЕНО</b> {symbol} {side} id=<code>{order_id}</code>",
-            "SETTLEMENT_TIMEOUT": "⏱️ <b>ТАЙМАУТ ЗАВЕРШЕНИЯ</b> {symbol} id=<code>{order_id}</code>",
-            "BUDGET_BLOCK": "⏳ <b>РИСК/БЮДЖЕТ БЛОК</b> {symbol}\n{detail}",
-            "RISK_BLOCKED": "⛔ <b>РИСК/БЛОК</b> {symbol}\nПричина: <code>{reason}</code>",
-            "BROKER_ERROR": "⚠️ <b>ОШИБКА БРОКЕРА</b> {symbol}\n<code>{error}</code>",
-            "HEALTH_FAIL": "🩻 <b>НЕЗДОРОВО</b>\n<code>{summary}</code>",
+            "ORCH_PAUSED": "вЏёпёЏ <b>РџРђРЈР—Рђ</b> {symbol} (Р°РІС‚Рѕ)",
+            "ORCH_RESUMED": "в–¶пёЏ <b>Р’РћР—РћР‘РќРћР’Р›Р•РќРћ</b> {symbol} (Р°РІС‚Рѕ)",
+            "DMS_TRIGGERED": "рџ›‘ <b>DMS</b> {symbol}\nРџР°РґРµРЅРёРµ: <code>{drop_pct}%</code>",
+            "DMS_SKIPPED": "в„№пёЏ <b>DMS РџР РћРџРЈР©Р•Рќ</b> {symbol}",
+            "TRADE_COMPLETED": "рџ’№ <b>РЎР”Р•Р›РљРђ</b> {symbol} {side}\nРљРѕР»-РІРѕ: <code>{amount}</code> @ <code>{price}</code>\nРЎС‚РѕРёРјРѕСЃС‚СЊ: <code>{cost}</code> РљРѕРјРёСЃСЃРёСЏ: <code>{fee}</code>",
+            "TRADE_FAILED": "вќЊ <b>РћРЁРР‘РљРђ РЎР”Р•Р›РљР</b> {symbol}\n<code>{error}</code>",
+            "TRADE_SETTLED": "вњ… <b>Р—РђР’Р•Р РЁР•РќРћ</b> {symbol} {side} id=<code>{order_id}</code>",
+            "SETTLEMENT_TIMEOUT": "вЏ±пёЏ <b>РўРђР™РњРђРЈРў Р—РђР’Р•Р РЁР•РќРРЇ</b> {symbol} id=<code>{order_id}</code>",
+            "BUDGET_BLOCK": "вЏі <b>Р РРЎРљ/Р‘Р®Р”Р–Р•Рў Р‘Р›РћРљ</b> {symbol}\n{detail}",
+            "RISK_BLOCKED": "в›” <b>Р РРЎРљ/Р‘Р›РћРљ</b> {symbol}\nРџСЂРёС‡РёРЅР°: <code>{reason}</code>",
+            "BROKER_ERROR": "вљ пёЏ <b>РћРЁРР‘РљРђ Р‘Р РћРљР•Р Рђ</b> {symbol}\n<code>{error}</code>",
+            "HEALTH_FAIL": "рџ©» <b>РќР•Р—Р”РћР РћР’Рћ</b>\n<code>{summary}</code>",
         },
         "tr": {
-            "ORCH_PAUSED": "⏸️ <b>DURAKLATILDI</b> {symbol} (otomatik)",
-            "ORCH_RESUMED": "▶️ <b>DEVAM</b> {symbol} (otomatik)",
-            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nDüşüş: <code>{drop_pct}%</code>",
-            "DMS_SKIPPED": "ℹ️ <b>DMS ATLANDI</b> {symbol}",
-            "TRADE_COMPLETED": "💹 <b>İŞLEM</b> {symbol} {side}\nMiktar: <code>{amount}</code> @ <code>{price}</code>\nTutar: <code>{cost}</code> Ücret: <code>{fee}</code>",
-            "TRADE_FAILED": "❌ <b>İŞLEM HATASI</b> {symbol}\n<code>{error}</code>",
-            "TRADE_SETTLED": "✅ <b>KAPANDI</b> {symbol} {side} id=<code>{order_id}</code>",
-            "SETTLEMENT_TIMEOUT": "⏱️ <b>KAPANMA ZAMANI AŞIMI</b> {symbol} id=<code>{order_id}</code>",
-            "BUDGET_BLOCK": "⏳ <b>RİSK/BÜTÇE ENGELİ</b> {symbol}\n{detail}",
-            "RISK_BLOCKED": "⛔ <b>RİSK/ENGELLENDİ</b> {symbol}\nNeden: <code>{reason}</code>",
-            "BROKER_ERROR": "⚠️ <b>ARACI HATASI</b> {symbol}\n<code>{error}</code>",
-            "HEALTH_FAIL": "🩻 <b>SAĞLIK SORUNU</b>\n<code>{summary}</code>",
+            "ORCH_PAUSED": "вЏёпёЏ <b>DURAKLATILDI</b> {symbol} (otomatik)",
+            "ORCH_RESUMED": "в–¶пёЏ <b>DEVAM</b> {symbol} (otomatik)",
+            "DMS_TRIGGERED": "рџ›‘ <b>DMS</b> {symbol}\nDГјЕџГјЕџ: <code>{drop_pct}%</code>",
+            "DMS_SKIPPED": "в„№пёЏ <b>DMS ATLANDI</b> {symbol}",
+            "TRADE_COMPLETED": "рџ’№ <b>Д°ЕћLEM</b> {symbol} {side}\nMiktar: <code>{amount}</code> @ <code>{price}</code>\nTutar: <code>{cost}</code> Гњcret: <code>{fee}</code>",
+            "TRADE_FAILED": "вќЊ <b>Д°ЕћLEM HATASI</b> {symbol}\n<code>{error}</code>",
+            "TRADE_SETTLED": "вњ… <b>KAPANDI</b> {symbol} {side} id=<code>{order_id}</code>",
+            "SETTLEMENT_TIMEOUT": "вЏ±пёЏ <b>KAPANMA ZAMANI AЕћIMI</b> {symbol} id=<code>{order_id}</code>",
+            "BUDGET_BLOCK": "вЏі <b>RД°SK/BГњTГ‡E ENGELД°</b> {symbol}\n{detail}",
+            "RISK_BLOCKED": "в›” <b>RД°SK/ENGELLENDД°</b> {symbol}\nNeden: <code>{reason}</code>",
+            "BROKER_ERROR": "вљ пёЏ <b>ARACI HATASI</b> {symbol}\n<code>{error}</code>",
+            "HEALTH_FAIL": "рџ©» <b>SAДћLIK SORUNU</b>\n<code>{summary}</code>",
         },
     }
     lang = (lang or "en").lower()
@@ -67,7 +67,7 @@ def _t(lang: str, key: str, **kw: str) -> str:
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
     Subscribe EventBus alerts and forward to Telegram.
-    Ѹ ѾсѾ  сѹ: ѾѺ ѵс, HTML,  ѲсѲѵѽ .
+    Сё СѕСЃСѕ  СЃС№: СѕСє СµСЃ, HTML,  СІСЃСІСµСЅ .
     """
     tg = TelegramAlerts(
         bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
@@ -99,7 +99,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
 
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
-        await _send(f"️ <b>AUTO-PAUSE</b> {evt.get('symbol', '')}\nReason: <code>{evt.get('reason', '')}</code>")
+        await _send(f"пёЏ <b>AUTO-PAUSE</b> {evt.get('symbol', '')}\nReason: <code>{evt.get('reason', '')}</code>")
 
     async def on_auto_resumed(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
@@ -108,7 +108,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
     async def on_pos_mm(evt: dict[str, Any]) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
         await _send(
-            " <b>RECONCILE</b> {s}\nѶ: <code>{b}</code>\nѽ: <code>{l}</code>".format(
+            " <b>RECONCILE</b> {s}\nС¶: <code>{b}</code>\nСЅ: <code>{l}</code>".format(
                 s=evt.get("symbol", ""), b=evt.get("exchange", ""), l=evt.get("local", "")
             )
         )
@@ -116,7 +116,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
     async def on_dms_triggered(evt: dict[str, Any]) -> None:
         inc("dms_triggered_total", symbol=evt.get("symbol", ""))
         await _send(
-            f" <b>DMS TRIGGERED</b> {evt.get('symbol', '')}\nѾ : <code>{evt.get('amount', '')}</code>"
+            f" <b>DMS TRIGGERED</b> {evt.get('symbol', '')}\nСѕ : <code>{evt.get('amount', '')}</code>"
         )
 
     async def on_dms_skipped(evt: dict[str, Any]) -> None:
@@ -147,7 +147,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
     async def on_settlement_timeout(evt: dict[str, Any]) -> None:
         inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
         await _send(
-            f"⏱️ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol', '')} id=<code>{evt.get('order_id', '')}</code>"
+            f"вЏ±пёЏ <b>SETTLEMENT TIMEOUT</b> {evt.get('symbol', '')} id=<code>{evt.get('order_id', '')}</code>"
         )
 
     async def on_budget_exceeded(evt: dict[str, Any]) -> None:

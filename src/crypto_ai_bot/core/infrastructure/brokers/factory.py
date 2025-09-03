@@ -8,7 +8,7 @@ _log = get_logger("brokers.factory")
 
 
 def _import_first(*candidates: str) -> Any:
-    """Импортировать первый доступный модуль из списка."""
+    """РРјРїРѕСЂС‚РёСЂРѕРІР°С‚СЊ РїРµСЂРІС‹Р№ РґРѕСЃС‚СѓРїРЅС‹Р№ РјРѕРґСѓР»СЊ РёР· СЃРїРёСЃРєР°."""
     last_exc: Exception | None = None
     for path in candidates:
         try:
@@ -22,7 +22,7 @@ def _import_first(*candidates: str) -> Any:
 
 
 def _lower(value: Any, default: str = "") -> str:
-    """Безопасно привести значение к нижнему регистру (строка)."""
+    """Р‘РµР·РѕРїР°СЃРЅРѕ РїСЂРёРІРµСЃС‚Рё Р·РЅР°С‡РµРЅРёРµ Рє РЅРёР¶РЅРµРјСѓ СЂРµРіРёСЃС‚СЂСѓ (СЃС‚СЂРѕРєР°)."""
     try:
         s = (value or "").strip()
     except Exception:
@@ -32,9 +32,9 @@ def _lower(value: Any, default: str = "") -> str:
 
 def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
     """
-    Фабрика брокеров:
-      - MODE=paper -> PaperBroker (через порт-адаптер)
-      - MODE=live  -> CcxtBroker (обёртка над CCXT)
+    Р¤Р°Р±СЂРёРєР° Р±СЂРѕРєРµСЂРѕРІ:
+      - MODE=paper -> PaperBroker (С‡РµСЂРµР· РїРѕСЂС‚-Р°РґР°РїС‚РµСЂ)
+      - MODE=live  -> CcxtBroker (РѕР±С‘СЂС‚РєР° РЅР°Рґ CCXT)
     """
     md = _lower(mode)
     ex = _lower(exchange, "gateio")
@@ -56,7 +56,7 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
         if CcxtBroker is None:
             raise ImportError("CcxtBroker class not found in ccxt broker module(s)")
 
-        import ccxt  # локальный импорт
+        import ccxt  # Р»РѕРєР°Р»СЊРЅС‹Р№ РёРјРїРѕСЂС‚
 
         if not hasattr(ccxt, ex):
             raise ValueError(f"Unsupported exchange {exchange!r} for ccxt")

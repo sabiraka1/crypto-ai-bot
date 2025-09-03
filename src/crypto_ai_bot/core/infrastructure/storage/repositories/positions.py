@@ -7,7 +7,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-# Константа для дефолтного значения B008
+# РљРѕРЅСЃС‚Р°РЅС‚Р° РґР»СЏ РґРµС„РѕР»С‚РЅРѕРіРѕ Р·РЅР°С‡РµРЅРёСЏ B008
 _DEFAULT_FEE_ZERO = dec("0")
 
 
@@ -37,7 +37,7 @@ class PositionsRepository:
             pass
 
     def ensure_schema(self) -> None:
-        """Создает таблицу positions если её нет."""
+        """РЎРѕР·РґР°РµС‚ С‚Р°Р±Р»РёС†Сѓ positions РµСЃР»Рё РµС‘ РЅРµС‚."""
         cur = self.conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS positions (
@@ -82,7 +82,7 @@ class PositionsRepository:
     def get_base_qty(self, symbol: str) -> Decimal:
         return self.get_position(symbol).base_qty
 
-    # 🔹 батч-доступ
+    # рџ”№ Р±Р°С‚С‡-РґРѕСЃС‚СѓРї
     def get_positions_many(self, symbols: list[str]) -> dict[str, Position]:
         if not symbols:
             return {}
@@ -103,7 +103,7 @@ class PositionsRepository:
                 updated_ts_ms=int(r["updated_ts_ms"] or 0),
                 version=int(r["version"] or 0),
             )
-        # добиваем отсутствующие дефолтами
+        # РґРѕР±РёРІР°РµРј РѕС‚СЃСѓС‚СЃС‚РІСѓСЋС‰РёРµ РґРµС„РѕР»С‚Р°РјРё
         for s in symbols:
             if s not in out:
                 out[s] = Position(
@@ -140,7 +140,7 @@ class PositionsRepository:
         fee_quote: Decimal | None = None,
         last_price: Decimal | None = None,
     ) -> None:
-        # Обработка дефолтного значения для B008
+        # РћР±СЂР°Р±РѕС‚РєР° РґРµС„РѕР»С‚РЅРѕРіРѕ Р·РЅР°С‡РµРЅРёСЏ РґР»СЏ B008
         if fee_quote is None:
             fee_quote = _DEFAULT_FEE_ZERO
 

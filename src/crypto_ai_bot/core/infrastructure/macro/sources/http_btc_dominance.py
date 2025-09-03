@@ -12,8 +12,8 @@ _log = get_logger("macro.btc_dom_http")
 
 class BtcDominanceHttp(BtcDomPort):
     """
-    HTTP-источник BTC Dominance.
-    Ожидаемый JSON: {"change_pct": -0.25}
+    HTTP-РёСЃС‚РѕС‡РЅРёРє BTC Dominance.
+    РћР¶РёРґР°РµРјС‹Р№ JSON: {"change_pct": -0.25}
     """
 
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:

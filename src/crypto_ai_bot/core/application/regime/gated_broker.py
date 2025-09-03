@@ -14,14 +14,14 @@ _log = get_logger("regime.gated_broker")
 
 @dataclass(frozen=True)
 class _Policy:
-    # Ğ’ Ñ€ĞµĞ¶Ğ¸Ğ¼Ğµ risk_off Ğ·Ğ°Ğ¿Ñ€ĞµÑ‰Ğ°ĞµĞ¼ Ğ½Ğ¾Ğ²Ñ‹Ğµ Ğ²Ñ…Ğ¾Ğ´Ñ‹ (Ğ¿Ğ¾ĞºÑƒĞ¿ĞºĞ¸). ĞŸÑ€Ğ¾Ğ´Ğ°Ğ¶Ğ¸/Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚Ğ¸Ñ Ğ²ÑĞµĞ³Ğ´Ğ° Ñ€Ğ°Ğ·Ñ€ĞµÑˆĞµĞ½Ñ‹.
+    # ДћвЂ™ Г‘в‚¬ДћВµДћВ¶ДћВёДћВјДћВµ risk_off ДћВ·ДћВ°ДћВїГ‘в‚¬ДћВµГ‘вЂ°ДћВ°ДћВµДћВј ДћВЅДћВѕДћВІГ‘вЂ№ДћВµ ДћВІГ‘вЂ¦ДћВѕДћВґГ‘вЂ№ (ДћВїДћВѕДћВєГ‘Ж’ДћВїДћВєДћВё). ДћЕёГ‘в‚¬ДћВѕДћВґДћВ°ДћВ¶ДћВё/ДћВ·ДћВ°ДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљДћВёГ‘ВЏ ДћВІГ‘ВЃДћВµДћВіДћВґДћВ° Г‘в‚¬ДћВ°ДћВ·Г‘в‚¬ДћВµГ‘Л†ДћВµДћВЅГ‘вЂ№.
     block_new_longs_on_risk_off: bool = True
 
 
 class GatedBroker(BrokerPort):
     """
-    ĞĞ±Ñ‘Ñ€Ñ‚ĞºĞ° Ğ½Ğ°Ğ´ BrokerPort: Ğ¿Ñ€Ğ¾Ğ²ĞµÑ€ÑĞµÑ‚ Ğ¼Ğ°ĞºÑ€Ğ¾-Ñ€ĞµĞ¶Ğ¸Ğ¼ Ğ¿ĞµÑ€ĞµĞ´ ÑĞ¾Ğ·Ğ´Ğ°Ğ½Ğ¸ĞµĞ¼ Ğ¾Ñ€Ğ´ĞµÑ€Ğ°.
-    Ğ¡Ğ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ° Ñ Ñ‚Ğ²Ğ¾ĞµĞ¹ ÑĞ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ğ¾Ğ¹:
+    ДћВћДћВ±Г‘вЂГ‘в‚¬Г‘вЂљДћВєДћВ° ДћВЅДћВ°ДћВґ BrokerPort: ДћВїГ‘в‚¬ДћВѕДћВІДћВµГ‘в‚¬Г‘ВЏДћВµГ‘вЂљ ДћВјДћВ°ДћВєГ‘в‚¬ДћВѕ-Г‘в‚¬ДћВµДћВ¶ДћВёДћВј ДћВїДћВµГ‘в‚¬ДћВµДћВґ Г‘ВЃДћВѕДћВ·ДћВґДћВ°ДћВЅДћВёДћВµДћВј ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ДћВ°.
+    ДћВЎДћВѕДћВІДћВјДћВµГ‘ВЃГ‘вЂљДћВёДћВјДћВ° Г‘ВЃ Г‘вЂљДћВІДћВѕДћВµДћВ№ Г‘ВЃДћВёДћВіДћВЅДћВ°Г‘вЂљГ‘Ж’Г‘в‚¬ДћВѕДћВ№:
         GatedBroker(inner=..., regime=<RegimeDetector|None>, allow_sells_when_off=True)
     """
 
@@ -36,7 +36,7 @@ class GatedBroker(BrokerPort):
         self._policy = _Policy(block_new_longs_on_risk_off=True)
         self._allow_sells = allow_sells_when_off
 
-    # ---------- Ñ€Ñ‹Ğ½Ğ¾Ñ‡Ğ½Ñ‹Ğµ Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ / Ğ¿Ñ€Ğ¾ĞºÑĞ¸ ----------
+    # ---------- Г‘в‚¬Г‘вЂ№ДћВЅДћВѕГ‘вЂЎДћВЅГ‘вЂ№ДћВµ ДћВґДћВ°ДћВЅДћВЅГ‘вЂ№ДћВµ / ДћВїГ‘в‚¬ДћВѕДћВєГ‘ВЃДћВё ----------
     async def fetch_ticker(self, symbol: str) -> Any:
         return await self._inner.fetch_ticker(symbol)
 
@@ -46,7 +46,7 @@ class GatedBroker(BrokerPort):
     async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any:
         return await self._inner.fetch_order(symbol=symbol, broker_order_id=broker_order_id)
 
-    # ---------- Ñ‚Ğ¾Ñ€Ğ³Ğ¾Ğ²Ñ‹Ğµ Ğ¾Ğ¿ĞµÑ€Ğ°Ñ†Ğ¸Ğ¸ ----------
+    # ---------- Г‘вЂљДћВѕГ‘в‚¬ДћВіДћВѕДћВІГ‘вЂ№ДћВµ ДћВѕДћВїДћВµГ‘в‚¬ДћВ°Г‘вЂ ДћВёДћВё ----------
     async def create_market_buy_quote(
         self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None
     ) -> Any:
@@ -65,7 +65,7 @@ class GatedBroker(BrokerPort):
     async def create_market_sell_base(
         self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None
     ) -> Any:
-        # Ğ’Ñ‹Ñ…Ğ¾Ğ´Ñ‹ Ñ€Ğ°Ğ·Ñ€ĞµÑˆĞ°ĞµĞ¼ Ğ²ÑĞµĞ³Ğ´Ğ° (ĞµÑĞ»Ğ¸ Ğ´Ğ°Ğ¶Ğµ Ñ€ĞµĞ¶Ğ¸Ğ¼ risk_off)
+        # ДћвЂ™Г‘вЂ№Г‘вЂ¦ДћВѕДћВґГ‘вЂ№ Г‘в‚¬ДћВ°ДћВ·Г‘в‚¬ДћВµГ‘Л†ДћВ°ДћВµДћВј ДћВІГ‘ВЃДћВµДћВіДћВґДћВ° (ДћВµГ‘ВЃДћВ»ДћВё ДћВґДћВ°ДћВ¶ДћВµ Г‘в‚¬ДћВµДћВ¶ДћВёДћВј risk_off)
         return await self._inner.create_market_sell_base(
             symbol=symbol, base_amount=base_amount, client_order_id=client_order_id
         )

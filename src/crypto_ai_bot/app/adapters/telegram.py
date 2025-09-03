@@ -39,8 +39,8 @@ class TelegramAlerts:
 
     async def send(self, text: str) -> bool:
         """
-        ѰѰ True, с HTTP 200  {"ok":true}.
-        Ѱ  сѸ  с. utils.retry.apost_retry.
+        С°С° True, СЃ HTTP 200  {"ok":true}.
+        С°  СЃСё  СЃ. utils.retry.apost_retry.
         """
         if not self.enabled():
             _log.info("telegram_disabled")

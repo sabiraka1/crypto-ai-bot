@@ -10,7 +10,7 @@ _log = get_logger("storage.backup")
 
 
 def backup_database(src_path: str, backup_dir: str) -> str:
-    """Ğ¡Ğ¾Ğ·Ğ´Ğ°ĞµÑ‚ Ñ€ĞµĞ·ĞµÑ€Ğ²Ğ½ÑƒÑ ĞºĞ¾Ğ¿Ğ¸Ñ Ğ‘Ğ”."""
+    """ДћВЎДћВѕДћВ·ДћВґДћВ°ДћВµГ‘вЂљ Г‘в‚¬ДћВµДћВ·ДћВµГ‘в‚¬ДћВІДћВЅГ‘Ж’Г‘ВЋ ДћВєДћВѕДћВїДћВёГ‘ВЋ ДћвЂДћвЂќ."""
     try:
         src = Path(src_path)
         if not src.exists():
@@ -18,16 +18,16 @@ def backup_database(src_path: str, backup_dir: str) -> str:
 
         os.makedirs(backup_dir, exist_ok=True)
 
-        # Ğ“ĞµĞ½ĞµÑ€Ğ¸Ñ€ÑƒĞµĞ¼ Ğ¸Ğ¼Ñ Ğ´Ğ»Ñ Ğ±ÑĞºĞ°Ğ¿Ğ°
+        # ДћвЂњДћВµДћВЅДћВµГ‘в‚¬ДћВёГ‘в‚¬Г‘Ж’ДћВµДћВј ДћВёДћВјГ‘ВЏ ДћВґДћВ»Г‘ВЏ ДћВ±Г‘ВЌДћВєДћВ°ДћВїДћВ°
         from datetime import datetime
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_name = f"{src.stem}_backup_{timestamp}{src.suffix}"
         dst = Path(backup_dir) / backup_name
 
-        # ĞšĞ¾Ğ¿Ğ¸Ñ€ÑƒĞµĞ¼ Ñ„Ğ°Ğ¹Ğ»
+        # ДћЕЎДћВѕДћВїДћВёГ‘в‚¬Г‘Ж’ДћВµДћВј Г‘вЂћДћВ°ДћВ№ДћВ»
         if hasattr(src, "backup"):
-            src.backup(dst)  # Ğ´Ğ»Ñ sqlite3 Connection
+            src.backup(dst)  # ДћВґДћВ»Г‘ВЏ sqlite3 Connection
         else:
             shutil.copy2(src, dst)
 

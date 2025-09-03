@@ -8,7 +8,7 @@ _log = get_logger("recon.discrepancy")
 
 
 def build_report(*, discrepancies: list[dict[str, Any]]) -> dict[str, Any]:
-    """ĞĞ¾Ñ€Ğ¼Ğ°Ğ»Ğ¸Ğ·ÑƒĞµÑ‚ Ğ²Ñ‹Ğ²Ğ¾Ğ´ ÑĞ²ĞµÑ€Ğ¾Ğº, Ğ»Ğ¾Ğ³Ğ¸Ñ€ÑƒĞµÑ‚ Ğ½Ğ°Ğ¹Ğ´ĞµĞ½Ğ½Ñ‹Ğµ Ñ€Ğ°ÑÑ…Ğ¾Ğ¶Ğ´ĞµĞ½Ğ¸Ñ."""
+    """ДћВќДћВѕГ‘в‚¬ДћВјДћВ°ДћВ»ДћВёДћВ·Г‘Ж’ДћВµГ‘вЂљ ДћВІГ‘вЂ№ДћВІДћВѕДћВґ Г‘ВЃДћВІДћВµГ‘в‚¬ДћВѕДћВє, ДћВ»ДћВѕДћВіДћВёГ‘в‚¬Г‘Ж’ДћВµГ‘вЂљ ДћВЅДћВ°ДћВ№ДћВґДћВµДћВЅДћВЅГ‘вЂ№ДћВµ Г‘в‚¬ДћВ°Г‘ВЃГ‘вЂ¦ДћВѕДћВ¶ДћВґДћВµДћВЅДћВёГ‘ВЏ."""
     for d in discrepancies:
         _log.warning("discrepancy", extra=d)
     return {"discrepancies": discrepancies, "count": len(discrepancies)}

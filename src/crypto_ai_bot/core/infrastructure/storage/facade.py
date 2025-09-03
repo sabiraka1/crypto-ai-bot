@@ -34,7 +34,7 @@ class Storage:
             orders=_OrdersRepository(conn),
         )
 
-    # честный health-ping для /health
+    # С‡РµСЃС‚РЅС‹Р№ health-ping РґР»СЏ /health
     async def ping(self) -> bool:
         cur = self.conn.cursor()
         cur.execute("SELECT 1;")

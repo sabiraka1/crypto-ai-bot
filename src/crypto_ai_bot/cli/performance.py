@@ -5,10 +5,10 @@ from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.symbols import canonical  # исправлен путь импорта
+from crypto_ai_bot.utils.symbols import canonical  # РёСЃРїСЂР°РІР»РµРЅ РїСѓС‚СЊ РёРјРїРѕСЂС‚Р°
 
 
-def _symbols_from_settings(settings: Any) -> list[str]:  # добавлена аннотация типа
+def _symbols_from_settings(settings: Any) -> list[str]:  # РґРѕР±Р°РІР»РµРЅР° Р°РЅРЅРѕС‚Р°С†РёСЏ С‚РёРїР°
     raw = (getattr(settings, "SYMBOLS", "") or "").strip()
     if raw:
         return [canonical(s.strip()) for s in raw.split(",") if s.strip()]

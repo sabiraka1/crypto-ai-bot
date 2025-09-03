@@ -12,8 +12,8 @@ _log = get_logger("macro.fomc_http")
 
 class FomcHttp(FomcCalendarPort):
     """
-    HTTP-источник календаря FOMC.
-    Ожидаемый JSON: {"event_today": true}
+    HTTP-РёСЃС‚РѕС‡РЅРёРє РєР°Р»РµРЅРґР°СЂСЏ FOMC.
+    РћР¶РёРґР°РµРјС‹Р№ JSON: {"event_today": true}
     """
 
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:

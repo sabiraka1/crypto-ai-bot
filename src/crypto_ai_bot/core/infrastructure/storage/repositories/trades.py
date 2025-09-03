@@ -6,7 +6,7 @@ from typing import Any, cast
 
 
 def _get(obj: Any, attr: str, key: str | None = None, default: Any = None) -> Any:
-    """Ğ”Ğ¾ÑÑ‚Ğ°Ñ‘Ğ¼ Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ğµ Ğ¸Ğ· Ğ¾Ğ±ÑŠĞµĞºÑ‚Ğ° Ğ˜Ğ›Ğ˜ dict (ÑƒĞ½Ğ¸Ğ²ĞµÑ€ÑĞ°Ğ»ÑŒĞ½Ğ¾ Ğ´Ğ»Ñ CCXT-Ğ¾Ñ‚Ğ²ĞµÑ‚Ğ¾Ğ²)."""
+    """ДћвЂќДћВѕГ‘ВЃГ‘вЂљДћВ°Г‘вЂДћВј ДћВ·ДћВЅДћВ°Г‘вЂЎДћВµДћВЅДћВёДћВµ ДћВёДћВ· ДћВѕДћВ±Г‘Е ДћВµДћВєГ‘вЂљДћВ° ДћЛњДћвЂєДћЛњ dict (Г‘Ж’ДћВЅДћВёДћВІДћВµГ‘в‚¬Г‘ВЃДћВ°ДћВ»Г‘Е’ДћВЅДћВѕ ДћВґДћВ»Г‘ВЏ CCXT-ДћВѕГ‘вЂљДћВІДћВµГ‘вЂљДћВѕДћВІ)."""
     if hasattr(obj, attr):
         try:
             return getattr(obj, attr)
@@ -61,7 +61,7 @@ class TradesRepository:
     # ---------- INSERTS / LISTS ----------
 
     def add_from_order(self, order: Any) -> None:
-        """Ğ¡Ğ¾Ñ…Ñ€Ğ°Ğ½ÑĞµĞ¼ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ½Ñ‹Ğ¹ Ğ¾Ñ€Ğ´ĞµÑ€ Ğ² trades. ĞŸĞ¾Ğ´Ğ´ĞµÑ€Ğ¶Ğ¸Ğ²Ğ°ĞµÑ‚ Ğ¸ Ğ¾Ğ±ÑŠĞµĞºÑ‚Ñ‹, Ğ¸ dict-Ğ¾Ñ‚Ğ²ĞµÑ‚ CCXT."""
+        """ДћВЎДћВѕГ‘вЂ¦Г‘в‚¬ДћВ°ДћВЅГ‘ВЏДћВµДћВј ДћВёГ‘ВЃДћВїДћВѕДћВ»ДћВЅДћВµДћВЅДћВЅГ‘вЂ№ДћВ№ ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ ДћВІ trades. ДћЕёДћВѕДћВґДћВґДћВµГ‘в‚¬ДћВ¶ДћВёДћВІДћВ°ДћВµГ‘вЂљ ДћВё ДћВѕДћВ±Г‘Е ДћВµДћВєГ‘вЂљГ‘вЂ№, ДћВё dict-ДћВѕГ‘вЂљДћВІДћВµГ‘вЂљ CCXT."""
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -76,7 +76,7 @@ class TradesRepository:
                 str(_get(order, "filled", "filled", _get(order, "amount", "amount", Decimal("0")))),
                 str(_get(order, "price", "price", Decimal("0"))),
                 str(_get(order, "cost", "cost", Decimal("0"))),
-                # fee Ğ¼Ğ¾Ğ¶ĞµÑ‚ Ğ±Ñ‹Ñ‚ÑŒ dict: {"cost": ..., "currency": "..."}
+                # fee ДћВјДћВѕДћВ¶ДћВµГ‘вЂљ ДћВ±Г‘вЂ№Г‘вЂљГ‘Е’ dict: {"cost": ..., "currency": "..."}
                 str(
                     _get(order, "fee_quote", "fee_quote")
                     if _get(order, "fee_quote", "fee_quote") is not None
@@ -105,7 +105,7 @@ class TradesRepository:
         return cast(list[Any], cur.fetchall())
 
     def last_trades(self, symbol: str, limit: int = 50) -> list[Any]:
-        """ĞŸĞ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ N ÑĞ´ĞµĞ»Ğ¾Ğº Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ (DESC)."""
+        """ДћЕёДћВѕГ‘ВЃДћВ»ДћВµДћВґДћВЅДћВёДћВµ N Г‘ВЃДћВґДћВµДћВ»ДћВѕДћВє ДћВїДћВѕ Г‘ВЃДћВёДћВјДћВІДћВѕДћВ»Г‘Ж’ (DESC)."""
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -147,7 +147,7 @@ class TradesRepository:
         return int(result[0] if result else 0)
 
     def count_orders_today(self, symbol: str) -> int:
-        """Ğ¡ĞºĞ¾Ğ»ÑŒĞºĞ¾ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ğ¹ Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ Ğ·Ğ° ÑĞµĞ³Ğ¾Ğ´Ğ½Ñ (UTC)."""
+        """ДћВЎДћВєДћВѕДћВ»Г‘Е’ДћВєДћВѕ ДћВёГ‘ВЃДћВїДћВѕДћВ»ДћВЅДћВµДћВЅДћВёДћВ№ ДћВїДћВѕ Г‘ВЃДћВёДћВјДћВІДћВѕДћВ»Г‘Ж’ ДћВ·ДћВ° Г‘ВЃДћВµДћВіДћВѕДћВґДћВЅГ‘ВЏ (UTC)."""
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -160,7 +160,7 @@ class TradesRepository:
         row = cur.fetchone()
         return int(row[0] if row else 0)
 
-    # ---------- FIFO PnL (Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ fee_quote) ----------
+    # ---------- FIFO PnL (Г‘ВЃ Г‘Ж’Г‘вЂЎГ‘вЂГ‘вЂљДћВѕДћВј fee_quote) ----------
 
     def _iter_all_asc(self, symbol: str) -> list[Any]:
         cur = self.conn.cursor()
@@ -180,17 +180,17 @@ class TradesRepository:
         return Decimal(str(x if x is not None else "0"))
 
     def pnl_today_quote(self, symbol: str) -> Decimal:
-        """Ğ ĞµĞ°Ğ»Ğ¸Ğ·Ğ¾Ğ²Ğ°Ğ½Ğ½Ñ‹Ğ¹ PnL Ğ·Ğ° ÑĞµĞ³Ğ¾Ğ´Ğ½Ñ (UTC, quote), FIFO, Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ fee_quote."""
+        """ДћВ ДћВµДћВ°ДћВ»ДћВёДћВ·ДћВѕДћВІДћВ°ДћВЅДћВЅГ‘вЂ№ДћВ№ PnL ДћВ·ДћВ° Г‘ВЃДћВµДћВіДћВѕДћВґДћВЅГ‘ВЏ (UTC, quote), FIFO, Г‘ВЃ Г‘Ж’Г‘вЂЎГ‘вЂГ‘вЂљДћВѕДћВј fee_quote."""
         return self._pnl_today_fifo_quote(symbol)
 
-    # ĞĞ»Ğ¸Ğ°Ñ Ğ´Ğ»Ñ Ñ‡Ğ¸Ñ‚Ğ°ĞµĞ¼Ğ¾ÑÑ‚Ğ¸ ÑĞ½Ğ°Ñ€ÑƒĞ¶Ğ¸:
+    # ДћВђДћВ»ДћВёДћВ°Г‘ВЃ ДћВґДћВ»Г‘ВЏ Г‘вЂЎДћВёГ‘вЂљДћВ°ДћВµДћВјДћВѕГ‘ВЃГ‘вЂљДћВё Г‘ВЃДћВЅДћВ°Г‘в‚¬Г‘Ж’ДћВ¶ДћВё:
     def daily_pnl_quote(self, symbol: str) -> Decimal:
         return self.pnl_today_quote(symbol)
 
     def _pnl_today_fifo_quote(self, symbol: str) -> Decimal:
         rows = self._iter_all_asc(symbol)
 
-        # FIFO-Ğ¾Ñ‡ĞµÑ€ĞµĞ´ÑŒ Ğ¿Ğ¾ĞºÑƒĞ¿Ğ¾Ğº: ÑĞ»ĞµĞ¼ĞµĞ½Ñ‚Ñ‹ (qty_left, unit_cost_quote)
+        # FIFO-ДћВѕГ‘вЂЎДћВµГ‘в‚¬ДћВµДћВґГ‘Е’ ДћВїДћВѕДћВєГ‘Ж’ДћВїДћВѕДћВє: Г‘ВЌДћВ»ДћВµДћВјДћВµДћВЅГ‘вЂљГ‘вЂ№ (qty_left, unit_cost_quote)
         # unit_cost_quote = (cost + fee_quote) / filled
         buy_lots: list[tuple[Decimal, Decimal]] = []
 
@@ -219,7 +219,7 @@ class TradesRepository:
 
             if side == "sell":
                 qty_to_consume = filled
-                unit_sell = price  # Ğ²Ñ‹Ñ€ÑƒÑ‡ĞºĞ° Ğ´Ğ¾ ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ğ¸
+                unit_sell = price  # ДћВІГ‘вЂ№Г‘в‚¬Г‘Ж’Г‘вЂЎДћВєДћВ° ДћВґДћВѕ ДћВєДћВѕДћВјДћВёГ‘ВЃГ‘ВЃДћВёДћВё
                 realized = Decimal("0")
 
                 i = 0
@@ -235,7 +235,7 @@ class TradesRepository:
                     else:
                         buy_lots.pop(i)
 
-                # ĞºĞ¾Ğ¼Ğ¸ÑÑĞ¸Ñ Ğ¿Ñ€Ğ¾Ğ´Ğ°Ğ¶Ğ¸ Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ÑÑ Ğº Ğ¿Ñ€Ğ¾Ğ´Ğ°Ğ¶Ğµ
+                # ДћВєДћВѕДћВјДћВёГ‘ВЃГ‘ВЃДћВёГ‘ВЏ ДћВїГ‘в‚¬ДћВѕДћВґДћВ°ДћВ¶ДћВё ДћВѕГ‘вЂљДћВЅДћВѕГ‘ВЃДћВёГ‘вЂљГ‘ВЃГ‘ВЏ ДћВє ДћВїГ‘в‚¬ДћВѕДћВґДћВ°ДћВ¶ДћВµ
                 if ts_day == today_utc:
                     pnl_today += realized - fee_q
 

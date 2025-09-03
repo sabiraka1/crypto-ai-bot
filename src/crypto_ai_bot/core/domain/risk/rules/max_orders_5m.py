@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class MaxOrders5mConfig:
-    limit: int = 0  # 0 = выключено
+    limit: int = 0  # 0 = РІС‹РєР»СЋС‡РµРЅРѕ
 
 
 class MaxOrders5mRule:
@@ -15,13 +15,13 @@ class MaxOrders5mRule:
         self.cfg = cfg
 
     def _count_last_minutes(self, trades_repo: Any, symbol: str, minutes: int) -> int | None:
-        # быстрый путь
+        # Р±С‹СЃС‚СЂС‹Р№ РїСѓС‚СЊ
         if hasattr(trades_repo, "count_orders_last_minutes"):
             try:
                 return int(trades_repo.count_orders_last_minutes(symbol, minutes))
             except Exception:
                 return None
-        # деградация: пробуем list_today + фильтр по времени
+        # РґРµРіСЂР°РґР°С†РёСЏ: РїСЂРѕР±СѓРµРј list_today + С„РёР»СЊС‚СЂ РїРѕ РІСЂРµРјРµРЅРё
         try:
             items = trades_repo.list_today(symbol)
             if not items:
@@ -29,7 +29,7 @@ class MaxOrders5mRule:
             now_ms = int(time.time() * 1000)
             thr = now_ms - minutes * 60_000
 
-            # пытаемся вытащить timestamp из item.{ts, timestamp, time} или dict
+            # РїС‹С‚Р°РµРјСЃСЏ РІС‹С‚Р°С‰РёС‚СЊ timestamp РёР· item.{ts, timestamp, time} РёР»Рё dict
             def get_ts(x: Any) -> int:
                 for k in ("ts", "timestamp", "time"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)

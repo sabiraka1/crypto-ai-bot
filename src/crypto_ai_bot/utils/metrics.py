@@ -12,7 +12,7 @@ _HISTS: dict[tuple[str, tuple[tuple[str, str], ...]], Histogram] = {}
 
 
 def reset_registry() -> None:
-    """Ğ¡Ğ±Ñ€Ğ¾Ñ Ñ€ĞµĞ³Ğ¸ÑÑ‚Ñ€Ğ° Ğ´Ğ»Ñ Ñ‚ĞµÑÑ‚Ğ¾Ğ²."""
+    """ДћВЎДћВ±Г‘в‚¬ДћВѕГ‘ВЃ Г‘в‚¬ДћВµДћВіДћВёГ‘ВЃГ‘вЂљГ‘в‚¬ДћВ° ДћВґДћВ»Г‘ВЏ Г‘вЂљДћВµГ‘ВЃГ‘вЂљДћВѕДћВІ."""
     global _REGISTRY, _COUNTERS, _GAUGES, _HISTS
     _REGISTRY = CollectorRegistry()
     _COUNTERS = {}
@@ -48,7 +48,7 @@ def inc(name: str, **labels: Any) -> None:
         try:
             _COUNTERS[k] = Counter(name, name, list(labs.keys()), registry=_REGISTRY)
         except ValueError:
-            # ĞœĞµÑ‚Ñ€Ğ¸ĞºĞ° ÑƒĞ¶Ğµ Ğ·Ğ°Ñ€ĞµĞ³Ğ¸ÑÑ‚Ñ€Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ°, Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚Ğ°ĞµĞ¼ÑÑ Ğ½Ğ°Ğ¹Ñ‚Ğ¸ ÑÑƒÑ‰ĞµÑÑ‚Ğ²ÑƒÑÑ‰ÑƒÑ
+            # ДћЕ“ДћВµГ‘вЂљГ‘в‚¬ДћВёДћВєДћВ° Г‘Ж’ДћВ¶ДћВµ ДћВ·ДћВ°Г‘в‚¬ДћВµДћВіДћВёГ‘ВЃГ‘вЂљГ‘в‚¬ДћВёГ‘в‚¬ДћВѕДћВІДћВ°ДћВЅДћВ°, ДћВїДћВѕДћВїГ‘вЂ№Г‘вЂљДћВ°ДћВµДћВјГ‘ВЃГ‘ВЏ ДћВЅДћВ°ДћВ№Г‘вЂљДћВё Г‘ВЃГ‘Ж’Г‘вЂ°ДћВµГ‘ВЃГ‘вЂљДћВІГ‘Ж’Г‘ВЋГ‘вЂ°Г‘Ж’Г‘ВЋ
             for metric in _REGISTRY.collect():
                 if metric.name == name and isinstance(metric, Counter):
                     return
@@ -58,7 +58,7 @@ def inc(name: str, **labels: Any) -> None:
 
 
 def gauge(name: str, **labels: Any) -> Gauge | None:
-    """Gauge (Ğ²ĞµÑ€Ğ½Ñ‘Ñ‚ Ğ¾Ğ±ÑŠĞµĞºÑ‚, Ñ‡Ñ‚Ğ¾Ğ±Ñ‹ .set())"""
+    """Gauge (ДћВІДћВµГ‘в‚¬ДћВЅГ‘вЂГ‘вЂљ ДћВѕДћВ±Г‘Е ДћВµДћВєГ‘вЂљ, Г‘вЂЎГ‘вЂљДћВѕДћВ±Г‘вЂ№ .set())"""
     name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
@@ -71,7 +71,7 @@ def gauge(name: str, **labels: Any) -> Gauge | None:
 
 
 def hist(name: str, **labels: Any) -> Histogram | None:
-    """Histogram (ÑĞµĞºÑƒĞ½Ğ´Ñ‹)"""
+    """Histogram (Г‘ВЃДћВµДћВєГ‘Ж’ДћВЅДћВґГ‘вЂ№)"""
     name = _sanitize_name(name)
     labs = {k: str(v) for k, v in labels.items()}
     k = _key(name, labs)
@@ -84,7 +84,7 @@ def hist(name: str, **labels: Any) -> Histogram | None:
 
 
 def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
-    """Ğ¨Ğ¾Ñ€Ñ‚ĞºĞ°Ñ‚ Ğ´Ğ»Ñ Ğ½Ğ°Ğ±Ğ»ÑĞ´ĞµĞ½Ğ¸Ñ Ğ·Ğ½Ğ°Ñ‡ĞµĞ½Ğ¸Ñ (Ğ¼Ğ¸Ğ»Ğ»Ğ¸ÑĞµĞºÑƒĞ½Ğ´Ñ‹ -> ÑĞµĞºÑƒĞ½Ğ´Ñ‹)."""
+    """ДћВЁДћВѕГ‘в‚¬Г‘вЂљДћВєДћВ°Г‘вЂљ ДћВґДћВ»Г‘ВЏ ДћВЅДћВ°ДћВ±ДћВ»Г‘ВЋДћВґДћВµДћВЅДћВёГ‘ВЏ ДћВ·ДћВЅДћВ°Г‘вЂЎДћВµДћВЅДћВёГ‘ВЏ (ДћВјДћВёДћВ»ДћВ»ДћВёГ‘ВЃДћВµДћВєГ‘Ж’ДћВЅДћВґГ‘вЂ№ -> Г‘ВЃДћВµДћВєГ‘Ж’ДћВЅДћВґГ‘вЂ№)."""
     name = _sanitize_name(name)
     value_sec = float(value) / 1000.0
     h = hist(name, **(labels or {}))
@@ -93,5 +93,5 @@ def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> No
 
 
 def export_text() -> str:
-    """Ğ”Ğ»Ñ /metrics Ğ² FastAPI"""
+    """ДћвЂќДћВ»Г‘ВЏ /metrics ДћВІ FastAPI"""
     return generate_latest(_REGISTRY).decode("utf-8")

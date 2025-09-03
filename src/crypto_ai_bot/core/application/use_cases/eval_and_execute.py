@@ -30,12 +30,12 @@ async def eval_and_execute(
     risk_manager: Any,
 ) -> EvalResult:
     """
-    1) Стратегия -> решение
-    2) RiskManager -> только возвращает ok/reason (без side-effects)
-    3) execute_trade -> исполняем и публикуем события исполнения
+    1) РЎС‚СЂР°С‚РµРіРёСЏ -> СЂРµС€РµРЅРёРµ
+    2) RiskManager -> С‚РѕР»СЊРєРѕ РІРѕР·РІСЂР°С‰Р°РµС‚ ok/reason (Р±РµР· side-effects)
+    3) execute_trade -> РёСЃРїРѕР»РЅСЏРµРј Рё РїСѓР±Р»РёРєСѓРµРј СЃРѕР±С‹С‚РёСЏ РёСЃРїРѕР»РЅРµРЅРёСЏ
     """
     try:
-        # 1) Получаем решение стратегии (единый контракт generate -> dict)
+        # 1) РџРѕР»СѓС‡Р°РµРј СЂРµС€РµРЅРёРµ СЃС‚СЂР°С‚РµРіРёРё (РµРґРёРЅС‹Р№ РєРѕРЅС‚СЂР°РєС‚ generate -> dict)
         try:
             decision = await strategy.generate(settings, {"symbol": symbol})
         except Exception:  # noqa: BLE001
@@ -53,7 +53,7 @@ async def eval_and_execute(
         if action not in ("buy", "sell"):
             return EvalResult(decided=False, action="skip", reason=decision.get("reason", "no_action"))
 
-        # 2) Проверка рисков (без публикаций из domain)
+        # 2) РџСЂРѕРІРµСЂРєР° СЂРёСЃРєРѕРІ (Р±РµР· РїСѓР±Р»РёРєР°С†РёР№ РёР· domain)
         ok = True
         why = ""
         try:
@@ -64,7 +64,7 @@ async def eval_and_execute(
             why = "risk_check_exception"
 
         if not ok:
-            # side-effects (события) — обязанность orchestration/use-case уровня, не domain
+            # side-effects (СЃРѕР±С‹С‚РёСЏ) вЂ” РѕР±СЏР·Р°РЅРЅРѕСЃС‚СЊ orchestration/use-case СѓСЂРѕРІРЅСЏ, РЅРµ domain
             try:
                 from crypto_ai_bot.core.application import events_topics as EVT
 
@@ -73,7 +73,7 @@ async def eval_and_execute(
                 _log.error("publish_trade_blocked_failed", extra={"symbol": symbol}, exc_info=True)
             return EvalResult(decided=True, action="skip", reason=why)
 
-        # 3) Исполнение
+        # 3) РСЃРїРѕР»РЅРµРЅРёРµ
         exec_res = await execute_trade(
             symbol=symbol,
             side=action,

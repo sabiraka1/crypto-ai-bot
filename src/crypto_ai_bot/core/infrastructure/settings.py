@@ -156,7 +156,7 @@ class Settings:
     REGIME_BTC_DOM_LIMIT_PCT: float
     REGIME_FOMC_BLOCK_HOURS: int
 
-    # strategy weights (clean defaults; invariant: sum==1.0 Â± eps)
+    # strategy weights (clean defaults; invariant: sum==1.0 Г‚В± eps)
     MTF_W_M15: float
     MTF_W_H1: float
     MTF_W_H4: float
@@ -209,13 +209,13 @@ class Settings:
             RISK_COOLDOWN_SEC=int(_get("RISK_COOLDOWN_SEC", "60")),
             RISK_MAX_SPREAD_PCT=float(
                 _get("RISK_MAX_SPREAD_PCT", "0.30")
-            ),  # 0.30% â€” ĞºĞ¾Ğ½ÑĞµÑ€Ğ²Ğ°Ñ‚Ğ¸Ğ²Ğ½Ñ‹Ğ¹ Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚
+            ),  # 0.30% Гўв‚¬вЂќ ДћВєДћВѕДћВЅГ‘ВЃДћВµГ‘в‚¬ДћВІДћВ°Г‘вЂљДћВёДћВІДћВЅГ‘вЂ№ДћВ№ ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљ
             RISK_MAX_POSITION_BASE=float(_get("RISK_MAX_POSITION_BASE", "0.02")),
             RISK_MAX_ORDERS_PER_HOUR=int(_get("RISK_MAX_ORDERS_PER_HOUR", "6")),
             RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
             FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
             RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
-            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.10")),  # 0.10% Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚
+            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.10")),  # 0.10% ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљ
             # extended risk caps
             RISK_MAX_ORDERS_5M=int(_get("RISK_MAX_ORDERS_5M", "0")),
             RISK_MAX_TURNOVER_5M_QUOTE=float(_get("RISK_MAX_TURNOVER_5M_QUOTE", "0")),
@@ -263,7 +263,7 @@ class Settings:
             REGIME_DXY_LIMIT_PCT=float(_get("REGIME_DXY_LIMIT_PCT", "0.35")),
             REGIME_BTC_DOM_LIMIT_PCT=float(_get("REGIME_BTC_DOM_LIMIT_PCT", "0.60")),
             REGIME_FOMC_BLOCK_HOURS=int(_get("REGIME_FOMC_BLOCK_HOURS", "8")),
-            # strategy weights â€” Ñ‡Ğ¸ÑÑ‚Ñ‹Ğµ Ğ´ĞµÑ„Ğ¾Ğ»Ñ‚Ñ‹ (Ğ¸Ğ½Ğ²Ğ°Ñ€Ğ¸Ğ°Ğ½Ñ‚Ñ‹ Ğ²Ğ°Ğ»Ğ¸Ğ´Ğ¸Ñ€ÑƒĞµĞ¼ Ğ² schema)
+            # strategy weights Гўв‚¬вЂќ Г‘вЂЎДћВёГ‘ВЃГ‘вЂљГ‘вЂ№ДћВµ ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљГ‘вЂ№ (ДћВёДћВЅДћВІДћВ°Г‘в‚¬ДћВёДћВ°ДћВЅГ‘вЂљГ‘вЂ№ ДћВІДћВ°ДћВ»ДћВёДћВґДћВёГ‘в‚¬Г‘Ж’ДћВµДћВј ДћВІ schema)
             MTF_W_M15=float(_get("MTF_W_M15", "0.40")),
             MTF_W_H1=float(_get("MTF_W_H1", "0.25")),
             MTF_W_H4=float(_get("MTF_W_H4", "0.20")),

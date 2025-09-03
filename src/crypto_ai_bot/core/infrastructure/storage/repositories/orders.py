@@ -46,7 +46,7 @@ class OrdersRepository:
     # ---------- public API ----------
 
     def upsert_open(self, order: Any) -> None:
-        """Ğ’ÑÑ‚Ğ°Ğ²Ğ»ÑĞµÑ‚ Ğ¾Ñ‚ĞºÑ€Ñ‹Ñ‚Ñ‹Ğ¹ Ğ¾Ñ€Ğ´ĞµÑ€, ĞµÑĞ»Ğ¸ Ñ‚Ğ°ĞºĞ¾Ğ³Ğ¾ ĞµÑ‰Ñ‘ Ğ½ĞµÑ‚ (Ğ¿Ğ¾ broker_id Ğ¸Ğ»Ğ¸ client_id)."""
+        """ДћвЂ™Г‘ВЃГ‘вЂљДћВ°ДћВІДћВ»Г‘ВЏДћВµГ‘вЂљ ДћВѕГ‘вЂљДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљГ‘вЂ№ДћВ№ ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬, ДћВµГ‘ВЃДћВ»ДћВё Г‘вЂљДћВ°ДћВєДћВѕДћВіДћВѕ ДћВµГ‘вЂ°Г‘вЂ ДћВЅДћВµГ‘вЂљ (ДћВїДћВѕ broker_id ДћВёДћВ»ДћВё client_id)."""
         self.ensure_schema()
         broker_id = getattr(order, "id", None) or getattr(order, "order_id", None)
         client_id = getattr(order, "client_order_id", None)
@@ -70,7 +70,7 @@ class OrdersRepository:
         self.conn.commit()
 
     def list_open(self, symbol: str) -> list[dict[str, Any]]:
-        """ĞÑ‚ĞºÑ€Ñ‹Ñ‚Ñ‹Ğµ (Ğ¸Ğ»Ğ¸ Ñ‡Ğ°ÑÑ‚Ğ¸Ñ‡Ğ½Ğ¾ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ½Ñ‹Ğµ) Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ, ÑÑ‚Ğ°Ñ€Ñ‹Ğµ â†’ Ğ½Ğ¾Ğ²Ñ‹Ğµ."""
+        """ДћВћГ‘вЂљДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљГ‘вЂ№ДћВµ (ДћВёДћВ»ДћВё Г‘вЂЎДћВ°Г‘ВЃГ‘вЂљДћВёГ‘вЂЎДћВЅДћВѕ ДћВёГ‘ВЃДћВїДћВѕДћВ»ДћВЅДћВµДћВЅДћВЅГ‘вЂ№ДћВµ) ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ДћВ° ДћВїДћВѕ Г‘ВЃДћВёДћВјДћВІДћВѕДћВ»Г‘Ж’, Г‘ВЃГ‘вЂљДћВ°Г‘в‚¬Г‘вЂ№ДћВµ ГўвЂ вЂ™ ДћВЅДћВѕДћВІГ‘вЂ№ДћВµ."""
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -100,7 +100,7 @@ class OrdersRepository:
         return result
 
     def update_progress(self, broker_order_id: str, filled: str) -> None:
-        """ĞĞ±Ğ½Ğ¾Ğ²Ğ»ÑĞµÑ‚ filled, Ğ½Ğµ Ğ¼ĞµĞ½ÑÑ ÑÑ‚Ğ°Ñ‚ÑƒÑ."""
+        """ДћВћДћВ±ДћВЅДћВѕДћВІДћВ»Г‘ВЏДћВµГ‘вЂљ filled, ДћВЅДћВµ ДћВјДћВµДћВЅГ‘ВЏГ‘ВЏ Г‘ВЃГ‘вЂљДћВ°Г‘вЂљГ‘Ж’Г‘ВЃ."""
         if not broker_order_id:
             return
         self.ensure_schema()
@@ -112,7 +112,7 @@ class OrdersRepository:
         self.conn.commit()
 
     def mark_closed(self, broker_order_id: str, filled: str) -> None:
-        """ĞŸĞ¾Ğ¼ĞµÑ‡Ğ°ĞµÑ‚ Ğ¾Ñ€Ğ´ĞµÑ€ Ğ·Ğ°ĞºÑ€Ñ‹Ñ‚Ñ‹Ğ¼ Ğ¸ Ñ„Ğ¸ĞºÑĞ¸Ñ€ÑƒĞµÑ‚ Ñ„Ğ¸Ğ½Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ filled."""
+        """ДћЕёДћВѕДћВјДћВµГ‘вЂЎДћВ°ДћВµГ‘вЂљ ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ ДћВ·ДћВ°ДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљГ‘вЂ№ДћВј ДћВё Г‘вЂћДћВёДћВєГ‘ВЃДћВёГ‘в‚¬Г‘Ж’ДћВµГ‘вЂљ Г‘вЂћДћВёДћВЅДћВ°ДћВ»Г‘Е’ДћВЅГ‘вЂ№ДћВ№ filled."""
         if not broker_order_id:
             return
         self.ensure_schema()

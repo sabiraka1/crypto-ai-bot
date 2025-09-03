@@ -6,14 +6,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SpreadCapConfig:
-    max_spread_pct: float = 0.0  # 0 = выключено
+    max_spread_pct: float = 0.0  # 0 = РІС‹РєР»СЋС‡РµРЅРѕ
 
 
 class SpreadCapRule:
     """
-    Проверяем текущий спрэд. Источник даём в виде провайдера:
-      provider(symbol) -> float (процент спрэда), либо None.
-    Если провайдера нет/ошибка — правило молча пропускается.
+    РџСЂРѕРІРµСЂСЏРµРј С‚РµРєСѓС‰РёР№ СЃРїСЂСЌРґ. РСЃС‚РѕС‡РЅРёРє РґР°С‘Рј РІ РІРёРґРµ РїСЂРѕРІР°Р№РґРµСЂР°:
+      provider(symbol) -> float (РїСЂРѕС†РµРЅС‚ СЃРїСЂСЌРґР°), Р»РёР±Рѕ None.
+    Р•СЃР»Рё РїСЂРѕРІР°Р№РґРµСЂР° РЅРµС‚/РѕС€РёР±РєР° вЂ” РїСЂР°РІРёР»Рѕ РјРѕР»С‡Р° РїСЂРѕРїСѓСЃРєР°РµС‚СЃСЏ.
     """
 
     def __init__(self, cfg: SpreadCapConfig, provider: Callable[[str], float] | None = None) -> None:

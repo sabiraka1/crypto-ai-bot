@@ -9,7 +9,7 @@ import sqlite3
 def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(
         db_path, check_same_thread=False, isolation_level=None
-    )  # autocommit; BEGIN Ğ²Ñ€ÑƒÑ‡Ğ½ÑƒÑ
+    )  # autocommit; BEGIN ДћВІГ‘в‚¬Г‘Ж’Г‘вЂЎДћВЅГ‘Ж’Г‘ВЋ
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
@@ -19,8 +19,8 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
-    """BEGIN IMMEDIATE (write txn) + COMMIT/ROLLBACK. Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ ĞºÑƒÑ€ÑĞ¾Ñ€.
-    Ğ˜ÑĞ¿Ğ¾Ğ»ÑŒĞ·ÑƒĞµĞ¼ ÑĞ²Ğ½Ñ‹Ğµ Ñ‚Ñ€Ğ°Ğ½Ğ·Ğ°ĞºÑ†Ğ¸Ğ¸ Ğ´Ğ»Ñ Ğ°Ñ‚Ğ¾Ğ¼Ğ°Ñ€Ğ½Ğ¾ÑÑ‚Ğ¸ Ğ¾Ğ¿ĞµÑ€Ğ°Ñ†Ğ¸Ğ¹ (Ğ½Ğ°Ğ¿Ñ€Ğ¸Ğ¼ĞµÑ€, Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚ÑŒ).
+    """BEGIN IMMEDIATE (write txn) + COMMIT/ROLLBACK. ДћвЂ™ДћВѕДћВ·ДћВІГ‘в‚¬ДћВ°Г‘вЂ°ДћВ°ДћВµГ‘вЂљ ДћВєГ‘Ж’Г‘в‚¬Г‘ВЃДћВѕГ‘в‚¬.
+    ДћЛњГ‘ВЃДћВїДћВѕДћВ»Г‘Е’ДћВ·Г‘Ж’ДћВµДћВј Г‘ВЏДћВІДћВЅГ‘вЂ№ДћВµ Г‘вЂљГ‘в‚¬ДћВ°ДћВЅДћВ·ДћВ°ДћВєГ‘вЂ ДћВёДћВё ДћВґДћВ»Г‘ВЏ ДћВ°Г‘вЂљДћВѕДћВјДћВ°Г‘в‚¬ДћВЅДћВѕГ‘ВЃГ‘вЂљДћВё ДћВѕДћВїДћВµГ‘в‚¬ДћВ°Г‘вЂ ДћВёДћВ№ (ДћВЅДћВ°ДћВїГ‘в‚¬ДћВёДћВјДћВµГ‘в‚¬, ДћВёДћВґДћВµДћВјДћВїДћВѕГ‘вЂљДћВµДћВЅГ‘вЂљДћВЅДћВѕГ‘ВЃГ‘вЂљГ‘Е’).
     """
     cur = conn.cursor()
     cur.execute("BEGIN IMMEDIATE;")

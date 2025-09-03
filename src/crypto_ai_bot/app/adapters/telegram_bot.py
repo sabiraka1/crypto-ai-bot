@@ -67,7 +67,7 @@ class TelegramBotCommands:
         self._cache: dict[tuple[int, str], tuple[float, str]] = {}
         self._recent: dict[int, list[float]] = {}
 
-    # --------------------- Ѹ ---------------------
+    # --------------------- Сё ---------------------
 
     def _allow(self, user_id: int | None) -> bool:
         if not self._allowed:
@@ -145,13 +145,13 @@ class TelegramBotCommands:
             return
         txt = (
             " <b></b>\n"
-            "/help  сс \n"
-            "/symbols  сѿѵ с\n"
-            "/set &lt;SYM&gt;   я ѰѰ\n"
-            "/status [SYM]  сѰс ѺсѰѾѰ\n"
-            "/balance [SYM]  с  Ѷ\n"
-            "/limits  ѵѸ  Ѹс\n"
-            "/risk [SYM]  сѷ Ѿ\n"
+            "/help  СЃСЃ \n"
+            "/symbols  СЃСїСµ СЃ\n"
+            "/set &lt;SYM&gt;   СЏ С°С°\n"
+            "/status [SYM]  СЃС°СЃ СєСЃС°СѕС°\n"
+            "/balance [SYM]  СЃ  С¶\n"
+            "/limits  СµСё  СёСЃ\n"
+            "/risk [SYM]  СЃС· Сѕ\n"
         )
         self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
@@ -165,22 +165,22 @@ class TelegramBotCommands:
         orchs = getattr(self._container, "orchestrators", {}) or {}
         syms = ", ".join(sorted(orchs.keys())) or ""
         cur = self._chat_symbol.get(chat_id, self._default_symbol)
-        txt = f" <b></b>\nсѿ: <code>{html.escape(syms)}</code>\nѸ: <code>{html.escape(cur)}</code>"
+        txt = f" <b></b>\nСЃСї: <code>{html.escape(syms)}</code>\nСё: <code>{html.escape(cur)}</code>"
         self._cache_put(chat_id, key, txt)
         await self._reply(chat_id, txt)
 
     async def _cmd_set(self, chat_id: int, text: str) -> None:
         parts = text.strip().split()
         if len(parts) < 2 or "/" not in parts[1]:
-            await self._reply(chat_id, "сѷ: <code>/set BTC/USDT</code>")
+            await self._reply(chat_id, "СЃС·: <code>/set BTC/USDT</code>")
             return
         sym = canonical(parts[1])
         orchs = getattr(self._container, "orchestrators", {}) or {}
         if sym not in orchs:
-            await self._reply(chat_id, f" ѺсѰѾ я <code>{html.escape(sym)}</code>  ")
+            await self._reply(chat_id, f" СєСЃС°Сѕ СЏ <code>{html.escape(sym)}</code>  ")
             return
         self._chat_symbol[chat_id] = sym
-        await self._reply(chat_id, f" сѰ ѵѸ с: <code>{html.escape(sym)}</code>")
+        await self._reply(chat_id, f" СЃС° СµСё СЃ: <code>{html.escape(sym)}</code>")
 
     async def _cmd_status(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
@@ -189,7 +189,7 @@ class TelegramBotCommands:
             return
         st = orch.status()
         started = "" if st.get("started") else ""
-        paused = "⏸" if st.get("paused") else "️"
+        paused = "вЏё" if st.get("paused") else "пёЏ"
         lines = [f"{started} <b>Status</b> {paused} <code>{html.escape(symbol)}</code>"]
         loops = st.get("loops", {})
         for name, info in loops.items():
@@ -230,7 +230,7 @@ class TelegramBotCommands:
         risk = getattr(self._container, "risk", None)
         cfg = getattr(risk, "config", None)
         if not cfg:
-            await self._reply(chat_id, " RiskConfig сѿ")
+            await self._reply(chat_id, " RiskConfig СЃСї")
             return
         txt = (
             " <b></b>\n"
@@ -243,7 +243,7 @@ class TelegramBotCommands:
         await self._reply(chat_id, txt)
 
     async def _cmd_risk(self, chat_id: int, symbol: str) -> None:
-        parts = [" <b>с (ѵ)</b>"]
+        parts = [" <b>СЃ (Сµ)</b>"]
         st = getattr(self._container, "storage", None)
         cfg = getattr(getattr(self._container, "risk", None), "config", None)
         try:
@@ -272,7 +272,7 @@ class TelegramBotCommands:
     async def _cmd_balance(self, chat_id: int, symbol: str) -> None:
         broker = getattr(self._container, "broker", None)
         if not broker:
-            await self._reply(chat_id, " broker сѿ")
+            await self._reply(chat_id, " broker СЃСї")
             return
         base, quote = _split_symbol(symbol)
         try:
@@ -283,13 +283,13 @@ class TelegramBotCommands:
             quote_free = gv(quote).get("free") or gv(quote).get("total") or "0"
             await self._reply(
                 chat_id,
-                f" <b>с</b> <code>{html.escape(symbol)}</code>\n"
+                f" <b>СЃ</b> <code>{html.escape(symbol)}</code>\n"
                 f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>",
             )
         except Exception:  # noqa: BLE001
-            await self._reply(chat_id, "️ Error while processing your command")
+            await self._reply(chat_id, "пёЏ Error while processing your command")
 
-    # --------------------- ѹ Ѿ run() ---------------------
+    # --------------------- С№ Сѕ run() ---------------------
 
     async def run(self) -> None:
         """Run long-polling against Telegram"""

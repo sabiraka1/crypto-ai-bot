@@ -10,20 +10,20 @@ from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 
 class EmaCrossStrategy(BaseStrategy):
-    """EMA crossover Ñ Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€Ğ°Ğ¼Ğ¸ ÑĞ¿Ñ€ĞµĞ´Ğ°/Ğ²Ğ¾Ğ»Ğ°Ñ‚Ğ¸Ğ»ÑŒĞ½Ğ¾ÑÑ‚Ğ¸.
+    """EMA crossover Г‘ВЃ Г‘вЂћДћВёДћВ»Г‘Е’Г‘вЂљГ‘в‚¬ДћВ°ДћВјДћВё Г‘ВЃДћВїГ‘в‚¬ДћВµДћВґДћВ°/ДћВІДћВѕДћВ»ДћВ°Г‘вЂљДћВёДћВ»Г‘Е’ДћВЅДћВѕГ‘ВЃГ‘вЂљДћВё.
 
-    ĞŸĞ¾ ĞºĞ¾Ğ½Ñ‚Ñ€Ğ°ĞºÑ‚Ñƒ Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ ÑÑ‚Ñ€Ğ¾ĞºÑƒ-Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ ('buy'|'sell'|'hold') Ğ¸ explain.
+    ДћЕёДћВѕ ДћВєДћВѕДћВЅГ‘вЂљГ‘в‚¬ДћВ°ДћВєГ‘вЂљГ‘Ж’ ДћВІДћВѕДћВ·ДћВІГ‘в‚¬ДћВ°Г‘вЂ°ДћВ°ДћВµГ‘вЂљ Г‘ВЃГ‘вЂљГ‘в‚¬ДћВѕДћВєГ‘Ж’-Г‘в‚¬ДћВµГ‘Л†ДћВµДћВЅДћВёДћВµ ('buy'|'sell'|'hold') ДћВё explain.
     """
 
     def __init__(
         self,
         fast_period: int = 9,
         slow_period: int = 21,
-        threshold_pct: float = 0.1,  # 0.1% Ğ´Ğ¸Ğ²ĞµÑ€Ğ³ĞµĞ½Ñ†Ğ¸Ñ fast/slow
-        max_spread_pct: float = 0.5,  # Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€ ÑĞ¿Ñ€ĞµĞ´Ğ°
+        threshold_pct: float = 0.1,  # 0.1% ДћВґДћВёДћВІДћВµГ‘в‚¬ДћВіДћВµДћВЅГ‘вЂ ДћВёГ‘ВЏ fast/slow
+        max_spread_pct: float = 0.5,  # Г‘вЂћДћВёДћВ»Г‘Е’Г‘вЂљГ‘в‚¬ Г‘ВЃДћВїГ‘в‚¬ДћВµДћВґДћВ°
         use_volatility_filter: bool = True,
         max_volatility_pct: float = 10.0,
-        min_volatility_pct: float = 0.0,  # Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ·Ğ°Ğ´Ğ°Ñ‚ÑŒ >0 Ğ´Ğ»Ñ Â«ÑĞ»Ğ¸ÑˆĞºĞ¾Ğ¼ Ğ½Ğ¸Ğ·ĞºĞ°Ñ Ğ²Ğ¾Ğ»Ğ°Â»
+        min_volatility_pct: float = 0.0,  # ДћВјДћВѕДћВ¶ДћВЅДћВѕ ДћВ·ДћВ°ДћВґДћВ°Г‘вЂљГ‘Е’ >0 ДћВґДћВ»Г‘ВЏ Г‚В«Г‘ВЃДћВ»ДћВёГ‘Л†ДћВєДћВѕДћВј ДћВЅДћВёДћВ·ДћВєДћВ°Г‘ВЏ ДћВІДћВѕДћВ»ДћВ°Г‚В»
     ) -> None:
         assert fast_period > 0 and slow_period > 0 and fast_period < slow_period
         self.fast_period = fast_period
@@ -44,12 +44,12 @@ class EmaCrossStrategy(BaseStrategy):
         alpha_s = dec(2) / (dec(self.slow_period) + dec(1))
 
         if self._ema_fast is None or self._ema_slow is None:
-            # Ğ˜Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ñ‡ĞµÑ€ĞµĞ· SMA
+            # ДћЛњДћВЅДћВёГ‘вЂ ДћВёДћВ°ДћВ»ДћВёДћВ·ДћВ°Г‘вЂ ДћВёГ‘ВЏ Г‘вЂЎДћВµГ‘в‚¬ДћВµДћВ· SMA
             if len(self._prices) >= self.slow_period:
                 self._ema_fast = sum(list(self._prices)[-self.fast_period :]) / dec(self.fast_period)
                 self._ema_slow = sum(list(self._prices)[-self.slow_period :]) / dec(self.slow_period)
             else:
-                # Ğ½ĞµĞ´Ğ¾ÑÑ‚Ğ°Ñ‚Ğ¾Ñ‡Ğ½Ğ¾ Ğ¸ÑÑ‚Ğ¾Ñ€Ğ¸Ğ¸ Ğ´Ğ»Ñ SMA Ğ¸Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ğ¸
+                # ДћВЅДћВµДћВґДћВѕГ‘ВЃГ‘вЂљДћВ°Г‘вЂљДћВѕГ‘вЂЎДћВЅДћВѕ ДћВёГ‘ВЃГ‘вЂљДћВѕГ‘в‚¬ДћВёДћВё ДћВґДћВ»Г‘ВЏ SMA ДћВёДћВЅДћВёГ‘вЂ ДћВёДћВ°ДћВ»ДћВёДћВ·ДћВ°Г‘вЂ ДћВёДћВё
                 return
         else:
             self._ema_fast = price * alpha_f + self._ema_fast * (dec(1) - alpha_f)
@@ -82,7 +82,7 @@ class EmaCrossStrategy(BaseStrategy):
             explain["reason"] = "no_price"
             return "hold", explain
 
-        # Ğ˜ÑÑ‚Ğ¾Ñ€Ğ¸Ñ Ğ¸ EMA
+        # ДћЛњГ‘ВЃГ‘вЂљДћВѕГ‘в‚¬ДћВёГ‘ВЏ ДћВё EMA
         self._prices.append(last)
         if len(self._prices) < self.slow_period:
             explain["reason"] = "warming_up"
@@ -100,13 +100,13 @@ class EmaCrossStrategy(BaseStrategy):
             "price": float(last),
         }
 
-        # Ğ¤Ğ¸Ğ»ÑŒÑ‚Ñ€Ñ‹
+        # ДћВ¤ДћВёДћВ»Г‘Е’Г‘вЂљГ‘в‚¬Г‘вЂ№
         ok, why = self._filters_ok(d)
         if not ok:
             explain["reason"] = why
             return "hold", explain
 
-        # Ğ¡Ğ¸Ğ³Ğ½Ğ°Ğ»
+        # ДћВЎДћВёДћВіДћВЅДћВ°ДћВ»
         upper = self._ema_slow * (dec(1) + self.threshold)
         lower = self._ema_slow * (dec(1) - self.threshold)
 
@@ -121,8 +121,8 @@ class EmaCrossStrategy(BaseStrategy):
         return "hold", explain
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        """ĞĞ´Ğ°Ğ¿Ñ‚ĞµÑ€ Ğ´Ğ»Ñ BaseStrategy.generate() - Ğ²Ñ‹Ğ·Ñ‹Ğ²Ğ°ĞµÑ‚ decide() Ğ¸ Ğ¿Ñ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·ÑƒĞµÑ‚ Ñ€ĞµĞ·ÑƒĞ»ÑŒÑ‚Ğ°Ñ‚."""
-        # ĞŸĞ¾Ğ»ÑƒÑ‡Ğ°ĞµĞ¼ Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ Ğ¸Ğ· MarketData ĞµÑĞ»Ğ¸ Ğ¸Ñ… Ğ½ĞµÑ‚ Ğ² ĞºĞ¾Ğ½Ñ‚ĞµĞºÑÑ‚Ğµ
+        """ДћВђДћВґДћВ°ДћВїГ‘вЂљДћВµГ‘в‚¬ ДћВґДћВ»Г‘ВЏ BaseStrategy.generate() - ДћВІГ‘вЂ№ДћВ·Г‘вЂ№ДћВІДћВ°ДћВµГ‘вЂљ decide() ДћВё ДћВїГ‘в‚¬ДћВµДћВѕДћВ±Г‘в‚¬ДћВ°ДћВ·Г‘Ж’ДћВµГ‘вЂљ Г‘в‚¬ДћВµДћВ·Г‘Ж’ДћВ»Г‘Е’Г‘вЂљДћВ°Г‘вЂљ."""
+        # ДћЕёДћВѕДћВ»Г‘Ж’Г‘вЂЎДћВ°ДћВµДћВј ДћВґДћВ°ДћВЅДћВЅГ‘вЂ№ДћВµ ДћВёДћВ· MarketData ДћВµГ‘ВЃДћВ»ДћВё ДћВёГ‘вЂ¦ ДћВЅДћВµГ‘вЂљ ДћВІ ДћВєДћВѕДћВЅГ‘вЂљДћВµДћВєГ‘ВЃГ‘вЂљДћВµ
         if ctx.data is None:
             ticker = await md.get_ticker(ctx.symbol)
             ctx = StrategyContext(symbol=ctx.symbol, settings=ctx.settings, data={"ticker": ticker})
@@ -130,9 +130,9 @@ class EmaCrossStrategy(BaseStrategy):
         action, explain = self.decide(ctx)
         reason = explain.get("reason", "")
 
-        # ĞŸÑ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·ÑƒĞµĞ¼ Ğ² Decision
+        # ДћЕёГ‘в‚¬ДћВµДћВѕДћВ±Г‘в‚¬ДћВ°ДћВ·Г‘Ж’ДћВµДћВј ДћВІ Decision
         return Decision(
             action=action,
-            confidence=0.6,  # ĞœĞ¾Ğ¶Ğ½Ğ¾ Ğ²Ñ‹Ñ‡Ğ¸ÑĞ»ÑÑ‚ÑŒ Ğ½Ğ° Ğ¾ÑĞ½Ğ¾Ğ²Ğµ Ğ¸Ğ½Ğ´Ğ¸ĞºĞ°Ñ‚Ğ¾Ñ€Ğ¾Ğ²
+            confidence=0.6,  # ДћЕ“ДћВѕДћВ¶ДћВЅДћВѕ ДћВІГ‘вЂ№Г‘вЂЎДћВёГ‘ВЃДћВ»Г‘ВЏГ‘вЂљГ‘Е’ ДћВЅДћВ° ДћВѕГ‘ВЃДћВЅДћВѕДћВІДћВµ ДћВёДћВЅДћВґДћВёДћВєДћВ°Г‘вЂљДћВѕГ‘в‚¬ДћВѕДћВІ
             reason=reason,
         )

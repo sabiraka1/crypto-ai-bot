@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
 
-# Порт: только импорт (контракт), реализация — ниже в адаптере
+# РџРѕСЂС‚: С‚РѕР»СЊРєРѕ РёРјРїРѕСЂС‚ (РєРѕРЅС‚СЂР°РєС‚), СЂРµР°Р»РёР·Р°С†РёСЏ вЂ” РЅРёР¶Рµ РІ Р°РґР°РїС‚РµСЂРµ
 from crypto_ai_bot.core.application.ports import BrokerPort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
@@ -16,12 +16,12 @@ _log = get_logger("brokers.paper")
 
 @dataclass
 class PaperBroker:
-    """Симулятор брокера для paper trading."""
+    """РЎРёРјСѓР»СЏС‚РѕСЂ Р±СЂРѕРєРµСЂР° РґР»СЏ paper trading."""
 
     settings: Any
 
     def __post_init__(self) -> None:
-        # Инициализируем атрибуты после создания (оставлено как есть)
+        # РРЅРёС†РёР°Р»РёР·РёСЂСѓРµРј Р°С‚СЂРёР±СѓС‚С‹ РїРѕСЃР»Рµ СЃРѕР·РґР°РЅРёСЏ (РѕСЃС‚Р°РІР»РµРЅРѕ РєР°Рє РµСЃС‚СЊ)
         self._balances: dict[str, Decimal] = {"USDT": dec("10000"), "BTC": dec("0.5")}
         self._positions: dict[str, Decimal] = {}
         self._orders: dict[str, Any] = {}
@@ -29,9 +29,9 @@ class PaperBroker:
         self.exchange = getattr(self.settings, "EXCHANGE", "paper") if self.settings else "paper"
 
     async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
-        """Возвращает фиктивный ticker."""
+        """Р’РѕР·РІСЂР°С‰Р°РµС‚ С„РёРєС‚РёРІРЅС‹Р№ ticker."""
         price = self._last_prices[symbol]
-        spread = price * dec("0.0002")  # 0.02% спред
+        spread = price * dec("0.0002")  # 0.02% СЃРїСЂРµРґ
         return {
             "symbol": symbol,
             "bid": str(price - spread),
@@ -41,19 +41,19 @@ class PaperBroker:
         }
 
     async def fetch_balance(self, symbol: str = "") -> dict[str, Any]:
-        """Возвращает фиктивный баланс."""
+        """Р’РѕР·РІСЂР°С‰Р°РµС‚ С„РёРєС‚РёРІРЅС‹Р№ Р±Р°Р»Р°РЅСЃ."""
         result = {}
         for asset, amount in self._balances.items():
             result[asset] = {"free": str(amount), "used": "0", "total": str(amount)}
         return result
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[list[float]]:
-        """Возвращает фиктивные OHLCV данные."""
+        """Р’РѕР·РІСЂР°С‰Р°РµС‚ С„РёРєС‚РёРІРЅС‹Рµ OHLCV РґР°РЅРЅС‹Рµ."""
         price = float(self._last_prices[symbol])
         ohlcv: list[list[float]] = []
         ts = now_ms()
         for i in range(limit):
-            # Симулируем небольшие колебания цены
+            # РЎРёРјСѓР»РёСЂСѓРµРј РЅРµР±РѕР»СЊС€РёРµ РєРѕР»РµР±Р°РЅРёСЏ С†РµРЅС‹
             variation = 0.995 + (i % 10) * 0.001
             p = price * variation
             ohlcv.append(
@@ -74,12 +74,12 @@ class PaperBroker:
         quote_amount: Decimal,
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
-        """Симулирует покупку (как было)."""
+        """РЎРёРјСѓР»РёСЂСѓРµС‚ РїРѕРєСѓРїРєСѓ (РєР°Рє Р±С‹Р»Рѕ)."""
         price = self._last_prices[symbol]
         amount = quote_amount / price
         fee = quote_amount * dec("0.001")
 
-        # Обновляем балансы
+        # РћР±РЅРѕРІР»СЏРµРј Р±Р°Р»Р°РЅСЃС‹
         base, quote = symbol.split("/")
         if quote in self._balances:
             self._balances[quote] -= quote_amount + fee
@@ -90,7 +90,7 @@ class PaperBroker:
         order = {
             "id": f"paper_{client_order_id or now_ms()}",
             "clientOrderId": client_order_id,
-            "client_order_id": client_order_id,  # для совместимости
+            "client_order_id": client_order_id,  # РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
             "symbol": symbol,
             "side": "buy",
             "type": "market",
@@ -115,12 +115,12 @@ class PaperBroker:
         base_amount: Decimal,
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
-        """Симулирует продажу (как было)."""
+        """РЎРёРјСѓР»РёСЂСѓРµС‚ РїСЂРѕРґР°Р¶Сѓ (РєР°Рє Р±С‹Р»Рѕ)."""
         price = self._last_prices[symbol]
         cost = base_amount * price
         fee = cost * dec("0.001")
 
-        # Обновляем балансы
+        # РћР±РЅРѕРІР»СЏРµРј Р±Р°Р»Р°РЅСЃС‹
         base, quote = symbol.split("/")
         if base in self._balances:
             self._balances[base] -= base_amount
@@ -131,7 +131,7 @@ class PaperBroker:
         order = {
             "id": f"paper_{client_order_id or now_ms()}",
             "clientOrderId": client_order_id,
-            "client_order_id": client_order_id,  # для совместимости
+            "client_order_id": client_order_id,  # РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё
             "symbol": symbol,
             "side": "sell",
             "type": "market",
@@ -151,7 +151,7 @@ class PaperBroker:
         return order
 
     async def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
-        """Получить ордер по ID."""
+        """РџРѕР»СѓС‡РёС‚СЊ РѕСЂРґРµСЂ РїРѕ ID."""
         default_order: dict[str, Any] = {
             "id": order_id,
             "symbol": symbol,
@@ -163,21 +163,21 @@ class PaperBroker:
         return result
 
     async def fetch_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
-        """В paper режиме все ордера сразу исполняются, поэтому открытых нет."""
+        """Р’ paper СЂРµР¶РёРјРµ РІСЃРµ РѕСЂРґРµСЂР° СЃСЂР°Р·Сѓ РёСЃРїРѕР»РЅСЏСЋС‚СЃСЏ, РїРѕСЌС‚РѕРјСѓ РѕС‚РєСЂС‹С‚С‹С… РЅРµС‚."""
         return []
 
     async def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
-        """В paper режиме нечего отменять."""
+        """Р’ paper СЂРµР¶РёРјРµ РЅРµС‡РµРіРѕ РѕС‚РјРµРЅСЏС‚СЊ."""
         return {"id": order_id, "status": "canceled"}
 
 
 # -------------------------------
-# ТОНКИЙ ПОРТ-АДАПТЕР (без смены логики)
+# РўРћРќРљРР™ РџРћР Рў-РђР”РђРџРўР•Р  (Р±РµР· СЃРјРµРЅС‹ Р»РѕРіРёРєРё)
 # -------------------------------
 class PaperBrokerPortAdapter(BrokerPort):
     """
-    Реализация BrokerPort поверх текущего PaperBroker.
-    Ничего в логике не меняем — только «переводим» вызовы в существующие методы.
+    Р РµР°Р»РёР·Р°С†РёСЏ BrokerPort РїРѕРІРµСЂС… С‚РµРєСѓС‰РµРіРѕ PaperBroker.
+    РќРёС‡РµРіРѕ РІ Р»РѕРіРёРєРµ РЅРµ РјРµРЅСЏРµРј вЂ” С‚РѕР»СЊРєРѕ В«РїРµСЂРµРІРѕРґРёРјВ» РІС‹Р·РѕРІС‹ РІ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ РјРµС‚РѕРґС‹.
     """
 
     def __init__(self, core: PaperBroker) -> None:
@@ -192,15 +192,15 @@ class PaperBrokerPortAdapter(BrokerPort):
         time_in_force: str = "GTC",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        # BUY: есть прямой метод «покупка на сумму quote»
+        # BUY: РµСЃС‚СЊ РїСЂСЏРјРѕР№ РјРµС‚РѕРґ В«РїРѕРєСѓРїРєР° РЅР° СЃСѓРјРјСѓ quoteВ»
         if side == "buy":
             return await self._core.create_market_buy_quote(
                 symbol=symbol,
                 quote_amount=quote_amount,
                 client_order_id=idempotency_key,
             )
-        # SELL: у core метод «продажа base». Пересчитываем base = quote/price (по текущей last).
-        # Это ровно та же формула, что уже используется в create_market_buy_quote.
+        # SELL: Сѓ core РјРµС‚РѕРґ В«РїСЂРѕРґР°Р¶Р° baseВ». РџРµСЂРµСЃС‡РёС‚С‹РІР°РµРј base = quote/price (РїРѕ С‚РµРєСѓС‰РµР№ last).
+        # Р­С‚Рѕ СЂРѕРІРЅРѕ С‚Р° Р¶Рµ С„РѕСЂРјСѓР»Р°, С‡С‚Рѕ СѓР¶Рµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ create_market_buy_quote.
         ticker = await self._core.fetch_ticker(symbol)
         price = dec(ticker["last"])
         if price <= 0:

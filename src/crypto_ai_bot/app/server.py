@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.core.application import (
-    events_topics as EVT,  # noqa: N812  # нужен в /health и alertmanager/webhook
+    events_topics as EVT,  # noqa: N812  # РЅСѓР¶РµРЅ РІ /health Рё alertmanager/webhook
 )
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         try:
             bus = getattr(_container, "bus", None)
-            # безопасный shutdown шины: сначала stop(), если нет — close()
+            # Р±РµР·РѕРїР°СЃРЅС‹Р№ shutdown С€РёРЅС‹: СЃРЅР°С‡Р°Р»Р° stop(), РµСЃР»Рё РЅРµС‚ вЂ” close()
             if bus and hasattr(bus, "stop"):
                 await bus.stop()
             elif bus and hasattr(bus, "close"):
@@ -168,9 +168,9 @@ async def _call_with_timeout(coro, *, timeout: float = 2.5):  # noqa: ASYNC109
 @router.get("/health")
 async def health() -> JSONResponse:
     """
-    Детальная проверка health: DB, EventBus, Broker (с таймаутами).
-    Быстрый путь — в memory-only. Публикуем событие в шину.
-    Возвращаем также удобные поля (default_symbol, symbols) для интерфейса.
+    Р”РµС‚Р°Р»СЊРЅР°СЏ РїСЂРѕРІРµСЂРєР° health: DB, EventBus, Broker (СЃ С‚Р°Р№РјР°СѓС‚Р°РјРё).
+    Р‘С‹СЃС‚СЂС‹Р№ РїСѓС‚СЊ вЂ” РІ memory-only. РџСѓР±Р»РёРєСѓРµРј СЃРѕР±С‹С‚РёРµ РІ С€РёРЅСѓ.
+    Р’РѕР·РІСЂР°С‰Р°РµРј С‚Р°РєР¶Рµ СѓРґРѕР±РЅС‹Рµ РїРѕР»СЏ (default_symbol, symbols) РґР»СЏ РёРЅС‚РµСЂС„РµР№СЃР°.
     """
     ok = True
     details: dict[str, Any] = {"ts_ms": now_ms()}
@@ -210,7 +210,7 @@ async def health() -> JSONResponse:
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
-    # Broker check (облегчённый)
+    # Broker check (РѕР±Р»РµРіС‡С‘РЅРЅС‹Р№)
     try:
         if broker and hasattr(broker, "get_balance"):
             await _call_with_timeout(broker.get_balance(), timeout=2.0)
@@ -221,7 +221,7 @@ async def health() -> JSONResponse:
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
-    # публикация события в шину (для наблюдаемости/Telegram)
+    # РїСѓР±Р»РёРєР°С†РёСЏ СЃРѕР±С‹С‚РёСЏ РІ С€РёРЅСѓ (РґР»СЏ РЅР°Р±Р»СЋРґР°РµРјРѕСЃС‚Рё/Telegram)
     if bus and hasattr(bus, "publish"):
         try:
             await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
@@ -235,8 +235,8 @@ async def health() -> JSONResponse:
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     """
-    Webhook от Alertmanager -> перенаправляем в EventBus на EVT.ALERTS_ALERTMANAGER.
-    Нужен для телеграм-алёртов и общего мониторинга.
+    Webhook РѕС‚ Alertmanager -> РїРµСЂРµРЅР°РїСЂР°РІР»СЏРµРј РІ EventBus РЅР° EVT.ALERTS_ALERTMANAGER.
+    РќСѓР¶РµРЅ РґР»СЏ С‚РµР»РµРіСЂР°Рј-Р°Р»С‘СЂС‚РѕРІ Рё РѕР±С‰РµРіРѕ РјРѕРЅРёС‚РѕСЂРёРЅРіР°.
     """
     try:
         c = _ctx_or_500()
@@ -332,9 +332,9 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
     """
-    ЕДИНЫЙ источник истины — репозиторий трейдов:
+    Р•Р”РРќР«Р™ РёСЃС‚РѕС‡РЅРёРє РёСЃС‚РёРЅС‹ вЂ” СЂРµРїРѕР·РёС‚РѕСЂРёР№ С‚СЂРµР№РґРѕРІ:
     daily_pnl_quote / daily_turnover_quote / count_orders_today.
-    Без запасных обходов.
+    Р‘РµР· Р·Р°РїР°СЃРЅС‹С… РѕР±С…РѕРґРѕРІ.
     """
     c = _ctx_or_500()
     try:
@@ -389,7 +389,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> JSONResponse:
-    """Webhook endpoint Telegram-бота (можно использовать вместо polling)."""
+    """Webhook endpoint Telegram-Р±РѕС‚Р° (РјРѕР¶РЅРѕ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ РІРјРµСЃС‚Рѕ polling)."""
     try:
         _ = await request.body()
         data = await request.json()
@@ -404,7 +404,7 @@ async def telegram_webhook(request: Request) -> JSONResponse:
                 return JSONResponse({"ok": False}, status_code=401)
 
         _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
-        # если нужно — передать в tg_bot.process_webhook_update(data)
+        # РµСЃР»Рё РЅСѓР¶РЅРѕ вЂ” РїРµСЂРµРґР°С‚СЊ РІ tg_bot.process_webhook_update(data)
         return JSONResponse({"ok": True})
     except Exception:  # noqa: BLE001
         _log.error("telegram_webhook_error", exc_info=True)

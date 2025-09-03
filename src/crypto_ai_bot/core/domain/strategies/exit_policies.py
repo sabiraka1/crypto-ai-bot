@@ -16,7 +16,7 @@ class ExitPlan:
 
 
 def make_fixed_sl_tp(*, entry_price: Decimal, sl_pct: float, tp_pct: float | None = None) -> ExitPlan:
-    """Фиксированный SL/TP в процентах от входа."""
+    """Р¤РёРєСЃРёСЂРѕРІР°РЅРЅС‹Р№ SL/TP РІ РїСЂРѕС†РµРЅС‚Р°С… РѕС‚ РІС…РѕРґР°."""
     e = dec(str(entry_price))
     sl = e * (dec("1") - dec(str(sl_pct)) / dec("100"))
     tp = None
@@ -26,19 +26,19 @@ def make_fixed_sl_tp(*, entry_price: Decimal, sl_pct: float, tp_pct: float | Non
 
 
 def update_trailing_stop(plan: ExitPlan, last: Decimal) -> ExitPlan:
-    """Обновляет trailing stop при росте цены."""
+    """РћР±РЅРѕРІР»СЏРµС‚ trailing stop РїСЂРё СЂРѕСЃС‚Рµ С†РµРЅС‹."""
     if plan.trailing_pct is None:
         return plan
     if plan.trail_max_price is None or last > plan.trail_max_price:
         plan.trail_max_price = last
-        # SL подтягиваем вверх на trailing_pct
+        # SL РїРѕРґС‚СЏРіРёРІР°РµРј РІРІРµСЂС… РЅР° trailing_pct
         trail = dec(str(plan.trailing_pct)) / dec("100")
         plan.sl_price = last * (dec("1") - trail)
     return plan
 
 
 def should_exit(plan: ExitPlan, last: Decimal) -> str:
-    """Возврат: 'sl' | 'tp' | 'hold'."""
+    """Р’РѕР·РІСЂР°С‚: 'sl' | 'tp' | 'hold'."""
     if plan.sl_price is not None and last <= plan.sl_price:
         return "sl"
     if plan.tp_price is not None and last >= plan.tp_price:
@@ -46,9 +46,9 @@ def should_exit(plan: ExitPlan, last: Decimal) -> str:
     return "hold"
 
 
-# Классы-обертки для совместимости с __init__.py и другими модулями
+# РљР»Р°СЃСЃС‹-РѕР±РµСЂС‚РєРё РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃ __init__.py Рё РґСЂСѓРіРёРјРё РјРѕРґСѓР»СЏРјРё
 class StopLossPolicy:
-    """Политика стоп-лосса."""
+    """РџРѕР»РёС‚РёРєР° СЃС‚РѕРї-Р»РѕСЃСЃР°."""
 
     def __init__(self, sl_pct: float = 2.0):
         self.sl_pct = sl_pct
@@ -61,7 +61,7 @@ class StopLossPolicy:
 
 
 class TakeProfitPolicy:
-    """Политика тейк-профита."""
+    """РџРѕР»РёС‚РёРєР° С‚РµР№Рє-РїСЂРѕС„РёС‚Р°."""
 
     def __init__(self, tp_pct: float = 5.0):
         self.tp_pct = tp_pct
@@ -74,7 +74,7 @@ class TakeProfitPolicy:
 
 
 class TrailingStopPolicy:
-    """Политика трейлинг-стопа."""
+    """РџРѕР»РёС‚РёРєР° С‚СЂРµР№Р»РёРЅРі-СЃС‚РѕРїР°."""
 
     def __init__(self, trailing_pct: float = 3.0):
         self.trailing_pct = trailing_pct

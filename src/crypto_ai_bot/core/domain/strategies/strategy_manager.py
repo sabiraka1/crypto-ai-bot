@@ -6,7 +6,7 @@ from crypto_ai_bot.core.domain.strategies.base import BaseStrategy, Decision, Ma
 from crypto_ai_bot.core.domain.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
 from crypto_ai_bot.utils.decimal import dec
 
-# РЎРѕР·РґР°РµРј Р°Р»РёР°СЃС‹ РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃРѕ СЃС‚Р°СЂС‹Рј РєРѕРґРѕРј
+# Р РЋР С•Р В·Р Т‘Р В°Р ВµР С Р В°Р В»Р С‘Р В°РЎРѓРЎвЂ№ Р Т‘Р В»РЎРЏ РЎРѓР С•Р Р†Р СР ВµРЎРѓРЎвЂљР С‘Р СР С•РЎРѓРЎвЂљР С‘ РЎРѓР С• РЎРѓРЎвЂљР В°РЎР‚РЎвЂ№Р С Р С”Р С•Р Т‘Р С•Р С
 MarketData = MarketData
 StrategyPort = BaseStrategy
 Signal = Decision
@@ -14,9 +14,9 @@ Signal = Decision
 
 class StrategyManager:
     """
-    РђРіСЂРµРіР°С‚РѕСЂ СЃС‚СЂР°С‚РµРіРёР№.
-    РќР° РїРµСЂРІРѕРј СЌС‚Р°РїРµ вЂ” РѕРґРёРЅ СЃРёРіРЅР°Р» (EMA+ATR). РџРѕР·Р¶Рµ РјРѕР¶РЅРѕ РґРѕР±Р°РІР»СЏС‚СЊ РґСЂСѓРіРёРµ
-    Рё Р°РіСЂРµРіРёСЂРѕРІР°С‚СЊ (РІР·РІРµС€РёРІР°РЅРёРµ/РїСЂРёРѕСЂРёС‚РµС‚С‹).
+    Р С’Р С–РЎР‚Р ВµР С–Р В°РЎвЂљР С•РЎР‚ РЎРѓРЎвЂљРЎР‚Р В°РЎвЂљР ВµР С–Р С‘Р в„–.
+    Р СњР В° Р С—Р ВµРЎР‚Р Р†Р С•Р С РЎРЊРЎвЂљР В°Р С—Р Вµ РІР‚вЂќ Р С•Р Т‘Р С‘Р Р… РЎРѓР С‘Р С–Р Р…Р В°Р В» (EMA+ATR). Р СџР С•Р В·Р В¶Р Вµ Р СР С•Р В¶Р Р…Р С• Р Т‘Р С•Р В±Р В°Р Р†Р В»РЎРЏРЎвЂљРЎРЉ Р Т‘РЎР‚РЎС“Р С–Р С‘Р Вµ
+    Р С‘ Р В°Р С–РЎР‚Р ВµР С–Р С‘РЎР‚Р С•Р Р†Р В°РЎвЂљРЎРЉ (Р Р†Р В·Р Р†Р ВµРЎв‚¬Р С‘Р Р†Р В°Р Р…Р С‘Р Вµ/Р С—РЎР‚Р С‘Р С•РЎР‚Р С‘РЎвЂљР ВµРЎвЂљРЎвЂ№).
     """
 
     def __init__(self, *, md: MarketData, settings: Any) -> None:
@@ -43,7 +43,7 @@ class StrategyManager:
     async def decide(self, symbol: str) -> Signal:
         if not self._strategies:
             return Signal(action="hold", reason="no_strategies")
-        # РџСЂРѕСЃС‚РѕР№ РїСЂРёРѕСЂРёС‚РµС‚: РїРµСЂРІР°СЏ, РґР°РІС€Р°СЏ directional-СЃРёРіРЅР°Р»
+        # Р СџРЎР‚Р С•РЎРѓРЎвЂљР С•Р в„– Р С—РЎР‚Р С‘Р С•РЎР‚Р С‘РЎвЂљР ВµРЎвЂљ: Р С—Р ВµРЎР‚Р Р†Р В°РЎРЏ, Р Т‘Р В°Р Р†РЎв‚¬Р В°РЎРЏ directional-РЎРѓР С‘Р С–Р Р…Р В°Р В»
         for strat in self._strategies:
             from crypto_ai_bot.core.domain.strategies.base import StrategyContext
 

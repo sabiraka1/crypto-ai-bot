@@ -82,7 +82,7 @@ class Orchestrator:
         }
 
     # ---------------------------
-    # Публичное API
+    # РџСѓР±Р»РёС‡РЅРѕРµ API
     # ---------------------------
     async def start(self) -> None:
         if self._started:
@@ -151,7 +151,7 @@ class Orchestrator:
         }
 
     # ---------------------------
-    # Внутреннее: единый раннер цикла
+    # Р’РЅСѓС‚СЂРµРЅРЅРµРµ: РµРґРёРЅС‹Р№ СЂР°РЅРЅРµСЂ С†РёРєР»Р°
     # ---------------------------
     async def _loop_runner(self, spec: LoopSpec) -> None:
         loop = asyncio.get_event_loop()
@@ -160,7 +160,7 @@ class Orchestrator:
                 await asyncio.sleep(spec.interval_sec)
                 continue
             try:
-                with cid_context():  # ← генерируем CID на каждую итерацию
+                with cid_context():  # в†ђ РіРµРЅРµСЂРёСЂСѓРµРј CID РЅР° РєР°Р¶РґСѓСЋ РёС‚РµСЂР°С†РёСЋ
                     t0 = loop.time()
                     await spec.runner()
                     dt_ms = (loop.time() - t0) * 1000.0
@@ -175,7 +175,7 @@ class Orchestrator:
             await asyncio.sleep(max(0.001, spec.interval_sec))
 
     # ---------------------------
-    # Конкретные циклы
+    # РљРѕРЅРєСЂРµС‚РЅС‹Рµ С†РёРєР»С‹
     # ---------------------------
     async def _eval_loop(self) -> None:
         try:
@@ -229,7 +229,7 @@ class Orchestrator:
             raise
 
     # ---------------------------
-    # ЕДИНОРАЗОВЫЙ БИЗНЕС-ШАГ (evaluate → risk → execute → protective_exits → reconcile → watchdog [+ settlement])
+    # Р•Р”РРќРћР РђР—РћР’Р«Р™ Р‘РР—РќР•РЎ-РЁРђР“ (evaluate в†’ risk в†’ execute в†’ protective_exits в†’ reconcile в†’ watchdog [+ settlement])
     # ---------------------------
     async def run_once(self) -> dict[str, Any]:
         loop = asyncio.get_event_loop()

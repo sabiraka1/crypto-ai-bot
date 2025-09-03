@@ -7,7 +7,7 @@ from typing import Any
 
 class CircuitBreaker:
     """
-    ĞŸÑ€Ğ¾ÑÑ‚Ğ¾Ğ¹ async circuit breaker: closed -> open (Ğ½Ğ° timeout) -> half-open (1 Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚ĞºĞ°) -> closed
+    ДћЕёГ‘в‚¬ДћВѕГ‘ВЃГ‘вЂљДћВѕДћВ№ async circuit breaker: closed -> open (ДћВЅДћВ° timeout) -> half-open (1 ДћВїДћВѕДћВїГ‘вЂ№Г‘вЂљДћВєДћВ°) -> closed
     """
 
     def __init__(self, *, name: str = "cb", failure_threshold: int = 5, reset_timeout_sec: float = 10.0):
@@ -27,7 +27,7 @@ class CircuitBreaker:
                     self._failures = 0
                 else:
                     raise RuntimeError(f"{self.name}: open")
-            # closed or half-open â€” Ñ€Ğ°Ğ·Ñ€ĞµÑˆĞ°ĞµĞ¼ Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚ĞºÑƒ
+            # closed or half-open Гўв‚¬вЂќ Г‘в‚¬ДћВ°ДћВ·Г‘в‚¬ДћВµГ‘Л†ДћВ°ДћВµДћВј ДћВїДћВѕДћВїГ‘вЂ№Г‘вЂљДћВєГ‘Ж’
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool | None:
         async with self._lock:
@@ -41,4 +41,4 @@ class CircuitBreaker:
                     self._state = "open"
                     self._opened_at = time.time()
                 return False
-        return None  # Ğ”Ğ¾Ğ±Ğ°Ğ²Ğ»ĞµĞ½ return Ğ´Ğ»Ñ ÑƒÑĞ¿ĞµÑˆĞ½Ğ¾Ğ³Ğ¾ Ğ¿ÑƒÑ‚Ğ¸
+        return None  # ДћвЂќДћВѕДћВ±ДћВ°ДћВІДћВ»ДћВµДћВЅ return ДћВґДћВ»Г‘ВЏ Г‘Ж’Г‘ВЃДћВїДћВµГ‘Л†ДћВЅДћВѕДћВіДћВѕ ДћВїГ‘Ж’Г‘вЂљДћВё

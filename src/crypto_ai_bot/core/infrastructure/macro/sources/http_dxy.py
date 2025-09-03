@@ -12,8 +12,8 @@ _log = get_logger("macro.dxy_http")
 
 class DxyHttp(DxyPort):
     """
-    HTTP-источник индекса DXY.
-    Ожидаемый JSON: {"change_pct": 0.37}
+    HTTP-РёСЃС‚РѕС‡РЅРёРє РёРЅРґРµРєСЃР° DXY.
+    РћР¶РёРґР°РµРјС‹Р№ JSON: {"change_pct": 0.37}
     """
 
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:

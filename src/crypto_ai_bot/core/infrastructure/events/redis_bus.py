@@ -18,10 +18,10 @@ _log = get_logger("events.redis")
 
 class RedisEventBus:
     """
-    Асинхронная шина на Redis Pub/Sub.
+    РђСЃРёРЅС…СЂРѕРЅРЅР°СЏ С€РёРЅР° РЅР° Redis Pub/Sub.
     publish(topic: str, payload: dict) -> None
     on(topic: str, handler: Callable[[dict], Awaitable[None]]) -> None
-    start()/close() — управление жизненным циклом подписки.
+    start()/close() вЂ” СѓРїСЂР°РІР»РµРЅРёРµ Р¶РёР·РЅРµРЅРЅС‹Рј С†РёРєР»РѕРј РїРѕРґРїРёСЃРєРё.
     """
 
     def __init__(self, url: str, *, ping_interval_sec: float = 30.0) -> None:
@@ -74,7 +74,7 @@ class RedisEventBus:
         if not isinstance(payload, dict):
             raise TypeError("payload must be dict")
         if not self._r:
-            # позволяем publish до start(): лениво инициализируем клиент
+            # РїРѕР·РІРѕР»СЏРµРј publish РґРѕ start(): Р»РµРЅРёРІРѕ РёРЅРёС†РёР°Р»РёР·РёСЂСѓРµРј РєР»РёРµРЅС‚
             self._r = Redis.from_url(self._url, encoding="utf-8", decode_responses=True)
         msg = {"key": key, "payload": payload}
         data = json.dumps(msg, ensure_ascii=False)
@@ -87,7 +87,7 @@ class RedisEventBus:
     def on(self, topic: str, handler: Handler) -> None:
         self._handlers[topic].append(handler)
         self._topics.add(topic)
-        # если уже запущены — подписываемся немедленно
+        # РµСЃР»Рё СѓР¶Рµ Р·Р°РїСѓС‰РµРЅС‹ вЂ” РїРѕРґРїРёСЃС‹РІР°РµРјСЃСЏ РЅРµРјРµРґР»РµРЅРЅРѕ
         if self._started and self._ps:
             asyncio.create_task(self._ps.subscribe(topic))
 
@@ -96,7 +96,7 @@ class RedisEventBus:
         last_ping = 0.0
         try:
             while True:
-                # ping каждые N сек, чтобы поддерживать соединение
+                # ping РєР°Р¶РґС‹Рµ N СЃРµРє, С‡С‚РѕР±С‹ РїРѕРґРґРµСЂР¶РёРІР°С‚СЊ СЃРѕРµРґРёРЅРµРЅРёРµ
                 if self._r and (self._ping_interval > 0):
                     now = asyncio.get_event_loop().time()
                     if now - last_ping > self._ping_interval:

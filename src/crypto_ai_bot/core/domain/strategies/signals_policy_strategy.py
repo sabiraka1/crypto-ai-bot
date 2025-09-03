@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
-# ĞŸĞ¾Ğ´ÑĞ¸ÑÑ‚ĞµĞ¼Ğ° signals (Ğ³Ğ¾Ñ‚Ğ¾Ğ²Ğ°Ñ, Ğ½Ğ¾ Ñ€Ğ°Ğ½ĞµĞµ Ğ½Ğµ Ğ²ĞºĞ»ÑÑ‡Ñ‘Ğ½Ğ½Ğ°Ñ Ğ² Ñ€Ğ°Ğ½Ñ‚Ğ°Ğ¹Ğ¼)
+# ДћЕёДћВѕДћВґГ‘ВЃДћВёГ‘ВЃГ‘вЂљДћВµДћВјДћВ° signals (ДћВіДћВѕГ‘вЂљДћВѕДћВІДћВ°Г‘ВЏ, ДћВЅДћВѕ Г‘в‚¬ДћВ°ДћВЅДћВµДћВµ ДћВЅДћВµ ДћВІДћВєДћВ»Г‘ВЋГ‘вЂЎГ‘вЂДћВЅДћВЅДћВ°Г‘ВЏ ДћВІ Г‘в‚¬ДћВ°ДћВЅГ‘вЂљДћВ°ДћВ№ДћВј)
 if TYPE_CHECKING:
     from crypto_ai_bot.core.domain.signals._build import build_signals
     from crypto_ai_bot.core.domain.signals._fusion import fuse_signals
@@ -22,23 +22,23 @@ else:
 
 class SignalsPolicyStrategy(BaseStrategy):
     """
-    ĞĞ´Ğ°Ğ¿Ñ‚ĞµÑ€, ĞºĞ¾Ñ‚Ğ¾Ñ€Ñ‹Ğ¹:
-      1) ÑÑ‚Ñ€Ğ¾Ğ¸Ñ‚ ÑĞ¿Ğ¸ÑĞ¾Ğº ÑĞ¸Ğ³Ğ½Ğ°Ğ»Ğ¾Ğ² Ğ¸Ğ· MarketData (build_signals)
-      2) Ğ°Ğ³Ñ€ĞµĞ³Ğ¸Ñ€ÑƒĞµÑ‚ Ğ¸Ñ… (fuse_signals)
-      3) Ğ¿Ñ€Ğ¸Ğ½Ğ¸Ğ¼Ğ°ĞµÑ‚ Ñ€ĞµÑˆĞµĞ½Ğ¸Ğµ Ğ¿Ğ¾ Ğ·Ğ°Ğ´Ğ°Ğ½Ğ½Ğ¾Ğ¹ Ğ¿Ğ¾Ğ»Ğ¸Ñ‚Ğ¸ĞºĞµ (SignalsPolicy)
+    ДћВђДћВґДћВ°ДћВїГ‘вЂљДћВµГ‘в‚¬, ДћВєДћВѕГ‘вЂљДћВѕГ‘в‚¬Г‘вЂ№ДћВ№:
+      1) Г‘ВЃГ‘вЂљГ‘в‚¬ДћВѕДћВёГ‘вЂљ Г‘ВЃДћВїДћВёГ‘ВЃДћВѕДћВє Г‘ВЃДћВёДћВіДћВЅДћВ°ДћВ»ДћВѕДћВІ ДћВёДћВ· MarketData (build_signals)
+      2) ДћВ°ДћВіГ‘в‚¬ДћВµДћВіДћВёГ‘в‚¬Г‘Ж’ДћВµГ‘вЂљ ДћВёГ‘вЂ¦ (fuse_signals)
+      3) ДћВїГ‘в‚¬ДћВёДћВЅДћВёДћВјДћВ°ДћВµГ‘вЂљ Г‘в‚¬ДћВµГ‘Л†ДћВµДћВЅДћВёДћВµ ДћВїДћВѕ ДћВ·ДћВ°ДћВґДћВ°ДћВЅДћВЅДћВѕДћВ№ ДћВїДћВѕДћВ»ДћВёГ‘вЂљДћВёДћВєДћВµ (SignalsPolicy)
     """
 
     def __init__(self, *, policy: str = "conservative") -> None:
         self.policy_name = policy
-        self.score = 1.0  # Ğ´Ğ»Ñ weighted-Ñ€ĞµĞ¶Ğ¸Ğ¼Ğ° Ğ¼ĞµĞ½ĞµĞ´Ğ¶ĞµÑ€Ğ°
+        self.score = 1.0  # ДћВґДћВ»Г‘ВЏ weighted-Г‘в‚¬ДћВµДћВ¶ДћВёДћВјДћВ° ДћВјДћВµДћВЅДћВµДћВґДћВ¶ДћВµГ‘в‚¬ДћВ°
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        # ĞŸÑ€Ğ¾Ğ²ĞµÑ€ÑĞµĞ¼ Ñ‡Ñ‚Ğ¾ Ğ¼Ğ¾Ğ´ÑƒĞ»Ğ¸ Ğ±Ñ‹Ğ»Ğ¸ Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ñ‹
+        # ДћЕёГ‘в‚¬ДћВѕДћВІДћВµГ‘в‚¬Г‘ВЏДћВµДћВј Г‘вЂЎГ‘вЂљДћВѕ ДћВјДћВѕДћВґГ‘Ж’ДћВ»ДћВё ДћВ±Г‘вЂ№ДћВ»ДћВё ДћВёДћВјДћВїДћВѕГ‘в‚¬Г‘вЂљДћВёГ‘в‚¬ДћВѕДћВІДћВ°ДћВЅГ‘вЂ№
         if SignalsPolicy is None or fuse_signals is None or build_signals is None:
             return Decision(action="hold", reason="signals_subsystem_unavailable")
 
-        # Ğ£Ğ¿Ñ€Ğ¾Ñ‰ĞµĞ½Ğ½Ğ°Ñ Ñ€ĞµĞ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ğ±ĞµĞ· build_signals (Ñ‚Ğ°Ğº ĞºĞ°Ğº Ğ¾Ğ½ Ñ‚Ñ€ĞµĞ±ÑƒĞµÑ‚ Ğ´Ñ€ÑƒĞ³Ğ¸Ğµ Ğ¿Ğ°Ñ€Ğ°Ğ¼ĞµÑ‚Ñ€Ñ‹)
-        # Ğ˜ÑĞ¿Ğ¾Ğ»ÑŒĞ·ÑƒĞµĞ¼ Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ Ğ¸Ğ· MarketData Ğ½Ğ°Ğ¿Ñ€ÑĞ¼ÑƒÑ
+        # ДћВЈДћВїГ‘в‚¬ДћВѕГ‘вЂ°ДћВµДћВЅДћВЅДћВ°Г‘ВЏ Г‘в‚¬ДћВµДћВ°ДћВ»ДћВёДћВ·ДћВ°Г‘вЂ ДћВёГ‘ВЏ ДћВ±ДћВµДћВ· build_signals (Г‘вЂљДћВ°ДћВє ДћВєДћВ°ДћВє ДћВѕДћВЅ Г‘вЂљГ‘в‚¬ДћВµДћВ±Г‘Ж’ДћВµГ‘вЂљ ДћВґГ‘в‚¬Г‘Ж’ДћВіДћВёДћВµ ДћВїДћВ°Г‘в‚¬ДћВ°ДћВјДћВµГ‘вЂљГ‘в‚¬Г‘вЂ№)
+        # ДћЛњГ‘ВЃДћВїДћВѕДћВ»Г‘Е’ДћВ·Г‘Ж’ДћВµДћВј ДћВґДћВ°ДћВЅДћВЅГ‘вЂ№ДћВµ ДћВёДћВ· MarketData ДћВЅДћВ°ДћВїГ‘в‚¬Г‘ВЏДћВјГ‘Ж’Г‘ВЋ
         ticker = await md.get_ticker(ctx.symbol)
         features = {
             "last": ticker.get("last", 0),
@@ -49,13 +49,13 @@ class SignalsPolicyStrategy(BaseStrategy):
             else 0,
         }
 
-        # Ğ¡Ğ¾Ğ·Ğ´Ğ°ĞµĞ¼ ÑĞºĞ·ĞµĞ¼Ğ¿Ğ»ÑÑ€ Ğ¿Ğ¾Ğ»Ğ¸Ñ‚Ğ¸ĞºĞ¸
+        # ДћВЎДћВѕДћВ·ДћВґДћВ°ДћВµДћВј Г‘ВЌДћВєДћВ·ДћВµДћВјДћВїДћВ»Г‘ВЏГ‘в‚¬ ДћВїДћВѕДћВ»ДћВёГ‘вЂљДћВёДћВєДћВё
         try:
             policy = SignalsPolicy()
             if hasattr(policy, "decide"):
                 decision, score, explain = policy.decide(features)
             else:
-                # Ğ•ÑĞ»Ğ¸ Ğ¼ĞµÑ‚Ğ¾Ğ´Ğ° decide Ğ½ĞµÑ‚, Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµĞ¼ hold
+                # ДћвЂўГ‘ВЃДћВ»ДћВё ДћВјДћВµГ‘вЂљДћВѕДћВґДћВ° decide ДћВЅДћВµГ‘вЂљ, ДћВІДћВѕДћВ·ДћВІГ‘в‚¬ДћВ°Г‘вЂ°ДћВ°ДћВµДћВј hold
                 return Decision(action="hold", reason="policy_decide_not_found")
         except Exception as e:
             return Decision(action="hold", reason=f"policy_error:{e}")

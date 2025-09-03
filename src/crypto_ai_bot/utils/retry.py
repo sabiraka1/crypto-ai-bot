@@ -26,7 +26,7 @@ async def async_retry(
     if last_exc:
         raise last_exc
 
-# ѵ Ѻ  http_client
+# Сµ Сє  http_client
 from crypto_ai_bot.utils.http_client import aget, apost  # noqa: E402
 
 

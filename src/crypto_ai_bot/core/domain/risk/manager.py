@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-# Domain-Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ñ‡Ğ¸ÑÑ‚Ñ‹Ğ¹ ÑĞ»Ğ¾Ğ¹)
+# Domain-ДћВїГ‘в‚¬ДћВ°ДћВІДћВёДћВ»ДћВ° (Г‘вЂЎДћВёГ‘ВЃГ‘вЂљГ‘вЂ№ДћВ№ Г‘ВЃДћВ»ДћВѕДћВ№)
 from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
 from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
 
-# Ğ”Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ğ¼ÑĞ³ĞºĞ¾Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ)
+# ДћвЂќДћВѕДћВї. ДћВїГ‘в‚¬ДћВ°ДћВІДћВёДћВ»ДћВ° (ДћВјГ‘ВЏДћВіДћВєДћВѕДћВµ ДћВїДћВѕДћВґДћВєДћВ»Г‘ВЋГ‘вЂЎДћВµДћВЅДћВёДћВµ)
 try:
     from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mConfig, MaxOrders5mRule
 except Exception:
@@ -40,7 +40,7 @@ except Exception:
     CorrelationManager = None  # type: ignore
     CorrelationConfig = None  # type: ignore
 
-# utils Ğ² domain Ğ´Ğ¾Ğ¿ÑƒÑÑ‚Ğ¸Ğ¼Ñ‹
+# utils ДћВІ domain ДћВґДћВѕДћВїГ‘Ж’Г‘ВЃГ‘вЂљДћВёДћВјГ‘вЂ№
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -49,23 +49,23 @@ _log = get_logger("risk.manager")
 
 @dataclass(frozen=True)
 class RiskConfig:
-    # Ğ±Ğ°Ğ·Ğ¾Ğ²Ñ‹Ğµ
+    # ДћВ±ДћВ°ДћВ·ДћВѕДћВІГ‘вЂ№ДћВµ
     loss_streak_limit: int = 0
     max_drawdown_pct: float = 0.0
     max_orders_per_day: int = 0
     max_turnover_quote_per_day: Decimal = Decimal("0")
 
-    # Ğ¼ÑĞ³ĞºĞ¸Ğµ Ğ»Ğ¸Ğ¼Ğ¸Ñ‚Ñ‹ (0 = Ğ²Ñ‹ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾)
+    # ДћВјГ‘ВЏДћВіДћВєДћВёДћВµ ДћВ»ДћВёДћВјДћВёГ‘вЂљГ‘вЂ№ (0 = ДћВІГ‘вЂ№ДћВєДћВ»Г‘ВЋГ‘вЂЎДћВµДћВЅДћВѕ)
     max_orders_5m: int = 0
     max_turnover_5m_quote: Decimal = Decimal("0")
     cooldown_sec: int = 0
     max_spread_pct: float = 0.0
     daily_loss_limit_quote: Decimal = Decimal("0")
 
-    # Ğ°Ğ½Ñ‚Ğ¸ĞºĞ¾Ñ€Ñ€ĞµĞ»ÑÑ†Ğ¸Ñ
+    # ДћВ°ДћВЅГ‘вЂљДћВёДћВєДћВѕГ‘в‚¬Г‘в‚¬ДћВµДћВ»Г‘ВЏГ‘вЂ ДћВёГ‘ВЏ
     anti_corr_groups: list[list[str]] | None = None
 
-    # Ğ¿Ñ€Ğ¾Ğ²Ğ°Ğ¹Ğ´ĞµÑ€ ÑĞ¿Ñ€ÑĞ´Ğ° (ĞµÑĞ»Ğ¸ None â€” SpreadCapRule Ğ¿Ñ€Ğ¾Ğ¿ÑƒÑĞºĞ°ĞµÑ‚ÑÑ)
+    # ДћВїГ‘в‚¬ДћВѕДћВІДћВ°ДћВ№ДћВґДћВµГ‘в‚¬ Г‘ВЃДћВїГ‘в‚¬Г‘ВЌДћВґДћВ° (ДћВµГ‘ВЃДћВ»ДћВё None Гўв‚¬вЂќ SpreadCapRule ДћВїГ‘в‚¬ДћВѕДћВїГ‘Ж’Г‘ВЃДћВєДћВ°ДћВµГ‘вЂљГ‘ВЃГ‘ВЏ)
     spread_provider: callable | None = None
 
     @classmethod
@@ -98,19 +98,19 @@ class RiskConfig:
 
 class RiskManager:
     """
-    Ğ§Ğ¸ÑÑ‚Ñ‹Ğ¹ API Ğ´Ğ»Ñ application ÑĞ»Ğ¾Ñ:
+    ДћВ§ДћВёГ‘ВЃГ‘вЂљГ‘вЂ№ДћВ№ API ДћВґДћВ»Г‘ВЏ application Г‘ВЃДћВ»ДћВѕГ‘ВЏ:
     check(symbol, storage) -> (ok: bool, reason: str, extra: dict)
-    ĞĞ¸ĞºĞ°ĞºĞ¸Ñ… Ğ¿ÑƒĞ±Ğ»Ğ¸ĞºĞ°Ñ†Ğ¸Ğ¹/ÑˆĞ¸Ğ½Ñ‹ Ğ²Ğ½ÑƒÑ‚Ñ€Ğ¸ domain.
+    ДћВќДћВёДћВєДћВ°ДћВєДћВёГ‘вЂ¦ ДћВїГ‘Ж’ДћВ±ДћВ»ДћВёДћВєДћВ°Г‘вЂ ДћВёДћВ№/Г‘Л†ДћВёДћВЅГ‘вЂ№ ДћВІДћВЅГ‘Ж’Г‘вЂљГ‘в‚¬ДћВё domain.
     """
 
     def __init__(self, cfg: RiskConfig) -> None:
         self.cfg = cfg
 
-        # Ğ±Ğ°Ğ·Ğ¾Ğ²Ñ‹Ğµ
+        # ДћВ±ДћВ°ДћВ·ДћВѕДћВІГ‘вЂ№ДћВµ
         self._loss = LossStreakRule(LossStreakConfig(limit=cfg.loss_streak_limit))
         self._dd = MaxDrawdownRule(MaxDrawdownConfig(max_drawdown_pct=cfg.max_drawdown_pct))
 
-        # Ğ´Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ°
+        # ДћВґДћВѕДћВї. ДћВїГ‘в‚¬ДћВ°ДћВІДћВёДћВ»ДћВ°
         self._orders5 = (
             MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m))
             if (MaxOrders5mRule and cfg.max_orders_5m > 0)
@@ -144,7 +144,7 @@ class RiskManager:
 
     def _budget_check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
         """
-        Ğ”Ğ½ĞµĞ²Ğ½Ñ‹Ğµ Ğ±ÑĞ´Ğ¶ĞµÑ‚Ñ‹: ĞºĞ¾Ğ»-Ğ²Ğ¾ Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ² Ğ¸ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚ (quote). 0 = Ğ²Ñ‹ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾.
+        ДћвЂќДћВЅДћВµДћВІДћВЅГ‘вЂ№ДћВµ ДћВ±Г‘ВЋДћВґДћВ¶ДћВµГ‘вЂљГ‘вЂ№: ДћВєДћВѕДћВ»-ДћВІДћВѕ ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ДћВѕДћВІ ДћВё ДћВґДћВЅДћВµДћВІДћВЅДћВѕДћВ№ ДћВѕДћВ±ДћВѕГ‘в‚¬ДћВѕГ‘вЂљ (quote). 0 = ДћВІГ‘вЂ№ДћВєДћВ»Г‘ВЋГ‘вЂЎДћВµДћВЅДћВѕ.
         reason: 'budget:max_orders_per_day' | 'budget:max_turnover_quote_per_day'
         """
         limit_n = int(self.cfg.max_orders_per_day or 0)
@@ -182,14 +182,14 @@ class RiskManager:
 
     def check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
         """
-        Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ (ok, reason, extra). ĞĞ¸ĞºĞ°ĞºĞ¸Ñ… side-effects.
+        ДћвЂ™ДћВѕДћВ·ДћВІГ‘в‚¬ДћВ°Г‘вЂ°ДћВ°ДћВµГ‘вЂљ (ok, reason, extra). ДћВќДћВёДћВєДћВ°ДћВєДћВёГ‘вЂ¦ side-effects.
         reason:
           - 'ok'
           - 'budget:*'
           - 'cooldown' | 'orders_5m' | 'turnover_5m' | 'spread' | 'daily_loss' | 'correlation'
           - 'loss_streak' | 'max_drawdown'
         """
-        # Ğ±ÑĞ´Ğ¶ĞµÑ‚Ñ‹
+        # ДћВ±Г‘ВЋДћВґДћВ¶ДћВµГ‘вЂљГ‘вЂ№
         ok, why, extra = self._budget_check(symbol=symbol, storage=storage)
         if not ok:
             inc("budget_exceeded_total", symbol=symbol, type=why.split(":", 1)[-1])
@@ -205,7 +205,7 @@ class RiskManager:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # 5m ĞºĞ°Ğ¿Ñ‹
+        # 5m ДћВєДћВ°ДћВїГ‘вЂ№
         if self._orders5 and trades:
             ok, why, extra = self._orders5.check(symbol=symbol, trades_repo=trades)
             if not ok:
@@ -218,21 +218,21 @@ class RiskManager:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # Ğ°Ğ½Ñ‚Ğ¸ĞºĞ¾Ñ€Ñ€ĞµĞ»ÑÑ†Ğ¸Ñ
+        # ДћВ°ДћВЅГ‘вЂљДћВёДћВєДћВѕГ‘в‚¬Г‘в‚¬ДћВµДћВ»Г‘ВЏГ‘вЂ ДћВёГ‘ВЏ
         if self._corr and positions:
             ok, why, extra = self._corr.check(symbol=symbol, positions_repo=positions)
             if not ok:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # ÑĞ¿Ñ€ĞµĞ´
+        # Г‘ВЃДћВїГ‘в‚¬ДћВµДћВґ
         if self._spread:
             ok, why, extra = self._spread.check(symbol=symbol)
             if not ok:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ ÑƒĞ±Ñ‹Ñ‚Ğ¾Ğº
+        # ДћВґДћВЅДћВµДћВІДћВЅДћВѕДћВ№ Г‘Ж’ДћВ±Г‘вЂ№Г‘вЂљДћВѕДћВє
         if self._dailoss and trades:
             ok, why, extra = self._dailoss.check(symbol=symbol, trades_repo=trades)
             if not ok:
@@ -256,7 +256,7 @@ class RiskManager:
 
         return True, "ok", {}
 
-    # ---- Ğ‘ÑĞºĞ¾Ğ¼Ğ¿Ğ°Ñ‚ Ğ´Ğ»Ñ ÑÑ‚Ğ°Ñ€Ñ‹Ñ… Ğ²Ñ‹Ğ·Ğ¾Ğ²Ğ¾Ğ² ----
+    # ---- ДћвЂГ‘ВЌДћВєДћВѕДћВјДћВїДћВ°Г‘вЂљ ДћВґДћВ»Г‘ВЏ Г‘ВЃГ‘вЂљДћВ°Г‘в‚¬Г‘вЂ№Г‘вЂ¦ ДћВІГ‘вЂ№ДћВ·ДћВѕДћВІДћВѕДћВІ ----
     def can_execute(self, symbol: str, storage: Any) -> bool:
         ok, _, _ = self.check(symbol=symbol, storage=storage)
         return ok
