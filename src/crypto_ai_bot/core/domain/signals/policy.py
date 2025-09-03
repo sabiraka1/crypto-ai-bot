@@ -11,7 +11,7 @@ from ._fusion import fuse_score
 class Policy:
     buy_threshold: float = 0.62
     sell_threshold: float = 0.38
-    
+
     def decide(self, features: dict[str, Any]) -> tuple[str, float, str]:
         """ĞœĞµÑ‚Ğ¾Ğ´ ĞºĞ»Ğ°ÑÑĞ° Policy Ğ´Ğ»Ñ Ğ¿Ñ€Ğ¸Ğ½ÑÑ‚Ğ¸Ñ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ."""
         score, explain = fuse_score(features)

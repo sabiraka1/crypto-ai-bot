@@ -1,6 +1,4 @@
-﻿import pytest
-import os
-
+﻿
 def test_risk_manager_import(mock_settings):
     '''Test RiskManager can be imported'''
     try:

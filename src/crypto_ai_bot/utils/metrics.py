@@ -5,6 +5,7 @@ from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
+
 _REGISTRY = CollectorRegistry()
 _COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Counter] = {}
 _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Gauge] = {}

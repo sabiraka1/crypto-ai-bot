@@ -7,9 +7,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.utils.logging import get_logger
+
 
 _log = get_logger("events.bus")
 

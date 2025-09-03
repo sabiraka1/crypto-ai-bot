@@ -1,7 +1,10 @@
 ﻿from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Literal
+
 from .macro import MacroContext, macro_coeff
+
 
 Regime = Literal["bull", "neutral", "bear"]
 

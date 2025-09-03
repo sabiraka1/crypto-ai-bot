@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
-from typing import Protocol, runtime_checkable, Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -43,7 +44,7 @@ class BrokerPort(Protocol):
     async def fetch_order(self, *, symbol: str, broker_order_id: str) -> Any: ...
 
 
-@runtime_checkable  
+@runtime_checkable
 class StoragePort(Protocol):
     """Ğ˜Ğ½Ñ‚ĞµÑ€Ñ„ĞµĞ¹Ñ Ğ´Ğ»Ñ Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğ°."""
     @property

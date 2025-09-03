@@ -2,12 +2,13 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort
 from crypto_ai_bot.core.domain.macro.regime_detector import RegimeDetector
 from crypto_ai_bot.core.domain.macro.types import Regime
 from crypto_ai_bot.utils.logging import get_logger
+
 
 _log = get_logger("regime.gated_broker")
 
@@ -27,7 +28,7 @@ class GatedBroker(BrokerPort):
     def __init__(
         self,
         inner: BrokerPort,
-        regime: Optional[RegimeDetector] = None,
+        regime: RegimeDetector | None = None,
         allow_sells_when_off: bool = True,
     ) -> None:
         self._inner = inner

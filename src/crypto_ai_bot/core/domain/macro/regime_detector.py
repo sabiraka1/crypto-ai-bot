@@ -1,7 +1,10 @@
 ﻿from __future__ import annotations
+
 from dataclasses import dataclass
-from .ports import DxyPort, BtcDomPort, FomcCalendarPort
+
+from .ports import BtcDomPort, DxyPort, FomcCalendarPort
 from .types import MacroSnapshot, Regime
+
 
 @dataclass
 class RegimeConfig:

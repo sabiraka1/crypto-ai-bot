@@ -6,7 +6,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-from .base import BaseStrategy, Decision, StrategyContext, MarketData
+from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 
 class EmaCrossStrategy(BaseStrategy):
@@ -126,10 +126,10 @@ class EmaCrossStrategy(BaseStrategy):
                 settings=ctx.settings,
                 data={"ticker": ticker}
             )
-        
+
         action, explain = self.decide(ctx)
         reason = explain.get("reason", "")
-        
+
         # ĞŸÑ€ĞµĞ¾Ğ±Ñ€Ğ°Ğ·ÑƒĞµĞ¼ Ğ² Decision
         return Decision(
             action=action,

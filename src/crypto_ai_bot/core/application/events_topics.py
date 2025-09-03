@@ -3,6 +3,7 @@
 # Ğ•Ğ´Ğ¸Ğ½Ğ°Ñ Ñ‚Ğ¾Ñ‡ĞºĞ° Ğ¸ÑÑ‚Ğ¸Ğ½Ğ½Ñ‹ Ñ‚ĞµĞ¼Ñ‹ â€” Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚Ğ¸Ñ€ÑƒĞµĞ¼ Ñ€ĞµĞµÑÑ‚Ñ€ Ğ¸ Ğ¿Ñ€Ğ¾ĞºĞ¸Ğ´Ñ‹Ğ²Ğ°ĞµĞ¼ ĞºĞ¾Ğ½ÑÑ‚Ğ°Ğ½Ñ‚Ñ‹ Ğ½Ğ°Ñ€ÑƒĞ¶Ñƒ.
 from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 
+
 # Ğ‘Ñ€Ğ¾ĞºĞµÑ€/Ğ¾Ñ€Ğ´ĞµÑ€Ğ°
 ORDER_EXECUTED = EVT.ORDER_EXECUTED
 ORDER_FAILED = EVT.ORDER_FAILED

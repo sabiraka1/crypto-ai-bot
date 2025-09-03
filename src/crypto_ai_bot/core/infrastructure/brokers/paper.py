@@ -1,16 +1,16 @@
 ﻿from __future__ import annotations
 
-from typing import Any, Dict, List, Literal
-from decimal import Decimal
-from dataclasses import dataclass
 from collections import defaultdict
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Literal
 
+# Порт: только импорт (контракт), реализация — ниже в адаптере
+from crypto_ai_bot.core.application.ports import BrokerPort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.time import now_ms
 
-# Порт: только импорт (контракт), реализация — ниже в адаптере
-from crypto_ai_bot.core.application.ports import BrokerPort
 
 _log = get_logger("brokers.paper")
 
@@ -22,13 +22,13 @@ class PaperBroker:
 
     def __post_init__(self) -> None:
         # Инициализируем атрибуты после создания (оставлено как есть)
-        self._balances: Dict[str, Decimal] = {"USDT": dec("10000"), "BTC": dec("0.5")}
-        self._positions: Dict[str, Decimal] = {}
-        self._orders: Dict[str, Any] = {}
-        self._last_prices: Dict[str, Decimal] = defaultdict(lambda: dec("50000"))
+        self._balances: dict[str, Decimal] = {"USDT": dec("10000"), "BTC": dec("0.5")}
+        self._positions: dict[str, Decimal] = {}
+        self._orders: dict[str, Any] = {}
+        self._last_prices: dict[str, Decimal] = defaultdict(lambda: dec("50000"))
         self.exchange = getattr(self.settings, "EXCHANGE", "paper") if self.settings else "paper"
 
-    async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+    async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         """Возвращает фиктивный ticker."""
         price = self._last_prices[symbol]
         spread = price * dec("0.0002")  # 0.02% спред
@@ -40,17 +40,17 @@ class PaperBroker:
             "timestamp": now_ms(),
         }
 
-    async def fetch_balance(self, symbol: str = "") -> Dict[str, Any]:
+    async def fetch_balance(self, symbol: str = "") -> dict[str, Any]:
         """Возвращает фиктивный баланс."""
         result = {}
         for asset, amount in self._balances.items():
             result[asset] = {"free": str(amount), "used": "0", "total": str(amount)}
         return result
 
-    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> List[List[float]]:
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list[list[float]]:
         """Возвращает фиктивные OHLCV данные."""
         price = float(self._last_prices[symbol])
-        ohlcv: List[List[float]] = []
+        ohlcv: list[list[float]] = []
         ts = now_ms()
         for i in range(limit):
             # Симулируем небольшие колебания цены
@@ -71,7 +71,7 @@ class PaperBroker:
         symbol: str,
         quote_amount: Decimal,
         client_order_id: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Симулирует покупку (как было)."""
         price = self._last_prices[symbol]
         amount = quote_amount / price
@@ -112,7 +112,7 @@ class PaperBroker:
         symbol: str,
         base_amount: Decimal,
         client_order_id: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Симулирует продажу (как было)."""
         price = self._last_prices[symbol]
         cost = base_amount * price
@@ -148,23 +148,23 @@ class PaperBroker:
             self._orders[client_order_id] = order
         return order
 
-    async def fetch_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
+    async def fetch_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         """Получить ордер по ID."""
-        default_order: Dict[str, Any] = {
+        default_order: dict[str, Any] = {
             "id": order_id,
             "symbol": symbol,
             "status": "closed",
             "filled": "0",
             "remaining": "0",
         }
-        result: Dict[str, Any] = self._orders.get(order_id, default_order)
+        result: dict[str, Any] = self._orders.get(order_id, default_order)
         return result
 
-    async def fetch_open_orders(self, symbol: str | None = None) -> List[Dict[str, Any]]:
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
         """В paper режиме все ордера сразу исполняются, поэтому открытых нет."""
         return []
 
-    async def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
+    async def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         """В paper режиме нечего отменять."""
         return {"id": order_id, "status": "canceled"}
 
@@ -189,7 +189,7 @@ class PaperBrokerPortAdapter(BrokerPort):
         *,
         time_in_force: str = "GTC",
         idempotency_key: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         # BUY: есть прямой метод «покупка на сумму quote»
         if side == "buy":
             return await self._core.create_market_buy_quote(
@@ -210,14 +210,14 @@ class PaperBrokerPortAdapter(BrokerPort):
             client_order_id=idempotency_key,
         )
 
-    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+    async def cancel_order(self, symbol: str, order_id: str) -> dict[str, Any]:
         return await self._core.cancel_order(order_id=order_id, symbol=symbol)
 
-    async def fetch_open_orders(self, symbol: str | None = None) -> List[Dict[str, Any]]:
+    async def fetch_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
         return await self._core.fetch_open_orders(symbol)
 
-    async def fetch_order(self, symbol: str, order_id: str) -> Dict[str, Any] | None:
+    async def fetch_order(self, symbol: str, order_id: str) -> dict[str, Any] | None:
         return await self._core.fetch_order(order_id=order_id, symbol=symbol)
 
-    async def get_balance(self) -> Dict[str, Any]:
+    async def get_balance(self) -> dict[str, Any]:
         return await self._core.fetch_balance()

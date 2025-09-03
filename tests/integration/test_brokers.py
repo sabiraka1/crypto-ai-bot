@@ -1,5 +1,4 @@
-﻿import pytest
-
+﻿
 def test_ccxt_adapter_import():
     '''Test CCXT adapter can be imported'''
     try:

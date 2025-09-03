@@ -1,5 +1,4 @@
-﻿import pytest
-
+﻿
 def test_signals_import():
     '''Test signals modules can be imported'''
     try:

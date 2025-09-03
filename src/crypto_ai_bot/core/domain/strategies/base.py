@@ -1,11 +1,13 @@
 ﻿from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Optional
 from decimal import Decimal
+from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import hist
+
 
 _log = get_logger("strategy.base")
 
@@ -46,7 +48,7 @@ class BaseStrategy:
         return True, ""
 
     async def generate(self, ctx: Any, md: Any) -> dict[str, Any]:
-        t0 = getattr(__import__("time"), "time")()
+        t0 = __import__("time").time()
         await self.prepare(ctx, md)
 
         sig = await self.signal(ctx, md)

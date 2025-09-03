@@ -1,5 +1,4 @@
-﻿import pytest
-
+﻿
 def test_strategy_manager_import():
     '''Test StrategyManager can be imported'''
     try:

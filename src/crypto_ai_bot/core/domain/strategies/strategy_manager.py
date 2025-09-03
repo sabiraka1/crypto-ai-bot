@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from crypto_ai_bot.core.domain.strategies.base import MarketData, BaseStrategy, Decision
+from crypto_ai_bot.core.domain.strategies.base import BaseStrategy, Decision, MarketData
 from crypto_ai_bot.core.domain.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
 from crypto_ai_bot.utils.decimal import dec
 

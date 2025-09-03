@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, List, Tuple
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class LossStreakRule:
     def _to_dec(x: Any) -> Decimal:
         return Decimal(str(x if x is not None else "0"))
 
-    def _iter_all_asc(self, trades_repo: Any, symbol: str) -> List[Any]:
+    def _iter_all_asc(self, trades_repo: Any, symbol: str) -> list[Any]:
         # Требуется API, возвращающий все трейды по символу в порядке возрастания времени.
         # В твоём TradesRepository есть аналогичный приватный итератор — реализуем локально через SQL в самом репозитории.
         if hasattr(trades_repo, "_iter_all_asc"):
@@ -45,7 +45,7 @@ class LossStreakRule:
             return True, "no_trades", {}
 
         # FIFO склад покупок: [(qty_left, unit_cost_quote)]
-        buy_lots: List[Tuple[Decimal, Decimal]] = []
+        buy_lots: list[tuple[Decimal, Decimal]] = []
         streak = 0
         worst_trade_pnl: Decimal = Decimal("0")
 

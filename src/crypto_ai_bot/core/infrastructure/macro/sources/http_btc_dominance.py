@@ -1,10 +1,12 @@
 ﻿from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
+
 import httpx
 
 from crypto_ai_bot.core.domain.macro.ports import BtcDomPort
 from crypto_ai_bot.utils.logging import get_logger
+
 
 _log = get_logger("macro.btc_dom_http")
 
@@ -19,7 +21,7 @@ class BtcDominanceHttp(BtcDomPort):
         self._url = url
         self._timeout = float(timeout_sec)
 
-    async def change_pct(self) -> Optional[float]:
+    async def change_pct(self) -> float | None:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as c:
                 r = await c.get(self._url)
@@ -35,7 +37,7 @@ class BtcDominanceHttp(BtcDomPort):
         return None
 
     @staticmethod
-    def _parse_change_pct(data: Any) -> Optional[float]:
+    def _parse_change_pct(data: Any) -> float | None:
         try:
             if isinstance(data, dict) and "change_pct" in data:
                 return float(data["change_pct"])

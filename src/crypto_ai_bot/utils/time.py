@@ -1,8 +1,9 @@
 ﻿from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+import time
+
 
 __all__ = [
     "bucket_ms",

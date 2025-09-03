@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict
 from decimal import Decimal
+from typing import Any
+
 
 @dataclass(frozen=True)
 class TickerDTO:
@@ -16,7 +18,7 @@ class BaseBroker(ABC):
     @abstractmethod
     async def fetch_ticker(self, symbol: str) -> TickerDTO: ...
     @abstractmethod
-    async def fetch_balance(self, symbol: str) -> Dict[str, Decimal]: ...
+    async def fetch_balance(self, symbol: str) -> dict[str, Decimal]: ...
     @abstractmethod
     async def create_market_buy_quote(
         self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None

@@ -1,5 +1,4 @@
-﻿import pytest
-
+﻿
 def test_application_ports_import():
     '''Test application ports can be imported'''
     try:
@@ -10,7 +9,7 @@ def test_application_ports_import():
         pass
 
 def test_events_topics_import():
-    '''Test event topics can be imported'''  
+    '''Test event topics can be imported'''
     try:
         from crypto_ai_bot.core.application.events_topics import OrderEvent, TradeEvent
         assert True

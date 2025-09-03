@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any
 import time
+from typing import Any
+
 
 @dataclass(frozen=True)
 class MaxOrders5mConfig:

@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, List, Dict
+from typing import Any
+
 
 @dataclass
 class OrdersRepository:
@@ -67,7 +69,7 @@ class OrdersRepository:
         )
         self.conn.commit()
 
-    def list_open(self, symbol: str) -> List[Dict[str, Any]]:
+    def list_open(self, symbol: str) -> list[dict[str, Any]]:
         """ĞÑ‚ĞºÑ€Ñ‹Ñ‚Ñ‹Ğµ (Ğ¸Ğ»Ğ¸ Ñ‡Ğ°ÑÑ‚Ğ¸Ñ‡Ğ½Ğ¾ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ½Ñ‹Ğµ) Ğ¾Ñ€Ğ´ĞµÑ€Ğ° Ğ¿Ğ¾ ÑĞ¸Ğ¼Ğ²Ğ¾Ğ»Ñƒ, ÑÑ‚Ğ°Ñ€Ñ‹Ğµ â†’ Ğ½Ğ¾Ğ²Ñ‹Ğµ."""
         self.ensure_schema()
         cur = self.conn.cursor()

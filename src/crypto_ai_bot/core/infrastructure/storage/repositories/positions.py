@@ -7,6 +7,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
+
 # Константа для дефолтного значения B008
 _DEFAULT_FEE_ZERO = dec("0")
 
@@ -122,7 +123,7 @@ class PositionsRepository:
         # Обработка дефолтного значения для B008
         if fee_quote is None:
             fee_quote = _DEFAULT_FEE_ZERO
-            
+
         side = (side or "").lower().strip()
         if side not in ("buy", "sell"):
             return

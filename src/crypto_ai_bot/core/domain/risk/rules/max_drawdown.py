@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, List, Tuple
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class MaxDrawdownRule:
     def _to_dec(x: Any) -> Decimal:
         return Decimal(str(x if x is not None else "0"))
 
-    def _iter_today_asc(self, trades_repo: Any, symbol: str) -> List[Any]:
+    def _iter_today_asc(self, trades_repo: Any, symbol: str) -> list[Any]:
         # Нужна последовательность за "сегодня" в порядке времени
         if hasattr(trades_repo, "list_today"):
             rows = list(reversed(trades_repo.list_today(symbol)))  # type: ignore[attr-defined]
@@ -40,7 +40,7 @@ class MaxDrawdownRule:
             return True, "no_today_trades", {}
 
         # FIFO склад покупок
-        buy_lots: List[Tuple[Decimal, Decimal]] = []
+        buy_lots: list[tuple[Decimal, Decimal]] = []
         cum: Decimal = Decimal("0")
         peak: Decimal = Decimal("0")
         worst_dd_pct: float = 0.0

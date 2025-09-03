@@ -1,11 +1,12 @@
 ﻿from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Tuple
+from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+
 
 _log = get_logger("application.reconcile.positions")
 
@@ -47,7 +48,7 @@ class PositionGuard:
     """Single source of truth for NO_SHORTS checks (compat wrapper)."""
 
     @staticmethod
-    def can_sell(storage: StoragePort, symbol: str, amount: Decimal) -> Tuple[bool, Decimal]:
+    def can_sell(storage: StoragePort, symbol: str, amount: Decimal) -> tuple[bool, Decimal]:
         return compute_sell_amount(storage, symbol, amount)
 
 

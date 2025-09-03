@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Iterator
 import contextlib
 import contextvars
 import uuid
-from collections.abc import Iterator
+
 
 _cid: contextvars.ContextVar[str | None] = contextvars.ContextVar("cid", default=None)
 

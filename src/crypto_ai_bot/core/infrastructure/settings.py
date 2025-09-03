@@ -1,12 +1,11 @@
 ﻿from __future__ import annotations
 
 import base64
-import json
-import os
 from dataclasses import dataclass
 from decimal import Decimal
+import json
+import os
 from pathlib import Path
-from typing import Any, List
 
 from crypto_ai_bot.core.infrastructure.settings_schema import validate_settings
 from crypto_ai_bot.utils.decimal import dec
@@ -55,7 +54,7 @@ def _secret(name: str, default: str = "") -> str:
             pass
     return os.getenv(name, default)
 
-def _list(name: str, default: str = "") -> List[str]:
+def _list(name: str, default: str = "") -> list[str]:
     raw = _get(name, default)
     parts = [p.strip() for p in raw.split(",") if p.strip()]
     return parts
@@ -175,7 +174,7 @@ class Settings:
     RISK_ANTI_CORR_GROUPS: str  # e.g. "BTC/USDT|ETH/USDT;XRP/USDT|ADA/USDT"
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls) -> Settings:
         mode = _get("MODE", "paper")
         base, quote = (_get("SYMBOL", "BTC/USDT").split("/") + ["USDT"])[:2]
         db_default = (

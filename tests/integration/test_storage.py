@@ -1,6 +1,6 @@
-﻿import pytest
+﻿import os
 import tempfile
-import os
+
 
 def test_sqlite_adapter_import():
     '''Test SQLite adapter can be imported'''

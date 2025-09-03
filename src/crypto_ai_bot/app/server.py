@@ -1,21 +1,22 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import time
-import hashlib
-import hmac
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
+import time
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, Body
+from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
+from crypto_ai_bot.core.application import (
+    events_topics as EVT,  # noqa: N812  # нужен в /health и alertmanager/webhook
+)
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
 from crypto_ai_bot.utils.time import now_ms
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812  # нужен в /health и alertmanager/webhook
+
 
 _log = get_logger("app.server")
 _container: Any | None = None

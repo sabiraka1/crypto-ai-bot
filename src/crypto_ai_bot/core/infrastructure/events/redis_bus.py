@@ -1,16 +1,17 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import json
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from typing import Any, Dict, Optional
+import json
+from typing import Any
 
 from redis.asyncio import Redis
 from redis.asyncio.client import PubSub
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+
 
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
 _log = get_logger("events.redis")
@@ -28,9 +29,9 @@ class RedisEventBus:
         if not url:
             raise ValueError("RedisEventBus requires non-empty redis url (e.g. redis://...)")
         self._url = url
-        self._r: Optional[Redis] = None
-        self._ps: Optional[PubSub] = None
-        self._task: Optional[asyncio.Task[None]] = None
+        self._r: Redis | None = None
+        self._ps: PubSub | None = None
+        self._task: asyncio.Task[None] | None = None
         self._handlers: dict[str, list[Handler]] = defaultdict(list)
         self._topics: set[str] = set()
         self._ping_interval = ping_interval_sec

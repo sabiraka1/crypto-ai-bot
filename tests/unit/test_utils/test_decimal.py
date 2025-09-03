@@ -1,6 +1,7 @@
-﻿import pytest
-from decimal import Decimal
+﻿from decimal import Decimal
+
 from crypto_ai_bot.utils.decimal import dec
+
 
 def test_decimal_basic_operations():
     '''Test basic decimal operations'''

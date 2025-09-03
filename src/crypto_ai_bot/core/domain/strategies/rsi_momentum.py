@@ -6,7 +6,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-from .base import BaseStrategy, Decision, StrategyContext, MarketData
+from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 
 class RSIMomentumStrategy(BaseStrategy):
@@ -81,17 +81,15 @@ class RSIMomentumStrategy(BaseStrategy):
                 settings=ctx.settings,
                 data={"ticker": ticker}
             )
-        
+
         action, explain = self.decide(ctx)
         reason = explain.get("signal", explain.get("reason", ""))
-        
+
         # Вычисляем confidence на основе силы сигнала
         confidence = 0.5  # базовая уверенность
-        if action == "buy" and "oversold_with_positive_momentum" in reason:
+        if action == "buy" and "oversold_with_positive_momentum" in reason or action == "sell" and "overbought_with_negative_momentum" in reason:
             confidence = 0.7
-        elif action == "sell" and "overbought_with_negative_momentum" in reason:
-            confidence = 0.7
-        
+
         return Decision(
             action=action,
             confidence=confidence,

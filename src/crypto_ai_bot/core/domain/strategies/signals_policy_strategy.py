@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
+
 from typing import TYPE_CHECKING
-from .base import BaseStrategy, MarketData, StrategyContext, Decision
+
+from .base import BaseStrategy, Decision, MarketData, StrategyContext
+
 
 # ĞŸĞ¾Ğ´ÑĞ¸ÑÑ‚ĞµĞ¼Ğ° signals (Ğ³Ğ¾Ñ‚Ğ¾Ğ²Ğ°Ñ, Ğ½Ğ¾ Ñ€Ğ°Ğ½ĞµĞµ Ğ½Ğµ Ğ²ĞºĞ»ÑÑ‡Ñ‘Ğ½Ğ½Ğ°Ñ Ğ² Ñ€Ğ°Ğ½Ñ‚Ğ°Ğ¹Ğ¼)
 if TYPE_CHECKING:

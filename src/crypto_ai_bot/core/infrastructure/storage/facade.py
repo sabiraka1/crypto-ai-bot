@@ -1,14 +1,14 @@
 ﻿# src/crypto_ai_bot/core/infrastructure/storage/facade.py
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
+import sqlite3
 
 from .repositories.audit import AuditRepo as _AuditRepository
 from .repositories.idempotency import IdempotencyRepository as _IdempotencyRepository
 from .repositories.market_data import MarketDataRepository as _MarketDataRepository
-from .repositories.positions import PositionsRepository as _PositionsRepository
 from .repositories.orders import OrdersRepository as _OrdersRepository
+from .repositories.positions import PositionsRepository as _PositionsRepository
 from .repositories.trades import TradesRepository as _TradesRepository
 
 

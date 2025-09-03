@@ -4,8 +4,8 @@ import asyncio
 from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
-from crypto_ai_bot.utils.symbols import canonical  # исправлен путь импорта
 from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.symbols import canonical  # исправлен путь импорта
 
 
 def _symbols_from_settings(settings: Any) -> list[str]:  # добавлена аннотация типа

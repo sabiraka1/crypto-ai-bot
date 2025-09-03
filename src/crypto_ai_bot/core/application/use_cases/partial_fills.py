@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, Optional, cast
+from typing import Any, cast
 
-from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, OrderLike
 from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, OrderLike
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+
 
 _log = get_logger("usecase.partial_fills")
 
@@ -40,7 +41,7 @@ def _is_open(status: str | None) -> bool:
 class PartialFillHandler:
     bus: EventBusPort
 
-    async def handle(self, order: OrderLike, broker: BrokerPort) -> Optional[OrderLike]:
+    async def handle(self, order: OrderLike, broker: BrokerPort) -> OrderLike | None:
         """
         Если частично исполнилось меньше 95% — добиваем остаток по рынку.
         Для buy amount трактуем как quote, для sell — как base (как в текущей модели).

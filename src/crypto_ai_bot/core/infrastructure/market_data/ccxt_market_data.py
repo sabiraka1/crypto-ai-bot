@@ -1,19 +1,21 @@
 ﻿from __future__ import annotations
+
 from collections.abc import Sequence
-from typing import Any, List, Dict, Tuple, cast
+from typing import Any, cast
 
 from crypto_ai_bot.core.domain.strategies.base import MarketData as MarketData
 from crypto_ai_bot.core.infrastructure.market_data.cache import TTLCache
 
-_OHLCV = List[List[Any]]  # ccxt: list[list[number]]
-_TICKER = Dict[str, Any]
+
+_OHLCV = list[list[Any]]  # ccxt: list[list[number]]
+_TICKER = dict[str, Any]
 
 class CcxtMarketData(MarketData):
     def __init__(self, *, broker: Any, cache_ttl_sec: float = 30.0) -> None:
         self._broker = broker
         self._cache: TTLCache[Any] = TTLCache(ttl_sec=cache_ttl_sec)
 
-    async def get_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> Sequence[Tuple[Any, ...]]:
+    async def get_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 200) -> Sequence[tuple[Any, ...]]:
         key = ("ohlcv", symbol, timeframe, int(limit))
         cached = self._cache.get(key)
         if cached is not None:

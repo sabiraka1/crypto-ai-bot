@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, cast, List, Tuple
+from typing import Any, cast
 
 
 def _get(obj: Any, attr: str, key: str | None = None, default: Any = None) -> Any:
@@ -158,7 +158,7 @@ class TradesRepository:
 
     # ---------- FIFO PnL (Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ fee_quote) ----------
 
-    def _iter_all_asc(self, symbol: str) -> List[Any]:
+    def _iter_all_asc(self, symbol: str) -> list[Any]:
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -169,7 +169,7 @@ class TradesRepository:
             """,
             (symbol,),
         )
-        return cast(List[Any], cur.fetchall())
+        return cast(list[Any], cur.fetchall())
 
     @staticmethod
     def _to_dec(x: Any) -> Decimal:
@@ -188,7 +188,7 @@ class TradesRepository:
 
         # FIFO-Ğ¾Ñ‡ĞµÑ€ĞµĞ´ÑŒ Ğ¿Ğ¾ĞºÑƒĞ¿Ğ¾Ğº: ÑĞ»ĞµĞ¼ĞµĞ½Ñ‚Ñ‹ (qty_left, unit_cost_quote)
         # unit_cost_quote = (cost + fee_quote) / filled
-        buy_lots: List[Tuple[Decimal, Decimal]] = []
+        buy_lots: list[tuple[Decimal, Decimal]] = []
 
         pnl_today = Decimal("0")
 

@@ -1,9 +1,9 @@
 ﻿from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict
+import hashlib
+from typing import Any
 
 from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
@@ -11,6 +11,7 @@ from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
+
 
 _log = get_logger("usecase.execute_trade")
 
@@ -28,7 +29,7 @@ class ExecuteTradeResult:
     why: str = ""  # Ğ´Ğ¾Ğ¿. Ğ¿Ğ¾ÑÑĞ½ĞµĞ½Ğ¸Ğµ (Ğ´Ğ»Ñ Ğ¿Ñ€Ğ¸Ñ‡Ğ¸Ğ½ Ğ±Ğ»Ğ¾ĞºĞ¸Ñ€Ğ¾Ğ²ĞºĞ¸)
 
 
-async def _recent_trades(storage: Any, symbol: str, n: int) -> list[Dict[str, Any]]:
+async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, Any]]:
     """Ğ‘ĞµĞ·Ğ¾Ğ¿Ğ°ÑĞ½Ğ¾ Ğ´Ğ¾ÑÑ‚Ğ°Ñ‘Ğ¼ Ğ¿Ğ¾ÑĞ»ĞµĞ´Ğ½Ğ¸Ğµ N ÑĞ´ĞµĞ»Ğ¾Ğº, ĞµÑĞ»Ğ¸ storage Ğ¿Ğ¾Ğ´Ğ´ĞµÑ€Ğ¶Ğ¸Ğ²Ğ°ĞµÑ‚."""
     try:
         repo = getattr(storage, "trades", None)
@@ -86,7 +87,7 @@ async def execute_trade(
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
     protective_exits: Any | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Ğ•Ğ´Ğ¸Ğ½Ñ‹Ğ¹ Ğ¿ÑƒÑ‚ÑŒ Ğ¸ÑĞ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¸Ñ Ñ‚Ğ¾Ñ€Ğ³Ğ¾Ğ²Ğ¾Ğ³Ğ¾ Ñ€ĞµÑˆĞµĞ½Ğ¸Ñ (buy/sell) Ñ ÑƒÑ‡Ñ‘Ñ‚Ğ¾Ğ¼ Ğ¸Ğ´ĞµĞ¼Ğ¿Ğ¾Ñ‚ĞµĞ½Ñ‚Ğ½Ğ¾ÑÑ‚Ğ¸,
     Ñ€Ğ¸ÑĞº-Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹, Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡ĞµĞ½Ğ¸Ğ¹ Ğ½Ğ° ÑĞ¿Ñ€ĞµĞ´/Ñ‡Ğ°ÑÑ‚Ğ¾Ñ‚Ñƒ/Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚, Ğ¸ Ğ·Ğ°Ğ¿Ğ¸ÑĞ¸ Ğ² Ñ…Ñ€Ğ°Ğ½Ğ¸Ğ»Ğ¸Ñ‰Ğµ.

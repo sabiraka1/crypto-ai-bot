@@ -1,8 +1,8 @@
 ﻿from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
-from crypto_ai_bot.core.domain.risk.manager import RiskManager, RiskConfig
+from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 
 
 def check(
@@ -10,8 +10,8 @@ def check(
     symbol: str,
     settings: Any,
     *,
-    risk_manager: Optional[RiskManager] = None,
-) -> Optional[Dict[str, str]]:
+    risk_manager: RiskManager | None = None,
+) -> dict[str, str] | None:
     """
     Тонкая обёртка над RiskManager: никакой собственной логики.
     Возвращает dict-описание превышения лимита или None (если можно торговать).
@@ -21,7 +21,7 @@ def check(
     if ok:
         return None
 
-    out: Dict[str, str] = {"type": (extra or {}).get("type", "risk"), "reason": (reason or "blocked")}
+    out: dict[str, str] = {"type": (extra or {}).get("type", "risk"), "reason": (reason or "blocked")}
     for k, v in (extra or {}).items():
         if v is not None:
             out[k] = str(v)

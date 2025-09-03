@@ -3,12 +3,13 @@
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+
 
 _log = get_logger("protective_exits")
 
@@ -69,7 +70,7 @@ def _true_ranges(ohlcv: list[list[Decimal]]) -> list[Decimal]:
         prev_close = close
     return trs
 
-def _ema_last(values: list[Decimal], period: int) -> Optional[Decimal]:
+def _ema_last(values: list[Decimal], period: int) -> Decimal | None:
     if period <= 0 or len(values) < period:
         return None
     k = dec("2") / dec(str(period + 1))
@@ -78,7 +79,7 @@ def _ema_last(values: list[Decimal], period: int) -> Optional[Decimal]:
         ema = x * k + ema * (dec("1") - k)
     return ema
 
-async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int) -> Optional[Decimal]:
+async def _atr(broker: Any, symbol: str, timeframe: str, limit: int, period: int) -> Decimal | None:
     try:
         ohlcv_raw = await broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if not ohlcv_raw:
@@ -149,11 +150,11 @@ class ProtectiveExits:
                 self._cancel_task(sym)
 
     # ---- Ğ¿ÑƒĞ±Ğ»Ğ¸Ñ‡Ğ½Ñ‹Ğµ Ğ¸Ğ½Ñ‚ĞµÑ€Ñ„ĞµĞ¹ÑÑ‹ (ÑĞ¾Ñ…Ñ€Ğ°Ğ½ÑĞµĞ¼ ÑĞ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ñ‹) ----
-    async def evaluate(self, *, symbol: str) -> Optional[dict[str, Any]]:
+    async def evaluate(self, *, symbol: str) -> dict[str, Any] | None:
         """ĞĞ´Ğ½Ğ¾Ñ€Ğ°Ğ·Ğ¾Ğ²Ğ°Ñ Ğ¾Ñ†ĞµĞ½ĞºĞ° (Ğ¼Ğ¾Ğ¶Ğ½Ğ¾ Ğ²Ñ‹Ğ·Ñ‹Ğ²Ğ°Ñ‚ÑŒ Ğ²Ñ€ÑƒÑ‡Ğ½ÑƒÑ)."""
         return await self._evaluate_once(symbol)
 
-    async def tick(self, symbol: str) -> Optional[dict[str, Any]]:
+    async def tick(self, symbol: str) -> dict[str, Any] | None:
         """Ğ¡Ğ¾Ğ²Ğ¼ĞµÑÑ‚Ğ¸Ğ¼Ğ¾ÑÑ‚ÑŒ: Ğ´ĞµĞ»ĞµĞ³Ğ¸Ñ€ÑƒĞµĞ¼ Ğ½Ğ° evaluate()."""
         return await self.evaluate(symbol=symbol)
 
@@ -186,7 +187,7 @@ class ProtectiveExits:
         finally:
             self._tasks.pop(symbol, None)
 
-    async def _evaluate_once(self, symbol: str) -> Optional[dict[str, Any]]:
+    async def _evaluate_once(self, symbol: str) -> dict[str, Any] | None:
         # Ğ¿Ğ¾Ğ·Ğ¸Ñ†Ğ¸Ñ
         pos = self._storage.positions.get_position(symbol) if hasattr(self._storage, "positions") else None
         if not pos:

@@ -1,10 +1,10 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 import os
 import shutil
 import sqlite3
-from collections.abc import Callable
-from dataclasses import dataclass
 
 
 def _ensure_dir(path: str) -> None:

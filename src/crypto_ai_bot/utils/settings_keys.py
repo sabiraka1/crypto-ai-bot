@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+
 T = TypeVar("T")
 
 def per_symbol_override(settings: Any, symbol: str, base_key: str, caster: Callable[[str], T], default: T) -> T:

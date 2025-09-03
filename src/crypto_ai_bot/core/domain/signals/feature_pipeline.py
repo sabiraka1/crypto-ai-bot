@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
+
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
+
 
 @dataclass(frozen=True)
 class Candle:
@@ -58,7 +60,7 @@ def _macd(values: list[float], fast: int = 12, slow: int = 26, signal: int = 9) 
         return out
     ema_fast = ema_list(values, fast)
     ema_slow = ema_list(values, slow)
-    macd_line = [a - b for a, b in zip(ema_fast[-len(ema_slow):], ema_slow)]
+    macd_line = [a - b for a, b in zip(ema_fast[-len(ema_slow):], ema_slow, strict=False)]
     sig = ema_list(macd_line, signal)
     return float(macd_line[-1]), float(sig[-1])
 

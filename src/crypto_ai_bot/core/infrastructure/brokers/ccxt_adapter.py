@@ -1,13 +1,16 @@
 ﻿from __future__ import annotations
+
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 from crypto_ai_bot.utils.circuit_breaker import CircuitBreaker
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
+
 
 _log = get_logger("broker.ccxt")
 
@@ -22,7 +25,7 @@ class ExchangeUnavailable(BrokerError): ...
 
 class _TokenBucket:
     """Rate limiter using token bucket algorithm."""
-    
+
     def __init__(self, rate_per_sec: float, capacity: int) -> None:
         self._rate = float(rate_per_sec)
         self._cap = int(capacity)
@@ -46,7 +49,7 @@ class _TokenBucket:
 @dataclass
 class CcxtBroker:
     """CCXT exchange adapter with circuit breaker and rate limiting."""
-    
+
     exchange: Any
     settings: Any
 
@@ -242,7 +245,7 @@ class CcxtBroker:
         try:
             t0 = asyncio.get_event_loop().time()
             order = await self._with_cb(
-                self._cb_create, 
+                self._cb_create,
                 lambda: self.exchange.create_order(gate, "market", "buy", float(base_amount), None, params)
             )
             observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "create_buy"})

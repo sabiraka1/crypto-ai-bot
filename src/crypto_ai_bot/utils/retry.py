@@ -1,8 +1,8 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import random
 from collections.abc import Awaitable, Callable
+import random
 from typing import Any
 
 

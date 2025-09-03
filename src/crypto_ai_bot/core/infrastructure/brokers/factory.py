@@ -4,6 +4,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 
+
 _log = get_logger("brokers.factory")
 
 
@@ -47,8 +48,8 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
             raise ImportError("Paper broker or its port adapter not found in module")
 
         _log.info("make_broker_paper", extra={"exchange": ex})
-        core = getattr(mod, "PaperBroker")(settings=settings)
-        return getattr(mod, "PaperBrokerPortAdapter")(core)
+        core = mod.PaperBroker(settings=settings)
+        return mod.PaperBrokerPortAdapter(core)
 
     if md in ("live", "real", "prod", "production"):
         ccxt_mod = _import_first("crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter")

@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
+
 
 @dataclass(frozen=True)
 class SpreadCapConfig:
@@ -12,7 +14,7 @@ class SpreadCapRule:
       provider(symbol) -> float (процент спрэда), либо None.
     Если провайдера нет/ошибка — правило молча пропускается.
     """
-    def __init__(self, cfg: SpreadCapConfig, provider: Optional[Callable[[str], float]] = None) -> None:
+    def __init__(self, cfg: SpreadCapConfig, provider: Callable[[str], float] | None = None) -> None:
         self.cfg = cfg
         self.provider = provider
 

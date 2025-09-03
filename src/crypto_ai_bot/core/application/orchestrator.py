@@ -11,6 +11,7 @@ from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
 from crypto_ai_bot.utils.trace import cid_context, get_cid
 
+
 _log = get_logger("orchestrator")
 
 LoopFn = Callable[[], Awaitable[None]]

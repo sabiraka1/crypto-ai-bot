@@ -14,9 +14,6 @@ from .exit_policies import (
     TrailingStopPolicy,
 )
 
-# ĞœĞµĞ½ĞµĞ´Ğ¶ĞµÑ€ - Ğ¸ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¾: Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚ Ğ¸Ğ· strategy_manager
-from .strategy_manager import StrategyManager
-
 # ĞŸĞ¾Ğ·Ğ¸Ñ†Ğ¸Ğ¾Ğ½Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ / Ğ²Ñ‹Ñ…Ğ¾Ğ´Ñ‹
 from .position_sizing import (
     SizeConstraints,
@@ -26,6 +23,10 @@ from .position_sizing import (
 )
 from .rsi_momentum import RSIMomentumStrategy
 from .signals_policy_strategy import SignalsPolicyStrategy
+
+# ĞœĞµĞ½ĞµĞ´Ğ¶ĞµÑ€ - Ğ¸ÑĞ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¾: Ğ¸Ğ¼Ğ¿Ğ¾Ñ€Ñ‚ Ğ¸Ğ· strategy_manager
+from .strategy_manager import StrategyManager
+
 
 __all__ = [
     "BaseStrategy",

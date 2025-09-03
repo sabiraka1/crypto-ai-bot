@@ -5,6 +5,7 @@ import logging
 import sys
 from typing import Any
 
+
 __all__ = ["get_correlation_id", "get_logger", "set_correlation_id"]
 
 _CORRELATION_ID: str | None = None

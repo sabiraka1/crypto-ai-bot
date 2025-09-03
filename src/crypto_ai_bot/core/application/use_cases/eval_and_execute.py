@@ -1,13 +1,11 @@
 ﻿from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
-from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+
 
 _log = get_logger("usecase.eval_and_execute")
 

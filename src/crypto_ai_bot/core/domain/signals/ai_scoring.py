@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+
 from .ai_model import AIModel
 from .feature_pipeline import Candle, last_features
+
 
 @dataclass
 class AIScoringConfig:
@@ -21,10 +23,10 @@ class AIScorer:
 
     def score(self,
               ohlcv_15m: list[Candle],
-              ohlcv_1h: Optional[list[Candle]] = None,
-              ohlcv_4h: Optional[list[Candle]] = None,
-              ohlcv_1d: Optional[list[Candle]] = None,
-              ohlcv_1w: Optional[list[Candle]] = None) -> float | None:
+              ohlcv_1h: list[Candle] | None = None,
+              ohlcv_4h: list[Candle] | None = None,
+              ohlcv_1d: list[Candle] | None = None,
+              ohlcv_1w: list[Candle] | None = None) -> float | None:
         feats = last_features(ohlcv_15m, ohlcv_1h, ohlcv_4h, ohlcv_1d, ohlcv_1w)
         p = self._model.predict_proba(feats)
         if p is None and self.cfg.required:

@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+
 
 try:
     import httpx
@@ -84,7 +84,7 @@ class TelegramErrorHandler(logging.Handler):
             pass
 
 
-def _b64env(name: str) -> Optional[str]:
+def _b64env(name: str) -> str | None:
     raw = os.getenv(name)
     if not raw:
         return None

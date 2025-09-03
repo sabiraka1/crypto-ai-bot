@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
+
 from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+
 
 _log = get_logger("health")
 
@@ -36,7 +38,7 @@ class HealthChecker:
 
         # Broker
         try:
-            if hasattr(self._br, "ping") and callable(getattr(self._br, "ping")):
+            if hasattr(self._br, "ping") and callable(self._br.ping):
                 await self._br.ping()
             else:
                 await self._br.fetch_ticker(self._symbol)

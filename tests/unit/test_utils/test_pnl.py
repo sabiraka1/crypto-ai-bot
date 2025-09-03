@@ -1,5 +1,5 @@
-﻿import pytest
-from decimal import Decimal
+﻿from decimal import Decimal
+
 
 def test_pnl_import():
     '''Test PnL module imports'''

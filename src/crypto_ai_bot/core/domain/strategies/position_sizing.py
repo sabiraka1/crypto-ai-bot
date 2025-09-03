@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from crypto_ai_bot.utils.decimal import dec
 
+
 # Константа для дефолтного значения B008
 _DEFAULT_KELLY_CAP = dec("0.5")
 
@@ -89,7 +90,7 @@ def naive_kelly(win_rate: Decimal, avg_win_pct: Decimal, avg_loss_pct: Decimal, 
     """
     if cap is None:
         cap = _DEFAULT_KELLY_CAP
-    
+
     w = dec(str(win_rate or 0))
     aw = dec(str(avg_win_pct or 0)) / dec("100")
     al = dec(str(avg_loss_pct or 0)) / dec("100")

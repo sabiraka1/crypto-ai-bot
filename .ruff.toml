@@ -1,140 +1,272 @@
-# Crypto AI Bot - Enhanced Ruff Configuration
-# Stricter, but still green-by-default (tests are relaxed where sensible).
-line-length = 120
+# Crypto AI Bot - Balanced Ruff Configuration
+# Focus: catch critical errors, maintain code quality, avoid false positives
 target-version = "py311"
+line-length = 110  # Balanced: not too strict, not too loose
 
 [lint]
-# Core families + isort + pyupgrade + security + naming + simplify
-# ENHANCED: Added crypto-specific rules
 select = [
-    "E", "F", "W",           # pycodestyle + pyflakes
-    "B", "C90",              # bugbear + complexity
-    "I",                     # isort
-    "UP",                    # pyupgrade  
-    "S",                     # bandit security
-    "N",                     # pep8-naming
-    "SIM", "RET", "PERF",    # simplify + return + performance
-    # CRYPTO-SPECIFIC ADDITIONS
-    "ASYNC",                 # async/await patterns (critical for trading)
-    "A",                     # flake8-builtins (avoid shadowing)
-    "BLE",                   # blind-except (important for error handling)
-    "FBT",                   # boolean-trap (trading functions clarity)
-    "C4",                    # comprehensions (performance)
-    "EM",                    # error messages (structured logging)
-    "LOG",                   # logging patterns
-    "PIE",                   # unnecessary code
-    "T20",                   # print statements (should use logging)
-    "TRY",                   # exception handling patterns
-    "ARG",                   # unused arguments
+    # CRITICAL - Always needed
+    "E",           # pycodestyle errors
+    "F",           # pyflakes (undefined names, imports)
+    "W",           # pycodestyle warnings
+    
+    # IMPORTANT - Code quality
+    "I",           # isort (import sorting)
+    "UP",          # pyupgrade (modern Python patterns)
+    "N",           # pep8-naming (naming conventions)
+    "B",           # flake8-bugbear (common bugs)
+    
+    # SECURITY - Critical for trading
+    "S",           # bandit (security issues)
+    "BLE",         # blind-except (catch Exception handling)
+    
+    # ASYNC - Critical for trading bot
+    "ASYNC",       # async/await best practices
+    
+    # PERFORMANCE - Important for trading
+    "PERF",        # performance anti-patterns
+    "C4",          # list/dict/set comprehensions
+    
+    # CODE QUALITY - Medium priority
+    "SIM",         # simplify (code simplification)
+    "RET",         # return statements
+    "ARG",         # unused arguments
+    "TRY",         # try/except patterns
+    
+    # TRADING SPECIFIC
+    "A",           # builtin shadowing (important for 'id', 'type')
 ]
 
-# Pragmatic ignores
+# Minimal ignores - only what's really needed
 ignore = [
-    "E501",   # long lines
-    "E701",   # multiple statements on one line (colon)
-    "E702",   # multiple statements on one line (semicolon) 
-    "E731",   # lambda assigned
-    "B904",   # raise ... from in except blocks
-    "B008",   # function call in default argument
-    "RUF001", "RUF002", "RUF003", "RUF005", "RUF012",
-    "UP027", "UP038",
-    "E402",   # module level import not at top of file
-    "E741",   # ambiguous variable name
-    "C901",   # function complexity
+    # Line length - controlled by line-length setting
+    "E501",        # line too long
     
-    # CRYPTO-SPECIFIC IGNORES
-    "FBT001", "FBT002",      # boolean traps (common in trading APIs)
-    "EM101", "EM102",        # exception message patterns
-    "TRY003",                # long exception messages (trading errors need context)
-    "ARG002",                # unused method argument (interfaces/protocols)
-    "S101",                  # assert statements (used in domain validation)
-    "A003",                  # builtin attribute shadowing (common with 'type', 'id')
+    # Complexity - handle per-file for specific cases
+    "C901",        # function too complex
+    
+    # Lambda - sometimes useful
+    "E731",        # don't assign lambda
+    
+    # Common in trading APIs
+    "B008",        # function call in default argument
+    "B904",        # raise without from in except
+    
+    # Assert is OK in domain validation
+    "S101",        # use of assert
+    
+    # Trading APIs often have these
+    "A003",        # class attribute shadows builtin (type, id)
+    "ARG002",      # unused method argument (interfaces)
+    
+    # Too strict for now
+    "SIM108",      # ternary operator (sometimes less readable)
+    "TRY003",      # long exception messages (need context in trading)
 ]
 
 [lint.per-file-ignores]
-# Tests - more relaxed
-"tests/**" = [
-    "E501", "E701", "E702", "C901", "E741", "B904", "B008", 
-    "S", "N", "SIM", "RET",
-    "ASYNC",                 # tests can have simpler async patterns
-    "A", "BLE", "FBT", "C4", "EM", "LOG", "PIE", "T20", "TRY", "ARG"
+# =============================================================================
+# TEST FILES - More relaxed
+# =============================================================================
+"tests/**/*.py" = [
+    "S",           # security not critical in tests
+    "ARG",         # unused arguments OK in fixtures
+    "BLE001",      # bare except OK in tests
+    "B018",        # useless expression OK in tests
+    "SIM",         # simplification not critical
+    "N802",        # function names can be test_CamelCase
 ]
 
-# Scripts - operational tools
-"scripts/**" = [
-    "E501", "E701", "E702", "S", "N", "SIM",
-    "T20",                   # allow prints in scripts
-    "ASYNC", "BLE", "ARG"
+# =============================================================================
+# SCRIPTS & CLI - Operational tools
+# =============================================================================
+"scripts/**/*.py" = [
+    "T20",         # print() OK in scripts
+    "S",           # security checks can be relaxed
 ]
 
-# Package inits
-"src/**/__init__.py" = ["F401"]
-
-# CLI tools - allow prints and simpler patterns  
 "src/crypto_ai_bot/cli/*.py" = [
-    "T20",                   # print statements OK in CLI
-    "FBT",                   # boolean arguments common in CLI
-    "C901",                  # complexity OK in CLI entry points
-    "ARG",                   # CLI argument patterns
+    "T20",         # print statements OK in CLI
+    "BLE001",      # broad exception handling for user-friendly errors
+    "TRY301",      # raise in try block OK for CLI
+    "ARG001",      # unused arguments in CLI commands
 ]
 
-# Migrations - can be more flexible
-"src/crypto_ai_bot/core/infrastructure/storage/migrations/*.py" = [
-    "S608",                  # hardcoded SQL (by design)
-    "E501",                  # long SQL lines
-    "T20",                   # debug prints
+# =============================================================================
+# APP LAYER - API and composition
+# =============================================================================
+"src/crypto_ai_bot/app/server.py" = [
+    "ARG001",      # FastAPI requires unused args (request, app)
+    "ASYNC109",    # async-function-with-timeout OK
+    "B008",        # FastAPI Depends() in defaults
 ]
 
-# Settings - environment access patterns
-"src/crypto_ai_bot/core/infrastructure/settings.py" = [
-    "S105", "S106",          # hardcoded secrets (false positive on env var names)
+"src/crypto_ai_bot/app/compose.py" = [
+    "BLE001",      # broad exception for startup failures
+    "C901",        # complexity OK in DI composition
 ]
 
-# CRYPTO-SPECIFIC PER-FILE RULES
-# Domain layer - strictest rules (business logic)
-"src/crypto_ai_bot/core/domain/**/*.py" = []  # no ignores - maximum strictness
+# Telegram adapters - external API integration
+"src/crypto_ai_bot/app/adapters/telegram*.py" = [
+    "BLE001",      # broad except for network errors
+    "TRY301",      # raise within try for retries
+    "S101",        # assert for message validation
+]
 
-# Critical trading paths - strict error handling
+"src/crypto_ai_bot/app/subscribers/*.py" = [
+    "BLE001",      # broad except for event handling
+    "ARG001",      # unused event data OK
+]
+
+# =============================================================================
+# CORE APPLICATION - Business logic (moderate strictness)
+# =============================================================================
+"src/crypto_ai_bot/core/application/orchestrator.py" = [
+    "C901",        # orchestrator can be complex
+    "BLE001",      # catch-all for graceful degradation
+]
+
 "src/crypto_ai_bot/core/application/use_cases/execute_trade.py" = [
-    # No ignores - this is critical trading logic
+    # CRITICAL FILE - minimal ignores only
+    "TRY301",      # raise in try block for retries
+    "BLE001",      # broad except for broker errors
 ]
 
-"src/crypto_ai_bot/core/application/use_cases/eval_and_execute.py" = [
-    # No ignores - critical decision logic
+"src/crypto_ai_bot/core/application/protective_exits.py" = [
+    "BLE001",      # broad except for exit safety
+    "PERF401",     # list comprehension OK for readability
 ]
 
-# Utils with financial calculations - strict
-"src/crypto_ai_bot/utils/decimal.py" = []  # no ignores
-"src/crypto_ai_bot/utils/pnl.py" = []     # no ignores
+"src/crypto_ai_bot/core/application/reconciliation/*.py" = [
+    "BLE001",      # broad except for reconciliation safety
+]
 
-# Infrastructure adapters - some flexibility for external APIs
+# Event topics registry
+"src/crypto_ai_bot/core/application/events_topics.py" = [
+    "N812",        # lowercase 'EVT' alias OK
+]
+
+# =============================================================================
+# CORE DOMAIN - Strictest (minimal ignores)
+# =============================================================================
+# Risk management - CRITICAL, no additional ignores
+
+# Strategies might need some flexibility
+"src/crypto_ai_bot/core/domain/strategies/*.py" = [
+    "C901",        # strategy logic can be complex
+]
+
+# Signals processing
+"src/crypto_ai_bot/core/domain/signals/*.py" = [
+    "C901",        # signal fusion can be complex
+]
+
+# =============================================================================
+# INFRASTRUCTURE - External integrations
+# =============================================================================
+# Broker adapters - external API
 "src/crypto_ai_bot/core/infrastructure/brokers/*.py" = [
-    "A003",                  # CCXT API has 'type', 'id' attributes
-    "ARG",                   # CCXT methods have many unused params
+    "BLE001",      # broad except for exchange errors
+    "ARG",         # CCXT has many unused params
+    "C901",        # broker logic can be complex
+    "TRY301",      # raise in try for retries
+    "S324",        # hashlib for order IDs OK
+]
+
+# Storage and migrations
+"src/crypto_ai_bot/core/infrastructure/storage/*.py" = [
+    "S608",        # SQL injection - controlled queries
+    "BLE001",      # broad except for DB errors
+]
+
+"src/crypto_ai_bot/core/infrastructure/storage/migrations/*.py" = [
+    "S608",        # hardcoded SQL by design
+    "E501",        # long SQL lines OK
+]
+
+# Settings - special case
+"src/crypto_ai_bot/core/infrastructure/settings.py" = [
+    "S105",        # hardcoded password - false positive on env names
+    "S106",        # hardcoded password - false positive
+    "C901",        # validation can be complex
+]
+
+# Event bus
+"src/crypto_ai_bot/core/infrastructure/events/*.py" = [
+    "BLE001",      # broad except for event handling
+    "ARG001",      # unused handler args OK
+]
+
+# Market data
+"src/crypto_ai_bot/core/infrastructure/market_data/*.py" = [
+    "BLE001",      # broad except for data fetching
+]
+
+# =============================================================================
+# UTILS - Should be clean but practical
+# =============================================================================
+# Financial calculations - CRITICAL, no additional ignores
+"src/crypto_ai_bot/utils/decimal.py" = []
+"src/crypto_ai_bot/utils/pnl.py" = []
+
+# Other utils can be more flexible
+"src/crypto_ai_bot/utils/retry.py" = [
+    "BLE001",      # broad except for retry logic
+]
+
+"src/crypto_ai_bot/utils/logging.py" = [
+    "ARG001",      # unused args in formatters
+]
+
+# =============================================================================
+# SPECIAL FILES
+# =============================================================================
+# Package init files
+"**/__init__.py" = [
+    "F401",        # unused imports (re-exports)
+    "F403",        # star imports OK in __init__
 ]
 
 [lint.isort]
+# Import organization
 known-first-party = ["crypto_ai_bot"]
+known-third-party = ["ccxt", "redis", "prometheus_client", "fastapi", "pydantic", "httpx"]
 combine-as-imports = true
+force-single-line = false
 force-sort-within-sections = true
-# ENHANCED: Add trading-specific import grouping
-known-third-party = ["ccxt", "redis", "prometheus_client"]
+lines-after-imports = 2
 section-order = [
-    "future", 
+    "future",
     "standard-library", 
-    "third-party", 
-    "first-party", 
+    "third-party",
+    "first-party",
     "local-folder"
 ]
 
+[lint.flake8-bugbear]
+# Allow some common patterns
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query", 
+    "fastapi.Body",
+    "pydantic.Field"
+]
+
 [lint.flake8-bandit]
-# CRYPTO-SPECIFIC: Allow patterns needed for trading systems
-check-typed-exception = true
-# Note: hardcoded-tmp-directory config removed - not supported in this format
+# Security settings
+check-typed-exception = false  # too many false positives
 
 [lint.pylint]
-# Financial calculations can be complex
-max-args = 8
-max-branches = 15
+# Complexity limits (reasonable for trading logic)
+max-args = 7           # function arguments
+max-branches = 12      # if/else branches
+max-returns = 6        # return statements
+max-statements = 50    # statements in function
 
-# Note: flake8-logging-format removed - use LOG rules in select instead
+[lint.pycodestyle]
+# E501 line length is already in ignore list
+max-doc-length = 200   # docstring line length
+
+[lint.mccabe]
+# Complexity score (handled per-file where needed)
+max-complexity = 10

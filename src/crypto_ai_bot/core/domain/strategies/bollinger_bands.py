@@ -6,7 +6,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-from .base import BaseStrategy, Decision, StrategyContext, MarketData
+from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 
 class BollingerBandsStrategy(BaseStrategy):
@@ -61,15 +61,15 @@ class BollingerBandsStrategy(BaseStrategy):
                 settings=ctx.settings,
                 data={"ticker": ticker}
             )
-        
+
         action, explain = self.decide(ctx)
         reason = explain.get("signal", explain.get("reason", ""))
-        
+
         # Вычисляем confidence на основе силы сигнала
         confidence = 0.5
         if action in ["buy", "sell"] and "touch" in reason:
             confidence = 0.65
-        
+
         return Decision(
             action=action,
             confidence=confidence,

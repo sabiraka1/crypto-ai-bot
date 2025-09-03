@@ -1,5 +1,7 @@
-﻿import pytest
-import asyncio
+﻿import asyncio
+
+import pytest
+
 
 def test_orchestrator_import():
     '''Test orchestrator module'''

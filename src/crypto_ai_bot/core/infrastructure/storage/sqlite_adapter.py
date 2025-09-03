@@ -1,9 +1,9 @@
 ﻿## `core/storage/sqlite_adapter.py`
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+import sqlite3
 
 
 def connect(db_path: str) -> sqlite3.Connection:

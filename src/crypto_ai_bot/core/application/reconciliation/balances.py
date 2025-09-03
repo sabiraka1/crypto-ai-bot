@@ -1,12 +1,14 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
 from decimal import Decimal
+from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
+
 
 _log = get_logger("reconcile.balances")
 

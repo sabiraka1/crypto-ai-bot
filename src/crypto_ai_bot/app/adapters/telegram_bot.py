@@ -1,13 +1,16 @@
 ﻿from __future__ import annotations
-from typing import Any, cast
+
 import asyncio
 import html
 import os
 import time
+from typing import Any, cast
+
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
+
 
 def _getv(d: Any) -> Any:
     def _inner(k: str) -> Any:
@@ -24,7 +27,7 @@ _log = get_logger("adapters.telegram_bot")
 _TTL = float(os.environ.get("TELEGRAM_BOT_TTL_SECS", "30") or 30.0)
 _THR = os.environ.get("TELEGRAM_BOT_THROTTLE", "3/5")
 try:
-    _THR_N, _THR_WIN = [int(x) for x in _THR.split("/", 1)]
+    _THR_N, _THR_WIN = (int(x) for x in _THR.split("/", 1))
 except Exception:  # noqa: BLE001  # fallback
     _THR_N, _THR_WIN = 3, 5
 

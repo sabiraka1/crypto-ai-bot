@@ -2,40 +2,41 @@
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional, Tuple
+from typing import Any
 
 # Domain-Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ñ‡Ğ¸ÑÑ‚Ñ‹Ğ¹ ÑĞ»Ğ¾Ğ¹)
-from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule, LossStreakConfig
-from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule, MaxDrawdownConfig
+from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
+from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
+
 
 # Ğ”Ğ¾Ğ¿. Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° (Ğ¼ÑĞ³ĞºĞ¾Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ)
 try:
-    from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mRule, MaxOrders5mConfig
+    from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mConfig, MaxOrders5mRule
 except Exception:
     MaxOrders5mRule = None  # type: ignore
     MaxOrders5mConfig = None  # type: ignore
 try:
-    from crypto_ai_bot.core.domain.risk.rules.max_turnover_5m import MaxTurnover5mRule, MaxTurnover5mConfig
+    from crypto_ai_bot.core.domain.risk.rules.max_turnover_5m import MaxTurnover5mConfig, MaxTurnover5mRule
 except Exception:
     MaxTurnover5mRule = None  # type: ignore
     MaxTurnover5mConfig = None  # type: ignore
 try:
-    from crypto_ai_bot.core.domain.risk.rules.cooldown import CooldownRule, CooldownConfig
+    from crypto_ai_bot.core.domain.risk.rules.cooldown import CooldownConfig, CooldownRule
 except Exception:
     CooldownRule = None  # type: ignore
     CooldownConfig = None  # type: ignore
 try:
-    from crypto_ai_bot.core.domain.risk.rules.spread_cap import SpreadCapRule, SpreadCapConfig
+    from crypto_ai_bot.core.domain.risk.rules.spread_cap import SpreadCapConfig, SpreadCapRule
 except Exception:
     SpreadCapRule = None  # type: ignore
     SpreadCapConfig = None  # type: ignore
 try:
-    from crypto_ai_bot.core.domain.risk.rules.daily_loss import DailyLossRule, DailyLossConfig
+    from crypto_ai_bot.core.domain.risk.rules.daily_loss import DailyLossConfig, DailyLossRule
 except Exception:
     DailyLossRule = None  # type: ignore
     DailyLossConfig = None  # type: ignore
 try:
-    from crypto_ai_bot.core.domain.risk.correlation_manager import CorrelationManager, CorrelationConfig
+    from crypto_ai_bot.core.domain.risk.correlation_manager import CorrelationConfig, CorrelationManager
 except Exception:
     CorrelationManager = None  # type: ignore
     CorrelationConfig = None  # type: ignore
@@ -43,6 +44,7 @@ except Exception:
 # utils Ğ² domain Ğ´Ğ¾Ğ¿ÑƒÑÑ‚Ğ¸Ğ¼Ñ‹
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
+
 
 _log = get_logger("risk.manager")
 
@@ -66,10 +68,10 @@ class RiskConfig:
     anti_corr_groups: list[list[str]] | None = None
 
     # Ğ¿Ñ€Ğ¾Ğ²Ğ°Ğ¹Ğ´ĞµÑ€ ÑĞ¿Ñ€ÑĞ´Ğ° (ĞµÑĞ»Ğ¸ None â€” SpreadCapRule Ğ¿Ñ€Ğ¾Ğ¿ÑƒÑĞºĞ°ĞµÑ‚ÑÑ)
-    spread_provider: Optional[callable] = None
+    spread_provider: callable | None = None
 
     @classmethod
-    def from_settings(cls, s: Any, *, spread_provider: Optional[callable] = None) -> "RiskConfig":
+    def from_settings(cls, s: Any, *, spread_provider: callable | None = None) -> RiskConfig:
         groups = getattr(s, "RISK_ANTI_CORR_GROUPS", None) or None
         if isinstance(groups, str):
             try:
@@ -117,7 +119,7 @@ class RiskManager:
         self._dailoss = DailyLossRule(DailyLossConfig(limit_quote=cfg.daily_loss_limit_quote)) if (DailyLossRule and cfg.daily_loss_limit_quote > 0) else None
         self._corr = CorrelationManager(CorrelationConfig(groups=cfg.anti_corr_groups or [])) if (CorrelationManager and cfg.anti_corr_groups) else None
 
-    def _budget_check(self, *, symbol: str, storage: Any) -> Tuple[bool, str, dict]:
+    def _budget_check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
         """
         Ğ”Ğ½ĞµĞ²Ğ½Ñ‹Ğµ Ğ±ÑĞ´Ğ¶ĞµÑ‚Ñ‹: ĞºĞ¾Ğ»-Ğ²Ğ¾ Ğ¾Ñ€Ğ´ĞµÑ€Ğ¾Ğ² Ğ¸ Ğ´Ğ½ĞµĞ²Ğ½Ğ¾Ğ¹ Ğ¾Ğ±Ğ¾Ñ€Ğ¾Ñ‚ (quote). 0 = Ğ²Ñ‹ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾.
         reason: 'budget:max_orders_per_day' | 'budget:max_turnover_quote_per_day'
@@ -153,7 +155,7 @@ class RiskManager:
 
         return True, "ok", {}
 
-    def check(self, *, symbol: str, storage: Any) -> Tuple[bool, str, dict]:
+    def check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
         """
         Ğ’Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ (ok, reason, extra). ĞĞ¸ĞºĞ°ĞºĞ¸Ñ… side-effects.
         reason:

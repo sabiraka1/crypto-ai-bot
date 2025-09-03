@@ -4,6 +4,7 @@ from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 
+
 _log = get_logger("recon.discrepancy")
 
 
