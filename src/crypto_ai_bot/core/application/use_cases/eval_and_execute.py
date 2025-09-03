@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from crypto_ai_bot.core.application.use_cases.execute_trade import execute_trade
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.core.domain.strategies.position_sizing import (
     SizeConstraints,
     fixed_fractional,
@@ -15,14 +16,13 @@ from crypto_ai_bot.core.domain.strategies.position_sizing import (
 )
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import inc
 
 # === AI skeleton imports (безопасные, есть фолбэк) ===
 try:
     from crypto_ai_bot.core.domain.signals.feature_pipeline import Candle, last_features
     from crypto_ai_bot.core.domain.signals.ai_scoring import AIScorer, AIScoringConfig
     from crypto_ai_bot.core.domain.signals.fusion import pass_thresholds, FusionThresholds
-except Exception:  # если папки ещё не добавили — всё равно не ломаемся
+except Exception:
     Candle = None  # type: ignore
     last_features = None  # type: ignore
     AIScorer = None  # type: ignore
@@ -50,11 +50,8 @@ class StrategyContext:
     now_ms: int | None = None
 
 
-async def _fetch_ohlcv_as_candles(broker: Any, symbol: str, timeframe: str, limit: int) -> list[Candle]:
-    """Унифицированная загрузка OHLCV и преобразование в Candle (если модуль доступен).
-    При ошибке возвращает пустой список — логика не ломается.
-    """
-    out: list[Candle] = []
+async def _fetch_ohlcv_as_candles(broker: Any, symbol: str, timeframe: str, limit: int):
+    out = []
     if Candle is None:
         return out
     try:
@@ -62,7 +59,6 @@ async def _fetch_ohlcv_as_candles(broker: Any, symbol: str, timeframe: str, limi
         if exch and hasattr(exch, "fetch_ohlcv"):
             ohlcv = await exch.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
             for row in (ohlcv or []):
-                # CCXT формирует: [ts, open, high, low, close, volume]
                 out.append(Candle(t=int(row[0]), o=dec(str(row[1])), h=dec(str(row[2])),
                                   l=dec(str(row[3])), c=dec(str(row[4])), v=dec(str(row[5]))))
     except Exception:
@@ -106,7 +102,8 @@ async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> Mark
         if rets:
             mean = sum(rets) / dec(str(len(rets)))
             var = sum((r - mean) * (r - mean) for r in rets) / dec(str(len(rets)))
-            std = dec(str(math.sqrt(float(var))))
+            from math import sqrt
+            std = dec(str(sqrt(float(var))))
             vol_pct = std * dec("100")
 
     return MarketData(
@@ -121,9 +118,6 @@ async def _build_market_data(*, symbol: str, broker: Any, settings: Any) -> Mark
 
 
 def _heuristic_ind_score_from_features(feats: dict[str, float]) -> float:
-    """Простой и безопасный индикаторный скор без сторонних зависимостей.
-    Скейл 0..100. Используется только если включён AI-gating.
-    """
     score = 50.0
     ema20 = feats.get("ema20_15m", 0.0)
     ema50 = feats.get("ema50_15m", 0.0)
@@ -134,19 +128,16 @@ def _heuristic_ind_score_from_features(feats: dict[str, float]) -> float:
     bb_m = feats.get("bb_m_15m", 0.0)
     bb_l = feats.get("bb_l_15m", 0.0)
 
-    # Тренд: EMA20 > EMA50
     if ema20 > ema50:
         score += 10
     else:
         score -= 5
 
-    # MACD > Signal
     if macd > macds:
         score += 10
     else:
         score -= 5
 
-    # RSI зона
     if 55 <= rsi <= 70:
         score += 10
     elif rsi > 70:
@@ -154,13 +145,10 @@ def _heuristic_ind_score_from_features(feats: dict[str, float]) -> float:
     elif rsi < 45:
         score -= 10
 
-    # Положение относительно средины Боллинджера
     if bb_u and bb_m and bb_l:
-        if bb_m > 0:
-            # близко к верхней половине канала — лёгкий плюс
-            score += 5 if (ema20 > bb_m) else 0
+        if bb_m > 0 and ema20 > bb_m:
+            score += 5
 
-    # Нормировка
     return max(0.0, min(100.0, score))
 
 
@@ -170,7 +158,6 @@ class StrategyManager:
         self.regime_provider = regime_provider
 
     async def decide(self, ctx: StrategyContext, md: MarketData) -> tuple[str, str | None]:
-        # здесь может быть логика стратегий; по умолчанию — hold
         return "hold", "no_strategy_configured"
 
 
@@ -187,7 +174,6 @@ async def eval_and_execute(
     try:
         md = await _build_market_data(symbol=symbol, broker=broker, settings=settings)
 
-        # regime (не ломаем поведение)
         regime = "neutral"
         if hasattr(broker, "_regime") and broker._regime:
             try:
@@ -199,12 +185,10 @@ async def eval_and_execute(
         manager = StrategyManager(settings=settings, regime_provider=lambda: regime)
         decision, explain = await manager.decide(ctx=ctx, md=md)
 
-        # === AI-gating (строго опционально) ===
+        # === AI-gating (опционально) ===
         ai_gating = bool(int(getattr(settings, "AI_GATING_ENABLED", 0) or 0))
         if ai_gating and decision in ("buy", "sell") and AIScorer and last_features and Candle:
-            # Подготовим OHLCV для мульти-TF
             limit = int(getattr(settings, "STRAT_OHLCV_LIMIT", 200) or 200)
-            # Базовый TF: 15m (если у тебя другой — подставится как есть)
             tf_15m = str(getattr(settings, "STRAT_TIMEFRAME", "15m") or "15m")
             o15 = await _fetch_ohlcv_as_candles(broker, symbol, tf_15m, limit)
             o1h = await _fetch_ohlcv_as_candles(broker, symbol, "1h", 200)
@@ -215,7 +199,6 @@ async def eval_and_execute(
             feats = last_features(o15, o1h, o4h, o1d, o1w)
             ind_score = _heuristic_ind_score_from_features(feats)
 
-            # Настройка AI: можно переопределить путями в settings при желании
             cfg = AIScoringConfig(
                 model_path=str(getattr(settings, "AI_MODEL_PATH", "models/ai/model.onnx") or "models/ai/model.onnx"),
                 meta_path=str(getattr(settings, "AI_META_PATH", "models/ai/meta.json") or "models/ai/meta.json"),
@@ -235,30 +218,26 @@ async def eval_and_execute(
             )
 
             if not ok:
-                inc("strategy_hold_total", symbol=symbol, reason=f"ai_gating:{dbg.get('reason','')}")
                 return {"ok": True, "action": "hold", "reason": f"ai_gating:{dbg}", "regime": regime}
 
         if decision not in ("buy", "sell"):
-            inc("strategy_hold_total", symbol=symbol, reason=explain or "")
             return {"ok": True, "action": "hold", "reason": explain, "regime": regime}
 
-        # ----------------- Position sizing (совместимо с CCXT и paper) -----------------
+        # ----------------- Position sizing -----------------
         quote_balance: Decimal = dec("0")
         quote_ccy = symbol.split("/")[1]
         bal = None
         try:
-            # 1) попробуем CCXT-стиль (по символу): {"free_base","free_quote"}
             try:
-                bal = await broker.fetch_balance(symbol)  # ccxt_adapter поддерживает symbol
+                bal = await broker.fetch_balance(symbol)
             except TypeError:
-                bal = await broker.fetch_balance()        # paper-стиль без аргумента
-
+                bal = await broker.fetch_balance()
             if isinstance(bal, dict):
-                if "free_quote" in bal:  # CCXT-адаптер
+                if "free_quote" in bal:
                     qb = bal.get("free_quote")
                     if qb is not None:
                         quote_balance = dec(str(qb))
-                elif quote_ccy in bal:  # словарь по активам (paper)
+                elif quote_ccy in bal:
                     info = bal.get(quote_ccy, {}) or {}
                     free = info.get("free") or info.get("total")
                     if free is not None:
@@ -306,19 +285,29 @@ async def eval_and_execute(
                     constraints=constraints,
                 )
 
-        # ----------------- Risk check (как было) -----------------
+        # ----------------- Risk check (domain -> result only) -----------------
         try:
-            ok_risk, risk_reason = (risk.check(symbol=symbol, storage=storage)
-                                    if hasattr(risk, "check")
-                                    else (risk.can_execute(), "legacy_risk"))
+            res = risk.check(symbol=symbol, storage=storage) if hasattr(risk, "check") else (risk.can_execute(), "legacy_risk", {})
+            if isinstance(res, tuple) and len(res) == 3:
+                ok_risk, risk_reason, risk_extra = res
+            elif isinstance(res, tuple) and len(res) == 2:
+                ok_risk, risk_reason = res
+                risk_extra = {}
+            else:
+                ok_risk, risk_reason, risk_extra = False, "risk_invalid_result", {}
         except Exception:
-            ok_risk, risk_reason = False, "risk_exception"
+            ok_risk, risk_reason, risk_extra = False, "risk_exception", {}
 
         if not ok_risk:
-            inc("risk_block_total", symbol=symbol, reason=str(risk_reason))
-            return {"ok": True, "action": "hold", "reason": f"risk:{risk_reason}", "regime": regime}
+            topic = EVT.BUDGET_EXCEEDED if str(risk_reason).startswith("budget:") else EVT.RISK_BLOCKED
+            payload = {"symbol": symbol, "reason": str(risk_reason), **(risk_extra or {})}
+            try:
+                await bus.publish(topic, payload)
+            except Exception:
+                pass
+            return {"ok": True, "action": "hold", "reason": f"risk:{risk_reason}", "regime": regime, **(risk_extra or {})}
 
-        # ----------------- Execute trade (как было) -----------------
+        # ----------------- Execute trade -----------------
         res = await execute_trade(
             symbol=symbol,
             side=decision,
@@ -333,6 +322,7 @@ async def eval_and_execute(
             protective_exits=exits,
         )
         return {"ok": True, "action": decision, "result": res, "explain": explain, "regime": regime, "sizer": sizer}
+
     except Exception as exc:
         _log.error("eval_and_execute_failed", extra={"symbol": symbol}, exc_info=True)
         return {"ok": False, "error": str(exc)}
