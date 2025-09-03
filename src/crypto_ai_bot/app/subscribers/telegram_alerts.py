@@ -13,7 +13,7 @@ _log = get_logger("subscribers.telegram")
 
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
-    сѸ Telegram: сѰ сѸя  EventBus  ѿѰя  Telegram.
+    Subscribe EventBus alerts and forward to Telegram.
     Ѹ ѾсѾ  сѹ: ѾѺ ѵс, HTML,  ѲсѲѵѽ .
     """
     tg = TelegramAlerts(
@@ -46,11 +46,11 @@ def attach_alerts(bus: Any, settings: Any) -> None:
 
     async def on_auto_paused(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
-        await _send(f"️ <b>AUTO-PAUSE</b> {evt.get('symbol', '')}\nѸѸ: <code>{evt.get('reason', '')}</code>")
+        await _send(f"️ <b>AUTO-PAUSE</b> {evt.get('symbol', '')}\nReason: <code>{evt.get('reason', '')}</code>")
 
     async def on_auto_resumed(evt: dict[str, Any]) -> None:
         inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
-        await _send(f" <b>AUTO-RESUME</b> {evt.get('symbol', '')}\nѸѸ: <code>{evt.get('reason', '')}</code>")
+        await _send(f" <b>AUTO-RESUME</b> {evt.get('symbol', '')}\nReason: <code>{evt.get('reason', '')}</code>")
 
     async def on_pos_mm(evt: dict[str, Any]) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
@@ -107,11 +107,13 @@ def attach_alerts(bus: Any, settings: Any) -> None:
             if kind == "max_orders_5m"
             else f"turnover={evt.get('turnover', '')}/{evt.get('limit', '')}"
         )
-        await _send(f"⏳ <b>BUDGET</b> {s} ѵѵ ({kind})\n{detail}")
+        await _send(f"⏳ <b>RISK/BUDGET BLOCK</b> {s}
+{detail}")
 
     async def on_trade_blocked(evt: dict[str, Any]) -> None:
         inc("trade_blocked_total", symbol=evt.get("symbol", ""), reason=evt.get("reason", ""))
-        await _send(f" <b>BLOCKED</b> {evt.get('symbol', '')}\nѸѸ: <code>{evt.get('reason', '')}</code>")
+        await _send(f"⛔ <b>RISK/BLOCKED</b> {evt.get('symbol', '')}
+Reason: <code>{evt.get('reason', '')}</code>")
 
     async def on_broker_error(evt: dict[str, Any]) -> None:
         inc("broker_error_total", symbol=evt.get("symbol", ""))

@@ -11,7 +11,7 @@ _log = get_logger("adapters.telegram")
 
 class TelegramAlerts:
     """
-    сѾяѸ Ѳя  Telegram (Bot API).
+    Adapter for Telegram (Bot API).
     """
 
     def __init__(

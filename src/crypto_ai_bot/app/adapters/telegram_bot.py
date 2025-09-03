@@ -44,7 +44,7 @@ def _split_symbol(sym: str) -> tuple[str, str]:
 
 class TelegramBotCommands:
     """
-    Long-poll ѹ .
+    Long-polling command bot.
     """
 
     def __init__(
@@ -185,7 +185,7 @@ class TelegramBotCommands:
     async def _cmd_status(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"  ѺсѰѾѰ я <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f" Orchestrator not found for <code>{html.escape(symbol)}</code>")
             return
         st = orch.status()
         started = "" if st.get("started") else ""
@@ -200,7 +200,7 @@ class TelegramBotCommands:
     async def _cmd_pause(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"  ѺсѰѾѰ я <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f" Orchestrator not found for <code>{html.escape(symbol)}</code>")
             return
         await orch.pause()
         await self._cmd_status(chat_id, symbol)
@@ -208,7 +208,7 @@ class TelegramBotCommands:
     async def _cmd_resume(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"  ѺсѰѾѰ я <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f" Orchestrator not found for <code>{html.escape(symbol)}</code>")
             return
         await orch.resume()
         await self._cmd_status(chat_id, symbol)
@@ -216,7 +216,7 @@ class TelegramBotCommands:
     async def _cmd_stop(self, chat_id: int, symbol: str) -> None:
         orch = self._get_orchestrator(symbol)
         if not orch:
-            await self._reply(chat_id, f"  ѺсѰѾѰ я <code>{html.escape(symbol)}</code>")
+            await self._reply(chat_id, f" Orchestrator not found for <code>{html.escape(symbol)}</code>")
             return
         await orch.stop()
         await self._cmd_status(chat_id, symbol)
@@ -287,12 +287,12 @@ class TelegramBotCommands:
                 f"{base}: <code>{base_free}</code>\n{quote}: <code>{quote_free}</code>",
             )
         except Exception:  # noqa: BLE001
-            await self._reply(chat_id, "️  Ѵс Ѹ с")
+            await self._reply(chat_id, "️ Error while processing your command")
 
     # --------------------- ѹ Ѿ run() ---------------------
 
     async def run(self) -> None:
-        """ѹ Ѹ long-polling я ѵя   Telegram"""
+        """Run long-polling against Telegram"""
         _log.info("telegram_bot_commands_started")
 
         while True:
@@ -315,11 +315,11 @@ class TelegramBotCommands:
                             continue
 
                         if not self._allow(user_id):
-                            await self._reply(chat_id, " сѿ ѵѵ")
+                            await self._reply(chat_id, " Not authorized")
                             continue
 
                         if not self._throttle(user_id):
-                            await self._reply(chat_id, "️ Ѻ  Ѿс, ѵ")
+                            await self._reply(chat_id, " Too many requests, slow down")
                             continue
 
                         if text.startswith("/"):
