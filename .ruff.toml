@@ -140,9 +140,6 @@ extend-immutable-calls = ["pathlib.Path"]
 max-args = 8
 max-branches = 15
 
-[lint.flake8-async]
-# Async trading operations
-check-blocking-calls = true
 
 [lint.flake8-logging-format] 
 # Structured logging for trading systems
