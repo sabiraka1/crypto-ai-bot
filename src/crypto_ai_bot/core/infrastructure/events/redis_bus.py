@@ -18,7 +18,7 @@ _log = get_logger("events.redis")
 
 class RedisEventBus:
     """
-    Простая асинхронная шина на Redis Pub/Sub.
+    Асинхронная шина на Redis Pub/Sub.
     publish(topic: str, payload: dict) -> None
     on(topic: str, handler: Callable[[dict], Awaitable[None]]) -> None
     start()/close() — управление жизненным циклом подписки.
@@ -35,8 +35,6 @@ class RedisEventBus:
         self._topics: set[str] = set()
         self._ping_interval = ping_interval_sec
         self._started = False
-
-    # ---- public API ----
 
     async def start(self) -> None:
         if self._started:
@@ -93,14 +91,12 @@ class RedisEventBus:
         if self._started and self._ps:
             asyncio.create_task(self._ps.subscribe(topic))
 
-    # ---- internals ----
-
     async def _listen_loop(self) -> None:
         assert self._ps is not None
         last_ping = 0.0
         try:
             while True:
-                # ping каждые N сек, чтобы не терять соединение
+                # ping каждые N сек, чтобы поддерживать соединение
                 if self._r and (self._ping_interval > 0):
                     now = asyncio.get_event_loop().time()
                     if now - last_ping > self._ping_interval:
@@ -123,7 +119,6 @@ class RedisEventBus:
                     obj = {}
                 payload = obj.get("payload", {}) if isinstance(obj, dict) else {}
 
-                # роутинг по локальным хэндлерам
                 for h in list(self._handlers.get(topic, [])):
                     try:
                         await h(payload)

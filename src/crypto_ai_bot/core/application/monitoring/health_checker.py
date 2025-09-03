@@ -47,7 +47,6 @@ class HealthChecker:
         # Bus
         try:
             if hasattr(self._bus, "publish"):
-                # публикация пробного сообщения; шина может его игнорировать
                 await self._bus.publish("watchdog.heartbeat", {"source": "health"})
         except Exception as e:
             _log.error("bus_ready_fail", exc_info=True)
@@ -58,5 +57,4 @@ class HealthChecker:
         return res
 
     async def tick(self) -> Dict[str, str]:
-        # Алиас для совместимости с оркестратором
         return await self.ready()

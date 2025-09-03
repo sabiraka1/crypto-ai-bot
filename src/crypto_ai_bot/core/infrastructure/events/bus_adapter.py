@@ -2,7 +2,7 @@
 
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
-from crypto_ai_bot.core.application.ports import EventBusPort  # протокол порта
+from crypto_ai_bot.core.application.ports import EventBusPort
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus, Event
 from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
 
@@ -21,10 +21,10 @@ class _RedisBusLike(Protocol):
 
 class UnifiedEventBus(EventBusPort):
     """
-    Адаптер, унифицирующий интерфейсы разных реализаций шины:
+    Унифицирует интерфейсы разных реализаций шины:
     - AsyncEventBus (работает с Event)
     - RedisEventBus (работает с dict)
-    Внешне всегда publish(dict) и on(dict-handler), возвращает None.
+    Внешний контракт: publish(dict), on(dict-handler). Возвращает None.
     """
 
     def __init__(self, implementation: AsyncEventBus | RedisEventBus):

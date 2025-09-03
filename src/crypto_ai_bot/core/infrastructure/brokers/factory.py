@@ -8,7 +8,7 @@ _log = get_logger("brokers.factory")
 
 
 def _import_first(*candidates: str) -> Any:
-    """Import first available module from the list."""
+    """Импортировать первый доступный модуль из списка."""
     last_exc: Exception | None = None
     for path in candidates:
         try:
@@ -22,7 +22,7 @@ def _import_first(*candidates: str) -> Any:
 
 
 def _lower(value: Any, default: str = "") -> str:
-    """Safely convert value to lowercase string."""
+    """Безопасно привести значение к нижнему регистру (строка)."""
     try:
         s = (value or "").strip()
     except Exception:
@@ -40,29 +40,23 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
     ex = _lower(exchange, "gateio")
 
     if md in ("paper", "sim", "simulation"):
-        mod = _import_first(
-            "crypto_ai_bot.core.infrastructure.brokers.paper",
-        )
+        mod = _import_first("crypto_ai_bot.core.infrastructure.brokers.paper")
         PaperBroker = getattr(mod, "PaperBroker", None)
         PaperBrokerPortAdapter = getattr(mod, "PaperBrokerPortAdapter", None)
         if PaperBroker is None or PaperBrokerPortAdapter is None:
             raise ImportError("Paper broker or its port adapter not found in module")
 
         _log.info("make_broker_paper", extra={"exchange": ex})
-        core = PaperBroker(settings=settings)
-        return PaperBrokerPortAdapter(core)
+        core = getattr(mod, "PaperBroker")(settings=settings)
+        return getattr(mod, "PaperBrokerPortAdapter")(core)
 
     if md in ("live", "real", "prod", "production"):
-        # 1) Загружаем нашу обёртку
-        ccxt_mod = _import_first(
-            "crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter",
-        )
+        ccxt_mod = _import_first("crypto_ai_bot.core.infrastructure.brokers.ccxt_adapter")
         CcxtBroker = getattr(ccxt_mod, "CcxtBroker", None)
         if CcxtBroker is None:
             raise ImportError("CcxtBroker class not found in ccxt broker module(s)")
 
-        # 2) Создаём реальный CCXT-клиент
-        import ccxt  # локальный импорт, чтобы не тянуть в paper-режиме
+        import ccxt  # локальный импорт
         if not hasattr(ccxt, ex):
             raise ValueError(f"Unsupported exchange {exchange!r} for ccxt")
 
@@ -83,7 +77,6 @@ def make_broker(*, exchange: str, mode: str, settings: Any) -> Any:
         })
 
         _log.info("make_broker_live", extra={"exchange": ex})
-        # 3) Отдаём в обёртку готовый ccxt-инстанс
         return CcxtBroker(exchange=exch, settings=settings)
 
     raise ValueError(f"Unsupported MODE={mode!r}. Use 'paper' or 'live'.")

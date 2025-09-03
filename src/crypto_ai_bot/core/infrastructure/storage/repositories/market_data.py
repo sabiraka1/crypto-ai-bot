@@ -43,6 +43,3 @@ class MarketDataRepository:
             (symbol, int(limit)),
         )
         return [dict(r) for r in cur.fetchall()]
-
-
-__all__ = ["MarketDataRepository"]
