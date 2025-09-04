@@ -17,6 +17,7 @@ _log = get_logger("adapters.telegram_bot")
 
 def _getv(d: Any) -> Any:
     """Safe accessor that works with dicts and objects (case-insensitive for attrs)."""
+
     def _inner(k: str) -> Any:
         try:
             if isinstance(d, dict):
@@ -24,6 +25,7 @@ def _getv(d: Any) -> Any:
             return getattr(d, k.lower(), {})
         except AttributeError:
             return {}
+
     return _inner
 
 
@@ -228,7 +230,7 @@ class TelegramBotCommands:
                     chat_id = int(chat.get("id", 0) or 0)
                     user_id = int(user.get("id", 0) or 0)
                     text = str(msg.get("text") or "").strip()
-                    
+
                     if not chat_id or not text:
                         continue
 
@@ -252,7 +254,7 @@ class TelegramBotCommands:
     async def _dispatch(self, chat_id: int, text: str) -> None:
         t = text.strip()
         low = t.lower()
-        
+
         # Split command and tail
         parts = t.split(" ", 1)
         tail = parts[1] if len(parts) > 1 else ""

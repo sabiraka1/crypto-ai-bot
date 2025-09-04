@@ -67,7 +67,7 @@ def main() -> None:
 
     if args.oneshot:
         raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
-    
+
     try:
         asyncio.run(_watch(args.url, args.timeout, args.interval))
     except KeyboardInterrupt:
