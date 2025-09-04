@@ -8,7 +8,7 @@ ORDER_FAILED = "order.failed"
 
 # Trade lifecycle
 TRADE_COMPLETED = "trade.completed"
-TRADE_FAILED = "trade.failed"  
+TRADE_FAILED = "trade.failed"
 TRADE_SETTLED = "trade.settled"
 TRADE_SETTLEMENT_TIMEOUT = "trade.settlement.timeout"
 TRADE_BLOCKED = "trade.blocked"
@@ -18,7 +18,7 @@ TRADE_PARTIAL_FOLLOWUP = "trade.partial.followup"
 WATCHDOG_HEARTBEAT = "watchdog.heartbeat"
 HEALTH_REPORT = "health.report"
 
-# Risk and budgets  
+# Risk and budgets
 RISK_BLOCKED = "risk.blocked"
 BUDGET_EXCEEDED = "budget.exceeded"
 

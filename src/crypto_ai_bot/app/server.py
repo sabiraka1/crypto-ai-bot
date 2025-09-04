@@ -72,14 +72,14 @@ async def _shutdown_orchestrators(orchs: dict[str, Any]) -> None:
     """Shutdown all orchestrators gracefully."""
     if not isinstance(orchs, dict):
         return
-    
+
     tasks = []
     for oc in orchs.values():
         try:
             tasks.append(asyncio.create_task(oc.stop()))
         except Exception:
             _log.error("orchestrator_stop_schedule_failed", exc_info=True)
-    
+
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -88,7 +88,7 @@ async def _shutdown_bus(bus: Any) -> None:
     """Shutdown event bus gracefully."""
     if not bus:
         return
-    
+
     if hasattr(bus, "stop"):
         await bus.stop()
     elif hasattr(bus, "close"):
@@ -108,13 +108,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _container
     _log.info("lifespan_start")
     _container = await build_container_async()
-    
+
     try:
         yield
     finally:
         # --- graceful shutdown ---
         _log.info("lifespan_shutdown_begin")
-        
+
         # Release instance lock
         try:
             inst_lock = getattr(_container, "instance_lock", None)
@@ -122,7 +122,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 inst_lock.release()
         except (AttributeError, RuntimeError, OSError):
             _log.debug("instance_lock_release_failed", exc_info=True)
-        
+
         # Shutdown orchestrators
         try:
             orchs = getattr(_container, "orchestrators", None)
@@ -143,7 +143,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await _shutdown_broker(broker)
         except Exception:
             _log.error("exchange_close_failed", exc_info=True)
-        
+
         _log.info("lifespan_shutdown_end")
 
 
@@ -365,17 +365,13 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
 
 def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
     """Get PnL data from storage."""
-    result = {
-        "pnl_quote": "0",
-        "turnover_quote": "0", 
-        "orders_count": 0
-    }
-    
+    result = {"pnl_quote": "0", "turnover_quote": "0", "orders_count": 0}
+
     if not hasattr(storage, "trades"):
         return result
-    
+
     trades = storage.trades
-    
+
     # Get PnL
     if hasattr(trades, "daily_pnl_quote"):
         try:
@@ -384,7 +380,7 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
             _log.error("pnl_today_calc_failed", extra={"symbol": symbol}, exc_info=True)
     else:
         _log.warning("pnl_today_missing_method_daily_pnl_quote", extra={"symbol": symbol})
-    
+
     # Get turnover
     if hasattr(trades, "daily_turnover_quote"):
         try:
@@ -393,7 +389,7 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
             _log.error("turnover_today_calc_failed", extra={"symbol": symbol}, exc_info=True)
     else:
         _log.warning("pnl_today_missing_method_daily_turnover_quote", extra={"symbol": symbol})
-    
+
     # Get orders count
     if hasattr(trades, "count_orders_today"):
         try:
@@ -402,7 +398,7 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
             _log.error("orders_today_count_failed", extra={"symbol": symbol}, exc_info=True)
     else:
         _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": symbol})
-    
+
     return result
 
 
@@ -418,12 +414,9 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         st = getattr(c, "storage", None)
         if not st:
             raise HTTPException(status_code=500, detail="storage_missing")
-        
+
         data = _get_pnl_data(st, sym)
-        return JSONResponse({
-            "symbol": sym,
-            **data
-        })
+        return JSONResponse({"symbol": sym, **data})
     except HTTPException:
         raise
     except Exception:

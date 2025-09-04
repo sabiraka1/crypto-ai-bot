@@ -188,7 +188,7 @@ async def execute_trade(
     except Exception:
         _log.debug("spread_limit_parse_failed")
         limit_spread = dec("0")
-        
+
     if limit_spread > dec("0"):
         try:
             t = await broker.fetch_ticker(sym)
@@ -244,7 +244,7 @@ async def execute_trade(
     except Exception:
         _log.debug("turnover_limit_parse_failed")
         max_turnover = dec("0")
-        
+
     if max_turnover > dec("0"):
         try:
             current_turnover = storage.trades.daily_turnover_quote(sym)
@@ -288,9 +288,7 @@ async def execute_trade(
     except Exception:
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
-            await bus.publish(
-                EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"}
-            )
+            await bus.publish(EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
         except Exception:
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
