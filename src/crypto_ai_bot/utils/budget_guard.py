@@ -13,7 +13,7 @@ def check(
     risk_manager: RiskManager | None = None,
 ) -> dict[str, str] | None:
     """
-    Тонкая обёртка над RiskManager: никакой собственной логики.
+    Обёртка над RiskManager: никакой собственной логики.
     Возвращает dict-описание превышения лимита или None (если можно торговать).
     """
     rm = risk_manager or RiskManager(cfg=RiskConfig.from_settings(settings))

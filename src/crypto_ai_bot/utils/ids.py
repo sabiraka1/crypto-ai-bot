@@ -14,5 +14,5 @@ def make_client_order_id(exchange_id: str, tag: str) -> str:
 
 
 def sanitize_ascii(value: str) -> str:
-    """Фильтрует строки, оставляя только безопасные ASCII символы [a-z0-9-]."""
+    """Фильтрует строки, оставляя только безопасные ASCII [a-z0-9_-]."""
     return "".join(ch.lower() if ch.isalnum() else "-" for ch in value if ch.isalnum() or ch in "-_")
