@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.app.subscribers.telegram_alerts import attach_alerts
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort
@@ -30,7 +29,6 @@ from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.ids import cid_middleware
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
-from crypto_ai_bot.utils.retry import retry_async
 
 _log = get_logger("compose")
 
@@ -72,7 +70,7 @@ def _make_storage(settings: Any) -> StorageFacade:
 
 
 # ----------------------------- Broker -----------------------------
-def _make_broker(settings: Any) -> Any:
+def _make_broker_impl(settings: Any) -> Any:
     return make_broker(
         exchange=getattr(settings, "EXCHANGE", "gateio"),
         api_key=getattr(settings, "API_KEY", ""),
@@ -166,40 +164,35 @@ def _make_reconcilers(*, storage: StorageFacade, broker: Any, bus: UnifiedEventB
     return po, dh, orc
 
 
-# ----------------------------- Orchestrator -----------------------------
-def _make_orchestrator(
-    *,
-    settings: Any,
-    bus: UnifiedEventBus,
-    eval_and_execute: EvalAndExecuteUseCase,
-    execute_trade: ExecuteTradeUseCase,
-    storage: StorageFacade,
-    risk: RiskManager,
-    exits: ProtectiveExits,
+# ----------------------------- Orchestrator (simplified) -----------------------------
+def _create_orchestrator(
+    settings: Any, bus: UnifiedEventBus, eval_and_execute: EvalAndExecuteUseCase,
+    storage: StorageFacade, risk: RiskManager, exits: ProtectiveExits
 ) -> Orchestrator:
+    """Создание оркестратора с базовыми настройками"""
     orch = Orchestrator(bus=bus)
-
-    # Attach periodic loop: evaluate-and-execute
-    interval_sec = int(getattr(settings, "LOOP_INTERVAL_SEC", 60) or 60)
-
-    async def _loop_eval() -> None:
+    
+    # Базовые интервалы
+    eval_interval = int(getattr(settings, "LOOP_INTERVAL_SEC", 60) or 60)
+    recon_interval = int(getattr(settings, "RECONCILE_INTERVAL_SEC", 300) or 300)
+    
+    # Циклы оценки
+    async def _eval_loop() -> None:
         try:
             await eval_and_execute.run_once()
             inc("loop.eval.ok")
         except Exception:
             inc("loop.eval.err")
             _log.exception("loop_eval_failed")
-
-    orch.attach_loop(name="eval", interval_sec=interval_sec, loop=_loop_eval)
-
-    # Attach periodic loop: reconciliation
-    recon_interval = int(getattr(settings, "RECONCILE_INTERVAL_SEC", 300) or 300)
-
+    
+    orch.attach_loop(name="eval", interval_sec=eval_interval, loop=_eval_loop)
+    
+    # Циклы сверки
     positions_reconciler, discrepancy_handler, orders_reconciler = _make_reconcilers(
         storage=storage, broker=eval_and_execute.broker, bus=bus
     )
-
-    async def _loop_reconcile() -> None:
+    
+    async def _reconcile_loop() -> None:
         try:
             await positions_reconciler.run_once()
             await discrepancy_handler.run_once()
@@ -208,40 +201,39 @@ def _make_orchestrator(
         except Exception:
             inc("loop.reconcile.err")
             _log.exception("loop_reconcile_failed")
+    
+    orch.attach_loop(name="reconcile", interval_sec=recon_interval, loop=_reconcile_loop)
+    
+    # Слушатели событий
+    _attach_event_listeners(orch, exits)
+    
+    return orch
 
-    orch.attach_loop(name="reconcile", interval_sec=recon_interval, loop=_loop_reconcile)
 
-    # Attach listeners
+def _attach_event_listeners(orch: Orchestrator, exits: ProtectiveExits) -> None:
+    """Подключение обработчиков событий"""
     orch.on(EVT.TRADE_COMPLETED, lambda p: observe("trade.completed", float(p.get("quote", 0.0) or 0.0)))
-    orch.on(EVT.TRADE_FAILED, lambda _p: inc("trade.failed"))
-    orch.on(EVT.RISK_BLOCKED, lambda _p: inc("risk.blocked"))
-    orch.on(EVT.BROKER_ERROR, lambda _p: inc("broker.error"))
-
-    # Attach safety & exits triggers to bus
-    # (protective exits publish their own events)
+    orch.on(EVT.TRADE_FAILED, lambda _: inc("trade.failed"))
+    orch.on(EVT.RISK_BLOCKED, lambda _: inc("risk.blocked"))
+    orch.on(EVT.BROKER_ERROR, lambda _: inc("broker.error"))
     orch.on(EVT.DMS_TRIGGERED, lambda p: _log.warning("dms_triggered", extra=p))
     orch.on(EVT.DMS_SKIPPED, lambda p: _log.info("dms_skipped", extra=p))
-
-    # Allow orchestrator to pause on alert
+    
     async def _pause_on_alert(_p: dict[str, Any]) -> None:
         try:
             await orch.pause()
         except Exception:
             _log.exception("orch_pause_failed")
-
+    
     orch.on(EVT.ALERTS_ALERTMANAGER, _pause_on_alert)
-
-    # Wire protective exits (need bus pushed inside)
-    exits.attach_bus(bus)
+    
+    # Wire protective exits
+    exits.attach_bus(orch.bus)
     orch.on(EVT.HEALTH_REPORT, exits.on_health_report)
-
-    return orch
 
 
 # ----------------------------- Telegram Commands -----------------------------
-def _make_telegram_cmds(
-    *, bus: UnifiedEventBus, settings: Any, storage: StorageFacade
-) -> TelegramBotCommands:
+def _make_telegram_cmds(*, bus: UnifiedEventBus, settings: Any, storage: StorageFacade) -> TelegramBotCommands:
     return TelegramBotCommands(bus=bus, settings=settings, storage=storage)
 
 
@@ -249,72 +241,33 @@ def _make_telegram_cmds(
 def compose(settings: Any) -> AppWiring:
     _log.info("compose.start")
 
-    # Bus/Storage/Broker
+    # Core components
     bus = _make_bus(settings)
     storage = _make_storage(settings)
-
-    # Broker may require retry on cold start (network)
-    broker = make_broker(
-        exchange=getattr(settings, "EXCHANGE", "gateio"),
-        api_key=getattr(settings, "API_KEY", ""),
-        secret=getattr(settings, "API_SECRET", ""),
-        password=getattr(settings, "API_PASSWORD", None),
-        sandbox=bool(getattr(settings, "SANDBOX", False)),
-        rate_limit_ms=int(getattr(settings, "RATE_LIMIT_MS", 1000) or 1000),
-    )
-
+    broker = _make_broker_impl(settings)
+    
     # Risk / Exits / Health / Safety
     risk = _make_risk(settings)
     exits = _make_protective_exits(bus=bus, settings=settings)
     health = _make_health(storage=storage, broker=broker, settings=settings)
     safety = _make_safety(bus=bus, broker=broker, settings=settings)
-
+    
     # Use-cases
     eval_and_execute, execute_trade = _make_use_cases(
         settings=settings, storage=storage, broker=broker, bus=bus, risk=risk
     )
-
+    
     # Orchestrator
-    orchestrator = _make_orchestrator(
-        settings=settings,
-        bus=bus,
-        eval_and_execute=eval_and_execute,
-        execute_trade=execute_trade,
-        storage=storage,
-        risk=risk,
-        exits=exits,
+    orchestrator = _create_orchestrator(
+        settings=settings, bus=bus, eval_and_execute=eval_and_execute,
+        storage=storage, risk=risk, exits=exits
     )
-
+    
     # Subscribers (Telegram alerts)
     attach_alerts(bus, settings)
-
-    # Some helpful helpers
-    async def _daily_pnl_quote(symbol: str) -> Decimal:
-        try:
-            repo = getattr(storage, "reports", None)
-            if not repo:
-                return dec("0")
-            if hasattr(repo, "daily_pnl_quote"):
-                v = repo.daily_pnl_quote(symbol)
-                return dec(str(v))
-            return dec("0")
-        except Exception:
-            _log.debug("_daily_pnl_quote_failed", exc_info=True)
-            return dec("0")
-
-    async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
-        try:
-            repo = getattr(storage, "reports", None)
-            if not repo or not hasattr(repo, "balances_series"):
-                return []
-            arr = repo.balances_series(symbol=symbol, limit=limit)
-            return [dec(str(x)) for x in arr]
-        except Exception:
-            _log.debug("_balances_series_failed", exc_info=True)
-            return []
-
+    
     _log.info("compose.done")
-
+    
     return AppWiring(
         settings=settings,
         storage=storage,

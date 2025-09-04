@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
 from crypto_ai_bot.utils.trace import cid_context, get_cid
 
 _log = get_logger("orchestrator")
-
-LoopFn = Callable[[], Awaitable[None]]
 
 
 @dataclass
@@ -20,7 +17,7 @@ class LoopSpec:
     name: str
     interval_sec: float
     enabled: bool
-    runner: LoopFn
+    runner: callable
     task: asyncio.Task[None] | None = None
     paused: bool = False
 
@@ -44,7 +41,7 @@ class Orchestrator:
     def __post_init__(self) -> None:
         s = self.settings
 
-        def _loop(coro: Callable[[], Awaitable[None]], interval: float, enabled: bool, name: str) -> LoopSpec:
+        def _loop(coro: callable, interval: float, enabled: bool, name: str) -> LoopSpec:
             return LoopSpec(name=name, interval_sec=float(interval), enabled=bool(enabled), runner=coro)
 
         self._loops = {
