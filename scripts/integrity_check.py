@@ -6,9 +6,12 @@ import sys
 
 
 def main() -> int:
-    return subprocess.run(
-        [sys.executable, "-m", "crypto_ai_bot.cli.maintenance", "integrity"], check=False
-    ).returncode
+    # Проверка целостности БД/состояний
+    result = subprocess.run(
+        [sys.executable, "-m", "crypto_ai_bot.cli.maintenance", "integrity"],
+        check=True,
+    )
+    return result.returncode
 
 
 if __name__ == "__main__":
