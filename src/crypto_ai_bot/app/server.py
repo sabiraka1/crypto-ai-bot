@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
-import contextlib
 from collections.abc import AsyncGenerator, Awaitable, Callable
+import contextlib
 from contextlib import asynccontextmanager
+import time
 from typing import Any
 
-from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Iterator
+import uuid
 
-from crypto_ai_bot.utils.logging import set_correlation_id as _set_log_cid, get_correlation_id as _get_log_cid
+from crypto_ai_bot.utils.logging import get_correlation_id as _get_log_cid, set_correlation_id as _set_log_cid
 
 _CID: ContextVar[str | None] = ContextVar("cid", default=None)
 

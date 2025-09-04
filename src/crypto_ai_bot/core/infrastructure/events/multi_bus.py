@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -157,7 +157,7 @@ class MultiEventBus:
         inject_trace: bool = True,
         dedupe_local: bool = True,
         topic_concurrency: int = 32,
-    ) -> "MultiEventBus":
+    ) -> MultiEventBus:
         """
         Быстрый конструктор:
           - создаёт локальную шину (с опциональной дедупликацией),

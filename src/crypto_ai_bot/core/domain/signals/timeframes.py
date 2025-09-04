@@ -21,7 +21,7 @@ class TFWeights:
         t = self.w_15m + self.w_1h + self.w_4h + self.w_1d + self.w_1w
         return float(t)
 
-    def normalized(self) -> "TFWeights":
+    def normalized(self) -> TFWeights:
         """Вернёт новые веса, нормированные так, чтобы сумма была ровно 1.0."""
         t = self.total()
         if t <= 0:

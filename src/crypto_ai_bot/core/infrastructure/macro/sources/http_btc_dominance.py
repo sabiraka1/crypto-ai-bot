@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from crypto_ai_bot.core.domain.macro.ports import BtcDomPort
+from crypto_ai_bot.core.domain.macro.macro_ports import BtcDomPort
 from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("macro.btc_dom_http")

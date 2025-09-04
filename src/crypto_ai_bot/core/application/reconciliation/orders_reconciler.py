@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from crypto_ai_bot.core.application.ports import BrokerPort, StoragePort
 from crypto_ai_bot.utils.logging import get_logger

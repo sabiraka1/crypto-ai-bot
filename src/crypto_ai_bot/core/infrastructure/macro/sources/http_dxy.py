@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from crypto_ai_bot.core.domain.macro.ports import DxyPort
+from crypto_ai_bot.core.domain.macro.macro_ports import DxyPort
 from crypto_ai_bot.utils.logging import get_logger
 
 _log = get_logger("macro.dxy_http")

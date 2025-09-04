@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
-import asyncio
 import time
 
 __all__ = [

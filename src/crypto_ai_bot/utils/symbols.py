@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import Tuple
 
 _COMMON_QUOTES = {
     "USDT", "USDC", "BUSD", "USD", "EUR", "TRY",
@@ -14,7 +13,7 @@ def _clean(s: str) -> str:
 def _apply_alias(asset: str) -> str:
     return _ALIASES.get(asset, asset)
 
-def split(symbol: str) -> Tuple[str, str]:
+def split(symbol: str) -> tuple[str, str]:
     s = _clean(symbol or "")
     if not s:
         return "", ""

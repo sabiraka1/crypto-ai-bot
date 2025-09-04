@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
 import sqlite3
 
 # Пытаемся использовать твои репозитории, если они есть…
@@ -14,7 +13,9 @@ try:
     from .repositories.trades import TradesRepository as _TradesRepository  # type: ignore
 except Exception:  # pragma: no cover
     # …иначе — минимальные совместимые заглушки/альтернативы
-    from crypto_ai_bot.core.infrastructure.idempotency import IdempotencyRepository as _IdempotencyRepository  # type: ignore
+    from crypto_ai_bot.core.infrastructure.idempotency import (
+        IdempotencyRepository as _IdempotencyRepository,  # type: ignore
+    )
 
     class _StubRepo:
         def __init__(self, _conn: sqlite3.Connection) -> None: ...
@@ -42,7 +43,7 @@ class StorageFacade:
     market_data: _MarketDataRepository
 
     @classmethod
-    def from_connection(cls, conn: sqlite3.Connection) -> "StorageFacade":
+    def from_connection(cls, conn: sqlite3.Connection) -> StorageFacade:
         return cls(
             conn=conn,
             trades=_TradesRepository(conn),  # type: ignore[call-arg]

@@ -66,7 +66,7 @@ class HealthChecker:
     async def _check_db(self) -> str:
         """DB: storage.conn.execute('SELECT 1') или storage.ping()."""
         try:
-            if hasattr(self._storage, "conn") and getattr(self._storage, "conn") is not None:
+            if hasattr(self._storage, "conn") and self._storage.conn is not None:
                 # Синхронная проверка — лёгкий запрос
                 self._storage.conn.execute("SELECT 1;")
                 return "ok"

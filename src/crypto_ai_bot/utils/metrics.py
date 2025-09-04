@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 import os
 import time
-from contextlib import contextmanager, asynccontextmanager
-from typing import Any, AsyncIterator, Iterator
+from typing import Any
 
 try:
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest

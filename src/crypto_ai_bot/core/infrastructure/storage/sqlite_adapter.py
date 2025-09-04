@@ -4,7 +4,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 import os
 import sqlite3
-from typing import Any
 
 DEFAULT_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "8000"))
 DEFAULT_PAGE_SIZE = int(os.getenv("SQLITE_PAGE_SIZE", "4096"))

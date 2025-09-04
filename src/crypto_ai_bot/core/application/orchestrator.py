@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
-from collections.abc import Awaitable, Callable
 
 from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.utils.logging import get_logger
@@ -235,7 +235,9 @@ class Orchestrator:
         with cid_context():
             # 1) evaluate + risk + execute
             try:
-                from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute  # noqa: E402
+                from crypto_ai_bot.core.application.use_cases.eval_and_execute import (
+                    eval_and_execute,  # noqa: E402
+                )
 
                 await eval_and_execute(
                     symbol=self.symbol,
@@ -277,8 +279,12 @@ class Orchestrator:
             # 3) reconcile
             if getattr(s, "RECONCILE_ENABLED", True):
                 try:
-                    from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances  # noqa: E402
-                    from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions  # noqa: E402
+                    from crypto_ai_bot.core.application.reconciliation.balances import (
+                        reconcile_balances,  # noqa: E402
+                    )
+                    from crypto_ai_bot.core.application.reconciliation.positions import (
+                        reconcile_positions,  # noqa: E402
+                    )
 
                     await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, s)
                     await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, s)
@@ -311,7 +317,9 @@ class Orchestrator:
             # 5) settlement
             if getattr(s, "SETTLEMENT_ENABLED", True):
                 try:
-                    from crypto_ai_bot.core.application.use_cases.partial_fills import settle_orders  # noqa: E402
+                    from crypto_ai_bot.core.application.use_cases.partial_fills import (
+                        settle_orders,  # noqa: E402
+                    )
 
                     await settle_orders(self.symbol, self.storage, self.broker, self.bus, s)
                     inc("orchestrator_step_ok_total", step="settlement", symbol=self.symbol)

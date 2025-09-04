@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+import random
 from typing import Any
 
 from crypto_ai_bot.utils.logging import get_logger
@@ -162,7 +162,7 @@ class AsyncEventBus:
                 return await _run(h)
 
         results = await asyncio.gather(*[_guarded(h) for h in handlers], return_exceptions=True)
-        for res, h in zip(results, handlers):
+        for res, h in zip(results, handlers, strict=False):
             if isinstance(res, Exception):
                 # сюда попадём редко (неожиданная ошибка вне ретраев)
                 _log.error(

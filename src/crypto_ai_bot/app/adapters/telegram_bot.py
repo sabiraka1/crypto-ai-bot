@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import html
 import os
 import time
-import urllib.parse
-from dataclasses import dataclass
 from typing import Any, Protocol
+import urllib.parse
 
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger

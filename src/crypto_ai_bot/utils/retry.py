@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 from collections.abc import Awaitable, Callable
-from typing import Any, Iterable, Tuple, Type
+import secrets
+from typing import Any
 
 # Публичный API сохраняем: async_retry, aget_retry, apost_retry
 
@@ -15,7 +15,7 @@ async def async_retry(
     base_delay: float = 0.3,
     max_delay: float = 3.0,
     jitter: bool = True,
-    exceptions: Tuple[Type[BaseException], ...] = (Exception,),
+    exceptions: tuple[type[BaseException], ...] = (Exception,),
     hard_timeout: float | None = None,
     on_retry: Callable[[int, BaseException, float], None] | None = None,
 ) -> Any:

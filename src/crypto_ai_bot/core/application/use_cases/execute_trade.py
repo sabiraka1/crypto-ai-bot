@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from dataclasses import dataclass
 from decimal import Decimal
+import hashlib
 from typing import Any
 
 from crypto_ai_bot.core.application import events_topics

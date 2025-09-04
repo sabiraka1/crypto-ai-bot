@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from typing import Any, Callable
+import random
+from typing import Any
 
 import httpx
 
