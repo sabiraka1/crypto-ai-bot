@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 import json
 from typing import Any
 
@@ -18,10 +19,10 @@ _log = get_logger("events.redis")
 
 class RedisEventBus:
     """
-    Асинхронная шина на Redis Pub/Sub.
+    Asynchronous event bus on Redis Pub/Sub.
     publish(topic: str, payload: dict) -> None
     on(topic: str, handler: Callable[[dict], Awaitable[None]]) -> None
-    start()/close() — управление жизненным циклом подписки.
+    start()/close() - lifecycle management.
     """
 
     def __init__(self, url: str, *, ping_interval_sec: float = 30.0) -> None:
@@ -37,6 +38,7 @@ class RedisEventBus:
         self._started = False
 
     async def start(self) -> None:
+        """Start the event bus."""
         if self._started:
             return
         self._r = Redis.from_url(self._url, encoding="utf-8", decode_responses=True)
@@ -48,36 +50,39 @@ class RedisEventBus:
         _log.info("redis_bus_started", extra={"url": self._url})
 
     async def close(self) -> None:
+        """Close the event bus."""
         self._started = False
+        
         if self._task:
             self._task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._task
-            except Exception:
-                pass
             self._task = None
+        
         if self._ps:
-            try:
+            with suppress(Exception):
                 await self._ps.close()
-            except Exception:
-                pass
             self._ps = None
+        
         if self._r:
-            try:
+            with suppress(Exception):
                 await self._r.close()
-            except Exception:
-                pass
             self._r = None
+        
         _log.info("redis_bus_closed")
 
     async def publish(self, topic: str, payload: dict[str, Any], key: str | None = None) -> None:
+        """Publish event to topic."""
         if not isinstance(payload, dict):
             raise TypeError("payload must be dict")
+        
         if not self._r:
-            # позволяем publish до start(): лениво инициализируем клиент
+            # Allow publish before start(): lazy init client
             self._r = Redis.from_url(self._url, encoding="utf-8", decode_responses=True)
+        
         msg = {"key": key, "payload": payload}
         data = json.dumps(msg, ensure_ascii=False)
+        
         try:
             await self._r.publish(topic, data)
             inc("bus_publish_total", topic=topic)
@@ -85,18 +90,22 @@ class RedisEventBus:
             _log.error("redis_publish_failed", extra={"topic": topic}, exc_info=True)
 
     def on(self, topic: str, handler: Handler) -> None:
+        """Subscribe to topic with handler."""
         self._handlers[topic].append(handler)
         self._topics.add(topic)
-        # если уже запущены — подписываемся немедленно
+        
+        # If already started - subscribe immediately
         if self._started and self._ps:
             asyncio.create_task(self._ps.subscribe(topic))
 
     async def _listen_loop(self) -> None:
+        """Main listening loop."""
         assert self._ps is not None
         last_ping = 0.0
+        
         try:
             while True:
-                # ping каждые N сек, чтобы поддерживать соединение
+                # Ping periodically to keep connection alive
                 if self._r and (self._ping_interval > 0):
                     now = asyncio.get_event_loop().time()
                     if now - last_ping > self._ping_interval:
@@ -113,18 +122,22 @@ class RedisEventBus:
 
                 topic = str(msg.get("channel", "") or "")
                 raw = msg.get("data", "")
+                
                 try:
                     obj = json.loads(raw) if isinstance(raw, str) and raw else {}
                 except Exception:
                     obj = {}
+                
                 payload = obj.get("payload", {}) if isinstance(obj, dict) else {}
 
-                for h in list(self._handlers.get(topic, [])):
+                # Call handlers
+                for handler in list(self._handlers.get(topic, [])):
                     try:
-                        await h(payload)
+                        await handler(payload)
                     except Exception:
                         _log.error("handler_failed", extra={"topic": topic}, exc_info=True)
                         inc("bus_handler_errors_total", topic=topic)
+                        
         except asyncio.CancelledError:
             pass
         except Exception:
