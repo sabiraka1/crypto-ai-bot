@@ -102,6 +102,11 @@ async def _shutdown_broker(broker: Any) -> None:
         await exch.close()
 
 
+def _raise_http_exception(status_code: int, detail: str) -> None:
+    """Helper to raise HTTPException (TRY301 fix)."""
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
 # -------- lifespan --------
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -160,22 +165,17 @@ async def _metrics_middleware(
     method = request.method
     t = hist("http_request_latency_seconds", path=path, method=method)
 
-    response = await call_next(request) if not t else await _time_request(call_next, request, t)
+    with t.time() if t else contextlib.nullcontext():
+        response = await call_next(request)
 
     inc("http_requests_total", path=path, method=method, code=str(response.status_code))
     return response
 
 
-async def _time_request(call_next, request, timer):
-    """Helper to time request with context manager."""
-    with timer.time():
-        return await call_next(request)
-
-
 def _raise_not_ready() -> Any:
     """Raise HTTPException if container not ready."""
     if _container is None:
-        raise HTTPException(status_code=503, detail="Container not ready")
+        _raise_http_exception(503, "Container not ready")
     return _container
 
 
@@ -186,10 +186,10 @@ def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
     sym = symbol or default_symbol
     orchs = getattr(c, "orchestrators", None)
     if not isinstance(orchs, dict):
-        raise HTTPException(status_code=500, detail="orchestrators_missing")
+        _raise_http_exception(500, "orchestrators_missing")
     orch = orchs.get(sym) or orchs.get(sym.replace("-", "/").upper())
     if orch is None:
-        raise HTTPException(status_code=404, detail=f"orchestrator_not_found_for_{sym}")
+        _raise_http_exception(404, f"orchestrator_not_found_for_{sym}")
     return orch, sym
 
 
@@ -247,21 +247,21 @@ async def health() -> JSONResponse:
     # DB check
     try:
         details["db"] = await _check_storage(storage)
-    except (asyncio.TimeoutError, ConnectionError, RuntimeError) as exc:
+    except (TimeoutError, ConnectionError, RuntimeError) as exc:
         ok = False
         details["db"] = f"fail: {exc!s}"
 
     # EventBus check
     try:
         details["bus"] = await _check_bus(bus)
-    except (asyncio.TimeoutError, ConnectionError, RuntimeError) as exc:
+    except (TimeoutError, ConnectionError, RuntimeError) as exc:
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
     # Broker check
     try:
         details["broker"] = await _check_broker(broker)
-    except (asyncio.TimeoutError, ConnectionError, RuntimeError) as exc:
+    except (TimeoutError, ConnectionError, RuntimeError) as exc:
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
@@ -311,7 +311,7 @@ async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
         return JSONResponse(st)
     except (AttributeError, RuntimeError) as e:
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="status_failed") from e
+        _raise_http_exception(500, "status_failed")
 
 
 @router.post("/orchestrator/start")
@@ -325,7 +325,7 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
         return JSONResponse({"ok": True, "status": st})
     except (AttributeError, RuntimeError) as e:
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="start_failed") from e
+        _raise_http_exception(500, "start_failed")
 
 
 @router.post("/orchestrator/stop")
@@ -339,7 +339,7 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)) 
         return JSONResponse({"ok": True, "status": st})
     except (AttributeError, RuntimeError) as e:
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="stop_failed") from e
+        _raise_http_exception(500, "stop_failed")
 
 
 @router.post("/orchestrator/pause")
@@ -353,7 +353,7 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
         return JSONResponse({"ok": True, "status": st})
     except (AttributeError, RuntimeError) as e:
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="pause_failed") from e
+        _raise_http_exception(500, "pause_failed")
 
 
 @router.post("/orchestrator/resume")
@@ -367,7 +367,7 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
         return JSONResponse({"ok": True, "status": st})
     except (AttributeError, RuntimeError) as e:
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
-        raise HTTPException(status_code=500, detail="resume_failed") from e
+        _raise_http_exception(500, "resume_failed")
 
 
 def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
@@ -420,7 +420,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         _, sym = _get_orchestrator(symbol)
         st = getattr(c, "storage", None)
         if not st:
-            raise HTTPException(status_code=500, detail="storage_missing")
+            _raise_http_exception(500, "storage_missing")
 
         data = _get_pnl_data(st, sym)
         return JSONResponse({"symbol": sym, **data})
@@ -428,7 +428,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         raise
     except (ValueError, RuntimeError):
         _log.error("pnl_today_failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="pnl_today_failed")
+        _raise_http_exception(500, "pnl_today_failed")
 
 
 @router.post("/telegram/webhook")
@@ -454,5 +454,8 @@ async def telegram_webhook(request: Request) -> JSONResponse:
         _log.error("telegram_webhook_error", exc_info=True)
         return JSONResponse({"ok": False}, status_code=500)
 
+
+# Добавим отсутствующий import
+import contextlib
 
 app.include_router(router)

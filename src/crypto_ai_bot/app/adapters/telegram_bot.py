@@ -18,8 +18,6 @@ _log = get_logger("adapters.telegram_bot")
 class OrchestratorNotFoundError(Exception):
     """Raised when orchestrator is not found for symbol."""
 
-    pass
-
 
 class OrchestratorProtocol(Protocol):
     """Protocol for orchestrator interface."""
@@ -252,10 +250,15 @@ class TelegramAPI:
         )
 
         try:
+            # Используем встроенный TimeoutError вместо asyncio.TimeoutError
             async with asyncio.timeout(timeout + 10):
-                data = await aget(url)
-        except asyncio.TimeoutError:
+                resp = await aget(url)
+                data = resp.json() if resp.status_code == 200 else {}
+        except TimeoutError:
             _log.warning("telegram_get_updates_timeout")
+            return []
+        except Exception:
+            _log.error("telegram_get_updates_failed", exc_info=True)
             return []
 
         if isinstance(data, dict):
@@ -394,7 +397,7 @@ class TelegramBotCommands:
     async def _fetch_updates(self) -> list[dict[str, Any]]:
         """Fetch updates from Telegram."""
         try:
-            return await self.api.get_updates(self._offset, self.config.long_poll_sec + 5)
+            return await self.api.get_updates(self._offset, self.config.long_poll_sec)
         except Exception:
             _log.error("telegram_getupdates_failed", exc_info=True)
             return []

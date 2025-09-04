@@ -42,15 +42,18 @@ def main() -> None:
     args = parser.parse_args()
 
     # 1) Check imports
-    ok = True
-    ok &= _import_ok("crypto_ai_bot.app.server")
-    ok &= _import_ok("crypto_ai_bot.app.compose")
-    ok &= _import_ok("crypto_ai_bot.core.infrastructure.events.bus")
-    ok &= _import_ok("crypto_ai_bot.core.infrastructure.events.redis_bus")
+    ok = all(
+        [
+            _import_ok("crypto_ai_bot.app.server"),
+            _import_ok("crypto_ai_bot.app.compose"),
+            _import_ok("crypto_ai_bot.core.infrastructure.events.bus"),
+            _import_ok("crypto_ai_bot.core.infrastructure.events.redis_bus"),
+        ]
+    )
 
     # 2) Optional HTTP ping
     if args.url:
-        ok &= asyncio.run(_ping(args.url, args.timeout))
+        ok = ok and asyncio.run(_ping(args.url, args.timeout))
 
     raise SystemExit(0 if ok else 1)
 

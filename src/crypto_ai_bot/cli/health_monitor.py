@@ -35,14 +35,12 @@ async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:
 async def _oneshot(url: str, timeout: float) -> int:
     res = await _fetch_health(url, timeout)
     pretty = res.get("json") or res.get("text")
-    try:
-        out = (
-            json.dumps(pretty, ensure_ascii=False, indent=2)
-            if isinstance(pretty, dict | list)
-            else str(pretty)
-        )
-    except Exception:
+
+    if isinstance(pretty, dict | list):
+        out = json.dumps(pretty, ensure_ascii=False, indent=2)
+    else:
         out = str(pretty)
+
     print(out)
     return 0 if res.get("ok") else 1
 
@@ -50,11 +48,9 @@ async def _oneshot(url: str, timeout: float) -> int:
 async def _watch(url: str, timeout: float, interval: float) -> int:
     while True:
         code = await _oneshot(url, timeout)
-        await asyncio.sleep(max(0.5, interval))
         if code != 0:
             _log.warning("health_not_ok", extra={"url": url})
-    # Never reached in normal operation
-    return 0
+        await asyncio.sleep(max(0.5, interval))
 
 
 def main() -> None:

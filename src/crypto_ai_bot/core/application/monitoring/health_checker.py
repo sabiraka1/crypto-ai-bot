@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as evt
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -59,7 +59,7 @@ class HealthChecker:
         # Bus check
         try:
             if hasattr(self._bus, "publish"):
-                await self._bus.publish(EVT.WATCHDOG_HEARTBEAT, {"source": "health"})
+                await self._bus.publish(evt.WATCHDOG_HEARTBEAT, {"source": "health"})
         except Exception as exc:
             _log.error("bus_ready_fail", exc_info=True)
             res["bus"] = f"fail:{type(exc).__name__}"
@@ -70,7 +70,7 @@ class HealthChecker:
         # Publish health report
         if hasattr(self._bus, "publish"):
             try:
-                await self._bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **res})
+                await self._bus.publish(evt.HEALTH_REPORT, {"ok": ok, **res})
             except Exception:
                 _log.debug("health_report_publish_failed", exc_info=True)
 

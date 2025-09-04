@@ -66,16 +66,12 @@ class ComponentFactory:
     @staticmethod
     def create_broker(settings: Any) -> Any:
         """Create broker instance."""
-        broker = make_broker(
+        # Исправлено: правильная передача параметров в make_broker
+        return make_broker(
             mode=getattr(settings, "MODE", "paper"),
             exchange=getattr(settings, "EXCHANGE", "gateio"),
-            api_key=getattr(settings, "API_KEY", ""),
-            secret=getattr(settings, "API_SECRET", ""),
-            password=getattr(settings, "API_PASSWORD", None),
-            sandbox=bool(getattr(settings, "SANDBOX", False)),
             settings=settings,
         )
-        return broker
 
     @staticmethod
     async def create_spread_provider(broker: Any) -> Callable[[str], Awaitable[float | None]]:
@@ -88,8 +84,7 @@ class ComponentFactory:
                 ask = float(ticker.get("ask", 0))
 
                 if bid > 0 and ask > 0:
-                    spread_pct = ((ask - bid) / ((ask + bid) / 2)) * 100
-                    return spread_pct
+                    return ((ask - bid) / ((ask + bid) / 2)) * 100
 
             except (ValueError, ConnectionError) as e:
                 _log.debug("spread_provider_error", extra={"symbol": symbol, "error": str(e)})
@@ -287,7 +282,7 @@ class ContainerBuilder:
 
         _log.info("compose.done")
 
-        container = AppContainer(
+        return AppContainer(
             settings=settings,
             storage=storage,
             broker=broker,
@@ -299,7 +294,6 @@ class ContainerBuilder:
             instance_lock=instance_lock,
             orchestrators=orchestrators,
         )
-        return container
 
     async def _load_settings(self) -> Any:
         """Load application settings."""
@@ -312,8 +306,7 @@ class ContainerBuilder:
 async def build_container_async() -> AppContainer:
     """Asynchronously build the application container."""
     builder = ContainerBuilder()
-    container = await builder.build()
-    return container
+    return await builder.build()
 
 
 def compose() -> AppContainer:
