@@ -6,7 +6,6 @@ from pathlib import Path
 import shutil
 import sqlite3
 
-# : ѹ   Settings с сѰѸѸѸ:
 from crypto_ai_bot.core.infrastructure.settings import Settings
 
 BACKUPS_DIR = Path("./backups")
@@ -38,16 +37,21 @@ def _rotate(retention_days: int) -> None:
     removed = 0
     for p in BACKUPS_DIR.glob("db-*.sqlite3"):
         try:
-            # Ѷ
-            stem = p.stem
-            # db-YYYYmmdd-HHMMSS
-            ts = stem.split("-")[1]
-            dt = datetime.strptime(ts, "%Y%m%d%H%M%S") if len(ts) > 8 else datetime.strptime(ts, "%Y%m%d")
-        except Exception:  # noqa: BLE001
+            stem = p.stem  # "db-20240101-123456"
+            parts = stem.split("-")
+            if len(parts) >= 2:
+                date_part = parts[1]
+                time_part = parts[2] if len(parts) > 2 else ""
+                if time_part:
+                    dt = datetime.strptime(f"{date_part}{time_part}", "%Y%m%d%H%M%S")
+                else:
+                    dt = datetime.strptime(date_part, "%Y%m%d")
+
+                if dt < cutoff:
+                    p.unlink(missing_ok=True)
+                    removed += 1
+        except Exception:
             continue
-        if dt < cutoff:
-            p.unlink(missing_ok=True)
-            removed += 1
     print(f"[OK] rotate -> removed={removed}, retention_days={retention_days}")
 
 
@@ -88,29 +92,36 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings.load()
     parser = argparse.ArgumentParser(prog="cab-maintenance", description="DB maintenance")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
     sub.add_parser("backup")
+
     p_rot = sub.add_parser("rotate")
     p_rot.add_argument("--days", type=int, default=settings.BACKUP_RETENTION_DAYS)
+
     sub.add_parser("vacuum")
     sub.add_parser("integrity")
     sub.add_parser("list")
+
     args = parser.parse_args(argv)
 
-    if args.cmd == "backup":
+    cmd = args.cmd
+
+    if cmd == "backup":
         _backup(settings.DB_PATH)
         return 0
-    if args.cmd == "rotate":
+    if cmd == "rotate":
         _rotate(args.days)
         return 0
-    if args.cmd == "vacuum":
+    if cmd == "vacuum":
         _vacuum(settings.DB_PATH)
         return 0
-    if args.cmd == "integrity":
+    if cmd == "integrity":
         _integrity(settings.DB_PATH)
         return 0
-    if args.cmd == "list":
+    if cmd == "list":
         _list()
         return 0
+
     return 1
 
 

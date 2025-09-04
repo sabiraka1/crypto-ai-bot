@@ -2,21 +2,19 @@ from __future__ import annotations
 
 import logging
 
-from crypto_ai_bot.core.infrastructure.events.telegram_log_handler import (
-    TelegramErrorHandler,
-)
-
 
 def setup_telegram_error_handler() -> None:
     """
-    Подключить отправку ошибок в Telegram, если LOG_TG_ERRORS=1.
-    Вешаем на root-логгер, но уважаем текущую конфигурацию форматтеров.
+    Setup Telegram error handler if LOG_TG_ERRORS=1.
+    Attaches to root logger but respects current formatter configuration.
     """
     try:
+        from crypto_ai_bot.core.infrastructure.events.telegram_log_handler import TelegramErrorHandler
+
         handler = TelegramErrorHandler()
-    except (ImportError, RuntimeError, ValueError) as exc:  # когда нет токена или httpx не установлен
+    except (ImportError, RuntimeError, ValueError) as exc:
         logging.getLogger(__name__).warning("TG error handler disabled: %s", exc)
-        return  # noqa: TRY300
+        return
 
     handler.setLevel(logging.ERROR)
     fmt = logging.Formatter(fmt="🔴 %(levelname)s | %(name)s | %(message)s\nat %(pathname)s:%(lineno)d")
