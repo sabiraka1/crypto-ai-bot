@@ -21,7 +21,7 @@ def reset_registry() -> None:
 
 
 def _sanitize_name(name: str) -> str:
-    """Convert dots and dashes to underscores for Prometheus compatibility."""
+    """Prometheus совместимость: точки/дефисы -> подчёркивания."""
     return name.replace(".", "_").replace("-", "_")
 
 
@@ -48,13 +48,9 @@ def inc(name: str, **labels: Any) -> None:
         try:
             _COUNTERS[k] = Counter(name, name, list(labs.keys()), registry=_REGISTRY)
         except ValueError:
-            # Метрика уже зарегистрирована, пытаемся найти существующую
-            for metric in _REGISTRY.collect():
-                if metric.name == name and isinstance(metric, Counter):
-                    return
+            # несовместимые лейблы для уже зарегистрированной метрики — пропускаем
             return
-    if k in _COUNTERS:
-        _COUNTERS[k].labels(**labs).inc()
+    _COUNTERS[k].labels(**labs).inc()
 
 
 def gauge(name: str, **labels: Any) -> Gauge | None:
@@ -67,7 +63,7 @@ def gauge(name: str, **labels: Any) -> Gauge | None:
             _GAUGES[k] = Gauge(name, name, list(labs.keys()), registry=_REGISTRY)
         except ValueError:
             return None
-    return _GAUGES[k].labels(**labs) if k in _GAUGES else None
+    return _GAUGES[k].labels(**labs)
 
 
 def hist(name: str, **labels: Any) -> Histogram | None:
@@ -80,11 +76,11 @@ def hist(name: str, **labels: Any) -> Histogram | None:
             _HISTS[k] = Histogram(name, name, list(labs.keys()), buckets=_buckets_ms(), registry=_REGISTRY)
         except ValueError:
             return None
-    return _HISTS[k].labels(**labs) if k in _HISTS else None
+    return _HISTS[k].labels(**labs)
 
 
 def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> None:
-    """Шорткaт для наблюдения значения (миллисекунды -> секунды)."""
+    """Шорткат для наблюдения значения (миллисекунды -> секунды)."""
     name = _sanitize_name(name)
     value_sec = float(value) / 1000.0
     h = hist(name, **(labels or {}))
@@ -93,5 +89,5 @@ def observe(name: str, value: float, labels: dict[str, Any] | None = None) -> No
 
 
 def export_text() -> str:
-    """Для /metrics в FastAPI"""
+    """Для /metrics в FastAPI."""
     return generate_latest(_REGISTRY).decode("utf-8")
