@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import contextlib
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -69,42 +70,31 @@ def limit(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
 
 # -------- helper functions --------
 async def _shutdown_orchestrators(orchs: dict[str, Any]) -> None:
-    """Shutdown all orchestrators gracefully."""
     if not isinstance(orchs, dict):
         return
-
     tasks = []
     for oc in orchs.values():
-        try:
+        if hasattr(oc, "stop") and callable(oc.stop):
             tasks.append(asyncio.create_task(oc.stop()))
-        except (AttributeError, TypeError):
-            _log.error("orchestrator_stop_schedule_failed", exc_info=True)
-
+        else:
+            _log.error("orchestrator_stop_schedule_failed", extra={"orch": oc})
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _shutdown_bus(bus: Any) -> None:
-    """Shutdown event bus gracefully."""
     if not bus:
         return
-
-    if hasattr(bus, "stop"):
+    if hasattr(bus, "stop") and callable(bus.stop):
         await bus.stop()
-    elif hasattr(bus, "close"):
+    elif hasattr(bus, "close") and callable(bus.close):
         await bus.close()
 
 
 async def _shutdown_broker(broker: Any) -> None:
-    """Close broker exchange connection."""
     exch = getattr(broker, "exchange", None) if broker else None
-    if exch and hasattr(exch, "close"):
+    if exch and hasattr(exch, "close") and callable(exch.close):
         await exch.close()
-
-
-def _raise_http_exception(status_code: int, detail: str) -> None:
-    """Helper to raise HTTPException (TRY301 fix)."""
-    raise HTTPException(status_code=status_code, detail=detail)
 
 
 # -------- lifespan --------
@@ -117,36 +107,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
-        # --- graceful shutdown ---
         _log.info("lifespan_shutdown_begin")
 
-        # Release instance lock
         try:
             inst_lock = getattr(_container, "instance_lock", None)
             if inst_lock and hasattr(inst_lock, "release"):
                 inst_lock.release()
-        except (AttributeError, RuntimeError, OSError):
+        except Exception:
             _log.debug("instance_lock_release_failed", exc_info=True)
 
-        # Shutdown orchestrators
         try:
             orchs = getattr(_container, "orchestrators", None)
             await _shutdown_orchestrators(orchs)
-        except (RuntimeError, asyncio.CancelledError):
+        except Exception:
             _log.error("orchestrators_stop_failed", exc_info=True)
 
-        # Shutdown bus
         try:
             bus = getattr(_container, "bus", None)
             await _shutdown_bus(bus)
-        except (ConnectionError, RuntimeError):
+        except Exception:
             _log.error("bus_shutdown_failed", exc_info=True)
 
-        # Close broker
         try:
             broker = getattr(_container, "broker", None)
             await _shutdown_broker(broker)
-        except (ConnectionError, RuntimeError):
+        except Exception:
             _log.error("exchange_close_failed", exc_info=True)
 
         _log.info("lifespan_shutdown_end")
@@ -172,290 +157,100 @@ async def _metrics_middleware(
     return response
 
 
-def _raise_not_ready() -> Any:
-    """Raise HTTPException if container not ready."""
-    if _container is None:
-        _raise_http_exception(503, "Container not ready")
-    return _container
+# -------- endpoints: orchestrator --------
+@router.post("/orchestrator/{name}/start")
+@limit
+async def orch_start(name: str, request: Request) -> JSONResponse:
+    orch = getattr(_container, "orchestrators", {}).get(name) if _container else None
+    if not orch:
+        raise HTTPException(status_code=404, detail=f"Orchestrator {name} not found")
+    try:
+        await orch.start()
+        return JSONResponse({"status": "started", "name": name})
+    except Exception as exc:
+        _log.error("orchestrator_start_failed", extra={"name": name, "error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to start orchestrator")
 
 
-def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
-    c = _raise_not_ready()
-    s = getattr(c, "settings", None)
-    default_symbol = getattr(s, "SYMBOL", "BTC/USDT") if s else "BTC/USDT"
-    sym = symbol or default_symbol
-    orchs = getattr(c, "orchestrators", None)
-    if not isinstance(orchs, dict):
-        _raise_http_exception(500, "orchestrators_missing")
-    orch = orchs.get(sym) or orchs.get(sym.replace("-", "/").upper())
-    if orch is None:
-        _raise_http_exception(404, f"orchestrator_not_found_for_{sym}")
-    return orch, sym
+@router.post("/orchestrator/{name}/stop")
+@limit
+async def orch_stop(name: str, request: Request) -> JSONResponse:
+    orch = getattr(_container, "orchestrators", {}).get(name) if _container else None
+    if not orch:
+        raise HTTPException(status_code=404, detail=f"Orchestrator {name} not found")
+    try:
+        await orch.stop()
+        return JSONResponse({"status": "stopped", "name": name})
+    except Exception as exc:
+        _log.error("orchestrator_stop_failed", extra={"name": name, "error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to stop orchestrator")
 
 
-# -------- helpers --------
-async def _call_with_timeout(coro, *, timeout: float = 2.5):
-    """Call coroutine with timeout."""
-    async with asyncio.timeout(timeout):
-        return await coro
+@router.get("/orchestrator/{name}/status")
+@limit
+async def orch_status(name: str, request: Request) -> JSONResponse:
+    orch = getattr(_container, "orchestrators", {}).get(name) if _container else None
+    if not orch:
+        raise HTTPException(status_code=404, detail=f"Orchestrator {name} not found")
+    try:
+        st = await orch.status()
+        return JSONResponse({"status": "ok", "orchestrator": name, "details": st})
+    except Exception as exc:
+        _log.error("orchestrator_status_failed", extra={"name": name, "error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch status")
 
 
-async def _check_storage(storage: Any) -> str:
-    """Check storage health."""
-    if storage and hasattr(storage, "ping"):
-        await _call_with_timeout(storage.ping(), timeout=1.5)
-        return "ok"
-    return "n/a"
+# -------- endpoints: telegram webhook --------
+@router.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    update: dict[str, Any] = Body(...),
+) -> JSONResponse:
+    bus = getattr(_container, "bus", None)
+    if not bus:
+        raise HTTPException(status_code=500, detail="Bus not initialized")
+
+    try:
+        await bus.publish(events_topics.TELEGRAM_UPDATE, update)
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        _log.error("telegram_webhook_failed", extra={"error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process telegram update")
 
 
-async def _check_bus(bus: Any) -> str:
-    """Check event bus health."""
-    if bus and hasattr(bus, "publish"):
-        await _call_with_timeout(bus.publish("health.ping", {"ts_ms": now_ms()}), timeout=1.0)
-        return "ok"
-    return "n/a"
-
-
-async def _check_broker(broker: Any) -> str:
-    """Check broker health."""
-    if broker and hasattr(broker, "get_balance"):
-        await _call_with_timeout(broker.get_balance(), timeout=2.0)
-        return "ok"
-    return "n/a"
-
-
-# -------- endpoints --------
+# -------- endpoints: health & metrics --------
 @router.get("/health")
 async def health() -> JSONResponse:
-    """Health check for DB, EventBus, Broker (with timeouts)."""
-    ok = True
-    details: dict[str, Any] = {"ts_ms": now_ms()}
-
     try:
-        c = _raise_not_ready()
-    except HTTPException:
-        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
-
-    settings = getattr(c, "settings", None)
-    default_symbol = getattr(settings, "SYMBOL", "BTC/USDT") if settings else "BTC/USDT"
-    symbols = list(getattr(c, "orchestrators", {}).keys())
-
-    bus = getattr(c, "bus", None)
-    storage = getattr(c, "storage", None)
-    broker = getattr(c, "broker", None)
-
-    # DB check
-    try:
-        details["db"] = await _check_storage(storage)
-    except (TimeoutError, ConnectionError, RuntimeError) as exc:
-        ok = False
-        details["db"] = f"fail: {exc!s}"
-
-    # EventBus check
-    try:
-        details["bus"] = await _check_bus(bus)
-    except (TimeoutError, ConnectionError, RuntimeError) as exc:
-        ok = False
-        details["bus"] = f"fail: {exc!s}"
-
-    # Broker check
-    try:
-        details["broker"] = await _check_broker(broker)
-    except (TimeoutError, ConnectionError, RuntimeError) as exc:
-        ok = False
-        details["broker"] = f"fail: {exc!s}"
-
-    # publish event for observability/Telegram
-    if bus and hasattr(bus, "publish"):
-        try:
-            await bus.publish(events_topics.HEALTH_REPORT, {"ok": ok, **details})
-        except (ConnectionError, RuntimeError):
-            _log.debug("health_bus_publish_failed", exc_info=True)
-
-    body = {"ok": ok, "default_symbol": default_symbol, "symbols": symbols, **details}
-    return JSONResponse(body, status_code=200 if ok else 500)
-
-
-@router.post("/alertmanager/webhook")
-async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
-    """Alertmanager webhook -> forward to EventBus."""
-    try:
-        c = _raise_not_ready()
-    except HTTPException:
-        return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
-
-    bus = getattr(c, "bus", None)
-    if bus and hasattr(bus, "publish"):
-        try:
-            await bus.publish(events_topics.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
-        except (ConnectionError, RuntimeError):
-            _log.debug("alert_bus_publish_failed", exc_info=True)
-    return JSONResponse({"ok": True})
+        return JSONResponse({"status": "ok", "ts": now_ms()})
+    except Exception as exc:
+        _log.error("health_failed", extra={"error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Health check failed")
 
 
 @router.get("/metrics")
 async def metrics() -> PlainTextResponse:
     try:
-        return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
-    except (ValueError, RuntimeError):
-        _log.error("metrics_failed", exc_info=True)
-        return PlainTextResponse("", status_code=500)
+        return PlainTextResponse(export_text())
+    except Exception as exc:
+        _log.error("metrics_failed", extra={"error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Metrics export failed")
 
 
-@router.get("/orchestrator/status")
-async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
-    orch, sym = _get_orchestrator(symbol)
-    try:
-        st = orch.status()
-        st["symbol"] = sym
-        return JSONResponse(st)
-    except (AttributeError, RuntimeError) as e:
-        _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
-        _raise_http_exception(500, "status_failed")
-
-
-@router.post("/orchestrator/start")
-@limit
-async def orch_start(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
-    orch, sym = _get_orchestrator(symbol)
-    try:
-        await orch.start()
-        st = orch.status()
-        st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
-    except (AttributeError, RuntimeError) as e:
-        _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
-        _raise_http_exception(500, "start_failed")
-
-
-@router.post("/orchestrator/stop")
-@limit
-async def orch_stop(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
-    orch, sym = _get_orchestrator(symbol)
-    try:
-        await orch.stop()
-        st = orch.status()
-        st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
-    except (AttributeError, RuntimeError) as e:
-        _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
-        _raise_http_exception(500, "stop_failed")
-
-
-@router.post("/orchestrator/pause")
-@limit
-async def orch_pause(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
-    orch, sym = _get_orchestrator(symbol)
-    try:
-        await orch.pause()
-        st = orch.status()
-        st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
-    except (AttributeError, RuntimeError) as e:
-        _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
-        _raise_http_exception(500, "pause_failed")
-
-
-@router.post("/orchestrator/resume")
-@limit
-async def orch_resume(request: Request, symbol: str | None = Query(default=None)) -> JSONResponse:
-    orch, sym = _get_orchestrator(symbol)
-    try:
-        await orch.resume()
-        st = orch.status()
-        st["symbol"] = sym
-        return JSONResponse({"ok": True, "status": st})
-    except (AttributeError, RuntimeError) as e:
-        _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
-        _raise_http_exception(500, "resume_failed")
-
-
-def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
-    """Get PnL data from storage."""
-    result = {"pnl_quote": "0", "turnover_quote": "0", "orders_count": 0}
-
-    if not hasattr(storage, "trades"):
-        return result
-
-    trades = storage.trades
-
-    # Get PnL
-    if hasattr(trades, "daily_pnl_quote"):
-        try:
-            result["pnl_quote"] = str(trades.daily_pnl_quote(symbol))
-        except (ValueError, AttributeError):
-            _log.error("pnl_today_calc_failed", extra={"symbol": symbol}, exc_info=True)
-    else:
-        _log.warning("pnl_today_missing_method_daily_pnl_quote", extra={"symbol": symbol})
-
-    # Get turnover
-    if hasattr(trades, "daily_turnover_quote"):
-        try:
-            result["turnover_quote"] = str(trades.daily_turnover_quote(symbol))
-        except (ValueError, AttributeError):
-            _log.error("turnover_today_calc_failed", extra={"symbol": symbol}, exc_info=True)
-    else:
-        _log.warning("pnl_today_missing_method_daily_turnover_quote", extra={"symbol": symbol})
-
-    # Get orders count
-    if hasattr(trades, "count_orders_today"):
-        try:
-            result["orders_count"] = int(trades.count_orders_today(symbol))
-        except (ValueError, AttributeError):
-            _log.error("orders_today_count_failed", extra={"symbol": symbol}, exc_info=True)
-    else:
-        _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": symbol})
-
-    return result
-
-
+# -------- endpoints: pnl --------
 @router.get("/pnl/today")
-async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
-    """
-    Single source of truth — trades repository:
-    daily_pnl_quote / daily_turnover_quote / count_orders_today.
-    """
-    c = _raise_not_ready()
+@limit
+async def pnl_today(request: Request) -> JSONResponse:
     try:
-        _, sym = _get_orchestrator(symbol)
-        st = getattr(c, "storage", None)
-        if not st:
-            _raise_http_exception(500, "storage_missing")
-
-        data = _get_pnl_data(st, sym)
-        return JSONResponse({"symbol": sym, **data})
-    except HTTPException:
-        raise
-    except (ValueError, RuntimeError):
-        _log.error("pnl_today_failed", exc_info=True)
-        _raise_http_exception(500, "pnl_today_failed")
+        trades_repo = getattr(_container, "storage", None).trades if _container else None
+        if not trades_repo or not hasattr(trades_repo, "daily_pnl_quote"):
+            raise HTTPException(status_code=500, detail="Trades repo not available")
+        pnl = trades_repo.daily_pnl_quote()
+        return JSONResponse({"status": "ok", "pnl_today_quote": str(pnl)})
+    except Exception as exc:
+        _log.error("pnl_today_failed", extra={"error": str(exc)}, exc_info=True)
+        raise HTTPException(status_code=500, detail="PNL calculation failed")
 
 
-@router.post("/telegram/webhook")
-async def telegram_webhook(request: Request) -> JSONResponse:
-    """Webhook endpoint for Telegram bot (optional alternative to polling)."""
-    try:
-        _ = await request.body()
-        data = await request.json()
-        c = _raise_not_ready()
-        settings = getattr(c, "settings", None)
-        secret = getattr(settings, "TELEGRAM_BOT_SECRET", "")
-
-        if secret:
-            provided_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-            if provided_token != secret:
-                _log.warning("telegram_webhook_invalid_secret")
-                return JSONResponse({"ok": False}, status_code=401)
-
-        _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
-        # if needed, forward to tg_bot.process_webhook_update(data)
-        return JSONResponse({"ok": True})
-    except (ValueError, RuntimeError):
-        _log.error("telegram_webhook_error", exc_info=True)
-        return JSONResponse({"ok": False}, status_code=500)
-
-
-# Добавим отсутствующий import
-import contextlib
-
+# -------- register router --------
 app.include_router(router)

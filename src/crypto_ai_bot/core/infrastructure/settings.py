@@ -88,6 +88,8 @@ class Settings:
 
     # event bus / redis
     EVENT_BUS_URL: str  # "" => in-memory; "redis://..." => RedisEventBus
+    EVENT_BUS_INCLUDE: str  # CSV префиксов для зеркалирования, напр. "trade.,orders.,health."
+    EVENT_BUS_EXCLUDE: str  # CSV префиксов исключений, напр. "__"
 
     # risk & safety (application-level caps)
     RISK_COOLDOWN_SEC: int
@@ -110,7 +112,7 @@ class Settings:
     BROKER_RATE_RPS: float
     BROKER_RATE_BURST: int
 
-    # orchestrator intervals
+    # orchestrator intervals / http
     HTTP_TIMEOUT_SEC: int
     TRADER_AUTOSTART: int
 
@@ -145,6 +147,7 @@ class Settings:
     TELEGRAM_ALERTS_CHAT_ID: str
     TELEGRAM_BOT_COMMANDS_ENABLED: int
     TELEGRAM_ALLOWED_USERS: str  # "123,456"
+    TELEGRAM_LONG_POLL: int  # NEW: длинный поллинг для бота
 
     # Regime gating (macro regime filter)
     REGIME_ENABLED: int
@@ -203,7 +206,10 @@ class Settings:
             BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
             IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
             IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
+            # Event bus
             EVENT_BUS_URL=_get("EVENT_BUS_URL", ""),
+            EVENT_BUS_INCLUDE=_get("EVENT_BUS_INCLUDE", "trade.,orders.,health."),
+            EVENT_BUS_EXCLUDE=_get("EVENT_BUS_EXCLUDE", "__"),
             # risk
             RISK_COOLDOWN_SEC=int(_get("RISK_COOLDOWN_SEC", "60")),
             RISK_MAX_SPREAD_PCT=float(_get("RISK_MAX_SPREAD_PCT", "0.30")),
@@ -249,6 +255,7 @@ class Settings:
             TELEGRAM_ALERTS_CHAT_ID=_get("TELEGRAM_ALERTS_CHAT_ID", ""),
             TELEGRAM_BOT_COMMANDS_ENABLED=int(_get("TELEGRAM_BOT_COMMANDS_ENABLED", "0")),
             TELEGRAM_ALLOWED_USERS=_get("TELEGRAM_ALLOWED_USERS", ""),
+            TELEGRAM_LONG_POLL=int(_get("TELEGRAM_LONG_POLL", "30")),
             # Regime gating
             REGIME_ENABLED=int(_get("REGIME_ENABLED", "0")),
             REGIME_DXY_URL=_get("REGIME_DXY_URL", ""),

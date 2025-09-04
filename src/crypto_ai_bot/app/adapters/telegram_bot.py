@@ -104,6 +104,59 @@ class MessageCache:
         return False
 
 
+class TelegramAPI:
+    """Telegram API client."""
+
+    def __init__(self, bot_token: str):
+        self.token = bot_token
+
+    def _build_url(self, method: str, **params: Any) -> str:
+        """Build API URL."""
+        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+        return f"https://api.telegram.org/bot{self.token}/{method}?{query}"
+
+    async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML") -> None:
+        """Send message to chat."""
+        try:
+            url = self._build_url(
+                "sendMessage",
+                chat_id=str(chat_id),
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview="true",
+            )
+            # жёсткий cap на всю операцию отправки
+            await aget(url, hard_timeout=20.0)
+        except Exception:
+            _log.error("telegram_reply_failed", exc_info=True)
+
+    async def get_updates(self, offset: int, timeout: int) -> list[dict[str, Any]]:
+        """Get updates from Telegram with timeout."""
+        url = self._build_url(
+            "getUpdates",
+            timeout=str(timeout),
+            offset=str(offset),
+            # Telegram ожидает JSON-список строк; строка тоже работает, но оставим как есть
+            allowed_updates="message",
+        )
+
+        try:
+            # небольшая подстраховка поверх long-poll (timeout + запас)
+            async with asyncio.timeout(timeout + 10):
+                resp = await aget(url, hard_timeout=timeout + 8)
+                data = resp.json() if resp.status_code == 200 else {}
+        except TimeoutError:
+            _log.warning("telegram_get_updates_timeout")
+            return []
+        except Exception:
+            _log.error("telegram_get_updates_failed", exc_info=True)
+            return []
+
+        if isinstance(data, dict):
+            return data.get("result", [])
+        return []
+
+
 class CommandHandler:
     """Handle individual commands."""
 
@@ -182,7 +235,7 @@ class CommandHandler:
         for key in ("state", "open_orders", "position", "last_signal", "last_trade_at"):
             if key in status:
                 value = status[key]
-                if isinstance(value, dict | list):
+                if isinstance(value, (dict, list)):
                     value = str(value)
                 lines.append(f"- {key}: <code>{html.escape(str(value))}</code>")
 
@@ -216,54 +269,6 @@ class CommandHandler:
         except Exception:
             _log.error("orch_call_failed", extra={"symbol": symbol, "method": method}, exc_info=True)
             await self.api.send_message(chat_id, f"{method} failed for <b>{html.escape(symbol)}</b>")
-
-
-class TelegramAPI:
-    """Telegram API client."""
-
-    def __init__(self, bot_token: str):
-        self.token = bot_token
-
-    def _build_url(self, method: str, **params: Any) -> str:
-        """Build API URL."""
-        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-        return f"https://api.telegram.org/bot{self.token}/{method}?{query}"
-
-    async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML") -> None:
-        """Send message to chat."""
-        try:
-            url = self._build_url(
-                "sendMessage",
-                chat_id=str(chat_id),
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview="true",
-            )
-            await aget(url)
-        except Exception:
-            _log.error("telegram_reply_failed", exc_info=True)
-
-    async def get_updates(self, offset: int, timeout: int) -> list[dict[str, Any]]:
-        """Get updates from Telegram with timeout."""
-        url = self._build_url(
-            "getUpdates", timeout=str(timeout), offset=str(offset), allowed_updates="message"
-        )
-
-        try:
-            # Используем встроенный TimeoutError вместо asyncio.TimeoutError
-            async with asyncio.timeout(timeout + 10):
-                resp = await aget(url)
-                data = resp.json() if resp.status_code == 200 else {}
-        except TimeoutError:
-            _log.warning("telegram_get_updates_timeout")
-            return []
-        except Exception:
-            _log.error("telegram_get_updates_failed", exc_info=True)
-            return []
-
-        if isinstance(data, dict):
-            return data.get("result", [])
-        return []
 
 
 class UpdateParser:
@@ -330,6 +335,9 @@ class TelegramBotCommands:
         self.command_handler = CommandHandler(container, self.config.default_symbol, self.api)
         self.parser = UpdateParser()
         self._offset = 0
+
+        # ограничитель параллельных обработок апдейтов
+        self._sem = asyncio.Semaphore(int(os.environ.get("TELEGRAM_BOT_CONCURRENCY", "8") or "8"))
 
     def _is_authorized(self, user_id: int) -> bool:
         """Check if user is authorized."""
@@ -402,6 +410,17 @@ class TelegramBotCommands:
             _log.error("telegram_getupdates_failed", exc_info=True)
             return []
 
+    async def _guarded_process(self, update: dict[str, Any]) -> None:
+        async with self._sem:
+            try:
+                # не задерживаем обработку каждого апдейта дольше, чем long-poll
+                async with asyncio.timeout(self.config.long_poll_sec + 5):
+                    await self._process_update(update)
+            except TimeoutError:
+                _log.warning("telegram_update_timeout")
+            except Exception:
+                _log.error("telegram_update_process_failed", exc_info=True)
+
     async def run(self) -> None:
         """Main long-polling loop."""
         if not self.config.bot_token:
@@ -413,10 +432,8 @@ class TelegramBotCommands:
         while True:
             updates = await self._fetch_updates()
 
-            for update in updates:
-                try:
-                    await self._process_update(update)
-                except Exception:
-                    _log.error("telegram_update_process_failed", exc_info=True)
+            # параллелим обработку входящих апдейтов с ограничением
+            if updates:
+                await asyncio.gather(*[self._guarded_process(u) for u in updates], return_exceptions=True)
 
             await asyncio.sleep(0.2)

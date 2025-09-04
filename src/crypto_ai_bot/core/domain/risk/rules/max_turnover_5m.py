@@ -29,7 +29,7 @@ class MaxTurnover5mRule:
             thr = now_ms - minutes * 60_000
 
             def get_ts(x: Any) -> int:
-                for k in ("ts", "timestamp", "time"):
+                for k in ("ts", "timestamp", "time", "ts_ms"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)
                     if v is not None:
                         try:
@@ -39,14 +39,20 @@ class MaxTurnover5mRule:
                 return 0
 
             def get_quote(x: Any) -> Decimal:
-                for k in ("quote", "quote_amount", "filled_quote", "amount_quote"):
+                for k in ("quote", "quote_amount", "filled_quote", "amount_quote", "cost"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)
                     if v is not None:
                         try:
                             return Decimal(str(v))
                         except Exception:
                             continue
-                return Decimal("0")
+                # если нет явно — оцениваем quote как price*filled (грубый фолбэк)
+                try:
+                    price = Decimal(str(getattr(x, "price", x.get("price", "0"))))  # type: ignore[attr-defined]
+                    filled = Decimal(str(getattr(x, "filled", x.get("filled", "0"))))  # type: ignore[attr-defined]
+                    return price * filled
+                except Exception:
+                    return Decimal("0")
 
             s = Decimal("0")
             for it in items:

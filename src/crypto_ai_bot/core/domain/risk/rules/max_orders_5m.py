@@ -21,7 +21,7 @@ class MaxOrders5mRule:
                 return int(trades_repo.count_orders_last_minutes(symbol, minutes))
             except Exception:
                 return None
-        # деградация: пробуем list_today + фильтр по времени
+        # деградация: list_today + фильтр по времени
         try:
             items = trades_repo.list_today(symbol)
             if not items:
@@ -29,9 +29,8 @@ class MaxOrders5mRule:
             now_ms = int(time.time() * 1000)
             thr = now_ms - minutes * 60_000
 
-            # пытаемся вытащить timestamp из item.{ts, timestamp, time} или dict
             def get_ts(x: Any) -> int:
-                for k in ("ts", "timestamp", "time"):
+                for k in ("ts", "timestamp", "time", "ts_ms"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)
                     if v is not None:
                         try:

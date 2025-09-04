@@ -62,6 +62,14 @@ def _mark_applied(conn: sqlite3.Connection, version: int, name: str, now_ms: int
         )
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    cur = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1;",
+        (table,),
+    )
+    return cur.fetchone() is not None
+
+
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     cur = conn.execute(f"PRAGMA table_info({table});")
     return any(row[1] == column for row in cur.fetchall())
@@ -120,7 +128,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(1, "init", _v1))
 
-    # V0002 — добавим broker_order_id и client_order_id
+    # V0002 — trades: broker/client ids + filled
     def _v2(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "trades", "broker_order_id", "TEXT")
         _add_column_if_missing(conn, "trades", "client_order_id", "TEXT")
@@ -128,7 +136,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(2, "trades_order_ids", _v2))
 
-    # V0006 — индексы по сделкам
+    # V0006 — индексы по trades (symbol+ts, client_id, ts)
     def _v6(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -145,7 +153,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(6, "trades_indexes", _v6))
 
-    # V0007 — уникальность идемпотентности
+    # V0007 — idempotency: уникальность key + индекс по ts_ms
     def _v7(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -159,7 +167,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(7, "idempotency_unique_and_ts", _v7))
 
-    # V0008 — индекс по позициям
+    # V0008 — индекс по positions(symbol)
     def _v8(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -171,7 +179,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(8, "positions_idx", _v8))
 
-    # V0010 — индексы аудита и уникальность broker_order_id
+    # V0010 — индексы по audit(ts) и trades(broker_id)
     def _v10(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -186,14 +194,13 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(10, "audit_ts_idx", _v10))
 
-    # V0011 — расширение схемы positions
+    # V0011 — расширение positions (совместимость назад)
     def _v11(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "positions", "avg_entry_price", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "realized_pnl", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "updated_ts_ms", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "positions", "version", "INTEGER NOT NULL DEFAULT 0")
-
         try:
             with conn:
                 conn.execute(
@@ -209,7 +216,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(11, "positions_schema_extend", _v11))
 
-    # V0012 — таблица orders
+    # V0012 — orders table
     def _v12(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -232,6 +239,33 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(12, "orders_table", _v12))
 
+    # V0013 — Идемпотентность: добавляем expire_at и мигрируем из legacy idempotency_keys
+    def _v13(conn: sqlite3.Connection) -> None:
+        # добавить столбец expire_at, если его нет
+        _add_column_if_missing(conn, "idempotency", "expire_at", "INTEGER NOT NULL DEFAULT 0")
+        # индекс по expire_at для быстрого prune
+        _apply_sql(
+            conn,
+            """
+            CREATE INDEX IF NOT EXISTS idx_idempotency_expire
+                ON idempotency(expire_at);
+            """,
+        )
+        # если есть старая таблица idempotency_keys — перенесём данные
+        if _table_exists(conn, "idempotency_keys"):
+            # переносим ключи, где expires_at_ms >= ts_ms (профилактика мусора)
+            _apply_sql(
+                conn,
+                """
+                INSERT OR IGNORE INTO idempotency(key, expire_at)
+                SELECT key, expires_at_ms
+                FROM idempotency_keys
+                WHERE key IS NOT NULL;
+                """,
+            )
+
+    migs.append(PyMigration(13, "idempotency_expire_and_legacy_migration", _v13))
+
     return migs
 
 
@@ -243,7 +277,7 @@ def run_migrations(
     do_backup: bool = True,
     backup_retention_days: int = 30,
 ) -> None:
-    """Применяет программные миграции."""
+    """Применяет программные миграции (с резервной копией БД)."""
     assert isinstance(now_ms, int), "now_ms must be int (epoch ms)"
     _init_schema_table(conn)
 
@@ -258,7 +292,7 @@ def run_migrations(
         mig.up(conn)
         _mark_applied(conn, mig.version, mig.name, now_ms)
 
-    # ретеншн резервных копий
+    # Ретеншн резервных копий (оставляем минимум 3 файла)
     try:
         if do_backup and db_path and backup_retention_days >= 0:
             dest = os.path.join(os.path.dirname(db_path) or ".", "backups")

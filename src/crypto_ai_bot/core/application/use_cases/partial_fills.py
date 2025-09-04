@@ -51,28 +51,35 @@ class PartialFillHandler:
             if amount <= 0:
                 return None
 
-            if _ratio(filled, amount) >= dec("0.95"):
+            ratio = _ratio(filled, amount)
+            if ratio >= dec("0.95"):
                 return None
 
             remaining = amount - filled
+            if remaining <= 0:
+                return None
+
             symbol = getattr(order, "symbol", "") or ""
+            if not symbol:
+                return None
+
             side = (getattr(order, "side", "") or "").lower()
 
             # Prevent cycling - create follow-up only once
-            if client_order_id.endswith("-pf"):
+            if client_order_id and client_order_id.endswith("-pf"):
                 return None
 
             if side == "buy":
                 follow = await broker.create_market_buy_quote(
                     symbol=symbol,
-                    quote_amount=remaining,
-                    client_order_id=f"{client_order_id}-pf",
+                    quote_amount=remaining,  # модель: buy-amount трактуем как quote
+                    client_order_id=f"{client_order_id}-pf" if client_order_id else None,
                 )
             else:
                 follow = await broker.create_market_sell_base(
                     symbol=symbol,
                     base_amount=remaining,
-                    client_order_id=f"{client_order_id}-pf",
+                    client_order_id=f"{client_order_id}-pf" if client_order_id else None,
                 )
 
             await self.bus.publish(
@@ -88,7 +95,7 @@ class PartialFillHandler:
             inc("partial_followup_total", symbol=symbol, side=side)
             return cast(OrderLike, follow)
         except Exception as exc:
-            _log.error("partial_followup_failed", extra={"error": str(exc)})
+            _log.error("partial_followup_failed", extra={"error": str(exc)}, exc_info=True)
             inc("partial_followup_errors_total")
             return None
 
@@ -104,10 +111,13 @@ async def _process_single_order(
     min_ratio_for_ok: Decimal,
 ) -> None:
     """Process a single order (helper to reduce complexity)."""
-    broker_order_id = row.get("broker_order_id", "") if isinstance(row, dict) else None
-    client_order_id = row.get("client_order_id", "") if isinstance(row, dict) else None
-    side = (row.get("side") or "").lower() if isinstance(row, dict) else ""
-    ts_ms = int(row.get("ts_ms") or 0) if isinstance(row, dict) else 0
+    if not isinstance(row, dict):
+        return
+
+    broker_order_id = row.get("broker_order_id", "") or ""
+    client_order_id = row.get("client_order_id", "") or ""
+    side = (row.get("side") or "").lower()
+    ts_ms = int(row.get("ts_ms") or 0)
 
     # Calculate age
     age_sec = 0
@@ -119,10 +129,11 @@ async def _process_single_order(
         pass
 
     # 1) Fetch actual status from exchange
-    fetched = None
+    fetched: OrderLike | None = None
     try:
         if broker_order_id:
-            fetched = await broker.fetch_order(broker_order_id, symbol)
+            # Важно: совместимо с CcxtBroker(fetch_order(*, symbol, broker_order_id))
+            fetched = await broker.fetch_order(symbol=symbol, broker_order_id=broker_order_id)
         elif client_order_id and hasattr(broker, "fetch_order_by_client_id"):
             fetched = await broker.fetch_order_by_client_id(client_order_id, symbol)  # type: ignore[attr-defined]
         else:
@@ -137,6 +148,10 @@ async def _process_single_order(
         inc("settle_fetch_order_errors_total", symbol=symbol)
         return
 
+    if not fetched:
+        _log.warning("fetch_order_empty", extra={"symbol": symbol, "broker_order_id": broker_order_id})
+        return
+
     # 2) Synchronize progress (filled) and status
     filled = _dec(getattr(fetched, "filled", row.get("filled", "0")))
     amount = _dec(getattr(fetched, "amount", row.get("amount", "0")))
@@ -145,7 +160,7 @@ async def _process_single_order(
 
     # Write progress filled (not closing)
     try:
-        if broker_order_id and _is_open(status):
+        if broker_order_id and _is_open(status) and hasattr(storage, "orders"):
             storage.orders.update_progress(broker_order_id, str(filled))
     except Exception:
         _log.error(
@@ -157,7 +172,7 @@ async def _process_single_order(
     # 3) If order closed - record and publish event
     if _is_closed(status):
         try:
-            if broker_order_id:
+            if broker_order_id and hasattr(storage, "orders"):
                 storage.orders.mark_closed(broker_order_id, str(filled))
         except Exception:
             _log.error(
@@ -216,7 +231,7 @@ async def _process_single_order(
     # 5) If partially filled - try to fill remainder at market
     try:
         if ratio > dec("0") and ratio < dec("0.95"):
-            await pfh.handle(cast(OrderLike, fetched), broker, client_order_id or "")
+            await pfh.handle(cast(OrderLike, fetched), broker, client_order_id)
     except Exception:
         _log.error("partial_followup_call_failed", extra={"symbol": symbol}, exc_info=True)
 

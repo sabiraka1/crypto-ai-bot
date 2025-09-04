@@ -13,6 +13,7 @@ _log = get_logger("reconcile.balances")
 
 
 def _dec_from(bal: Mapping[str, Any], key: str, default: str = "0") -> Decimal:
+    """Безопасно извлекаем Decimal из словаря баланса."""
     try:
         return dec(str(bal.get(key, default)))
     except Exception:  # noqa: BLE001
@@ -21,16 +22,23 @@ def _dec_from(bal: Mapping[str, Any], key: str, default: str = "0") -> Decimal:
 
 @dataclass
 class BalancesReconciler:
+    """
+    Забирает баланс у брокера по символу и нормализует значения.
+    Сайд-эффектов не делает (паблиш/БД — на уровне вызывающей логики).
+    """
+
     broker: BrokerPort
     symbol: str
 
     async def run_once(self) -> dict[str, str]:
-        """
-        Fetch balance at broker and normalize values to Decimal strings.
-        No side-effects: event publishing / DB writes belong to the caller.
-        """
         try:
-            bal = await self.broker.fetch_balance(self.symbol)  # dict: free_base, free_quote
+            # ожидается: {"free_base": Decimal|num|str, "free_quote": Decimal|num|str}
+            bal = await self.broker.fetch_balance(self.symbol)
+            if not isinstance(bal, Mapping):
+                _log.error(
+                    "balance_invalid_payload", extra={"symbol": self.symbol, "type": type(bal).__name__}
+                )
+                return {"ok": "false", "reason": "invalid_payload"}
         except Exception:  # noqa: BLE001
             _log.error("balance_fetch_failed", extra={"symbol": self.symbol}, exc_info=True)
             return {"ok": "false", "reason": "broker_error"}
@@ -47,10 +55,7 @@ class BalancesReconciler:
         return {"ok": "true", "free_base": str(free_base), "free_quote": str(free_quote)}
 
 
+# Совместимый тонкий враппер для оркестратора
 async def reconcile_balances(symbol: str, _storage: Any, broker: Any, _bus: Any, _settings: Any) -> None:
-    """
-    Thin wrapper for orchestrator-compat: call the reconciler and return.
-    Publishing/writing is left to the application layer to avoid mixed responsibilities.
-    """
     rec = BalancesReconciler(broker=broker, symbol=symbol)
-    _ = await rec.run_once()
+    _ = await rec.run_once()  # результат возвращаем в вызывающий слой, если нужно

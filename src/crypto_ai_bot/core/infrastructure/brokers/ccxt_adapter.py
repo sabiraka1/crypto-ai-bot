@@ -14,6 +14,7 @@ from crypto_ai_bot.utils.metrics import inc, observe
 _log = get_logger("broker.ccxt")
 
 
+# ---- Public error types (preserve names for external code) ----
 class BrokerError(Exception): ...
 
 
@@ -57,7 +58,7 @@ class _TokenBucket:
 
 @dataclass
 class CcxtBroker:
-    """CCXT exchange adapter with circuit breaker, rate limiting and retries."""
+    """CCXT exchange adapter with circuit breaker, rate limiting, retries and hard timeouts."""
 
     exchange: Any
     settings: Any
@@ -70,11 +71,17 @@ class CcxtBroker:
         self._sym_to_ex: dict[str, str] = {}
         self._ex_to_sym: dict[str, str] = {}
 
+        # circuit breakers per operation kind
+        self._cb_markets = CircuitBreaker(name="markets", failure_threshold=3, reset_timeout_sec=15.0)
         self._cb_ticker = CircuitBreaker(name="ticker", failure_threshold=5, reset_timeout_sec=10.0)
         self._cb_balance = CircuitBreaker(name="balance", failure_threshold=5, reset_timeout_sec=10.0)
         self._cb_create = CircuitBreaker(name="create", failure_threshold=3, reset_timeout_sec=15.0)
         self._cb_order = CircuitBreaker(name="order", failure_threshold=5, reset_timeout_sec=10.0)
 
+        # hard timeout for any single exchange call
+        self._timeout_sec = float(getattr(self.settings, "BROKER_REQ_TIMEOUT_SEC", 15.0))
+
+    # ---------------- symbol mapping helpers ----------------
     @staticmethod
     def _to_gate(sym: str) -> str:
         """Convert symbol format: BTC/USDT -> btc_usdt (Gate style)."""
@@ -87,32 +94,17 @@ class CcxtBroker:
         base, quote = g.split("_")
         return f"{base.upper()}/{quote.upper()}"
 
-    async def _ensure_markets(self) -> None:
-        if self._markets:
-            return
-        await self._bucket.acquire()
-        mk = await self.exchange.load_markets()
-        self._markets = mk or {}
-        for k in self._markets.keys():
-            if "_" in k and "/" not in k:
-                can = self._from_gate(k)
-                self._sym_to_ex[can] = k
-                self._ex_to_sym[k] = can
-            elif "/" in k:
-                g = self._to_gate(k)
-                self._sym_to_ex[k] = g
-                self._ex_to_sym[g] = k
-
-    def _market_desc(self, sym: str) -> dict[str, Any]:
-        can = sym
-        ex = self._sym_to_ex.get(can) or sym
-        return self._markets.get(ex) or self._markets.get(can) or {}
-
+    # ---------------- precision & limits helpers ----------------
     @staticmethod
     def _quant(x: Decimal, step: Decimal | None) -> Decimal:
         if not step or step <= 0:
             return x
         return (x / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    def _market_desc(self, sym: str) -> dict[str, Any]:
+        can = sym
+        ex = self._sym_to_ex.get(can) or sym
+        return self._markets.get(ex) or self._markets.get(can) or {}
 
     def _apply_precision(
         self, sym: str, *, amount: Decimal | None, price: Decimal | None
@@ -136,23 +128,9 @@ class CcxtBroker:
                     step = dec(str(prec["price"]))
                 p_pr = self._quant(price, step)
         except Exception:
+            # precision issues should not explode here — валидация ниже
             pass
         return p_amt, p_pr
-
-    @staticmethod
-    def _map_error(exc: Exception) -> BrokerError:
-        msg = str(exc).lower()
-        if "insufficient" in msg or "balance" in msg:
-            return InsufficientFunds(msg)
-        if "not found" in msg or "cancelled" in msg:
-            return OrderNotFound(msg)
-        if "429" in msg or "rate limit" in msg:
-            return RateLimited(msg)
-        if "503" in msg or "temporarily unavailable" in msg:
-            return ExchangeUnavailable(msg)
-        if "invalid" in msg or "precision" in msg or "amount" in msg or "min" in msg or "notional" in msg:
-            return ValidationError(msg)
-        return BrokerError(msg)
 
     def _check_min_notional(self, sym: str, *, amount: Decimal, price: Decimal) -> None:
         md = self._market_desc(sym)
@@ -167,63 +145,114 @@ class CcxtBroker:
         if min_notional and min_notional > 0 and notional < min_notional:
             raise ValidationError(f"minNotional:{notional}<{min_notional}")
 
-    async def _with_cb(self, cb: CircuitBreaker, coro_fn: Callable[[], Awaitable[Any]]) -> Any:
-        async with cb:
-            return await coro_fn()
+    # ---------------- error mapping ----------------
+    @staticmethod
+    def _map_error(exc: Exception) -> BrokerError:
+        msg = str(exc).lower()
+        if "insufficient" in msg or "balance" in msg:
+            return InsufficientFunds(msg)
+        if "not found" in msg or "cancelled" in msg or "canceled" in msg:
+            return OrderNotFound(msg)
+        if "429" in msg or "rate limit" in msg:
+            return RateLimited(msg)
+        if "503" in msg or "temporarily unavailable" in msg or "service unavailable" in msg:
+            return ExchangeUnavailable(msg)
+        if "invalid" in msg or "precision" in msg or "amount" in msg or "min" in msg or "notional" in msg:
+            return ValidationError(msg)
+        return BrokerError(msg)
 
-    async def _retry(self, fn: Callable[[], Awaitable[Any]], *, max_attempts: int = 3) -> Any:
+    # ---------------- low-level call wrapper ----------------
+    async def _call_exchange(
+        self,
+        *,
+        name: str,
+        breaker: CircuitBreaker,
+        op: Callable[[], Awaitable[Any]],
+        bucket_cost: float = 1.0,
+    ) -> Any:
+        """Rate-limit + breaker + timeout + metrics wrapper for single CCXT call."""
+        await self._bucket.acquire(bucket_cost)
+        t0 = asyncio.get_event_loop().time()
+        try:
+            async with breaker:
+                # hard timeout for single request
+                async with asyncio.timeout(self._timeout_sec):
+                    res = await op()
+            dt = (asyncio.get_event_loop().time() - t0) * 1000.0
+            observe("broker.request.ms", dt, {"fn": name})
+            return res
+        except Exception as exc:
+            inc("broker.request.error", fn=name)
+            raise self._map_error(exc) from exc
+
+    async def _retry(
+        self, fn: Callable[[], Awaitable[Any]], *, max_attempts: int = 3, name: str = "op"
+    ) -> Any:
         for attempt in range(max_attempts):
             try:
                 return await fn()
             except Exception as exc:
                 if attempt == max_attempts - 1:
                     raise
-                _log.warning("broker_retry", extra={"attempt": attempt + 1, "error": str(exc)})
-                await asyncio.sleep(2**attempt)
+                _log.warning("broker_retry", extra={"attempt": attempt + 1, "op": name, "error": str(exc)})
+                await asyncio.sleep(min(8.0, 2**attempt))
 
+    # ---------------- markets cache ----------------
+    async def _ensure_markets(self) -> None:
+        if self._markets:
+            return
+        mk = await self._call_exchange(
+            name="load_markets",
+            breaker=self._cb_markets,
+            op=lambda: self.exchange.load_markets(),
+        )
+        self._markets = mk or {}
+        for k in self._markets.keys():
+            if "_" in k and "/" not in k:
+                can = self._from_gate(k)
+                self._sym_to_ex[can] = k
+                self._ex_to_sym[k] = can
+            elif "/" in k:
+                g = self._to_gate(k)
+                self._sym_to_ex[k] = g
+                self._ex_to_sym[g] = k
+
+    # ---------------- public broker API ----------------
     async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         await self._ensure_markets()
         ex_sym = self._sym_to_ex.get(symbol) or symbol
-        await self._bucket.acquire()
-        try:
-            t0 = asyncio.get_event_loop().time()
-            res = await self._with_cb(self._cb_ticker, lambda: self.exchange.fetch_ticker(ex_sym))
-            observe(
-                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"}
-            )
-            return res
-        except Exception as exc:
-            inc("broker.request.error", fn="fetch_ticker")
-            raise self._map_error(exc) from exc
+        return await self._call_exchange(
+            name="fetch_ticker",
+            breaker=self._cb_ticker,
+            op=lambda: self.exchange.fetch_ticker(ex_sym),
+        )
 
     async def fetch_balance(self, symbol: str) -> dict[str, Decimal]:
         await self._ensure_markets()
         base, quote = symbol.split("/")
-        await self._bucket.acquire()
-        try:
-            bal = await self._with_cb(self._cb_balance, lambda: self.exchange.fetch_balance())
-            acct_base = bal.get(base, {}) or {}
-            acct_quote = bal.get(quote, {}) or {}
-            return {
-                "free_base": dec(str(acct_base.get("free", 0) or 0)),
-                "free_quote": dec(str(acct_quote.get("free", 0) or 0)),
-            }
-        except Exception as exc:
-            inc("broker.request.error", fn="fetch_balance")
-            raise self._map_error(exc) from exc
+        bal = await self._call_exchange(
+            name="fetch_balance",
+            breaker=self._cb_balance,
+            op=lambda: self.exchange.fetch_balance(),
+        )
+        acct_base = bal.get(base, {}) or {}
+        acct_quote = bal.get(quote, {}) or {}
+        return {
+            "free_base": dec(str(acct_base.get("free", 0) or 0)),
+            "free_quote": dec(str(acct_quote.get("free", 0) or 0)),
+        }
 
     async def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
         await self._ensure_markets()
         ex_sym = self._sym_to_ex.get(symbol) or symbol
-        await self._bucket.acquire()
-        try:
-            orders = await self._with_cb(self._cb_order, lambda: self.exchange.fetch_open_orders(ex_sym))
-            if not isinstance(orders, list):
-                return []
-            return [dict(o) if not isinstance(o, dict) else o for o in orders]
-        except Exception as exc:
-            inc("broker.request.error", fn="fetch_open_orders")
-            raise self._map_error(exc) from exc
+        orders = await self._call_exchange(
+            name="fetch_open_orders",
+            breaker=self._cb_order,
+            op=lambda: self.exchange.fetch_open_orders(ex_sym),
+        )
+        if not isinstance(orders, list):
+            return []
+        return [dict(o) if not isinstance(o, dict) else o for o in orders]
 
     async def create_market_buy_quote(
         self, *, symbol: str, quote_amount: Decimal, client_order_id: str | None = None
@@ -233,35 +262,32 @@ class CcxtBroker:
         ask = dec(str(t.get("ask") or t.get("last") or "0"))
         if ask <= 0:
             raise ValidationError("ticker_ask_invalid")
+
         base_amount = quote_amount / ask
         base_amount_calc, _ = self._apply_precision(symbol, amount=base_amount, price=None)
         if base_amount_calc is None:
             raise ValidationError("precision_application_failed")
         base_amount = base_amount_calc
         self._check_min_notional(symbol, amount=base_amount, price=ask)
+
         ex_sym = self._sym_to_ex.get(symbol) or symbol
         params = {"type": "market", "timeInForce": "IOC"}
         if client_order_id:
             params["clientOrderId"] = client_order_id
-        await self._bucket.acquire()
+
+        def _op() -> Awaitable[Any]:
+            return self.exchange.create_order(ex_sym, "market", "buy", float(base_amount), None, params)
+
+        order = await self._retry(
+            lambda: self._call_exchange(name="create_order_buy", breaker=self._cb_create, op=_op),
+            name="create_order_buy",
+        )
+        order = order if isinstance(order, dict) else dict(order)
         try:
-            order = await self._retry(
-                lambda: self._with_cb(
-                    self._cb_create,
-                    lambda: self.exchange.create_order(
-                        ex_sym, "market", "buy", float(base_amount), None, params
-                    ),
-                )
-            )
-            order = order if isinstance(order, dict) else dict(order)
-            try:
-                order["fee_quote"] = _extract_fee_quote(order, symbol=symbol)
-            except Exception:
-                pass
-            return order
-        except Exception as exc:
-            inc("broker.request.error", fn="create_buy")
-            raise self._map_error(exc) from exc
+            order["fee_quote"] = _extract_fee_quote(order, symbol=symbol)
+        except Exception:
+            pass
+        return order
 
     async def create_market_sell_base(
         self, *, symbol: str, base_amount: Decimal, client_order_id: str | None = None
@@ -271,46 +297,43 @@ class CcxtBroker:
         bid = dec(str(t.get("bid") or t.get("last") or "0"))
         if bid <= 0:
             raise ValidationError("ticker_bid_invalid")
+
         b_amt, _ = self._apply_precision(symbol, amount=base_amount, price=None)
         if b_amt is None:
             raise ValidationError("precision_application_failed")
+
         self._check_min_notional(symbol, amount=b_amt, price=bid)
+
         ex_sym = self._sym_to_ex.get(symbol) or symbol
         params = {"type": "market", "timeInForce": "IOC"}
         if client_order_id:
             params["clientOrderId"] = client_order_id
-        await self._bucket.acquire()
+
+        def _op() -> Awaitable[Any]:
+            return self.exchange.create_order(ex_sym, "market", "sell", float(b_amt), None, params)
+
+        order = await self._retry(
+            lambda: self._call_exchange(name="create_order_sell", breaker=self._cb_create, op=_op),
+            name="create_order_sell",
+        )
+        order = order if isinstance(order, dict) else dict(order)
         try:
-            order = await self._retry(
-                lambda: self._with_cb(
-                    self._cb_create,
-                    lambda: self.exchange.create_order(ex_sym, "market", "sell", float(b_amt), None, params),
-                )
-            )
-            order = order if isinstance(order, dict) else dict(order)
-            try:
-                order["fee_quote"] = _extract_fee_quote(order, symbol=symbol)
-            except Exception:
-                pass
-            return order
-        except Exception as exc:
-            inc("broker.request.error", fn="create_sell")
-            raise self._map_error(exc) from exc
+            order["fee_quote"] = _extract_fee_quote(order, symbol=symbol)
+        except Exception:
+            pass
+        return order
 
     async def fetch_order(self, *, symbol: str, broker_order_id: str) -> dict[str, Any]:
         await self._ensure_markets()
         ex_sym = self._sym_to_ex.get(symbol) or symbol
-        await self._bucket.acquire()
-        try:
-            res = await self._with_cb(
-                self._cb_order, lambda: self.exchange.fetch_order(broker_order_id, ex_sym)
-            )
-            return res
-        except Exception as exc:
-            inc("broker.request.error", fn="fetch_order")
-            raise self._map_error(exc) from exc
+        return await self._call_exchange(
+            name="fetch_order",
+            breaker=self._cb_order,
+            op=lambda: self.exchange.fetch_order(broker_order_id, ex_sym),
+        )
 
 
+# ---------------- fee helper ----------------
 def _extract_fee_quote(order: dict[str, Any], *, symbol: str) -> str:
     try:
         fee = (order or {}).get("fee") or {}

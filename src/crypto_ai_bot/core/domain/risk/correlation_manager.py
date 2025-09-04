@@ -14,13 +14,21 @@ class CorrelationManager:
         self.cfg = cfg
 
     def _open_symbols(self, positions_repo: Any) -> set[str]:
-        # ДћВїГ‘в‚¬ДћВѕДћВ±Г‘Ж’ДћВµДћВј Г‘Ж’ДћВЅДћВёДћВІДћВµГ‘в‚¬Г‘ВЃДћВ°ДћВ»Г‘Е’ДћВЅДћВѕ: list_open() -> items Г‘ВЃ ДћВїДћВѕДћВ»ДћВµДћВј symbol
+        """
+        Возвращает множество символов с открытыми позициями.
+        Ожидается API: positions.list_open() -> iterable с полем symbol.
+        Фолбэк: positions.list() c фильтром по qty/size.
+        """
         try:
             items = None
             if hasattr(positions_repo, "list_open"):
                 items = positions_repo.list_open()
             elif hasattr(positions_repo, "list"):
-                items = [p for p in positions_repo.list() if getattr(p, "qty", 0) or getattr(p, "size", 0)]
+                items = [
+                    p
+                    for p in positions_repo.list()
+                    if getattr(p, "qty", 0) or getattr(p, "size", 0) or getattr(p, "base_qty", 0)
+                ]
             if not items:
                 return set()
             out = set()

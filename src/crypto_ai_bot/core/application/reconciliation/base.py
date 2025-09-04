@@ -11,6 +11,8 @@ class IReconciler(Protocol):
 
 @dataclass(frozen=True)
 class ReconciliationSuite:
+    """Запускает набор сверок и собирает результаты в список dict."""
+
     reconcilers: Sequence[IReconciler]
 
     async def run(self, *, symbol: str) -> list[dict[str, Any]]:

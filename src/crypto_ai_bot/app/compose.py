@@ -11,13 +11,16 @@ from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
-from crypto_ai_bot.core.infrastructure.events.bus_adapter import UnifiedEventBus
 from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
+from crypto_ai_bot.core.infrastructure.events.multi_bus import MultiEventBus, MirrorRules
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.core.infrastructure.storage.facade import StorageFacade
 from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import SQLiteAdapter
 from crypto_ai_bot.utils.logging import get_logger
+
+# NEW: телеграм-бот всегда стартует
+from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 
 _log = get_logger("compose")
 
@@ -29,31 +32,45 @@ class AppContainer:
     settings: Any
     storage: StorageFacade
     broker: Any
-    bus: UnifiedEventBus
+    bus: Any  # MultiEventBus | AsyncEventBus | RedisEventBus
     risk: RiskManager
     exits: ProtectiveExits
     health: HealthChecker
     dms: DeadMansSwitch
     instance_lock: InstanceLock
     orchestrators: dict[str, Orchestrator]
+    telegram_task: asyncio.Task | None = None  # NEW: фонова задача бота
 
 
 class ComponentFactory:
     """Factory for creating application components."""
 
     @staticmethod
-    def create_bus(settings: Any) -> UnifiedEventBus:
-        """Create event bus based on settings."""
-        url = getattr(settings, "EVENT_BUS_URL", "") or ""
+    def create_bus(settings: Any) -> MultiEventBus:
+        """
+        Create multi-event bus:
+          - локально: AsyncEventBus (быстрые подписчики внутри процесса)
+          - зеркалирование во внешнюю шину: RedisEventBus при EVENT_BUS_URL='redis://...'
+        """
+        url = str(getattr(settings, "EVENT_BUS_URL", "") or "")
+        include_csv = str(getattr(settings, "EVENT_BUS_INCLUDE", "trade.,orders.,health.") or "")
+        exclude_csv = str(getattr(settings, "EVENT_BUS_EXCLUDE", "__") or "")
 
+        include = [s.strip() for s in include_csv.split(",") if s.strip()]
+        exclude = [s.strip() for s in exclude_csv.split(",") if s.strip()]
+
+        # локальная шина с дедупликацией
+        local_bus = AsyncEventBus(enable_dedupe=True, topic_concurrency=64)
+
+        remote_bus = None
         if url.startswith("redis://"):
             _log.info("event_bus.redis.enabled", extra={"url": url})
-            base_bus = RedisEventBus(url=url)
+            remote_bus = RedisEventBus(url=url)
         else:
             _log.info("event_bus.memory.enabled")
-            base_bus = AsyncEventBus()
 
-        return UnifiedEventBus(base_bus)
+        rules = MirrorRules(include=tuple(include), exclude=tuple(exclude))
+        return MultiEventBus(local=local_bus, remote=remote_bus, rules=rules, inject_trace=True)
 
     @staticmethod
     def create_storage(settings: Any) -> StorageFacade:
@@ -66,7 +83,6 @@ class ComponentFactory:
     @staticmethod
     def create_broker(settings: Any) -> Any:
         """Create broker instance."""
-        # Исправлено: правильная передача параметров в make_broker
         return make_broker(
             mode=getattr(settings, "MODE", "paper"),
             exchange=getattr(settings, "EXCHANGE", "gateio"),
@@ -82,13 +98,10 @@ class ComponentFactory:
                 ticker = await broker.fetch_ticker(symbol)
                 bid = float(ticker.get("bid", 0))
                 ask = float(ticker.get("ask", 0))
-
                 if bid > 0 and ask > 0:
                     return ((ask - bid) / ((ask + bid) / 2)) * 100
-
             except (ValueError, ConnectionError) as e:
                 _log.debug("spread_provider_error", extra={"symbol": symbol, "error": str(e)})
-
             return None
 
         return spread_provider
@@ -102,36 +115,20 @@ class ComponentFactory:
 
     @staticmethod
     def create_protective_exits(
-        broker: Any, storage: StorageFacade, bus: UnifiedEventBus, settings: Any
+        broker: Any, storage: StorageFacade, bus: Any, settings: Any
     ) -> ProtectiveExits:
         """Create protective exits handler."""
-        return ProtectiveExits(
-            broker=broker,
-            storage=storage,
-            bus=bus,
-            settings=settings,
-        )
+        return ProtectiveExits(broker=broker, storage=storage, bus=bus, settings=settings)
 
     @staticmethod
-    def create_health_checker(
-        storage: StorageFacade, broker: Any, bus: UnifiedEventBus, settings: Any
-    ) -> HealthChecker:
+    def create_health_checker(storage: StorageFacade, broker: Any, bus: Any, settings: Any) -> HealthChecker:
         """Create health checker."""
-        return HealthChecker(
-            storage=storage,
-            broker=broker,
-            bus=bus,
-            settings=settings,
-        )
+        return HealthChecker(storage=storage, broker=broker, bus=bus, settings=settings)
 
     @staticmethod
-    def create_dead_mans_switch(bus: UnifiedEventBus, broker: Any, settings: Any) -> DeadMansSwitch:
+    def create_dead_mans_switch(bus: Any, broker: Any, settings: Any) -> DeadMansSwitch:
         """Create dead man's switch."""
-        return DeadMansSwitch(
-            bus=bus,
-            broker=broker,
-            settings=settings,
-        )
+        return DeadMansSwitch(bus=bus, broker=broker, settings=settings)
 
     @staticmethod
     def create_instance_lock(settings: Any) -> InstanceLock:
@@ -148,12 +145,9 @@ class OrchestratorFactory:
     def parse_symbols(settings: Any) -> list[str]:
         """Parse symbols from settings."""
         symbols_str = getattr(settings, "SYMBOLS", "") or getattr(settings, "SYMBOL", "BTC/USDT")
-
         symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
-
         if not symbols:
             symbols = ["BTC/USDT"]
-
         return symbols
 
     @staticmethod
@@ -161,14 +155,14 @@ class OrchestratorFactory:
         settings: Any,
         storage: StorageFacade,
         broker: Any,
-        bus: UnifiedEventBus,
+        bus: Any,
         risk: RiskManager,
         exits: ProtectiveExits,
         health: HealthChecker,
         dms: DeadMansSwitch,
     ) -> dict[str, Orchestrator]:
         """Create orchestrators for configured symbols."""
-        orchestrators = {}
+        orchestrators: dict[str, Orchestrator] = {}
         symbols = OrchestratorFactory.parse_symbols(settings)
 
         for symbol in symbols:
@@ -193,7 +187,6 @@ class OrchestratorFactory:
         """Auto-start orchestrators if configured."""
         if not int(getattr(settings, "TRADER_AUTOSTART", 0)):
             return
-
         for symbol, orchestrator in orchestrators.items():
             try:
                 await orchestrator.start()
@@ -204,47 +197,12 @@ class OrchestratorFactory:
                 )
 
 
-class TelegramIntegration:
-    """Telegram integration setup."""
-
-    @staticmethod
-    def setup(bus: UnifiedEventBus, settings: Any) -> None:
-        """Setup Telegram integrations if enabled."""
-        if not int(getattr(settings, "TELEGRAM_ENABLED", 0)):
-            _log.info("telegram.disabled")
-            return
-
-        try:
-            TelegramIntegration._setup_alerts(bus, settings)
-            TelegramIntegration._setup_bot_commands(settings)
-
-        except ImportError as e:
-            _log.warning("telegram_modules_not_found", extra={"error": str(e)})
-        except (RuntimeError, ValueError) as e:
-            _log.error("telegram_setup_failed", extra={"error": str(e)}, exc_info=True)
-
-    @staticmethod
-    def _setup_alerts(bus: UnifiedEventBus, settings: Any) -> None:
-        """Setup Telegram alerts."""
-        from crypto_ai_bot.app.telegram_alerts import attach_alerts
-
-        attach_alerts(bus, settings)
-        _log.info("telegram.alerts.attached")
-
-    @staticmethod
-    def _setup_bot_commands(settings: Any) -> None:
-        """Setup bot commands if enabled."""
-        if int(getattr(settings, "TELEGRAM_BOT_COMMANDS_ENABLED", 0)):
-            _log.info("telegram.commands.ready")
-
-
 class ContainerBuilder:
     """Builder for application container."""
 
     def __init__(self):
         self.factory = ComponentFactory()
         self.orch_factory = OrchestratorFactory()
-        self.telegram = TelegramIntegration()
 
     async def build(self) -> AppContainer:
         """Build the application container."""
@@ -257,6 +215,12 @@ class ContainerBuilder:
         bus = self.factory.create_bus(settings)
         storage = self.factory.create_storage(settings)
         broker = self.factory.create_broker(settings)
+
+        # Start bus (инициализация Redis-клиента, если включён)
+        try:
+            await bus.start()
+        except Exception:
+            _log.warning("bus_start_failed", exc_info=True)
 
         # Create application components
         risk = await self.factory.create_risk_manager(settings, broker)
@@ -274,15 +238,36 @@ class ContainerBuilder:
             settings, storage, broker, bus, risk, exits, health, dms
         )
 
-        # Setup integrations
-        self.telegram.setup(bus, settings)
+        # NEW: Telegram-бот — всегда поднимаем фоновую задачу
+        telegram_task = None
+        try:
+            default_symbol = OrchestratorFactory.parse_symbols(settings)[0]
+            allowed_users = _parse_allowed_users(getattr(settings, "TELEGRAM_ALLOWED_USERS", ""))
+            bot_token = str(getattr(settings, "TELEGRAM_BOT_TOKEN", "") or "")
+            long_poll = int(getattr(settings, "TELEGRAM_LONG_POLL", 30) or 30)
 
-        # Auto-start if configured
+            bot = TelegramBotCommands(
+                bot_token=bot_token,
+                allowed_users=allowed_users,
+                container=None,  # заполним ссылкой на контейнер после сборки
+                default_symbol=default_symbol,
+                long_poll_sec=long_poll,
+            )
+
+            # Временная заглушка контейнера, заменим после return
+            # (боту нужен доступ к orchestrators внутри контейнера)
+            _pending_bot_holder["bot"] = bot  # type: ignore[name-defined]
+            telegram_task = asyncio.create_task(bot.run())
+            _log.info("telegram_bot_autostarted", extra={"long_poll": long_poll})
+        except Exception:
+            _log.warning("telegram_bot_autostart_failed", exc_info=True)
+
+        # Авто-старт оркестраторов (если включено)
         await self.orch_factory.auto_start_orchestrators(orchestrators, settings)
 
         _log.info("compose.done")
 
-        return AppContainer(
+        container = AppContainer(
             settings=settings,
             storage=storage,
             broker=broker,
@@ -293,7 +278,18 @@ class ContainerBuilder:
             dms=dms,
             instance_lock=instance_lock,
             orchestrators=orchestrators,
+            telegram_task=telegram_task,
         )
+
+        # Дадим боту доступ к уже собранному контейнеру
+        try:
+            bot = _pending_bot_holder.pop("bot", None)  # type: ignore[name-defined]
+            if bot is not None:
+                bot.container = container
+        except Exception:
+            pass
+
+        return container
 
     async def _load_settings(self) -> Any:
         """Load application settings."""
@@ -302,7 +298,26 @@ class ContainerBuilder:
         return Settings.load()
 
 
-# Public API functions
+_pending_bot_holder: dict[str, Any] = {}  # простая передача ссылки на бота между стадиями
+
+
+# Helpers
+def _parse_allowed_users(value: str) -> list[int]:
+    if not value:
+        return []
+    res: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            res.append(int(part))
+        except ValueError:
+            continue
+    return res
+
+
+# Public API
 async def build_container_async() -> AppContainer:
     """Asynchronously build the application container."""
     builder = ContainerBuilder()

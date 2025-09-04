@@ -15,47 +15,38 @@ class CooldownRule:
         self.cfg = cfg
 
     def _last_ts(self, trades_repo: Any, symbol: str) -> int | None:
-        """Get timestamp of last trade."""
-        # Try fast path first
+        """Возвращает timestamp последней сделки (мс)."""
         if hasattr(trades_repo, "last_trade_ts_ms"):
             try:
-                result = trades_repo.last_trade_ts_ms(symbol)
-                if result is not None:
-                    return int(result)
+                res = trades_repo.last_trade_ts_ms(symbol)
+                if res is not None:
+                    return int(res)
             except Exception:
                 pass
 
-        # Fallback to list_today
+        # Фолбэк: ищем максимальный ts в list_today
         try:
             items = trades_repo.list_today(symbol)
             if not items:
                 return None
 
-            # Find the trade with maximum timestamp
             def get_ts(x: Any) -> int:
-                timestamp_keys = ["ts", "timestamp", "time", "ts_ms"]
-                for key in timestamp_keys:
-                    value = None
-                    if isinstance(x, dict):
-                        value = x.get(key)
-                    else:
-                        value = getattr(x, key, None)
-
-                    if value is not None:
+                for k in ("ts", "timestamp", "time", "ts_ms"):
+                    v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)
+                    if v is not None:
                         try:
-                            return int(value)
+                            return int(v)
                         except Exception:
                             continue
                 return 0
 
-            last = max(items, key=get_ts)
-            ts = get_ts(last)
-            return ts if ts > 0 else None
+            ts = max((get_ts(x) for x in items), default=0)
+            return ts or None
         except Exception:
             return None
 
     def check(self, *, symbol: str, trades_repo: Any) -> tuple[bool, str, dict]:
-        """Check if cooldown period has passed."""
+        """Проверяет, прошла ли пауза после последней сделки."""
         if self.cfg.cooldown_sec <= 0:
             return True, "disabled", {}
 

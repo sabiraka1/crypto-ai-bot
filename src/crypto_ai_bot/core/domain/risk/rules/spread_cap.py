@@ -6,17 +6,17 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SpreadCapConfig:
-    max_spread_pct: float = 0.0  # 0 = РІС‹РєР»СЋС‡РµРЅРѕ
+    max_spread_pct: float = 0.0  # 0 = выключено
 
 
 class SpreadCapRule:
     """
-    РџСЂРѕРІРµСЂСЏРµРј С‚РµРєСѓС‰РёР№ СЃРїСЂСЌРґ. РСЃС‚РѕС‡РЅРёРє РґР°С‘Рј РІ РІРёРґРµ РїСЂРѕРІР°Р№РґРµСЂР°:
-      provider(symbol) -> float (РїСЂРѕС†РµРЅС‚ СЃРїСЂСЌРґР°), Р»РёР±Рѕ None.
-    Р•СЃР»Рё РїСЂРѕРІР°Р№РґРµСЂР° РЅРµС‚/РѕС€РёР±РєР° вЂ” РїСЂР°РІРёР»Рѕ РјРѕР»С‡Р° РїСЂРѕРїСѓСЃРєР°РµС‚СЃСЏ.
+    Проверяем текущий спред.
+    Источник — провайдер: provider(symbol) -> float (процент спреда) или None.
+    Если провайдера нет / ошибка — правило молча пропускается.
     """
 
-    def __init__(self, cfg: SpreadCapConfig, provider: Callable[[str], float] | None = None) -> None:
+    def __init__(self, cfg: SpreadCapConfig, provider: Callable[[str], float | None] | None = None) -> None:
         self.cfg = cfg
         self.provider = provider
 
@@ -26,7 +26,10 @@ class SpreadCapRule:
         if not self.provider:
             return True, "no_provider", {}
         try:
-            spread = float(self.provider(symbol))
+            spread_val = self.provider(symbol)
+            if spread_val is None:
+                return True, "no_data", {}
+            spread = float(spread_val)
         except Exception:
             return True, "provider_error", {}
         if spread >= self.cfg.max_spread_pct:

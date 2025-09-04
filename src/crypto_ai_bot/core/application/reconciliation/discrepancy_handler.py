@@ -8,7 +8,7 @@ _log = get_logger("recon.discrepancy")
 
 
 def build_report(*, discrepancies: list[dict[str, Any]]) -> dict[str, Any]:
-    """Normalize output of reconciliation, log found discrepancies."""
+    """Нормализует вывод сверки и проливает всё, что нашли, в логи (warning)."""
     for d in discrepancies:
         _log.warning("discrepancy", extra=d)
     return {"discrepancies": discrepancies, "count": len(discrepancies)}
