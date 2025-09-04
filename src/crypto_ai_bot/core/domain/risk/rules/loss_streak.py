@@ -7,14 +7,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class LossStreakConfig:
-    limit: int  # 0 = РѕС‚РєР»СЋС‡РµРЅРѕ
+    limit: int  # 0 = отключено
 
 
 class LossStreakRule:
     """
-    РЎС‡РёС‚Р°РµС‚ РџРћР”Р РЇР” РёРґСѓС‰РёРµ СѓР±С‹С‚РѕС‡РЅС‹Рµ РїСЂРѕРґР°Р¶Рё (СЂРµР°Р»РёР·РѕРІР°РЅРЅС‹Р№ PnL < 0) РїРѕ FIFO.
-    РСЃС‚РѕСЂРёСЏ Р±РµСЂС‘С‚СЃСЏ РІСЃСЏ (СЃРёРјРІРѕР»-Р»РѕРєР°Р»СЊРЅР°СЏ), РєРѕРјРёСЃСЃРёРё СѓС‡РёС‚С‹РІР°СЋС‚СЃСЏ С‡РµСЂРµР· fee_quote.
-    Р•СЃР»Рё streak >= limit -> Р±Р»РѕРє.
+    Считает подряд идущие убыточные продажи (реализованный PnL < 0) по FIFO.
+    История берётся вся (символ-локальная), комиссии учитываются через fee_quote.
+    Если streak >= limit -> блокировка.
     """
 
     def __init__(self, cfg: LossStreakConfig) -> None:
@@ -25,14 +25,16 @@ class LossStreakRule:
         return Decimal(str(x if x is not None else "0"))
 
     def _iter_all_asc(self, trades_repo: Any, symbol: str) -> list[Any]:
-        # РўСЂРµР±СѓРµС‚СЃСЏ API, РІРѕР·РІСЂР°С‰Р°СЋС‰РёР№ РІСЃРµ С‚СЂРµР№РґС‹ РїРѕ СЃРёРјРІРѕР»Сѓ РІ РїРѕСЂСЏРґРєРµ РІРѕР·СЂР°СЃС‚Р°РЅРёСЏ РІСЂРµРјРµРЅРё.
-        # Р’ С‚РІРѕС‘Рј TradesRepository РµСЃС‚СЊ Р°РЅР°Р»РѕРіРёС‡РЅС‹Р№ РїСЂРёРІР°С‚РЅС‹Р№ РёС‚РµСЂР°С‚РѕСЂ вЂ” СЂРµР°Р»РёР·СѓРµРј Р»РѕРєР°Р»СЊРЅРѕ С‡РµСЂРµР· SQL РІ СЃР°РјРѕРј СЂРµРїРѕР·РёС‚РѕСЂРёРё.
+        """
+        Требуется API, возвращающее все трейды по символу в порядке возрастания времени.
+        Если в репозитории есть _iter_all_asc — используем его.
+        Иначе fallback через list_today (менее точно, но работает хотя бы за сегодня).
+        """
         if hasattr(trades_repo, "_iter_all_asc"):
             return trades_repo._iter_all_asc(symbol)  # type: ignore[attr-defined]
-        # fallback: РµСЃР»Рё РЅРµС‚ вЂ” РёСЃРїРѕР»СЊР·СѓРµРј list_today + РѕСЃС‚Р°РІРёРј РєР°Рє РјРёРЅРёРјСѓРј Р·Р° СЃРµРіРѕРґРЅСЏ
         if hasattr(trades_repo, "list_today"):
             rows = trades_repo.list_today(symbol)  # type: ignore[attr-defined]
-            return list(reversed(rows))  # РїСЂРёР±Р»РёР·РёРј Рє ASC
+            return list(reversed(rows))  # приближение к ASC
         return []
 
     def check(self, *, symbol: str, trades_repo: Any) -> tuple[bool, str, dict]:
@@ -44,13 +46,13 @@ class LossStreakRule:
         if not rows:
             return True, "no_trades", {}
 
-        # FIFO СЃРєР»Р°Рґ РїРѕРєСѓРїРѕРє: [(qty_left, unit_cost_quote)]
+        # FIFO склад покупок: [(qty_left, unit_cost_quote)]
         buy_lots: list[tuple[Decimal, Decimal]] = []
         streak = 0
         worst_trade_pnl: Decimal = Decimal("0")
 
         for r in rows:
-            side = (r["side"] or "").lower()
+            side = (r.get("side") or "").lower()
             filled = self._to_dec(r.get("filled") or r.get("amount"))
             price = self._to_dec(r.get("price"))
             cost = self._to_dec(r.get("cost"))
@@ -81,12 +83,11 @@ class LossStreakRule:
                     else:
                         buy_lots.pop(i)
 
-                # РєРѕРјРёСЃСЃРёСЏ РїСЂРѕРґР°Р¶Рё РѕС‚РЅРѕСЃРёС‚СЃСЏ Рє СЌС‚РѕР№ РїСЂРѕРґР°Р¶Рµ С†РµР»РёРєРѕРј
+                # комиссия продажи относится к этой сделке целиком
                 realized -= fee_q
                 if realized < 0:
                     streak += 1
-                    if realized < worst_trade_pnl:
-                        worst_trade_pnl = realized
+                    worst_trade_pnl = min(worst_trade_pnl, realized)
                 else:
                     streak = 0
 

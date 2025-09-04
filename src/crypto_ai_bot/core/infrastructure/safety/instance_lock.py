@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import sqlite3
 import time
+import sys
 
 from crypto_ai_bot.utils.logging import get_logger
 
@@ -16,9 +17,7 @@ class InstanceLock:
     owner: str
 
     def acquire(self, ttl_sec: int = 300) -> bool:
-        """ДћЕёГ‘вЂ№Г‘вЂљДћВ°ДћВµДћВјГ‘ВЃГ‘ВЏ ДћВІДћВ·Г‘ВЏГ‘вЂљГ‘Е’ Г‘ВЌДћВєГ‘ВЃДћВєДћВ»Г‘ВЋДћВ·ДћВёДћВІДћВЅГ‘вЂ№ДћВ№ ДћВ»ДћВѕДћВє. ДћвЂ™ДћВѕДћВ·ДћВІГ‘в‚¬ДћВ°Г‘вЂ°ДћВ°ДћВµГ‘вЂљ True ДћВїГ‘в‚¬ДћВё Г‘Ж’Г‘ВЃДћВїДћВµГ‘вЂ¦ДћВµ.
-        ДћВЎГ‘вЂ¦ДћВµДћВјДћВ°: Г‘вЂљДћВ°ДћВ±ДћВ»ДћВёГ‘вЂ ДћВ° app_locks(app TEXT PK, owner TEXT, expire_at INTEGER).
-        """
+        """Пытаемся установить эксклюзивный лок в SQLite."""
         expire_at = int(time.time()) + int(ttl_sec)
         self.conn.execute(
             """
@@ -29,7 +28,6 @@ class InstanceLock:
             )
             """
         )
-        # ДћВїДћВѕДћВїГ‘вЂ№Г‘вЂљДћВ°Г‘вЂљГ‘Е’Г‘ВЃГ‘ВЏ ДћВІГ‘ВЃГ‘вЂљДћВ°ДћВІДћВёГ‘вЂљГ‘Е’ ДћВ»ДћВѕДћВє, ДћВµГ‘ВЃДћВ»ДћВё ДћВµДћВіДћВѕ ДћВЅДћВµГ‘вЂљ ДћВёДћВ»ДћВё ДћВёГ‘ВЃГ‘вЂљГ‘вЂДћВє Гўв‚¬вЂќ ДћВ·ДћВ°Г‘вЂ¦ДћВІДћВ°Г‘вЂљДћВёГ‘вЂљГ‘Е’
         cur = self.conn.execute(
             """
             INSERT INTO app_locks(app, owner, expire_at)
@@ -41,7 +39,6 @@ class InstanceLock:
             """,
             (self.app, self.owner, expire_at),
         )
-        # sqlite ДћВЅДћВµ ДћВґДћВ°Г‘вЂГ‘вЂљ rowcount ДћВїДћВѕ upsert Г‘Ж’Г‘ВЃДћВ»ДћВѕДћВІДћВЅДћВѕ; ДћВїДћВµГ‘в‚¬ДћВµДћВїГ‘в‚¬ДћВѕДћВІДћВµГ‘в‚¬Г‘Е’ ДћВІДћВ»ДћВ°ДћВґДћВµДћВЅДћВёДћВµ
         cur = self.conn.execute("SELECT owner, expire_at FROM app_locks WHERE app=?", (self.app,))
         row = cur.fetchone()
         ok = bool(row and row[0] == self.owner)
@@ -51,3 +48,12 @@ class InstanceLock:
     def release(self) -> None:
         self.conn.execute("DELETE FROM app_locks WHERE app=? AND owner=?", (self.app, self.owner))
         _log.info("lock_release", extra={"owner": self.owner})
+
+
+def create_instance_lock(app: str, owner: str, path: str = "instance.lock.db") -> InstanceLock:
+    conn = sqlite3.connect(path, check_same_thread=False)
+    lock = InstanceLock(conn, app, owner)
+    if not lock.acquire():
+        _log.error("Another instance is already running", extra={"app": app})
+        sys.exit(1)
+    return lock

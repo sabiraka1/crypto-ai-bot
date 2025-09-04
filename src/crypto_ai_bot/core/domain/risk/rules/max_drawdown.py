@@ -7,13 +7,13 @@ from typing import Any
 
 @dataclass(frozen=True)
 class MaxDrawdownConfig:
-    max_drawdown_pct: float  # 0 = disabled
+    max_drawdown_pct: float  # 0 = отключено
 
 
 class MaxDrawdownRule:
     """
-    Intraday cumulative equity line from realized PnL (FIFO, with fees).
-    Blocks if relative drawdown from intraday peak >= max_drawdown_pct.
+    Считает внутридневную кривую эквити из реализованного PnL (FIFO с учётом комиссий).
+    Блокирует, если относительная просадка от внутридневного пика >= max_drawdown_pct.
     """
 
     def __init__(self, cfg: MaxDrawdownConfig) -> None:
@@ -24,14 +24,14 @@ class MaxDrawdownRule:
         return Decimal(str(x if x is not None else "0"))
 
     def _iter_today_asc(self, trades_repo: Any, symbol: str) -> list[Any]:
-        """Get today's trades in ascending time order."""
+        """Получить сегодняшние сделки в порядке возрастания времени."""
         if hasattr(trades_repo, "list_today"):
             rows = list(reversed(trades_repo.list_today(symbol)))  # type: ignore[attr-defined]
             return rows
         return []
 
     def check(self, *, symbol: str, trades_repo: Any) -> tuple[bool, str, dict]:
-        """Check if max drawdown limit is exceeded."""
+        """Проверить, не превышен ли лимит просадки."""
         lim_pct = float(self.cfg.max_drawdown_pct or 0.0)
         if lim_pct <= 0:
             return True, "disabled", {}
@@ -40,14 +40,13 @@ class MaxDrawdownRule:
         if not rows:
             return True, "no_today_trades", {}
 
-        # FIFO inventory of purchases
         buy_lots: list[tuple[Decimal, Decimal]] = []
         cum: Decimal = Decimal("0")
         peak: Decimal = Decimal("0")
         worst_dd_pct: float = 0.0
 
         for row in rows:
-            side = (row["side"] or "").lower()
+            side = (row.get("side") or "").lower()
             filled = self._to_dec(row.get("filled") or row.get("amount"))
             price = self._to_dec(row.get("price"))
             cost = self._to_dec(row.get("cost"))
@@ -80,13 +79,12 @@ class MaxDrawdownRule:
                     else:
                         buy_lots.pop(idx)
 
-                realized -= fee_q  # sell commission
-
+                realized -= fee_q  # комиссия продажи
                 cum += realized
+
                 if cum > peak:
                     peak = cum
 
-                # relative drawdown from peak
                 denom = float(peak) if float(peak) != 0.0 else 1.0
                 dd_pct = max(0.0, float(peak - cum) / abs(denom) * 100.0)
                 worst_dd_pct = max(worst_dd_pct, dd_pct)
@@ -95,10 +93,7 @@ class MaxDrawdownRule:
                     return (
                         False,
                         "max_drawdown",
-                        {
-                            "drawdown_pct": round(dd_pct, 6),
-                            "limit_pct": lim_pct,
-                        },
+                        {"drawdown_pct": round(dd_pct, 6), "limit_pct": lim_pct},
                     )
 
         return True, "ok", {"drawdown_pct": round(worst_dd_pct, 6), "limit_pct": lim_pct}
