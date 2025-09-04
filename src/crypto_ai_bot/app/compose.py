@@ -239,7 +239,9 @@ def _make_orchestrator(
 
 
 # ----------------------------- Telegram Commands -----------------------------
-def _make_telegram_cmds(*, bus: UnifiedEventBus, settings: Any, storage: StorageFacade) -> TelegramBotCommands:
+def _make_telegram_cmds(
+    *, bus: UnifiedEventBus, settings: Any, storage: StorageFacade
+) -> TelegramBotCommands:
     return TelegramBotCommands(bus=bus, settings=settings, storage=storage)
 
 

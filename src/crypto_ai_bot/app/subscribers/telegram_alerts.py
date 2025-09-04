@@ -99,7 +99,9 @@ def attach_alerts(bus: Any, settings: Any) -> None:
     # ----------------------------- Event handlers -----------------------------
 
     async def _on_orch_paused(payload: dict[str, Any]) -> None:
-        text = _t(_lang(), "orch_paused", symbol=payload.get("symbol", "?"), reason=payload.get("reason", "n/a"))
+        text = _t(
+            _lang(), "orch_paused", symbol=payload.get("symbol", "?"), reason=payload.get("reason", "n/a")
+        )
         await _send_text(text)
 
     async def _on_orch_resumed(payload: dict[str, Any]) -> None:
