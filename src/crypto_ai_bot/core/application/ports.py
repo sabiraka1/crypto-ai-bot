@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 #  Сервисные порты/контракты
 # =========================
 
+
 @runtime_checkable
 class SafetySwitchPort(Protocol):
     """
@@ -16,6 +17,7 @@ class SafetySwitchPort(Protocol):
     Если пинги не приходят N секунд — внешний сторож может остановить торговлю/закрыть позиции.
     В базовой реализации может быть no-op.
     """
+
     async def start(self) -> None: ...
     async def ping(self) -> None: ...
     async def stop(self) -> None: ...
@@ -27,6 +29,7 @@ class InstanceLockPort(Protocol):
     Эксклюзивный lock-инстанса: чтобы не запустить два бота на один символ.
     Вернул True при acquire() — значит, мы единственные владельцы.
     """
+
     async def acquire(self) -> bool: ...
     async def release(self) -> None: ...
 
@@ -34,6 +37,7 @@ class InstanceLockPort(Protocol):
 @runtime_checkable
 class EventBusPort(Protocol):
     """Общий интерфейс для event-bus реализаций."""
+
     async def publish(self, topic: str, payload: dict[str, Any], key: str | None = None) -> None: ...
     def on(self, topic: str, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> None: ...
     async def start(self) -> None: ...
@@ -44,9 +48,11 @@ class EventBusPort(Protocol):
 #  Порт брокера (биржи)
 # =========================
 
+
 @dataclass(frozen=True)
 class TickerDTO:
     """Опциональный удобный контейнер для тикера (можно продолжать возвращать dict)."""
+
     last: Decimal
     bid: Decimal | None = None
     ask: Decimal | None = None
@@ -60,6 +66,7 @@ class BrokerPort(Protocol):
     Интерфейс для адаптеров брокера. Разрешаем возвращать dict (как у ccxt),
     чтобы не ломать существующий код. Если используешь TickerDTO — тоже ок.
     """
+
     async def fetch_ticker(self, symbol: str) -> Any: ...
     async def fetch_balance(self, symbol: str) -> Any: ...
     async def create_market_buy_quote(
@@ -76,12 +83,14 @@ class BrokerPort(Protocol):
 #  Порт хранилища (storage)
 # =========================
 
+
 @runtime_checkable
 class StoragePort(Protocol):
     """
     Высокоуровневый контракт хранилища. Конкретные репозитории — атрибуты.
     Никаких сигнатур тут не навязываем, чтобы не ломать существующие реализации.
     """
+
     @property
     def trades(self) -> Any: ...
     @property
@@ -94,9 +103,11 @@ class StoragePort(Protocol):
 #  Утилитарный контракт
 # =========================
 
+
 @runtime_checkable
 class OrderLike(Protocol):
     """Минимальный контракт «похожего на ордер» объекта для обработчиков."""
+
     @property
     def filled(self) -> Any: ...
     @property
@@ -110,6 +121,7 @@ class OrderLike(Protocol):
 # =========================
 #  Базовые no-op реализации
 # =========================
+
 
 class NoopSafetySwitch(SafetySwitchPort):
     async def start(self) -> None:

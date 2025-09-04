@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-_COMMON_QUOTES = {
-    "USDT", "USDC", "BUSD", "USD", "EUR", "TRY",
-    "BTC", "ETH", "BNB", "FDUSD", "DAI"
-}
+_COMMON_QUOTES = {"USDT", "USDC", "BUSD", "USD", "EUR", "TRY", "BTC", "ETH", "BNB", "FDUSD", "DAI"}
 _ALIASES = {"XBT": "BTC", "XETH": "ETH", "BCC": "BCH"}
 _SEPARATORS = ("/", "-", "_", ":")
+
 
 def _clean(s: str) -> str:
     return "".join(ch for ch in s.strip().upper() if ch.isalnum() or ch in _SEPARATORS)
 
+
 def _apply_alias(asset: str) -> str:
     return _ALIASES.get(asset, asset)
+
 
 def split(symbol: str) -> tuple[str, str]:
     s = _clean(symbol or "")
@@ -27,9 +27,11 @@ def split(symbol: str) -> tuple[str, str]:
             return _apply_alias(base), _apply_alias(q)
     return _apply_alias(s), ""
 
+
 def canonical(symbol: str) -> str:
     base, quote = split(symbol)
     return f"{base}/{quote}" if base and quote else base
+
 
 def is_valid(symbol: str) -> bool:
     base, quote = split(symbol)

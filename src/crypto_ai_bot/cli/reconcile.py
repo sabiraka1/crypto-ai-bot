@@ -31,7 +31,9 @@ async def _run_reconcile(symbol: str) -> dict[str, Any]:
     bal = await BalancesReconciler(broker=c.broker, symbol=symbol).run_once()
 
     # Сверка позиций (обновляет unrealized по последней цене)
-    await reconcile_positions(symbol=symbol, storage=c.storage, broker=c.broker, bus=c.bus, _settings=c.settings)
+    await reconcile_positions(
+        symbol=symbol, storage=c.storage, broker=c.broker, bus=c.bus, _settings=c.settings
+    )
 
     # Позиция после сверки
     pos = c.storage.positions.get_position(symbol)

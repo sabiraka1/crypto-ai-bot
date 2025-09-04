@@ -14,6 +14,7 @@ class Signal:
       - confidence: 0..1 (для приоритезации/фильтров)
       - reason: произвольное пояснение (для логов/алертов)
     """
+
     side: Side
     confidence: float = 0.0
     reason: str | None = None

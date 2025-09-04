@@ -7,12 +7,14 @@ from typing import Any, Protocol
 
 class IReconciler(Protocol):
     async def reconcile(self, *, symbol: str) -> dict[str, Any] | None: ...
+
     # Минимальный контракт: на вход символ, на выход либо dict результата, либо None.
 
 
 @dataclass(frozen=True)
 class ReconciliationSuite:
     """Запускает набор сверок и собирает результаты в список dict."""
+
     reconcilers: Sequence[IReconciler]
 
     async def run(self, *, symbol: str) -> list[dict[str, Any]]:

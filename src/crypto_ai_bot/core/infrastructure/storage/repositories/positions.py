@@ -221,7 +221,11 @@ class PositionsRepository:
 
                 # unrealized от last_price (если есть), иначе от price
                 ref_price = last_price if last_price is not None else price
-                unreal = (ref_price - avg_entry) * rem_base if (rem_base > 0 and avg_entry > 0 and ref_price > 0) else dec("0")
+                unreal = (
+                    (ref_price - avg_entry) * rem_base
+                    if (rem_base > 0 and avg_entry > 0 and ref_price > 0)
+                    else dec("0")
+                )
 
                 self._upsert_position_fifo(
                     symbol=symbol,
@@ -254,7 +258,9 @@ class PositionsRepository:
             new_avg = avg0 if new_base > 0 else dec("0")
 
         ref_price = (last_price if last_price is not None else price) or dec("0")
-        new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+        new_unreal = (
+            (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+        )
 
         self._upsert_position_optimistic(
             symbol=symbol,
