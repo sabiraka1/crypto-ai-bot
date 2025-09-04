@@ -5,7 +5,7 @@ from decimal import Decimal
 import hashlib
 from typing import Any
 
-from crypto_ai_bot.core.application import events_topics as events_topics  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as EVT
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
@@ -37,9 +37,10 @@ async def _recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, An
             return list(repo.last_trades(symbol, n) or [])
         if hasattr(repo, "list_recent"):
             return list(repo.list_recent(symbol=symbol, limit=n) or [])
-    except Exception:  # noqa: BLE001
-        pass
-    return []
+        return []
+    except Exception:
+        _log.debug("_recent_trades_failed", exc_info=True)
+        return []
 
 
 async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
@@ -51,9 +52,10 @@ async def _daily_pnl_quote(storage: Any, symbol: str) -> Decimal:
         if hasattr(repo, "daily_pnl_quote"):
             v = repo.daily_pnl_quote(symbol)
             return dec(str(v))
-    except Exception:  # noqa: BLE001
         return dec("0")
-    return dec("0")
+    except Exception:
+        _log.debug("_daily_pnl_quote_failed", exc_info=True)
+        return dec("0")
 
 
 async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
@@ -65,9 +67,10 @@ async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[D
         if hasattr(repo, "recent_total_quote"):
             xs = repo.recent_total_quote(symbol=symbol, limit=limit)
             return [dec(str(x)) for x in (xs or [])]
-    except Exception:  # noqa: BLE001
         return []
-    return []
+    except Exception:
+        _log.debug("_balances_series_failed", exc_info=True)
+        return []
 
 
 async def execute_trade(
@@ -103,7 +106,7 @@ async def execute_trade(
     # ---- Idempotency: prevent duplicates for (sym, act, amounts, session) ----
     session = getattr(settings, "SESSION_RUN_ID", "") or ""
     key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"
-    # sha1 retained intentionally for compatibility with existing storage key format  # noqa: S324
+    # sha1 retained intentionally for compatibility with existing storage key format
     idem_key = "po:" + hashlib.sha1(key_payload.encode("utf-8")).hexdigest()  # noqa: S324
 
     idem_repo = None
@@ -113,10 +116,10 @@ async def execute_trade(
         if idem_repo is not None and hasattr(idem_repo, "check_and_store"):
             if not bool(idem_repo.check_and_store(idem_key, idempotency_ttl_sec)):
                 # Duplicate request (drop)
-                await bus.publish(events_topics.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
+                await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
                 _log.warning("trade_blocked_duplicate", extra={"symbol": sym})
                 return {"action": "skip", "executed": False, "reason": "duplicate"}
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("idempotency_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Risk-config (fallback if external manager is not provided) ----
@@ -137,14 +140,14 @@ async def execute_trade(
                 allowed, reason = ls_rule.check(trades)
                 if not allowed:
                     await bus.publish(
-                        events_topics.BUDGET_EXCEEDED,
+                        EVT.BUDGET_EXCEEDED,
                         {"symbol": sym, "type": "loss_streak", "reason": reason},
                     )
                     _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
-                pass
-    except Exception:  # noqa: BLE001
+                _log.debug("loss_streak_rule_not_available")
+    except Exception:
         _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Optional rule: max drawdown / daily loss (soft dependency) ----
@@ -169,21 +172,23 @@ async def execute_trade(
                 )
                 if not allowed:
                     await bus.publish(
-                        events_topics.BUDGET_EXCEEDED,
+                        EVT.BUDGET_EXCEEDED,
                         {"symbol": sym, "type": "max_drawdown", "reason": reason},
                     )
                     _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
             except ImportError:
-                pass
-    except Exception:  # noqa: BLE001
+                _log.debug("max_drawdown_rule_not_available")
+    except Exception:
         _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Pre-flight: spread guard ----
     try:
         limit_spread = dec(str(getattr(cfg, "max_spread_pct", 0.0) or 0))
-    except Exception:  # noqa: BLE001
+    except Exception:
+        _log.debug("spread_limit_parse_failed")
         limit_spread = dec("0")
+        
     if limit_spread > dec("0"):
         try:
             t = await broker.fetch_ticker(sym)
@@ -193,7 +198,7 @@ async def execute_trade(
                 mid = (bid + ask) / 2
                 spread_pct = (ask - bid) / mid * dec("100")
                 if spread_pct > limit_spread:
-                    await bus.publish(events_topics.TRADE_BLOCKED, {"symbol": sym, "reason": "spread"})
+                    await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "spread"})
                     _log.warning(
                         "trade_blocked_spread",
                         extra={
@@ -207,7 +212,7 @@ async def execute_trade(
                         "executed": False,
                         "why": f"blocked: spread {spread_pct:.4f}%>{limit_spread}%",
                     }
-        except Exception:  # noqa: BLE001
+        except Exception:
             _log.error("spread_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Rate limits: orders per 5 minutes ----
@@ -216,7 +221,7 @@ async def execute_trade(
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
             if recent_count >= cfg.max_orders_5m:
                 await bus.publish(
-                    events_topics.BUDGET_EXCEEDED,
+                    EVT.BUDGET_EXCEEDED,
                     {
                         "symbol": sym,
                         "type": "max_orders_5m",
@@ -229,21 +234,23 @@ async def execute_trade(
                     extra={"symbol": sym, "count_5m": recent_count, "limit": cfg.max_orders_5m},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
-        except Exception:  # noqa: BLE001
+        except Exception:
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Turnover cap per day ----
     max_turnover = getattr(cfg, "max_turnover_quote_per_day", Decimal("0"))
     try:
         max_turnover = dec(str(max_turnover))
-    except Exception:  # noqa: BLE001
+    except Exception:
+        _log.debug("turnover_limit_parse_failed")
         max_turnover = dec("0")
+        
     if max_turnover > dec("0"):
         try:
             current_turnover = storage.trades.daily_turnover_quote(sym)
             if current_turnover >= max_turnover:
                 await bus.publish(
-                    events_topics.BUDGET_EXCEEDED,
+                    EVT.BUDGET_EXCEEDED,
                     {
                         "symbol": sym,
                         "type": "max_turnover_day",
@@ -256,7 +263,7 @@ async def execute_trade(
                     extra={"symbol": sym, "turnover": str(current_turnover), "limit": str(max_turnover)},
                 )
                 return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
-        except Exception:  # noqa: BLE001
+        except Exception:
             _log.error("turnover_check_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Place order at broker ----
@@ -278,13 +285,13 @@ async def execute_trade(
             )
         else:
             return {"action": "skip", "executed": False, "reason": "invalid_side"}
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
             await bus.publish(
-                events_topics.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"}
+                EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"}
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
 
@@ -292,19 +299,19 @@ async def execute_trade(
     try:
         if hasattr(storage, "trades") and hasattr(storage.trades, "add_from_order"):
             storage.trades.add_from_order(order)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("add_trade_failed", extra={"symbol": sym}, exc_info=True)
 
     try:
         if hasattr(storage, "orders") and hasattr(storage.orders, "upsert_open"):
             storage.orders.upsert_open(order)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("upsert_order_failed", extra={"symbol": sym}, exc_info=True)
 
     # ---- Publish execution event ----
     try:
         await bus.publish(
-            events_topics.TRADE_COMPLETED,
+            EVT.TRADE_COMPLETED,
             {
                 "symbol": sym,
                 "side": act,
@@ -315,7 +322,7 @@ async def execute_trade(
                 "fee_quote": str(getattr(order, "fee_quote", "")),
             },
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("publish_trade_completed_failed", extra={"symbol": sym}, exc_info=True)
 
     return {"action": act, "executed": True, "order": order}

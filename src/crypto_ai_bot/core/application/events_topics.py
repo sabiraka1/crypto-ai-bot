@@ -1,46 +1,45 @@
 from __future__ import annotations
 
-# ДћвЂўДћВґДћВёДћВЅДћВ°Г‘ВЏ Г‘вЂљДћВѕГ‘вЂЎДћВєДћВ° ДћВёГ‘ВЃГ‘вЂљДћВёДћВЅДћВЅГ‘вЂ№ Г‘вЂљДћВµДћВјГ‘вЂ№ Гўв‚¬вЂќ ДћВёДћВјДћВїДћВѕГ‘в‚¬Г‘вЂљДћВёГ‘в‚¬Г‘Ж’ДћВµДћВј Г‘в‚¬ДћВµДћВµГ‘ВЃГ‘вЂљГ‘в‚¬ ДћВё ДћВїГ‘в‚¬ДћВѕДћВєДћВёДћВґГ‘вЂ№ДћВІДћВ°ДћВµДћВј ДћВєДћВѕДћВЅГ‘ВЃГ‘вЂљДћВ°ДћВЅГ‘вЂљГ‘вЂ№ ДћВЅДћВ°Г‘в‚¬Г‘Ж’ДћВ¶Г‘Ж’.
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+# Единая точка истинных тем событий для всей системы
 
-# ДћвЂГ‘в‚¬ДћВѕДћВєДћВµГ‘в‚¬/ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ДћВ°
-ORDER_EXECUTED = EVT.ORDER_EXECUTED
-ORDER_FAILED = EVT.ORDER_FAILED
+# Broker/orders
+ORDER_EXECUTED = "order.executed"
+ORDER_FAILED = "order.failed"
 
-# ДћВўДћВѕГ‘в‚¬ДћВіДћВѕДћВІГ‘вЂ№ДћВ№ Г‘Л†ДћВ°ДћВі (high-level)
-TRADE_COMPLETED = EVT.TRADE_COMPLETED
-TRADE_FAILED = EVT.TRADE_FAILED
-TRADE_SETTLED = EVT.TRADE_SETTLED
-TRADE_SETTLEMENT_TIMEOUT = EVT.TRADE_SETTLEMENT_TIMEOUT
-TRADE_BLOCKED = EVT.TRADE_BLOCKED
-TRADE_PARTIAL_FOLLOWUP = EVT.TRADE_PARTIAL_FOLLOWUP
+# Trade lifecycle
+TRADE_COMPLETED = "trade.completed"
+TRADE_FAILED = "trade.failed"  
+TRADE_SETTLED = "trade.settled"
+TRADE_SETTLEMENT_TIMEOUT = "trade.settlement.timeout"
+TRADE_BLOCKED = "trade.blocked"
+TRADE_PARTIAL_FOLLOWUP = "trade.partial.followup"
 
-# ДћвЂ”ДћВґДћВѕГ‘в‚¬ДћВѕДћВІГ‘Е’ДћВµ ДћВё ДћВЅДћВ°ДћВ±ДћВ»Г‘ВЋДћВґДћВ°ДћВµДћВјДћВѕГ‘ВЃГ‘вЂљГ‘Е’
-WATCHDOG_HEARTBEAT = EVT.WATCHDOG_HEARTBEAT
-HEALTH_REPORT = EVT.HEALTH_REPORT
+# Health and monitoring
+WATCHDOG_HEARTBEAT = "watchdog.heartbeat"
+HEALTH_REPORT = "health.report"
 
-# ДћВ ДћВёГ‘ВЃДћВєДћВё/ДћВ±Г‘ВЋДћВґДћВ¶ДћВµГ‘вЂљГ‘вЂ№
-RISK_BLOCKED = EVT.RISK_BLOCKED
-BUDGET_EXCEEDED = EVT.BUDGET_EXCEEDED
+# Risk and budgets  
+RISK_BLOCKED = "risk.blocked"
+BUDGET_EXCEEDED = "budget.exceeded"
 
-# ДћВћГ‘вЂ ДћВµДћВЅДћВєДћВ°/Г‘в‚¬ДћВµГ‘Л†ДћВµДћВЅДћВёДћВµ (ДћВ»ДћВѕДћВєДћВ°ДћВ»Г‘Е’ДћВЅГ‘вЂ№ДћВµ Г‘в‚¬ДћВ°ДћВ±ДћВѕГ‘вЂЎДћВёДћВµ Г‘вЂљДћВµДћВјГ‘вЂ№)
+# Evaluation and decision
 EVALUATION_STARTED = "evaluation.started"
 DECISION_EVALUATED = "decision.evaluated"
 
-# ДћВЎДћВІДћВµГ‘в‚¬ДћВєДћВё
-RECONCILIATION_COMPLETED = EVT.RECONCILIATION_COMPLETED
-RECONCILE_POSITION_MISMATCH = EVT.RECONCILE_POSITION_MISMATCH
+# Reconciliation
+RECONCILIATION_COMPLETED = "reconciliation.completed"
+RECONCILE_POSITION_MISMATCH = "reconcile.position.mismatch"
 
-# ДћВћГ‘в‚¬ДћВєДћВµГ‘ВЃГ‘вЂљГ‘в‚¬ДћВ°Г‘вЂљДћВѕГ‘в‚¬
-ORCH_AUTO_PAUSED = EVT.ORCH_AUTO_PAUSED
-ORCH_AUTO_RESUMED = EVT.ORCH_AUTO_RESUMED
+# Orchestrator
+ORCH_AUTO_PAUSED = "orch.auto.paused"
+ORCH_AUTO_RESUMED = "orch.auto.resumed"
 
 # Safety
-DMS_TRIGGERED = EVT.DMS_TRIGGERED
-DMS_SKIPPED = EVT.DMS_SKIPPED
+DMS_TRIGGERED = "dms.triggered"
+DMS_SKIPPED = "dms.skipped"
 
 # Alertmanager (Prometheus/Grafana)
-ALERTS_ALERTMANAGER = EVT.ALERTS_ALERTMANAGER
+ALERTS_ALERTMANAGER = "alerts.alertmanager"
 
-# ДћВћГ‘Л†ДћВёДћВ±ДћВєДћВё ДћВ±Г‘в‚¬ДћВѕДћВєДћВµГ‘в‚¬ДћВ°
-BROKER_ERROR = EVT.BROKER_ERROR
+# Broker errors
+BROKER_ERROR = "broker.error"
