@@ -16,9 +16,7 @@ class SizeConstraints:
     All fields optional: if None or 0 - constraint not applied.
     """
 
-    max_quote_pct: Decimal | None = (
-        None  # fraction of available balance, e.g. 0.1 (=10%)
-    )
+    max_quote_pct: Decimal | None = None  # fraction of available balance, e.g. 0.1 (=10%)
     min_quote: Decimal | None = None  # minimum amount in quote currency
     max_quote: Decimal | None = None  # absolute ceiling in quote currency
 
