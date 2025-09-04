@@ -21,7 +21,7 @@ async def async_retry(
             last_exc = e
             delay = min(max_delay, base_delay * (2 ** attempt))
             if jitter:
-                delay *= (0.5 + random.random()  # noqa: S311  # noqa: S311)
+                delay *= (0.5 + random.random(\))  # noqa: S311
             await asyncio.sleep(delay)
     if last_exc:
         raise last_exc

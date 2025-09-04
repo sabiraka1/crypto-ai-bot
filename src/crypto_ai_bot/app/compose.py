@@ -48,15 +48,14 @@ def _open_storage(s: Settings) -> Any:
 
 
 def _build_event_bus(s: Settings) -> Any:
-    # РњРѕР¶РЅРѕ РїРѕРґРјРµРЅРёС‚СЊ РЅР° РґСЂСѓРіРѕР№ EventBus РёР· ENV
-    url = getattr(s, "EVENT_BUS_URL", "").strip()
+
+# Можно подменить на другой EventBus из ENV
+url = getattr(s, "EVENT_BUS_URL", "").strip()
 if url and url.startswith("redis://"):
     impl = RedisEventBus(url)
 else:
     impl = AsyncEventBus()
 return UnifiedEventBus(impl)
-
-
 def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
     orig = bus.publish
 
