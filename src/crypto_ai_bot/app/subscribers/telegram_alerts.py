@@ -62,6 +62,8 @@ def _t(lang: str, key: str, **kw: str) -> str:
         lang = "en"
     tpl = L[lang].get(key, l10n["en"].get(key, key))
     return tpl.format(**kw)
+
+
 # noqa: C901
 
 
@@ -116,7 +118,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
         s = evt.get("symbol", "")
         b = evt.get("exchange", "")
-        local_ = evt.get('local', '')
+        local_ = evt.get("local", "")
         await _send(f"🧮 <b>RECONCILE</b> {s}\nexchange: <code>{b}</code>\nlocal: <code>{l}</code>")
 
     async def on_dms_triggered(evt: dict[str, Any]) -> None:
