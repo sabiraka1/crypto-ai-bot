@@ -7,7 +7,7 @@ import time
 from typing import Any, cast
 import urllib.parse
 
-from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
+from crypto_ai_bot.app.telegram import TelegramAlerts
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
@@ -16,50 +16,35 @@ _log = get_logger("adapters.telegram_bot")
 
 
 def _getv(d: Any) -> Any:
-    """
-    Safe accessor that works with dicts and objects (case-insensitive for attrs).
-    Returns {} if the key is absent.
-    """
-
+    """Safe accessor that works with dicts and objects (case-insensitive for attrs)."""
     def _inner(k: str) -> Any:
         try:
             if isinstance(d, dict):
                 return d.get(k, {})
-            return getattr(d, k.lower(), {})  # noqa: TRY300
-        except Exception:  # noqa: BLE001
-            return {}  # noqa: TRY300
-
-    return _inner  # noqa: TRY300
+            return getattr(d, k.lower(), {})
+        except AttributeError:
+            return {}
+    return _inner
 
 
 _TTL = float(os.environ.get("TELEGRAM_BOT_TTL_SECS", "30") or 30.0)
 _THR = os.environ.get("TELEGRAM_BOT_THROTTLE", "3/5")
 try:
     _THR_N, _THR_WIN = (int(x) for x in _THR.split("/", 1))
-except Exception:  # noqa: BLE001
+except ValueError:
     _THR_N, _THR_WIN = 3, 5
 
 
 def _split_symbol(sym: str) -> tuple[str, str]:
     try:
         b, q = sym.split("/", 1)
-        return b.upper(), q.upper()  # noqa: TRY300
-    except Exception:  # noqa: BLE001
-        return sym.upper(), ""  # noqa: TRY300
+        return b.upper(), q.upper()
+    except ValueError:
+        return sym.upper(), ""
 
 
 class TelegramBotCommands:
-    """
-    Long-polling bot for admin commands.
-    Supports:
-      /start, /help
-      /symbol [SYMBOL]
-      /status [SYMBOL]
-      /start_trade [SYMBOL]
-      /stop_trade [SYMBOL]
-      /pause [SYMBOL]
-      /resume [SYMBOL]
-    """
+    """Long-polling bot for admin commands."""
 
     def __init__(
         self,
@@ -78,25 +63,20 @@ class TelegramBotCommands:
         self._offset = 0
         self._lp_sec = max(3, int(long_poll_sec))
         self._chat_symbol: dict[int, str] = {}
-        # (user_id, text) -> (ts, last_message_id)
         self._cache: dict[tuple[int, str], tuple[float, str | None]] = {}
-        # user_id -> timestamps window
         self._recent: dict[int, list[float]] = {}
-
-    # --------------------- helpers ---------------------
 
     def _allow(self, user_id: int | None) -> bool:
         if not self._allowed:
             return True
         try:
-            return int(user_id or 0) in self._allowed  # noqa: TRY300
-        except Exception:  # noqa: BLE001
-            return False  # noqa: TRY300
+            return int(user_id or 0) in self._allowed
+        except ValueError:
+            return False
 
     def _throttle(self, user_id: int) -> bool:
         now = time.time()
         q = self._recent.setdefault(user_id, [])
-        # drop events older than window
         while q and q[0] < now - float(_THR_WIN):
             q.pop(0)
         if len(q) >= int(_THR_N):
@@ -111,7 +91,6 @@ class TelegramBotCommands:
         if ts - ts_prev <= _TTL:
             return True
         self._cache[key] = (ts, None)
-        # soft-prune old cache
         if len(self._cache) > 2048:
             cutoff = ts - _TTL
             for k, (t, _) in list(self._cache.items())[:1024]:
@@ -124,7 +103,6 @@ class TelegramBotCommands:
         return f"https://api.telegram.org/bot{self._token}/{method}?{q}"
 
     async def _reply(self, chat_id: int, text: str, *, parse_mode: str = "HTML") -> None:
-        # Prefer sending directly via Telegram API to address the originating chat.
         try:
             url = self._api(
                 "sendMessage",
@@ -134,7 +112,7 @@ class TelegramBotCommands:
                 disable_web_page_preview="true",
             )
             await aget(url)
-        except Exception:  # noqa: BLE001
+        except Exception:
             _log.error("telegram_reply_failed", exc_info=True)
 
     def _pick_symbol(self, chat_id: int, tail: str | None) -> str:
@@ -143,7 +121,6 @@ class TelegramBotCommands:
             if s:
                 self._chat_symbol[chat_id] = s
                 return s
-        # chat-local override or global default
         return self._chat_symbol.get(chat_id) or self._default_symbol
 
     def _orch(self, symbol: str) -> Any:
@@ -153,18 +130,16 @@ class TelegramBotCommands:
             raise RuntimeError("Orchestrators not ready")
         return orchs.get(symbol) or orchs.get(symbol.replace("-", "/").upper())
 
-    # --------------------- command handlers ---------------------
-
     async def _cmd_help(self, chat_id: int) -> None:
         text = (
             "<b>Available commands</b>\n"
-            "/help — show this help\n"
-            "/symbol SYMBOL — set default symbol (e.g. <code>BTC/USDT</code>)\n"
-            "/status [SYMBOL] — show orchestrator status\n"
-            "/start_trade [SYMBOL] — start orchestrator\n"
-            "/stop_trade [SYMBOL] — stop orchestrator\n"
-            "/pause [SYMBOL] — pause orchestrator\n"
-            "/resume [SYMBOL] — resume orchestrator\n"
+            "/help – show this help\n"
+            "/symbol SYMBOL – set default symbol\n"
+            "/status [SYMBOL] – show orchestrator status\n"
+            "/start_trade [SYMBOL] – start orchestrator\n"
+            "/stop_trade [SYMBOL] – stop orchestrator\n"
+            "/pause [SYMBOL] – pause orchestrator\n"
+            "/resume [SYMBOL] – resume orchestrator\n"
         )
         await self._reply(chat_id, text)
 
@@ -185,7 +160,7 @@ class TelegramBotCommands:
             return
         try:
             st = orch.status()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
             await self._reply(chat_id, f"Status failed: <code>{html.escape(str(e))}</code>")
             return
@@ -217,16 +192,12 @@ class TelegramBotCommands:
                 chat_id,
                 f"{ok_text} <b>{html.escape(sym)}</b>\nstate: <code>{html.escape(str(st.get('state')))}</code>",
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _log.error("orch_call_failed", extra={"symbol": sym, "method": method}, exc_info=True)
             await self._reply(chat_id, f"{method} failed: <code>{html.escape(str(e))}</code>")
 
-    # --------------------- polling loop ---------------------
-
     async def run(self) -> None:
-        """
-        Main long-polling loop.
-        """
+        """Main long-polling loop."""
         if not self._token:
             _log.warning("telegram_bot_token_missing")
             return
@@ -243,7 +214,7 @@ class TelegramBotCommands:
                 )
                 data = await aget(url)
                 updates = cast(dict, data).get("result", []) if isinstance(data, dict) else []
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _log.error("telegram_getupdates_failed", exc_info=True)
                 await asyncio.sleep(1.0)
                 continue
@@ -257,6 +228,7 @@ class TelegramBotCommands:
                     chat_id = int(chat.get("id", 0) or 0)
                     user_id = int(user.get("id", 0) or 0)
                     text = str(msg.get("text") or "").strip()
+                    
                     if not chat_id or not text:
                         continue
 
@@ -269,57 +241,41 @@ class TelegramBotCommands:
                         continue
 
                     if self._dedup(user_id, text):
-                        # Ignore duplicate within TTL
                         continue
 
                     await self._dispatch(chat_id, text)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _log.error("telegram_update_process_failed", exc_info=True)
 
-            # Long polling controlled by Telegram; small pause for fairness
             await asyncio.sleep(0.2)
 
     async def _dispatch(self, chat_id: int, text: str) -> None:
         t = text.strip()
         low = t.lower()
-        # split command and tail
-        if " " in t:
-            cmd, tail = t.split(" ", 1)
-        else:
-            cmd, tail = t, ""
+        
+        # Split command and tail
+        parts = t.split(" ", 1)
+        tail = parts[1] if len(parts) > 1 else ""
 
         if low.startswith("/start") or low.startswith("/help"):
             await self._cmd_help(chat_id)
-            return
-
-        if low.startswith("/symbol"):
+        elif low.startswith("/symbol"):
             await self._cmd_symbol(chat_id, tail)
-            return
-
-        if low.startswith("/status"):
+        elif low.startswith("/status"):
             await self._cmd_status(chat_id, tail)
-            return
-
-        if low.startswith("/start_trade") or low.startswith("/start"):
+        elif low.startswith("/start_trade"):
             await self._cmd_simple_call(chat_id, tail, sym_first=True, method="start", ok_text="Started")
-            return
-
-        if low.startswith("/stop_trade") or low.startswith("/stop"):
+        elif low.startswith("/stop_trade") or low.startswith("/stop"):
             await self._cmd_simple_call(chat_id, tail, sym_first=True, method="stop", ok_text="Stopped")
-            return
-
-        if low.startswith("/pause"):
+        elif low.startswith("/pause"):
             await self._cmd_simple_call(chat_id, tail, sym_first=True, method="pause", ok_text="Paused")
-            return
-
-        if low.startswith("/resume"):
+        elif low.startswith("/resume"):
             await self._cmd_simple_call(chat_id, tail, sym_first=True, method="resume", ok_text="Resumed")
-            return
-
-        # Fallback: echo unknown command
-        base, quote = _split_symbol(self._pick_symbol(chat_id, None))
-        await self._reply(
-            chat_id,
-            "Unknown command. Type /help\n"
-            f"Current symbol: <code>{html.escape(base + '/' + quote if quote else base)}</code>",
-        )
+        else:
+            # Unknown command
+            base, quote = _split_symbol(self._pick_symbol(chat_id, None))
+            await self._reply(
+                chat_id,
+                "Unknown command. Type /help\n"
+                f"Current symbol: <code>{html.escape(base + '/' + quote if quote else base)}</code>",
+            )
