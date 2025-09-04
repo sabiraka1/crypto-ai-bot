@@ -87,6 +87,7 @@ async def execute_trade(
     _idempotency_bucket_ms: int = 60000,
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
+    protective_exits: Any | None = None,  # принят для совместимости; не используется здесь
 ) -> dict[str, Any]:
     """
     Unified path for executing a trade (buy/sell) with idempotency, risk-guards,
@@ -104,7 +105,7 @@ async def execute_trade(
 
     # ---- Idempotency: prevent duplicates for (sym, act, amounts, session) ----
     session = getattr(settings, "SESSION_RUN_ID", "") or ""
-    key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"
+    key_payload = f"{sym}|{act}|{q_in}|{b_in}|{session}"`
     # sha1 retained intentionally for compatibility with existing storage key format
     idem_key = "po:" + hashlib.sha1(key_payload.encode("utf-8")).hexdigest()  # noqa: S324
 

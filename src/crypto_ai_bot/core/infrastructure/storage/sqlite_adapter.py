@@ -9,7 +9,7 @@ import sqlite3
 def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(
         db_path, check_same_thread=False, isolation_level=None
-    )  # autocommit; BEGIN ДћВІГ‘в‚¬Г‘Ж’Г‘вЂЎДћВЅГ‘Ж’Г‘ВЋ
+    )  # autocommit; BEGIN handled manually
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA temp_store=MEMORY;")
@@ -19,8 +19,8 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Cursor]:
-    """BEGIN IMMEDIATE (write txn) + COMMIT/ROLLBACK. ДћвЂ™ДћВѕДћВ·ДћВІГ‘в‚¬ДћВ°Г‘вЂ°ДћВ°ДћВµГ‘вЂљ ДћВєГ‘Ж’Г‘в‚¬Г‘ВЃДћВѕГ‘в‚¬.
-    ДћЛњГ‘ВЃДћВїДћВѕДћВ»Г‘Е’ДћВ·Г‘Ж’ДћВµДћВј Г‘ВЏДћВІДћВЅГ‘вЂ№ДћВµ Г‘вЂљГ‘в‚¬ДћВ°ДћВЅДћВ·ДћВ°ДћВєГ‘вЂ ДћВёДћВё ДћВґДћВ»Г‘ВЏ ДћВ°Г‘вЂљДћВѕДћВјДћВ°Г‘в‚¬ДћВЅДћВѕГ‘ВЃГ‘вЂљДћВё ДћВѕДћВїДћВµГ‘в‚¬ДћВ°Г‘вЂ ДћВёДћВ№ (ДћВЅДћВ°ДћВїГ‘в‚¬ДћВёДћВјДћВµГ‘в‚¬, ДћВёДћВґДћВµДћВјДћВїДћВѕГ‘вЂљДћВµДћВЅГ‘вЂљДћВЅДћВѕГ‘ВЃГ‘вЂљГ‘Е’).
+    """BEGIN IMMEDIATE (write txn) + COMMIT/ROLLBACK. Returns cursor.
+    Use explicit transactions for atomic operations (e.g., idempotency).
     """
     cur = conn.cursor()
     cur.execute("BEGIN IMMEDIATE;")
