@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
 import hashlib
+from typing import Any
 
 from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
@@ -10,7 +11,6 @@ from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
-
 
 _log = get_logger("usecase.execute_trade")
 

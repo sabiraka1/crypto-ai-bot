@@ -4,14 +4,13 @@ import asyncio
 import html
 import os
 import time
-import urllib.parse
 from typing import Any, cast
+import urllib.parse
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
-
 
 _log = get_logger("adapters.telegram_bot")
 

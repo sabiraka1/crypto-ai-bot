@@ -16,8 +16,8 @@ from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
-from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
 from crypto_ai_bot.core.infrastructure.events.bus_adapter import UnifiedEventBus
+from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
 from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import open_storage
