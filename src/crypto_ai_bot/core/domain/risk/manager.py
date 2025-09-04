@@ -114,12 +114,36 @@ class RiskManager:
         self._loss = LossStreakRule(LossStreakConfig(limit=cfg.loss_streak_limit))
         self._dd = MaxDrawdownRule(MaxDrawdownConfig(max_drawdown_pct=cfg.max_drawdown_pct))
 
-        self._orders5 = MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m)) if (MaxOrders5mRule and cfg.max_orders_5m > 0) else None
-        self._turn5 = MaxTurnover5mRule(MaxTurnover5mConfig(limit_quote=cfg.max_turnover_5m_quote)) if (MaxTurnover5mRule and cfg.max_turnover_5m_quote > 0) else None
-        self._cool = CooldownRule(CooldownConfig(cooldown_sec=cfg.cooldown_sec)) if (CooldownRule and cfg.cooldown_sec > 0) else None
-        self._spread = SpreadCapRule(SpreadCapConfig(max_spread_pct=cfg.max_spread_pct), provider=cfg.spread_provider) if (SpreadCapRule and cfg.max_spread_pct > 0) else None
-        self._dailoss = DailyLossRule(DailyLossConfig(limit_quote=cfg.daily_loss_limit_quote)) if (DailyLossRule and cfg.daily_loss_limit_quote > 0) else None
-        self._corr = CorrelationManager(CorrelationConfig(groups=cfg.anti_corr_groups or [])) if (CorrelationManager and cfg.anti_corr_groups) else None
+        self._orders5 = (
+            MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m))
+            if (MaxOrders5mRule and cfg.max_orders_5m > 0)
+            else None
+        )
+        self._turn5 = (
+            MaxTurnover5mRule(MaxTurnover5mConfig(limit_quote=cfg.max_turnover_5m_quote))
+            if (MaxTurnover5mRule and cfg.max_turnover_5m_quote > 0)
+            else None
+        )
+        self._cool = (
+            CooldownRule(CooldownConfig(cooldown_sec=cfg.cooldown_sec))
+            if (CooldownRule and cfg.cooldown_sec > 0)
+            else None
+        )
+        self._spread = (
+            SpreadCapRule(SpreadCapConfig(max_spread_pct=cfg.max_spread_pct), provider=cfg.spread_provider)
+            if (SpreadCapRule and cfg.max_spread_pct > 0)
+            else None
+        )
+        self._dailoss = (
+            DailyLossRule(DailyLossConfig(limit_quote=cfg.daily_loss_limit_quote))
+            if (DailyLossRule and cfg.daily_loss_limit_quote > 0)
+            else None
+        )
+        self._corr = (
+            CorrelationManager(CorrelationConfig(groups=cfg.anti_corr_groups or []))
+            if (CorrelationManager and cfg.anti_corr_groups)
+            else None
+        )
 
     def _budget_check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
         """Daily budgets: order count and turnover in quote currency. 0 = disabled."""
@@ -146,7 +170,11 @@ class RiskManager:
             try:
                 turn = trades.daily_turnover_quote(symbol)
                 if turn >= limit_turn:
-                    return False, "budget:max_turnover_quote_per_day", {"turnover": str(turn), "limit": str(limit_turn)}
+                    return (
+                        False,
+                        "budget:max_turnover_quote_per_day",
+                        {"turnover": str(turn), "limit": str(limit_turn)},
+                    )
             except Exception:
                 pass
 

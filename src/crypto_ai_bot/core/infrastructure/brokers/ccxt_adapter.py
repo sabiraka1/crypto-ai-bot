@@ -15,10 +15,20 @@ _log = get_logger("broker.ccxt")
 
 
 class BrokerError(Exception): ...
+
+
 class InsufficientFunds(BrokerError): ...
+
+
 class RateLimited(BrokerError): ...
+
+
 class OrderNotFound(BrokerError): ...
+
+
 class ValidationError(BrokerError): ...
+
+
 class ExchangeUnavailable(BrokerError): ...
 
 
@@ -169,7 +179,7 @@ class CcxtBroker:
                 if attempt == max_attempts - 1:
                     raise
                 _log.warning("broker_retry", extra={"attempt": attempt + 1, "error": str(exc)})
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(2**attempt)
 
     async def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         await self._ensure_markets()
@@ -178,7 +188,9 @@ class CcxtBroker:
         try:
             t0 = asyncio.get_event_loop().time()
             res = await self._with_cb(self._cb_ticker, lambda: self.exchange.fetch_ticker(ex_sym))
-            observe("broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"})
+            observe(
+                "broker.request.ms", (asyncio.get_event_loop().time() - t0) * 1000.0, {"fn": "fetch_ticker"}
+            )
             return res
         except Exception as exc:
             inc("broker.request.error", fn="fetch_ticker")
@@ -236,7 +248,9 @@ class CcxtBroker:
             order = await self._retry(
                 lambda: self._with_cb(
                     self._cb_create,
-                    lambda: self.exchange.create_order(ex_sym, "market", "buy", float(base_amount), None, params),
+                    lambda: self.exchange.create_order(
+                        ex_sym, "market", "buy", float(base_amount), None, params
+                    ),
                 )
             )
             order = order if isinstance(order, dict) else dict(order)
@@ -288,7 +302,9 @@ class CcxtBroker:
         ex_sym = self._sym_to_ex.get(symbol) or symbol
         await self._bucket.acquire()
         try:
-            res = await self._with_cb(self._cb_order, lambda: self.exchange.fetch_order(broker_order_id, ex_sym))
+            res = await self._with_cb(
+                self._cb_order, lambda: self.exchange.fetch_order(broker_order_id, ex_sym)
+            )
             return res
         except Exception as exc:
             inc("broker.request.error", fn="fetch_order")

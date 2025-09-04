@@ -9,6 +9,7 @@ from crypto_ai_bot.utils.logging import get_logger
 
 try:
     from crypto_ai_bot.core.application import events_topics as EVT
+
     _DMS_TOPIC = getattr(EVT, "DMS_TRIGGERED", "safety.dead_mans_switch.triggered")
 except Exception:
     _DMS_TOPIC = "safety.dead_mans_switch.triggered"
@@ -51,7 +52,9 @@ class DeadMansSwitch:
             try:
                 await self.broker.create_market_sell_base(symbol=self.symbol, base_amount=Decimal("0"))
             except Exception as exc:
-                _log.warning("dms_sell_failed", extra={"symbol": self.symbol, "error": str(exc)}, exc_info=True)
+                _log.warning(
+                    "dms_sell_failed", extra={"symbol": self.symbol, "error": str(exc)}, exc_info=True
+                )
             if self.bus and hasattr(self.bus, "publish"):
                 await self.bus.publish(
                     _DMS_TOPIC,

@@ -103,9 +103,7 @@ async def execute_trade(
     for attempt in range(3):
         try:
             if act == "buy":
-                q_amt = (
-                    q_in if q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
-                )
+                q_amt = q_in if q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
                 order = await broker.create_market_buy_quote(
                     symbol=sym, quote_amount=q_amt, client_order_id=client_order_id
                 )
