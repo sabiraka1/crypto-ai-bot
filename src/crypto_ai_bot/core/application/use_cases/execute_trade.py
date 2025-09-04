@@ -28,7 +28,7 @@ class ExecuteTradeResult:
 
 class TradeDataFetcher:
     """Helper class to fetch trade-related data from storage."""
-    
+
     @staticmethod
     async def recent_trades(storage: Any, symbol: str, n: int) -> list[dict[str, Any]]:
         """Best-effort: returns last N trades if storage provides such API."""
@@ -78,16 +78,18 @@ class TradeDataFetcher:
 
 class IdempotencyChecker:
     """Handle idempotency checks."""
-    
+
     @staticmethod
     def generate_key(symbol: str, side: str, q_in: Decimal, b_in: Decimal, session: str) -> str:
         """Generate idempotency key."""
         key_payload = f"{symbol}|{side}|{q_in}|{b_in}|{session}"
         # sha1 retained intentionally for compatibility with existing storage key format
         return "po:" + hashlib.sha1(key_payload.encode("utf-8")).hexdigest()  # noqa: S324
-    
+
     @staticmethod
-    async def check_duplicate(storage: StoragePort, idem_key: str, ttl_sec: int, sym: str, bus: EventBusPort) -> dict[str, Any] | None:
+    async def check_duplicate(
+        storage: StoragePort, idem_key: str, ttl_sec: int, sym: str, bus: EventBusPort
+    ) -> dict[str, Any] | None:
         """Check if request is duplicate and store if not."""
         try:
             idem = getattr(storage, "idempotency", None)
@@ -105,19 +107,19 @@ class IdempotencyChecker:
 
 class RiskChecker:
     """Handle risk-related checks."""
-    
+
     def __init__(self, storage: Any, bus: EventBusPort, settings: Any, cfg: RiskConfig):
         self.storage = storage
         self.bus = bus
         self.settings = settings
         self.cfg = cfg
         self.fetcher = TradeDataFetcher()
-    
+
     async def check_loss_streak(self, sym: str) -> dict[str, Any] | None:
         """Check loss streak rule if enabled."""
         if not getattr(self.settings, "RISK_USE_LOSS_STREAK", 0):
             return None
-            
+
         try:
             from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
 
@@ -136,12 +138,12 @@ class RiskChecker:
         except ImportError:
             _log.debug("loss_streak_rule_not_available")
         return None
-    
+
     async def check_max_drawdown(self, sym: str) -> dict[str, Any] | None:
         """Check max drawdown rule if enabled."""
         if not getattr(self.settings, "RISK_USE_MAX_DRAWDOWN", 0):
             return None
-            
+
         try:
             from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
 
@@ -167,7 +169,7 @@ class RiskChecker:
         except ImportError:
             _log.debug("max_drawdown_rule_not_available")
         return None
-    
+
     async def check_spread(self, sym: str, broker: BrokerPort) -> dict[str, Any] | None:
         """Check spread limits."""
         try:
@@ -178,7 +180,7 @@ class RiskChecker:
 
         if limit_spread <= dec("0"):
             return None
-            
+
         try:
             t = await broker.fetch_ticker(sym)
             bid = dec(str(t.get("bid", "0")) or "0")
@@ -204,12 +206,12 @@ class RiskChecker:
         except (ConnectionError, RuntimeError):
             _log.error("spread_check_failed", extra={"symbol": sym}, exc_info=True)
         return None
-    
+
     async def check_rate_limits(self, sym: str) -> dict[str, Any] | None:
         """Check orders per 5 minutes rate limit."""
         if not (getattr(self.cfg, "max_orders_5m", 0) and self.cfg.max_orders_5m > 0):
             return None
-            
+
         try:
             trades_repo = getattr(self.storage, "trades", None)
             if trades_repo and hasattr(trades_repo, "count_orders_last_minutes"):
@@ -232,7 +234,7 @@ class RiskChecker:
         except (AttributeError, RuntimeError):
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
         return None
-    
+
     async def check_turnover(self, sym: str) -> dict[str, Any] | None:
         """Check turnover cap per day."""
         max_turnover = getattr(self.cfg, "max_turnover_quote_per_day", Decimal("0"))
@@ -244,7 +246,7 @@ class RiskChecker:
 
         if max_turnover <= dec("0"):
             return None
-            
+
         try:
             trades_repo = getattr(self.storage, "trades", None)
             if trades_repo and hasattr(trades_repo, "daily_turnover_quote"):
@@ -281,7 +283,7 @@ async def execute_trade(
     base_amount: Decimal | None = None,
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
-    **_kwargs: Any  # Accept but ignore extra kwargs for compatibility
+    **_kwargs: Any,  # Accept but ignore extra kwargs for compatibility
 ) -> dict[str, Any]:
     """
     Unified path for executing a trade (buy/sell) with idempotency, risk-guards,
@@ -300,7 +302,7 @@ async def execute_trade(
     # ---- Idempotency: prevent duplicates ----
     session = getattr(settings, "SESSION_RUN_ID", "") or ""
     idem_key = IdempotencyChecker.generate_key(sym, act, q_in, b_in, session)
-    
+
     result = await IdempotencyChecker.check_duplicate(storage, idem_key, idempotency_ttl_sec, sym, bus)
     if result:
         return result
@@ -309,9 +311,9 @@ async def execute_trade(
     cfg: RiskConfig = (
         risk_manager.cfg if isinstance(risk_manager, RiskManager) else RiskConfig.from_settings(settings)
     )
-    
+
     risk_checker = RiskChecker(storage, bus, settings, cfg)
-    
+
     # Check all risk rules
     for check_method in [
         risk_checker.check_loss_streak,
@@ -328,7 +330,9 @@ async def execute_trade(
     try:
         client_order_id = idem_key  # reuse idempotency key for client_order_id
         if act == "buy":
-            q_amt = q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
+            q_amt = (
+                q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
+            )
             _log.info("execute_order_buy", extra={"symbol": sym, "quote_amount": str(q_amt)})
             order = await broker.create_market_buy_quote(
                 symbol=sym, quote_amount=q_amt, client_order_id=client_order_id

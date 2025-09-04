@@ -210,8 +210,7 @@ class CommandHandler:
 
             await self.api.send_message(
                 chat_id,
-                f"{success_text} <b>{html.escape(symbol)}</b>\n"
-                f"state: <code>{html.escape(str(state))}</code>",
+                f"{success_text} <b>{html.escape(symbol)}</b>\nstate: <code>{html.escape(str(state))}</code>",
             )
 
         except OrchestratorNotFoundError:
@@ -258,7 +257,7 @@ class TelegramAPI:
         except asyncio.TimeoutError:
             _log.warning("telegram_get_updates_timeout")
             return []
-        
+
         if isinstance(data, dict):
             return data.get("result", [])
         return []
@@ -389,7 +388,7 @@ class TelegramBotCommands:
             symbol = self.command_handler.pick_symbol(chat_id, None)
             await self.api.send_message(
                 chat_id,
-                f"Unknown command. Type /help\n" f"Current symbol: <code>{html.escape(symbol)}</code>",
+                f"Unknown command. Type /help\nCurrent symbol: <code>{html.escape(symbol)}</code>",
             )
 
     async def _fetch_updates(self) -> list[dict[str, Any]]:

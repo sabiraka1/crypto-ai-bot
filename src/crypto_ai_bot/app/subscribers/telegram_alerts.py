@@ -37,12 +37,12 @@ def get_message(lang: str, key: str, **kwargs: str) -> str:
 
 class AlertHandler:
     """Handler for telegram alerts."""
-    
+
     def __init__(self, telegram: TelegramAlerts, settings: Any):
         self.telegram = telegram
         self.settings = settings
         self.lang = str(getattr(settings, "LANG", "en")).lower()
-    
+
     async def send_text(self, text: str) -> None:
         """Send text message."""
         try:
@@ -51,7 +51,7 @@ class AlertHandler:
         except Exception:
             inc("telegram.send_text.err")
             _log.exception("telegram_send_text_failed")
-    
+
     async def send_alert(self, text: str, labels: dict[str, str] | None = None) -> None:
         """Send alert with optional labels."""
         try:
@@ -62,21 +62,19 @@ class AlertHandler:
         except Exception:
             inc("telegram.alert.err")
             _log.exception("telegram_alert_failed")
-    
+
     async def on_orch_paused(self, payload: dict[str, Any]) -> None:
         """Handle orchestrator paused event."""
         text = get_message(
-            self.lang, "orch_paused", 
-            symbol=payload.get("symbol", "?"), 
-            reason=payload.get("reason", "n/a")
+            self.lang, "orch_paused", symbol=payload.get("symbol", "?"), reason=payload.get("reason", "n/a")
         )
         await self.send_text(text)
-    
+
     async def on_orch_resumed(self, payload: dict[str, Any]) -> None:
         """Handle orchestrator resumed event."""
         text = get_message(self.lang, "orch_resumed", symbol=payload.get("symbol", "?"))
         await self.send_text(text)
-    
+
     async def on_trade_completed(self, payload: dict[str, Any]) -> None:
         """Handle trade completed event."""
         text = get_message(
@@ -88,7 +86,7 @@ class AlertHandler:
             quote_ccy=payload.get("quote_ccy", ""),
         )
         await self.send_text(text)
-    
+
     async def on_trade_failed(self, payload: dict[str, Any]) -> None:
         """Handle trade failed event."""
         text = get_message(
@@ -98,12 +96,12 @@ class AlertHandler:
             reason=payload.get("reason", "unknown"),
         )
         await self.send_text(text)
-    
+
     async def on_risk_blocked(self, payload: dict[str, Any]) -> None:
         """Handle risk blocked event."""
         text = get_message(self.lang, "risk_blocked", rule=payload.get("rule", "unknown"))
         await self.send_text(text)
-    
+
     async def on_budget_exceeded(self, payload: dict[str, Any]) -> None:
         """Handle budget exceeded event."""
         text = get_message(
@@ -113,12 +111,12 @@ class AlertHandler:
             ccy=payload.get("ccy", ""),
         )
         await self.send_text(text)
-    
+
     async def on_broker_error(self, payload: dict[str, Any]) -> None:
         """Handle broker error event."""
         text = get_message(self.lang, "broker_error", msg=payload.get("message", "unknown"))
         await self.send_text(text)
-    
+
     async def on_health(self, payload: dict[str, Any]) -> None:
         """Handle health report event."""
         text = get_message(
@@ -129,7 +127,7 @@ class AlertHandler:
             spread_pct=str(payload.get("spread_pct", "?")),
         )
         await self.send_text(text)
-    
+
     async def on_dms_triggered(self, payload: dict[str, Any]) -> None:
         """Handle DMS triggered event."""
         text = get_message(
@@ -140,7 +138,7 @@ class AlertHandler:
             last=str(payload.get("last", "?")),
         )
         await self.send_text(text)
-    
+
     async def on_dms_skipped(self, payload: dict[str, Any]) -> None:
         """Handle DMS skipped event."""
         text = get_message(
@@ -151,7 +149,7 @@ class AlertHandler:
             last=str(payload.get("last", "?")),
         )
         await self.send_text(text)
-    
+
     async def on_alertmanager(self, payload: dict[str, Any]) -> None:
         """Handle alertmanager event."""
         labels = payload.get("labels", {})
@@ -163,7 +161,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
     """Subscribe to bus events and forward to Telegram."""
     telegram = TelegramAlerts(settings=settings)
     handler = AlertHandler(telegram, settings)
-    
+
     # Subscribe to events
     bus.on(events_topics.ORCH_AUTO_PAUSED, handler.on_orch_paused)
     bus.on(events_topics.ORCH_AUTO_RESUMED, handler.on_orch_resumed)

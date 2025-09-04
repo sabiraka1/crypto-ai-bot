@@ -82,7 +82,11 @@ class EmaAtrStrategy(BaseStrategy):
             return Decision(action="hold", reason=f"atr_too_high:{atr_pct:.2f}%")
 
         # Наклон краткосрочной EMA относительно цены (процент)
-        slope = ((ema_s[-1] - ema_s[-2]) / last * dec("100") if last > 0 else dec("0")) if len(ema_s) >= 2 else dec("0")
+        slope = (
+            ((ema_s[-1] - ema_s[-2]) / last * dec("100") if last > 0 else dec("0"))
+            if len(ema_s) >= 2
+            else dec("0")
+        )
 
         # Логика сигналов
         if es > el and slope >= self.cfg.ema_min_slope:
