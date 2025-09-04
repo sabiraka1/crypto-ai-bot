@@ -137,7 +137,8 @@ async def execute_trade(
                 allowed, reason = ls_rule.check(trades)
                 if not allowed:
                     await bus.publish(
-                        events_topics.BUDGET_EXCEEDED, {"symbol": sym, "type": "loss_streak", "reason": reason}
+                        events_topics.BUDGET_EXCEEDED,
+                        {"symbol": sym, "type": "loss_streak", "reason": reason},
                     )
                     _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
@@ -168,7 +169,8 @@ async def execute_trade(
                 )
                 if not allowed:
                     await bus.publish(
-                        events_topics.BUDGET_EXCEEDED, {"symbol": sym, "type": "max_drawdown", "reason": reason}
+                        events_topics.BUDGET_EXCEEDED,
+                        {"symbol": sym, "type": "max_drawdown", "reason": reason},
                     )
                     _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
@@ -279,7 +281,9 @@ async def execute_trade(
     except Exception:  # noqa: BLE001
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
-            await bus.publish(events_topics.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
+            await bus.publish(
+                events_topics.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"}
+            )
         except Exception:  # noqa: BLE001
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
