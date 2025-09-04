@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if inst_lock and hasattr(inst_lock, "release"):
                 inst_lock.release()
         except (AttributeError, RuntimeError, OSError):
-        _log.debug("instance_lock_release_failed", exc_info=True)
+            _log.debug("instance_lock_release_failed", exc_info=True)
     finally:
         _log.info("lifespan_shutdown_begin")
         try:
