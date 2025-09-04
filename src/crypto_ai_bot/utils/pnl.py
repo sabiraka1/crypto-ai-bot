@@ -11,9 +11,9 @@ from crypto_ai_bot.utils.decimal import dec
 @dataclass
 class PnLItem:
     side: str  # "buy" | "sell"
-    base_qty: Decimal  # ДћВєДћВѕДћВ»ДћВёГ‘вЂЎДћВµГ‘ВЃГ‘вЂљДћВІДћВѕ ДћВІ ДћВ±ДћВ°ДћВ·ДћВѕДћВІДћВѕДћВ№ ДћВІДћВ°ДћВ»Г‘ВЋГ‘вЂљДћВµ
-    price: Decimal  # Г‘вЂ ДћВµДћВЅДћВ° (quote/base)
-    fee_quote: Decimal  # ДћВєДћВѕДћВјДћВёГ‘ВЃГ‘ВЃДћВёГ‘ВЏ ДћВІ ДћВєДћВѕГ‘вЂљДћВёГ‘в‚¬Г‘Ж’ДћВµДћВјДћВѕДћВ№ ДћВІДћВ°ДћВ»Г‘ВЋГ‘вЂљДћВµ
+    base_qty: Decimal  # количество в базовой валюте
+    price: Decimal  # цена (quote/base)
+    fee_quote: Decimal  # комиссия в котируемой валюте
     ts_ms: int | None = None
 
 
