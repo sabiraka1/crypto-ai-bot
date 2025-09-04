@@ -11,7 +11,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=30, help="Keep backups newer than N days (default: 30)")
     args = parser.parse_args(argv)
 
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603
         [
             sys.executable,
             "-m",

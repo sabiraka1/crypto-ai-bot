@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as events_topics  # noqa: N812
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -287,7 +287,7 @@ class ProtectiveExits:
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=base)
             await self._bus.publish(
-                EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)}
+                events_topics.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(base)}
             )
             _log.info(
                 "protective_exit_sell_all", extra={"symbol": symbol, "qty": str(base), "reason": reason}
@@ -295,7 +295,7 @@ class ProtectiveExits:
             self._cancel_task(symbol)
             return {"closed_all": True, "side": "sell", "qty": str(base), "reason": reason}  # noqa: TRY300
         except Exception as e:  # noqa: BLE001
-            await self._bus.publish(EVT.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
+            await self._bus.publish(events_topics.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return None
 
@@ -303,12 +303,12 @@ class ProtectiveExits:
         try:
             await self._broker.create_market_sell_base(symbol=symbol, base_amount=qty)
             await self._bus.publish(
-                EVT.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)}
+                events_topics.TRADE_COMPLETED, {"symbol": symbol, "side": "sell", "reason": reason, "amount": str(qty)}
             )
             _log.info("protective_exit_sell_qty", extra={"symbol": symbol, "qty": str(qty), "reason": reason})
             return True  # noqa: TRY300
         except Exception as e:  # noqa: BLE001
-            await self._bus.publish(EVT.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
+            await self._bus.publish(events_topics.TRADE_FAILED, {"symbol": symbol, "side": "sell", "reason": str(e)})
             _log.error("protective_exit_failed", extra={"symbol": symbol, "error": str(e)})
             return False
 

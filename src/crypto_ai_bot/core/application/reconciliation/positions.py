@@ -35,10 +35,8 @@ def compute_sell_amount(storage: StoragePort, symbol: str, requested: Decimal | 
         amt = dec(str(requested)) if requested is not None else held
         if amt > held:
             amt = held
-        if amt <= dec("0"):
-            return (False, dec("0"))
-        return (True, amt)
-    except Exception:
+        return (False, dec("0")) if amt <= dec("0") else (True, amt)
+    except Exception:  # noqa: BLE001
         return (False, dec("0"))
 
 
@@ -85,7 +83,7 @@ async def reconcile_positions_batch(
 
 # orchestrator wrapper
 async def reconcile_positions(
-    symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any
+    symbol: str, storage: StoragePort, broker: BrokerPort, _bus: EventBusPort, _settings: Any
 ) -> None:
     """Orchestrator compatibility wrapper."""
     await reconcile_positions_batch(symbols=[symbol], storage=storage, broker=broker, bus=bus)

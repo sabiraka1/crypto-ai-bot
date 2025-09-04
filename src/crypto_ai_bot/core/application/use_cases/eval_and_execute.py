@@ -52,7 +52,7 @@ async def eval_and_execute(
     broker: Any,
     bus: Any,
     risk: Any,  # Orchestrator passes RiskManager here
-    exits: Any,
+    _exits: Any,
     settings: Any,
 ) -> EvalResult:
     """
@@ -95,9 +95,9 @@ async def eval_and_execute(
 
         if not ok:
             try:
-                from crypto_ai_bot.core.application import events_topics as EVT
+                from crypto_ai_bot.core.application import events_topics as events_topics
 
-                await bus.publish(EVT.TRADE_BLOCKED, {"symbol": symbol, "reason": why})
+                await bus.publish(events_topics.TRADE_BLOCKED, {"symbol": symbol, "reason": why})
             except Exception:  # noqa: BLE001
                 _log.error("publish_trade_blocked_failed", extra={"symbol": symbol}, exc_info=True)
             return EvalResult(decided=True, action="skip", reason=why)

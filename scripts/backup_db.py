@@ -7,7 +7,7 @@ import sys
 
 def main() -> int:
     # Безопасный запуск: без shell, с check=True
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603
         [sys.executable, "-m", "crypto_ai_bot.cli.maintenance", "backup"],
         check=True,
     )

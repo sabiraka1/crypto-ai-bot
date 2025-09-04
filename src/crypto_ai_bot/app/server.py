@@ -82,8 +82,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             inst_lock = getattr(_container, "instance_lock", None)
             if inst_lock and hasattr(inst_lock, "release"):
                 inst_lock.release()
-        except Exception:
-            _log.debug("instance_lock_release_failed", exc_info=True)
+        except (AttributeError, RuntimeError, OSError):
+        _log.debug("instance_lock_release_failed", exc_info=True)
     finally:
         _log.info("lifespan_shutdown_begin")
         try:
@@ -225,7 +225,7 @@ async def health() -> JSONResponse:
     # publish event for observability/Telegram
     if bus and hasattr(bus, "publish"):
         try:
-            await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
+            await bus.publish(events_topics.HEALTH_REPORT, {"ok": ok, **details})
         except Exception:  # noqa: BLE001
             _log.debug("health_bus_publish_failed", exc_info=True)
 
@@ -235,7 +235,7 @@ async def health() -> JSONResponse:
 
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
-    """Alertmanager webhook -> forward to EventBus (EVT.ALERTS_ALERTMANAGER)."""
+    """Alertmanager webhook -> forward to EventBus (events_topics.ALERTS_ALERTMANAGER)."""
     try:
         c = _ctx_or_500()
     except HTTPException:
@@ -244,7 +244,7 @@ async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
     bus = getattr(c, "bus", None)
     if bus and hasattr(bus, "publish"):
         try:
-            await bus.publish(EVT.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
+            await bus.publish(events_topics.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
         except Exception:  # noqa: BLE001
             _log.debug("alert_bus_publish_failed", exc_info=True)
     return JSONResponse({"ok": True})  # noqa: TRY300

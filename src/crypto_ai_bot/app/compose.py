@@ -51,7 +51,7 @@ def _open_storage(s: Settings) -> Any:
 def _build_event_bus(s: Settings) -> Any:
     # Choose EventBus by ENV: Redis if EVENT_BUS_URL=redis://..., else in-memory
     url = getattr(s, "EVENT_BUS_URL", "").strip()
-    if url and url.startswith("redis://"):
+    if url and url.startswith("redis://"):  # noqa: SIM108
         impl = RedisEventBus(url)
     else:
         impl = AsyncEventBus()
@@ -163,7 +163,7 @@ async def build_container_async() -> Container:
             except Exception:  # noqa: BLE001
                 _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol", "")}, exc_info=True)
 
-        bus.on(EVT.TRADE_COMPLETED, _on_trade_completed_hint)
+        bus.on(events_topics.TRADE_COMPLETED, _on_trade_completed_hint)
 
     # Telegram command bot (incoming commands)
     tg_task: asyncio.Task | None = None

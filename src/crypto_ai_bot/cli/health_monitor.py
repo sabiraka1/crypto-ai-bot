@@ -38,7 +38,7 @@ async def _oneshot(url: str, timeout: float) -> int:  # noqa: ASYNC109
     try:
         out = (
             json.dumps(pretty, ensure_ascii=False, indent=2)
-            if isinstance(pretty, (dict, list))
+            if isinstance(pretty, dict | list)
             else str(pretty)
         )
     except Exception:  # noqa: BLE001

@@ -15,7 +15,7 @@ _log = get_logger("reconcile.balances")
 def _dec_from(bal: Mapping[str, Any], key: str, default: str = "0") -> Decimal:
     try:
         return dec(str(bal.get(key, default)))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return dec(default)
 
 
@@ -31,7 +31,7 @@ class BalancesReconciler:
         """
         try:
             bal = await self.broker.fetch_balance(self.symbol)  # dict: free_base, free_quote
-        except Exception:
+        except Exception:  # noqa: BLE001
             _log.error("balance_fetch_failed", extra={"symbol": self.symbol}, exc_info=True)
             return {"ok": "false", "reason": "broker_error"}
 
@@ -47,7 +47,7 @@ class BalancesReconciler:
         return {"ok": "true", "free_base": str(free_base), "free_quote": str(free_quote)}
 
 
-async def reconcile_balances(symbol: str, storage: Any, broker: Any, bus: Any, settings: Any) -> None:
+async def reconcile_balances(symbol: str, _storage: Any, broker: Any, _bus: Any, _settings: Any) -> None:
     """
     Thin wrapper for orchestrator-compat: call the reconciler and return.
     Publishing/writing is left to the application layer to avoid mixed responsibilities.

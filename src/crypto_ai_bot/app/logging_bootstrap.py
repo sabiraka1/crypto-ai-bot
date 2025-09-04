@@ -14,7 +14,7 @@ def setup_telegram_error_handler() -> None:
     """
     try:
         handler = TelegramErrorHandler()
-    except Exception as exc:  # когда нет токена или httpx не установлен
+    except (ImportError, RuntimeError, ValueError) as exc:  # когда нет токена или httpx не установлен
         logging.getLogger(__name__).warning("TG error handler disabled: %s", exc)
         return  # noqa: TRY300
 

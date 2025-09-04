@@ -1,9 +1,9 @@
 # tools/ci_autofix.py
 from __future__ import annotations
 
+from collections.abc import Iterable
 import pathlib
 import re
-from collections.abc import Iterable
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 

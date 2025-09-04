@@ -5,7 +5,7 @@ from decimal import Decimal
 import hashlib
 from typing import Any
 
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as events_topics  # noqa: N812
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, StoragePort
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.utils.decimal import dec
@@ -78,10 +78,10 @@ async def execute_trade(
     broker: BrokerPort,
     bus: EventBusPort,
     settings: Any,
-    exchange: str = "",
+    _exchange: str = "",
     quote_amount: Decimal | None = None,
     base_amount: Decimal | None = None,
-    idempotency_bucket_ms: int = 60000,
+    _idempotency_bucket_ms: int = 60000,
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
     protective_exits: Any | None = None,
@@ -113,7 +113,7 @@ async def execute_trade(
         if idem_repo is not None and hasattr(idem_repo, "check_and_store"):
             if not bool(idem_repo.check_and_store(idem_key, idempotency_ttl_sec)):
                 # Duplicate request (drop)
-                await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
+                await bus.publish(events_topics.TRADE_BLOCKED, {"symbol": sym, "reason": "duplicate"})
                 _log.warning("trade_blocked_duplicate", extra={"symbol": sym})
                 return {"action": "skip", "executed": False, "reason": "duplicate"}
     except Exception:  # noqa: BLE001
@@ -137,7 +137,7 @@ async def execute_trade(
                 allowed, reason = ls_rule.check(trades)
                 if not allowed:
                     await bus.publish(
-                        EVT.BUDGET_EXCEEDED, {"symbol": sym, "type": "loss_streak", "reason": reason}
+                        events_topics.BUDGET_EXCEEDED, {"symbol": sym, "type": "loss_streak", "reason": reason}
                     )
                     _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
@@ -168,7 +168,7 @@ async def execute_trade(
                 )
                 if not allowed:
                     await bus.publish(
-                        EVT.BUDGET_EXCEEDED, {"symbol": sym, "type": "max_drawdown", "reason": reason}
+                        events_topics.BUDGET_EXCEEDED, {"symbol": sym, "type": "max_drawdown", "reason": reason}
                     )
                     _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
                     return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
@@ -191,7 +191,7 @@ async def execute_trade(
                 mid = (bid + ask) / 2
                 spread_pct = (ask - bid) / mid * dec("100")
                 if spread_pct > limit_spread:
-                    await bus.publish(EVT.TRADE_BLOCKED, {"symbol": sym, "reason": "spread"})
+                    await bus.publish(events_topics.TRADE_BLOCKED, {"symbol": sym, "reason": "spread"})
                     _log.warning(
                         "trade_blocked_spread",
                         extra={
@@ -214,7 +214,7 @@ async def execute_trade(
             recent_count = storage.trades.count_orders_last_minutes(sym, 5)
             if recent_count >= cfg.max_orders_5m:
                 await bus.publish(
-                    EVT.BUDGET_EXCEEDED,
+                    events_topics.BUDGET_EXCEEDED,
                     {
                         "symbol": sym,
                         "type": "max_orders_5m",
@@ -241,7 +241,7 @@ async def execute_trade(
             current_turnover = storage.trades.daily_turnover_quote(sym)
             if current_turnover >= max_turnover:
                 await bus.publish(
-                    EVT.BUDGET_EXCEEDED,
+                    events_topics.BUDGET_EXCEEDED,
                     {
                         "symbol": sym,
                         "type": "max_turnover_day",
@@ -279,7 +279,7 @@ async def execute_trade(
     except Exception:  # noqa: BLE001
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
-            await bus.publish(EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
+            await bus.publish(events_topics.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
         except Exception:  # noqa: BLE001
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
@@ -300,7 +300,7 @@ async def execute_trade(
     # ---- Publish execution event ----
     try:
         await bus.publish(
-            EVT.TRADE_COMPLETED,
+            events_topics.TRADE_COMPLETED,
             {
                 "symbol": sym,
                 "side": act,

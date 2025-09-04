@@ -193,7 +193,7 @@ class TelegramBotCommands:
         for k in ("state", "open_orders", "position", "last_signal", "last_trade_at"):
             if k in st:
                 v = st[k]
-                if isinstance(v, (dict, list)):
+                if isinstance(v, dict | list):
                     v = str(v)
                 lines.append(f"- {k}: <code>{html.escape(str(v))}</code>")
         await self._reply(chat_id, "\n".join(lines))

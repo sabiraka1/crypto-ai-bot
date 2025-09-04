@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as events_topics
 from crypto_ai_bot.core.application.ports import BrokerPort, EventBusPort, OrderLike
 from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
@@ -76,7 +76,7 @@ class PartialFillHandler:
                 )
 
             await self.bus.publish(
-                EVT.TRADE_PARTIAL_FOLLOWUP,
+                events_topics.TRADE_PARTIAL_FOLLOWUP,
                 {
                     "parent_client_order_id": base_client_id,
                     "follow_client_order_id": getattr(follow, "client_order_id", ""),
@@ -87,7 +87,7 @@ class PartialFillHandler:
             )
             inc("partial_followup_total", symbol=symbol, side=side)
             return cast(OrderLike, follow)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _log.error("partial_followup_failed", extra={"error": str(exc)})
             inc("partial_followup_errors_total")
             return None
@@ -197,7 +197,7 @@ async def settle_orders(
             # settled event
             try:
                 await bus.publish(
-                    EVT.TRADE_SETTLED,
+                    events_topics.TRADE_SETTLED,
                     {
                         "symbol": symbol,
                         "side": side,
@@ -219,7 +219,7 @@ async def settle_orders(
         if age_sec > timeout_sec and ratio < min_ratio_for_ok:
             try:
                 await bus.publish(
-                    EVT.TRADE_SETTLEMENT_TIMEOUT,
+                    events_topics.TRADE_SETTLEMENT_TIMEOUT,
                     {
                         "symbol": symbol,
                         "side": side,

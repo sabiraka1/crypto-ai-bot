@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from crypto_ai_bot.app.adapters.telegram import TelegramAlerts
-from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as events_topics  # noqa: N812
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -60,8 +60,9 @@ def _t(lang: str, key: str, **kw: str) -> str:
     lang = (lang or "en").lower()
     if lang not in L:
         lang = "en"
-    tpl = L[lang].get(key, L["en"].get(key, key))
+    tpl = L[lang].get(key, l10n["en"].get(key, key))
     return tpl.format(**kw)
+# noqa: C901
 
 
 def attach_alerts(bus: Any, settings: Any) -> None:
@@ -115,7 +116,7 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
         s = evt.get("symbol", "")
         b = evt.get("exchange", "")
-        l = evt.get("local", "")
+        local_ = evt.get('local', '')
         await _send(f"🧮 <b>RECONCILE</b> {s}\nexchange: <code>{b}</code>\nlocal: <code>{l}</code>")
 
     async def on_dms_triggered(evt: dict[str, Any]) -> None:
@@ -223,20 +224,20 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         await _send("\n".join(lines))
 
     for topic, handler in [
-        (EVT.ORCH_AUTO_PAUSED, on_auto_paused),
-        (EVT.ORCH_AUTO_RESUMED, on_auto_resumed),
-        (EVT.RECONCILE_POSITION_MISMATCH, on_pos_mm),
-        (EVT.DMS_TRIGGERED, on_dms_triggered),
-        (EVT.DMS_SKIPPED, on_dms_skipped),
-        (EVT.TRADE_COMPLETED, on_trade_completed),
-        (EVT.TRADE_FAILED, on_trade_failed),
-        (EVT.TRADE_SETTLED, on_settled),
-        (EVT.TRADE_SETTLEMENT_TIMEOUT, on_settlement_timeout),
-        (EVT.BUDGET_EXCEEDED, on_budget_exceeded),
-        (EVT.TRADE_BLOCKED, on_trade_blocked),
-        (EVT.BROKER_ERROR, on_broker_error),
-        (EVT.HEALTH_REPORT, on_health_report),
-        (EVT.ALERTS_ALERTMANAGER, on_alertmanager),
+        (events_topics.ORCH_AUTO_PAUSED, on_auto_paused),
+        (events_topics.ORCH_AUTO_RESUMED, on_auto_resumed),
+        (events_topics.RECONCILE_POSITION_MISMATCH, on_pos_mm),
+        (events_topics.DMS_TRIGGERED, on_dms_triggered),
+        (events_topics.DMS_SKIPPED, on_dms_skipped),
+        (events_topics.TRADE_COMPLETED, on_trade_completed),
+        (events_topics.TRADE_FAILED, on_trade_failed),
+        (events_topics.TRADE_SETTLED, on_settled),
+        (events_topics.TRADE_SETTLEMENT_TIMEOUT, on_settlement_timeout),
+        (events_topics.BUDGET_EXCEEDED, on_budget_exceeded),
+        (events_topics.TRADE_BLOCKED, on_trade_blocked),
+        (events_topics.BROKER_ERROR, on_broker_error),
+        (events_topics.HEALTH_REPORT, on_health_report),
+        (events_topics.ALERTS_ALERTMANAGER, on_alertmanager),
     ]:
         _sub(topic, handler)
 
