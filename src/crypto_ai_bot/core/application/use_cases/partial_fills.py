@@ -42,8 +42,8 @@ class PartialFillHandler:
 
     async def handle(self, order: OrderLike, broker: BrokerPort) -> OrderLike | None:
         """
-        Если частично исполнилось меньше 95% — добиваем остаток по рынку.
-        Для buy amount трактуем как quote, для sell — как base (как в текущей модели).
+        If partially filled < 95% - fill remainder at market.
+        For buy amount treat as quote, for sell - as base (as in current model).
         """
         try:
             filled = _dec(getattr(order, "filled", 0))
@@ -58,7 +58,7 @@ class PartialFillHandler:
             symbol = getattr(order, "symbol", "") or ""
             side = (getattr(order, "side", "") or "").lower()
             base_client_id = getattr(order, "client_order_id", "") or ""
-            # чтобы не зациклиться, follow-up создаём один раз
+            # Prevent cycling - create follow-up only once
             if base_client_id.endswith("-pf"):
                 return None
 
@@ -101,21 +101,19 @@ async def settle_orders(
     settings: Any,
 ) -> None:
     """
-    Обходит открытые ордера по symbol, тянет фактический статус с биржи,
-    обновляет локальное состояние, делает follow-up при частичном исполнении,
-    и шлёт события/метрики.
+    Iterate through open orders by symbol, fetch actual status from exchange,
+    update local state, handle follow-up on partial fills,
+    and send events/metrics.
 
-    Требования к storage:
+    Storage requirements:
       - storage.orders.list_open(symbol) -> list[dict]
       - storage.orders.mark_closed(broker_order_id, filled)
-      - storage.orders.update_progress(broker_order_id, filled)   # добавлено в репозиторий
-      - storage.trades.add_from_order(order)                      # best-effort
+      - storage.orders.update_progress(broker_order_id, filled)
+      - storage.trades.add_from_order(order)  # best-effort
     """
-    # Защитные дефолты — чтобы не падать на пустых ENV/настройках
+    # Protective defaults for empty ENV/settings
     timeout_sec = int(getattr(settings, "SETTLEMENT_TIMEOUT_SEC", 300) or 300)
-    min_ratio_for_ok = dec(
-        "0.999"
-    )  # почти полное исполнение «ок» при закрытии
+    min_ratio_for_ok = dec("0.999")  # Almost complete fill is "ok" when closing
 
     try:
         open_rows = storage.orders.list_open(symbol) or []
@@ -141,7 +139,7 @@ async def settle_orders(
         except Exception:
             pass
 
-        # 1) Тянем фактический статус с биржи
+        # 1) Fetch actual status from exchange
         fetched = None
         try:
             if broker_order_id:
@@ -160,13 +158,13 @@ async def settle_orders(
             inc("settle_fetch_order_errors_total", symbol=symbol)
             continue
 
-        # 2) Синхронизируем прогресс (filled) и статус
+        # 2) Synchronize progress (filled) and status
         filled = _dec(getattr(fetched, "filled", row.get("filled") if isinstance(row, dict) else "0"))
         amount = _dec(getattr(fetched, "amount", row.get("amount") if isinstance(row, dict) else "0"))
         status = getattr(fetched, "status", row.get("status") if isinstance(row, dict) else "open")
         ratio = _ratio(filled, amount)
 
-        # запишем прогресс filled (не закрывая)
+        # Write progress filled (not closing)
         try:
             if broker_order_id and _is_open(status):
                 storage.orders.update_progress(broker_order_id, str(filled))
@@ -177,7 +175,7 @@ async def settle_orders(
                 exc_info=True,
             )
 
-        # 3) Если ордер закрыт — фиксируем и публикуем событие
+        # 3) If order closed - record and publish event
         if _is_closed(status):
             try:
                 if broker_order_id:
@@ -189,14 +187,14 @@ async def settle_orders(
                     exc_info=True,
                 )
 
-            # best-effort: записать трейд (если ещё не записан)
+            # best-effort: record trade (if not already recorded)
             try:
                 if hasattr(storage, "trades") and hasattr(storage.trades, "add_from_order"):
                     storage.trades.add_from_order(fetched)
             except Exception:
                 _log.error("add_trade_failed", extra={"symbol": symbol}, exc_info=True)
 
-            # событие settled
+            # settled event
             try:
                 await bus.publish(
                     EVT.TRADE_SETTLED,
@@ -217,7 +215,7 @@ async def settle_orders(
 
             continue
 
-        # 4) Если ордер подвис слишком долго — шлём таймаут (не закрывая)
+        # 4) If order hung too long - send timeout (not closing)
         if age_sec > timeout_sec and ratio < min_ratio_for_ok:
             try:
                 await bus.publish(
@@ -237,7 +235,7 @@ async def settle_orders(
             except Exception:
                 _log.error("publish_trade_settlement_timeout_failed", extra={"symbol": symbol}, exc_info=True)
 
-        # 5) Если частично исполнен — пробуем догнать остаток по рынку
+        # 5) If partially filled - try to fill remainder at market
         try:
             if ratio > dec("0") and ratio < dec("0.95"):
                 await pfh.handle(cast(OrderLike, fetched), broker)
