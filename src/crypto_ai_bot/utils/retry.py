@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 import random
@@ -19,19 +20,22 @@ async def async_retry(
             return await func()
         except Exception as e:
             last_exc = e
+            # capped exponential backoff
             delay = min(max_delay, base_delay * (2 ** attempt))
             if jitter:
-                delay *= (0.5 + random.random(\))  # noqa: S311
+                delay *= (0.5 + random.random())  # noqa: S311
             await asyncio.sleep(delay)
     if last_exc:
         raise last_exc
 
-# Сµ Сє  http_client
+
+# keep http_client helpers for convenience (late import)
 from crypto_ai_bot.utils.http_client import aget, apost  # noqa: E402
 
 
 async def aget_retry(*args: Any, **kwargs: Any) -> Any:
     return await async_retry(lambda: aget(*args, **kwargs))
+
 
 async def apost_retry(*args: Any, **kwargs: Any) -> Any:
     return await async_retry(lambda: apost(*args, **kwargs))
