@@ -15,12 +15,12 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-async def _ping(url: str, timeout: float) -> bool:  # noqa: ASYNC109
+async def _ping(url: str, timeout: float) -> bool:
     try:
         resp = await aget(url, timeout=timeout)
         _log.info("smoke_ping", extra={"url": url, "status": resp.status_code})
         return resp.status_code == 200
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("smoke_ping_failed", extra={"url": url}, exc_info=True)
         return False
 
@@ -30,7 +30,7 @@ def _import_ok(module: str) -> bool:
         importlib.import_module(module)
         _log.info("import_ok", extra={"module": module})
         return True
-    except Exception:  # noqa: BLE001
+    except ImportError:
         _log.error("import_failed", extra={"module": module}, exc_info=True)
         return False
 
@@ -41,14 +41,14 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=float(_env("HTTP_TIMEOUT_SEC", "30")))
     args = parser.parse_args()
 
-    # 1) ѵ
+    # 1) Check imports
     ok = True
     ok &= _import_ok("crypto_ai_bot.app.server")
     ok &= _import_ok("crypto_ai_bot.app.compose")
     ok &= _import_ok("crypto_ai_bot.core.infrastructure.events.bus")
     ok &= _import_ok("crypto_ai_bot.core.infrastructure.events.redis_bus")
 
-    # 2) Ѹѽѹ HTTP-
+    # 2) Optional HTTP ping
     if args.url:
         ok &= asyncio.run(_ping(args.url, args.timeout))
 

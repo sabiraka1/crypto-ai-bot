@@ -18,7 +18,6 @@ from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
 from crypto_ai_bot.core.infrastructure.storage.facade import StorageFacade
 from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import SQLiteAdapter
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import inc
 
 _log = get_logger("compose")
 
@@ -177,7 +176,7 @@ def _create_orchestrators(
 
 
 # ----------------------------- Telegram integration -----------------------------
-def _setup_telegram(bus: UnifiedEventBus, settings: Any, storage: StorageFacade) -> None:
+def _setup_telegram(bus: UnifiedEventBus, settings: Any) -> None:
     """Setup Telegram integrations if enabled."""
     if not int(getattr(settings, "TELEGRAM_ENABLED", 0)):
         _log.info("telegram.disabled")
@@ -230,7 +229,7 @@ async def build_container_async() -> AppContainer:
     orchestrators = _create_orchestrators(settings, storage, broker, bus, risk, exits, health, dms)
 
     # Setup Telegram if enabled
-    _setup_telegram(bus, settings, storage)
+    _setup_telegram(bus, settings)  # Убрали неиспользуемый аргумент storage
 
     # Auto-start orchestrators if configured
     if int(getattr(settings, "TRADER_AUTOSTART", 0)):

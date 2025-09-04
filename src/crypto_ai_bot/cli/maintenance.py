@@ -104,21 +104,21 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    cmd = args.cmd
+    command = args.cmd  # Переименовали cmd в command
 
-    if cmd == "backup":
+    if command == "backup":
         _backup(settings.DB_PATH)
         return 0
-    if cmd == "rotate":
+    if command == "rotate":
         _rotate(args.days)
         return 0
-    if cmd == "vacuum":
+    if command == "vacuum":
         _vacuum(settings.DB_PATH)
         return 0
-    if cmd == "integrity":
+    if command == "integrity":
         _integrity(settings.DB_PATH)
         return 0
-    if cmd == "list":
+    if command == "list":
         _list()
         return 0
 

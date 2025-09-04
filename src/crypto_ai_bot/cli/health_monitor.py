@@ -16,7 +16,7 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
-async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:  # noqa: ASYNC109
+async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:
     try:
         resp = await aget(url, timeout=timeout)
         return {
@@ -27,12 +27,12 @@ async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:  # noqa: AS
                 resp.json() if resp.headers.get("content-type", "").startswith("application/json") else None
             ),
         }
-    except Exception:  # noqa: BLE001
+    except Exception:
         _log.error("health_fetch_failed", extra={"url": url}, exc_info=True)
         return {"status_code": 0, "ok": False, "text": "", "json": None}
 
 
-async def _oneshot(url: str, timeout: float) -> int:  # noqa: ASYNC109
+async def _oneshot(url: str, timeout: float) -> int:
     res = await _fetch_health(url, timeout)
     pretty = res.get("json") or res.get("text")
     try:
@@ -41,21 +41,20 @@ async def _oneshot(url: str, timeout: float) -> int:  # noqa: ASYNC109
             if isinstance(pretty, dict | list)
             else str(pretty)
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         out = str(pretty)
     print(out)
     return 0 if res.get("ok") else 1
 
 
-async def _watch(url: str, timeout: float, interval: float) -> int:  # noqa: ASYNC109
+async def _watch(url: str, timeout: float, interval: float) -> int:
     while True:
         code = await _oneshot(url, timeout)
         await asyncio.sleep(max(0.5, interval))
         if code != 0:
-            # Ѿ ю,  ѵ ѵѿѵ
             _log.warning("health_not_ok", extra={"url": url})
-    # сѸ
-    # return 0
+    # Never reached in normal operation
+    return 0
 
 
 def main() -> None:
@@ -68,12 +67,12 @@ def main() -> None:
 
     if args.oneshot:
         raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
-        # ѽ ю
-        try:
-            asyncio.run(_watch(args.url, args.timeout, args.interval))
-        except KeyboardInterrupt:
-            print("\nstopped by user")
-            raise SystemExit(0) from None
+    
+    try:
+        asyncio.run(_watch(args.url, args.timeout, args.interval))
+    except KeyboardInterrupt:
+        print("\nstopped by user")
+        raise SystemExit(0) from None
 
 
 if __name__ == "__main__":

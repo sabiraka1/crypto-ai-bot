@@ -87,7 +87,6 @@ async def execute_trade(
     _idempotency_bucket_ms: int = 60000,
     idempotency_ttl_sec: int = 3600,
     risk_manager: RiskManager | None = None,
-    protective_exits: Any | None = None,
 ) -> dict[str, Any]:
     """
     Unified path for executing a trade (buy/sell) with idempotency, risk-guards,
