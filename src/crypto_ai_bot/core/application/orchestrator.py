@@ -89,6 +89,7 @@ class Orchestrator:
             if not spec.enabled:
                 continue
             spec.task = asyncio.create_task(self._loop_runner(spec))
+
         payload = {"symbol": self.symbol, "reason": "start"}
         cid = get_cid()
         if cid:
@@ -102,6 +103,7 @@ class Orchestrator:
                 spec.task.cancel()
         self._started = False
         self._paused = False
+
         payload = {"symbol": self.symbol, "reason": "stop"}
         cid = get_cid()
         if cid:
@@ -113,6 +115,7 @@ class Orchestrator:
         if not self._started or self._paused:
             return
         self._paused = True
+
         payload = {"symbol": self.symbol, "reason": "manual"}
         cid = get_cid()
         if cid:
@@ -124,6 +127,7 @@ class Orchestrator:
         if not self._started or not self._paused:
             return
         self._paused = False
+
         payload = {"symbol": self.symbol, "reason": "manual"}
         cid = get_cid()
         if cid:
@@ -174,58 +178,38 @@ class Orchestrator:
     # Concrete loops
     # ---------------------------
     async def _eval_loop(self) -> None:
-        try:
-            from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
+        from crypto_ai_bot.core.application.use_cases.eval_and_execute import eval_and_execute
 
-            await eval_and_execute(
-                symbol=self.symbol,
-                storage=self.storage,
-                broker=self.broker,
-                bus=self.bus,
-                risk=self.risk,
-                exits=self.exits,
-                settings=self.settings,
-            )
-        except Exception as exc:
-            _log.error("eval_loop_error", extra={"error": str(exc)})
-            raise
+        await eval_and_execute(
+            symbol=self.symbol,
+            storage=self.storage,
+            broker=self.broker,
+            bus=self.bus,
+            risk=self.risk,
+            exits=self.exits,
+            settings=self.settings,
+        )
 
     async def _exits_loop(self) -> None:
-        try:
-            await self.exits.tick(self.symbol)
-        except Exception as exc:
-            _log.error("exits_loop_error", extra={"error": str(exc)})
-            raise
+        await self.exits.tick(self.symbol)
 
     async def _reconcile_loop(self) -> None:
-        try:
-            from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances
-            from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
+        from crypto_ai_bot.core.application.reconciliation.balances import reconcile_balances
+        from crypto_ai_bot.core.application.reconciliation.positions import reconcile_positions
 
-            await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, self.settings)
-            await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, self.settings)
-        except Exception as exc:
-            _log.error("reconcile_loop_error", extra={"error": str(exc)})
-            raise
+        await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, self.settings)
+        await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, self.settings)
 
     async def _watchdog_loop(self) -> None:
-        try:
-            await self.health.tick(self.symbol, dms=self.dms)
-        except Exception as exc:
-            _log.error("watchdog_loop_error", extra={"error": str(exc)})
-            raise
+        await self.health.tick(self.symbol, dms=self.dms)
 
     async def _settlement_loop(self) -> None:
-        try:
-            from crypto_ai_bot.core.application.use_cases.partial_fills import settle_orders
+        from crypto_ai_bot.core.application.use_cases.partial_fills import settle_orders
 
-            await settle_orders(self.symbol, self.storage, self.broker, self.bus, self.settings)
-        except Exception as exc:
-            _log.error("settlement_loop_error", extra={"error": str(exc)})
-            raise
+        await settle_orders(self.symbol, self.storage, self.broker, self.bus, self.settings)
 
     # ---------------------------
-    # One-shot business step (evaluate → risk/execute → exits → reconcile → watchdog [+ settlement])
+    # One-shot business step (simplified)
     # ---------------------------
     async def run_once(self) -> dict[str, Any]:
         loop = asyncio.get_event_loop()
@@ -248,18 +232,17 @@ class Orchestrator:
                     settings=s,
                 )
                 inc("orchestrator_step_ok_total", step="eval_and_execute", symbol=self.symbol)
-                await self.bus.publish("trade.execute.done", {"symbol": self.symbol})
+                await self.bus.publish(EVT.TRADE_COMPLETED, {"symbol": self.symbol})
             except Exception as exc:
                 _log.error("run_once_eval_execute_failed", extra={"error": str(exc)})
                 inc("orchestrator_step_failed_total", step="eval_and_execute", symbol=self.symbol)
-                await self.bus.publish("trade.execute.failed", {"symbol": self.symbol, "error": str(exc)})
+                await self.bus.publish(EVT.TRADE_FAILED, {"symbol": self.symbol, "error": str(exc)})
 
             # 2) protective_exits
             if getattr(s, "EXITS_ENABLED", False):
                 try:
                     await self.exits.tick(self.symbol)
                     inc("orchestrator_step_ok_total", step="protective_exits", symbol=self.symbol)
-                    await self.bus.publish("trade.protective_exits.done", {"symbol": self.symbol})
                 except Exception as exc:
                     _log.error("run_once_exits_failed", extra={"error": str(exc)})
                     inc("orchestrator_step_failed_total", step="protective_exits", symbol=self.symbol)
@@ -273,7 +256,7 @@ class Orchestrator:
                     await reconcile_positions(self.symbol, self.storage, self.broker, self.bus, s)
                     await reconcile_balances(self.symbol, self.storage, self.broker, self.bus, s)
                     inc("orchestrator_step_ok_total", step="reconcile", symbol=self.symbol)
-                    await self.bus.publish("trade.reconcile.done", {"symbol": self.symbol})
+                    await self.bus.publish(EVT.RECONCILIATION_COMPLETED, {"symbol": self.symbol})
                 except Exception as exc:
                     _log.error("run_once_reconcile_failed", extra={"error": str(exc)})
                     inc("orchestrator_step_failed_total", step="reconcile", symbol=self.symbol)
@@ -283,7 +266,7 @@ class Orchestrator:
                 try:
                     await self.health.tick(self.symbol, dms=self.dms)
                     inc("orchestrator_step_ok_total", step="watchdog", symbol=self.symbol)
-                    await self.bus.publish("trade.watchdog.done", {"symbol": self.symbol})
+                    await self.bus.publish(EVT.WATCHDOG_HEARTBEAT, {"symbol": self.symbol})
                 except Exception as exc:
                     _log.error("run_once_watchdog_failed", extra={"error": str(exc)})
                     inc("orchestrator_step_failed_total", step="watchdog", symbol=self.symbol)
@@ -295,7 +278,7 @@ class Orchestrator:
 
                     await settle_orders(self.symbol, self.storage, self.broker, self.bus, s)
                     inc("orchestrator_step_ok_total", step="settlement", symbol=self.symbol)
-                    await self.bus.publish("trade.settlement.done", {"symbol": self.symbol})
+                    await self.bus.publish(EVT.TRADE_SETTLED, {"symbol": self.symbol})
                 except Exception as exc:
                     _log.error("run_once_settlement_failed", extra={"error": str(exc)})
                     inc("orchestrator_step_failed_total", step="settlement", symbol=self.symbol)

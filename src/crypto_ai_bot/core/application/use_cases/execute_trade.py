@@ -128,59 +128,51 @@ async def execute_trade(
     )
 
     # ---- Optional rule: loss streak (soft dependency) ----
-    try:
-        if getattr(settings, "RISK_USE_LOSS_STREAK", 0):
-            try:
-                from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
+    if getattr(settings, "RISK_USE_LOSS_STREAK", 0):
+        try:
+            from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakRule
 
-                max_streak = int(getattr(settings, "RISK_LOSS_STREAK_MAX", 3) or 3)
-                lookback = int(getattr(settings, "RISK_LOSS_STREAK_LOOKBACK", 10) or 10)
-                ls_rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)
-                trades = await _recent_trades(storage, sym, n=max(lookback, 10))
-                allowed, reason = ls_rule.check(trades)
-                if not allowed:
-                    await bus.publish(
-                        EVT.BUDGET_EXCEEDED,
-                        {"symbol": sym, "type": "loss_streak", "reason": reason},
-                    )
-                    _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
-                    return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
-            except ImportError:
-                _log.debug("loss_streak_rule_not_available")
-    except Exception:
-        _log.error("loss_streak_check_failed", extra={"symbol": sym}, exc_info=True)
+            max_streak = int(getattr(settings, "RISK_LOSS_STREAK_MAX", 3) or 3)
+            lookback = int(getattr(settings, "RISK_LOSS_STREAK_LOOKBACK", 10) or 10)
+            ls_rule = LossStreakRule(max_streak=max_streak, lookback_trades=lookback)
+            trades = await _recent_trades(storage, sym, n=max(lookback, 10))
+            allowed, reason = ls_rule.check(trades)
+            if not allowed:
+                await bus.publish(
+                    EVT.BUDGET_EXCEEDED,
+                    {"symbol": sym, "type": "loss_streak", "reason": reason},
+                )
+                _log.warning("trade_blocked_loss_streak", extra={"symbol": sym, "reason": reason})
+                return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+        except ImportError:
+            _log.debug("loss_streak_rule_not_available")
 
     # ---- Optional rule: max drawdown / daily loss (soft dependency) ----
-    try:
-        if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0):
-            try:
-                from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
+    if getattr(settings, "RISK_USE_MAX_DRAWDOWN", 0):
+        try:
+            from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownRule
 
-                max_dd = dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", "10.0") or "10.0"))
-                max_daily = dec(str(getattr(settings, "RISK_MAX_DAILY_LOSS_QUOTE", "0") or "0"))
-                md_rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)
+            max_dd = dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", "10.0") or "10.0"))
+            max_daily = dec(str(getattr(settings, "RISK_MAX_DAILY_LOSS_QUOTE", "0") or "0"))
+            md_rule = MaxDrawdownRule(max_drawdown_pct=max_dd, max_daily_loss_quote=max_daily)
 
-                balances = await _balances_series(
-                    storage, sym, limit=int(getattr(settings, "RISK_BALS_LOOKBACK", 48) or 48)
+            balances = await _balances_series(
+                storage, sym, limit=int(getattr(settings, "RISK_BALS_LOOKBACK", 48) or 48)
+            )
+            current = balances[-1] if balances else dec("0")
+            peak = max(balances) if balances else dec("0")
+            daily_pnl = await _daily_pnl_quote(storage, sym)
+
+            allowed, reason = md_rule.check(current_balance=current, peak_balance=peak, daily_pnl=daily_pnl)
+            if not allowed:
+                await bus.publish(
+                    EVT.BUDGET_EXCEEDED,
+                    {"symbol": sym, "type": "max_drawdown", "reason": reason},
                 )
-                current = balances[-1] if balances else dec("0")
-                peak = max(balances) if balances else dec("0")
-                daily_pnl = await _daily_pnl_quote(storage, sym)
-
-                allowed, reason = md_rule.check(
-                    current_balance=current, peak_balance=peak, daily_pnl=daily_pnl
-                )
-                if not allowed:
-                    await bus.publish(
-                        EVT.BUDGET_EXCEEDED,
-                        {"symbol": sym, "type": "max_drawdown", "reason": reason},
-                    )
-                    _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
-                    return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
-            except ImportError:
-                _log.debug("max_drawdown_rule_not_available")
-    except Exception:
-        _log.error("drawdown_check_failed", extra={"symbol": sym}, exc_info=True)
+                _log.warning("trade_blocked_max_drawdown", extra={"symbol": sym, "reason": reason})
+                return {"action": "skip", "executed": False, "why": f"blocked: {reason}"}
+        except ImportError:
+            _log.debug("max_drawdown_rule_not_available")
 
     # ---- Pre-flight: spread guard ----
     try:
@@ -192,8 +184,8 @@ async def execute_trade(
     if limit_spread > dec("0"):
         try:
             t = await broker.fetch_ticker(sym)
-            bid = dec(str(getattr(t, "bid", t.get("bid", "0")) or "0"))
-            ask = dec(str(getattr(t, "ask", t.get("ask", "0")) or "0"))
+            bid = dec(str(t.get("bid", "0")) or "0")
+            ask = dec(str(t.get("ask", "0")) or "0")
             if bid > 0 and ask > 0:
                 mid = (bid + ask) / 2
                 spread_pct = (ask - bid) / mid * dec("100")
@@ -218,22 +210,24 @@ async def execute_trade(
     # ---- Rate limits: orders per 5 minutes ----
     if getattr(cfg, "max_orders_5m", 0) and cfg.max_orders_5m > 0:
         try:
-            recent_count = storage.trades.count_orders_last_minutes(sym, 5)
-            if recent_count >= cfg.max_orders_5m:
-                await bus.publish(
-                    EVT.BUDGET_EXCEEDED,
-                    {
-                        "symbol": sym,
-                        "type": "max_orders_5m",
-                        "count_5m": recent_count,
-                        "limit": cfg.max_orders_5m,
-                    },
-                )
-                _log.warning(
-                    "trade_blocked_max_orders_5m",
-                    extra={"symbol": sym, "count_5m": recent_count, "limit": cfg.max_orders_5m},
-                )
-                return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
+            trades_repo = getattr(storage, "trades", None)
+            if trades_repo and hasattr(trades_repo, "count_orders_last_minutes"):
+                recent_count = trades_repo.count_orders_last_minutes(sym, 5)
+                if recent_count >= cfg.max_orders_5m:
+                    await bus.publish(
+                        EVT.BUDGET_EXCEEDED,
+                        {
+                            "symbol": sym,
+                            "type": "max_orders_5m",
+                            "count_5m": recent_count,
+                            "limit": cfg.max_orders_5m,
+                        },
+                    )
+                    _log.warning(
+                        "trade_blocked_max_orders_5m",
+                        extra={"symbol": sym, "count_5m": recent_count, "limit": cfg.max_orders_5m},
+                    )
+                    return {"action": "skip", "executed": False, "why": "blocked: max_orders_5m"}
         except Exception:
             _log.error("orders_rate_check_failed", extra={"symbol": sym}, exc_info=True)
 
@@ -247,22 +241,24 @@ async def execute_trade(
 
     if max_turnover > dec("0"):
         try:
-            current_turnover = storage.trades.daily_turnover_quote(sym)
-            if current_turnover >= max_turnover:
-                await bus.publish(
-                    EVT.BUDGET_EXCEEDED,
-                    {
-                        "symbol": sym,
-                        "type": "max_turnover_day",
-                        "turnover": str(current_turnover),
-                        "limit": str(max_turnover),
-                    },
-                )
-                _log.warning(
-                    "trade_blocked_max_turnover_day",
-                    extra={"symbol": sym, "turnover": str(current_turnover), "limit": str(max_turnover)},
-                )
-                return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
+            trades_repo = getattr(storage, "trades", None)
+            if trades_repo and hasattr(trades_repo, "daily_turnover_quote"):
+                current_turnover = trades_repo.daily_turnover_quote(sym)
+                if current_turnover >= max_turnover:
+                    await bus.publish(
+                        EVT.BUDGET_EXCEEDED,
+                        {
+                            "symbol": sym,
+                            "type": "max_turnover_day",
+                            "turnover": str(current_turnover),
+                            "limit": str(max_turnover),
+                        },
+                    )
+                    _log.warning(
+                        "trade_blocked_max_turnover_day",
+                        extra={"symbol": sym, "turnover": str(current_turnover), "limit": str(max_turnover)},
+                    )
+                    return {"action": "skip", "executed": False, "why": "blocked: max_turnover_day"}
         except Exception:
             _log.error("turnover_check_failed", extra={"symbol": sym}, exc_info=True)
 
@@ -285,10 +281,10 @@ async def execute_trade(
             )
         else:
             return {"action": "skip", "executed": False, "reason": "invalid_side"}
-    except Exception:
+    except Exception as exc:
         _log.error("execute_trade_failed", extra={"symbol": sym, "side": act}, exc_info=True)
         try:
-            await bus.publish(EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": "broker_exception"})
+            await bus.publish(EVT.TRADE_FAILED, {"symbol": sym, "side": act, "error": str(exc)})
         except Exception:
             _log.error("publish_trade_failed_event_failed", extra={"symbol": sym}, exc_info=True)
         return {"action": act, "executed": False, "reason": "broker_exception"}
@@ -308,12 +304,13 @@ async def execute_trade(
 
     # ---- Publish execution event ----
     try:
+        order_id = getattr(order, "id", None) or getattr(order, "order_id", "")
         await bus.publish(
             EVT.TRADE_COMPLETED,
             {
                 "symbol": sym,
                 "side": act,
-                "order_id": getattr(order, "id", "") or getattr(order, "order_id", ""),
+                "order_id": str(order_id),
                 "amount": str(getattr(order, "amount", "")),
                 "price": str(getattr(order, "price", "")),
                 "cost": str(getattr(order, "cost", "")),
