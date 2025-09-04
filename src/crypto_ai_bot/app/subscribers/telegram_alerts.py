@@ -15,52 +15,49 @@ _log = get_logger("subscribers.telegram")
 def _t(lang: str, key: str, **kw: str) -> str:
     L = {
         "en": {
-            "ORCH_PAUSED": "⏸️ <b>PAUSED</b> {symbol} (auto)",
-            "ORCH_RESUMED": "▶️ <b>RESUMED</b> {symbol} (auto)",
-            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nDrop: <code>{drop_pct}%</code>",
-            "DMS_SKIPPED": "ℹ️ <b>DMS SKIPPED</b> {symbol}",
-            "TRADE_COMPLETED": "💹 <b>TRADE</b> {symbol} {side}\nAmt: <code>{amount}</code> @ <code>{price}</code>\nCost: <code>{cost}</code> Fee: <code>{fee}</code>",
-            "TRADE_FAILED": "❌ <b>TRADE FAILED</b> {symbol}\n<code>{error}</code>",
-            "TRADE_SETTLED": "✅ <b>SETTLED</b> {symbol} {side} id=<code>{order_id}</code>",
-            "SETTLEMENT_TIMEOUT": "⏱️ <b>SETTLEMENT TIMEOUT</b> {symbol} id=<code>{order_id}</code>",
-            "BUDGET_BLOCK": "⏳ <b>RISK/BUDGET BLOCK</b> {symbol}\n{detail}",
-            "RISK_BLOCKED": "⛔ <b>RISK/BLOCKED</b> {symbol}\nReason: <code>{reason}</code>",
-            "BROKER_ERROR": "⚠️ <b>BROKER ERROR</b> {symbol}\n<code>{error}</code>",
-            "HEALTH_FAIL": "🩻 <b>HEALTH FAIL</b>\n<code>{summary}</code>",
-        },
-        "ru": {
-            "ORCH_PAUSED": "⏸️ <b>ПАУЗА</b> {symbol} (авто)",
-            "ORCH_RESUMED": "▶️ <b>ВОЗОБНОВЛЕНО</b> {symbol} (авто)",
-            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nПадение: <code>{drop_pct}%</code>",
-            "DMS_SKIPPED": "ℹ️ <b>DMS ПРОПУЩЕН</b> {symbol}",
-            "TRADE_COMPLETED": "💹 <b>СДЕЛКА</б> {symbol} {side}\nКол-во: <code>{amount}</code> @ <code>{price}</code>\nСтоимость: <code>{cost}</code> Комиссия: <code>{fee}</code>",
-            "TRADE_FAILED": "❌ <b>ОШИБКА СДЕЛКИ</b> {symbol}\n<code>{error}</code>",
-            "TRADE_SETTLED": "✅ <b>ЗАВЕРШЕНО</b> {symbol} {side} id=<code>{order_id}</code>",
-            "SETTLEMENT_TIMEOUT": "⏱️ <b>ТАЙМАУТ ЗАВЕРШЕНИЯ</b> {symbol} id=<code>{order_id}</code>",
-            "BUDGET_BLOCK": "⏳ <b>РИСК/БЮДЖЕТ БЛОК</b> {symbol}\n{detail}",
-            "RISK_BLOCKED": "⛔ <b>РИСК/БЛОК</b> {symbol}\nПричина: <code>{reason}</code>",
-            "BROKER_ERROR": "⚠️ <b>ОШИБКА БРОКЕРА</b> {symbol}\n<code>{error}</code>",
-            "HEALTH_FAIL": "🩻 <b>НЕЗДОРОВО</b>\n<code>{summary}</code>",
+            "orch_paused": "Auto trading has been *paused* for {symbol}. Reason: {reason}",
+            "orch_resumed": "Auto trading has been *resumed* for {symbol}.",
+            "trade_ok": "✅ Trade completed for {symbol}: {side} {quote} {quote_ccy}",
+            "trade_fail": "❌ Trade failed for {symbol}. Reason: {reason}",
+            "risk_blocked": "⛔ Trade blocked by risk rule: {rule}",
+            "budget_exceeded": "⛔ Budget exceeded. Daily PnL: {pnl} {ccy}",
+            "broker_error": "⚠️ Broker error: {msg}",
+            "health": "❤️ Health: price={price} spread={spread} spread%={spread_pct}",
+            "dms_triggered": "🛑 DMS TRIGGERED for {symbol}. Prev={prev}, Last={last}",
+            "dms_skipped": "ℹ️ DMS skipped for {symbol}. Prev={prev}, Last={last}",
+            "alerts_forwarded": "📣 Alert forwarded: {labels}",
         },
         "tr": {
-            "ORCH_PAUSED": "⏸️ <b>DURAKLATILDI</b> {symbol} (otomatik)",
-            "ORCH_RESUMED": "▶️ <b>DEVAM</b> {symbol} (otomatik)",
-            "DMS_TRIGGERED": "🛑 <b>DMS</b> {symbol}\nDüşüş: <code>{drop_pct}%</code>",
-            "DMS_SKIPPED": "ℹ️ <b>DMS ATLANDI</b> {symbol}",
-            "TRADE_COMPLETED": "💹 <b>İŞLEM</b> {symbol} {side}\nMiktar: <code>{amount}</code> @ <code>{price}</code>\nTutar: <code>{cost}</code> Ücret: <code>{fee}</code>",
-            "TRADE_FAILED": "❌ <b>İŞLEM HATASI</b> {symbol}\n<code>{error}</code>",
-            "TRADE_SETTLED": "✅ <b>KAPANDI</b> {symbol} {side} id=<code>{order_id}</code>",
-            "SETTLEMENT_TIMEOUT": "⏱️ <b>KAPANMA ZAMANI AŞIMI</b> {symbol} id=<code>{order_id}</code>",
-            "BUDGET_BLOCK": "⏳ <b>RİSK/BÜTÇE ENGELİ</b> {symbol}\n{detail}",
-            "RISK_BLOCKED": "⛔ <b>RİСК/ENGELLENDİ</b> {symbol}\nNeden: <code>{reason}</code>",
-            "BROKER_ERROR": "⚠️ <b>ARACI HATASI</b> {symbol}\n<code>{error}</code>",
-            "HEALTH_FAIL": "🩻 <b>SAĞLIK SORUNU</b>\n<code>{summary}</code>",
+            "orch_paused": "{symbol} için otomatik işlem *durduruldu*. Neden: {reason}",
+            "orch_resumed": "{symbol} için otomatik işlem *devam ediyor*.",
+            "trade_ok": "✅ İşlem tamamlandı {symbol}: {side} {quote} {quote_ccy}",
+            "trade_fail": "❌ İşlem başarısız {symbol}. Neden: {reason}",
+            "risk_blocked": "⛔ Risk kuralı engelledi: {rule}",
+            "budget_exceeded": "⛔ Bütçe aşıldı. Günlük PnL: {pnl} {ccy}",
+            "broker_error": "⚠️ Broker hatası: {msg}",
+            "health": "❤️ Sağlık: fiyat={price} spread={spread} spread%={spread_pct}",
+            "dms_triggered": "🛑 DMS TETİKLENDİ {symbol}. Önceki={prev}, Son={last}",
+            "dms_skipped": "ℹ️ DMS atlandı {symbol}. Önceki={prev}, Son={last}",
+            "alerts_forwarded": "📣 İleti yönlendirildi: {labels}",
+        },
+        "ru": {
+            "orch_paused": "Автоторговля *приостановлена* для {symbol}. Причина: {reason}",
+            "orch_resumed": "Автоторговля *возобновлена* для {symbol}.",
+            "trade_ok": "✅ Сделка завершена {symbol}: {side} {quote} {quote_ccy}",
+            "trade_fail": "❌ Сделка не выполнена для {symbol}. Причина: {reason}",
+            "risk_blocked": "⛔ Сделка заблокирована правилом риска: {rule}",
+            "budget_exceeded": "⛔ Бюджет превышен. Дневной PnL: {pnl} {ccy}",
+            "broker_error": "⚠️ Ошибка брокера: {msg}",
+            "health": "❤️ Состояние: цена={price} спрэд={spread} спрэд%={spread_pct}",
+            "dms_triggered": "🛑 DMS СРАБОТАЛ для {symbol}. Было={prev}, Стало={last}",
+            "dms_skipped": "ℹ️ DMS пропущен для {symbol}. Было={prev}, Стало={last}",
+            "alerts_forwarded": "📣 Оповещение переслано: {labels}",
         },
     }
     lang = (lang or "en").lower()
     if lang not in L:
         lang = "en"
-    tpl = L[lang].get(key, l10n["en"].get(key, key))
+    tpl = L[lang].get(key, L["en"].get(key, key))
     return tpl.format(**kw)
 
 
@@ -69,178 +66,131 @@ def _t(lang: str, key: str, **kw: str) -> str:
 
 def attach_alerts(bus: Any, settings: Any) -> None:
     """
-    Subscribe EventBus alerts and forward to Telegram.
+    Подписки на события шины и форвардинг в Telegram.
     """
-    tg = TelegramAlerts(
-        bot_token=getattr(settings, "TELEGRAM_BOT_TOKEN", ""),
-        chat_id=getattr(settings, "TELEGRAM_CHAT_ID", ""),
-    )
-    if not tg.enabled():
-        _log.info("telegram_alerts_disabled")
-        return
+    tg = TelegramAlerts(settings=settings)
 
-    # language preference (en/ru/tr)
-    lang = getattr(settings, "TELEGRAM_LANG", getattr(settings, "LANG", "en"))
-
-    async def _send(text: str) -> None:
+    def _lang() -> str:
         try:
-            ok = await tg.send(text)
-            if not ok:
-                _log.warning("telegram_send_not_ok")
-        except Exception:  # noqa: BLE001
-            _log.error("telegram_send_exception", exc_info=True)
+            return str(getattr(settings, "LANG", "en")).lower()
+        except Exception:
+            return "en"
 
-    def _sub(topic: str, coro: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
-        for attr in ("subscribe", "on"):
-            if hasattr(bus, attr):
-                try:
-                    getattr(bus, attr)(topic, coro)
-                    return  # noqa: TRY300
-                except Exception:  # noqa: BLE001
-                    _log.error("bus_subscribe_failed", extra={"topic": topic}, exc_info=True)
-        _log.error("bus_has_no_subscribe_api")
+    # --- Helpers to send messages ---
 
-    # ====== Handlers ======
+    async def _send_text(text: str) -> None:
+        try:
+            await tg.send_text(text)
+            inc("telegram.send_text.ok")
+        except Exception:
+            inc("telegram.send_text.err")
+            _log.exception("telegram_send_text_failed")
 
-    async def on_auto_paused(evt: dict[str, Any]) -> None:
-        inc("orchestrator_auto_paused_total", symbol=evt.get("symbol", ""))
-        s = evt.get("symbol", "")
-        r = evt.get("reason", "")
-        await _send(_t(lang, "ORCH_PAUSED", symbol=s) + (f"\nReason: <code>{r}</code>" if r else ""))
+    async def _send_alert(text: str, labels: dict[str, str] | None = None) -> None:
+        try:
+            await tg.send_text(text)
+            if labels:
+                await tg.send_text(f"Labels: {labels}")
+            inc("telegram.alert.ok")
+        except Exception:
+            inc("telegram.alert.err")
+            _log.exception("telegram_alert_failed")
 
-    async def on_auto_resumed(evt: dict[str, Any]) -> None:
-        inc("orchestrator_auto_resumed_total", symbol=evt.get("symbol", ""))
-        s = evt.get("symbol", "")
-        r = evt.get("reason", "")
-        await _send(_t(lang, "ORCH_RESUMED", symbol=s) + (f"\nReason: <code>{r}</code>" if r else ""))
+    # ----------------------------- Event handlers -----------------------------
 
-    async def on_pos_mm(evt: dict[str, Any]) -> None:
-        inc("reconcile_position_mismatch_total", symbol=evt.get("symbol", ""))
-        s = evt.get("symbol", "")
-        b = evt.get("exchange", "")
-        local_ = evt.get("local", "")
-        await _send(f"🧮 <b>RECONCILE</b> {s}\nexchange: <code>{b}</code>\nlocal: <code>{l}</code>")
+    async def _on_orch_paused(payload: dict[str, Any]) -> None:
+        text = _t(_lang(), "orch_paused", symbol=payload.get("symbol", "?"), reason=payload.get("reason", "n/a"))
+        await _send_text(text)
 
-    async def on_dms_triggered(evt: dict[str, Any]) -> None:
-        inc("dms_triggered_total", symbol=evt.get("symbol", ""))
-        s = evt.get("symbol", "")
-        drop = evt.get("drop_pct")
-        if drop is None:
-            # fallback for old payloads
-            drop = evt.get("amount", "")
-        await _send(_t(lang, "DMS_TRIGGERED", symbol=s, drop_pct=str(drop)))
+    async def _on_orch_resumed(payload: dict[str, Any]) -> None:
+        text = _t(_lang(), "orch_resumed", symbol=payload.get("symbol", "?"))
+        await _send_text(text)
 
-    async def on_dms_skipped(evt: dict[str, Any]) -> None:
-        inc("dms_skipped_total", symbol=evt.get("symbol", ""))
-        await _send(_t(lang, "DMS_SKIPPED", symbol=evt.get("symbol", "")))
-
-    async def on_trade_completed(evt: dict[str, Any]) -> None:
-        inc("trade_completed_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
-        s = evt.get("symbol", "")
-        side = evt.get("side", "")
-        cost = evt.get("cost", "")
-        fee = evt.get("fee_quote", "")
-        price = evt.get("price", "")
-        amt = evt.get("amount", "")
-        await _send(
-            _t(
-                lang,
-                "TRADE_COMPLETED",
-                symbol=s,
-                side=side.upper(),
-                amount=str(amt),
-                price=str(price),
-                cost=str(cost),
-                fee=str(fee),
-            )
+    async def _on_trade_completed(payload: dict[str, Any]) -> None:
+        text = _t(
+            _lang(),
+            "trade_ok",
+            symbol=payload.get("symbol", "?"),
+            side=payload.get("side", "?"),
+            quote=str(payload.get("quote", "0")),
+            quote_ccy=payload.get("quote_ccy", ""),
         )
+        await _send_text(text)
 
-    async def on_trade_failed(evt: dict[str, Any]) -> None:
-        inc("trade_failed_total", symbol=evt.get("symbol", ""), reason=evt.get("error", ""))
-        await _send(_t(lang, "TRADE_FAILED", symbol=evt.get("symbol", ""), error=str(evt.get("error", ""))))
-
-    async def on_settled(evt: dict[str, Any]) -> None:
-        inc("trade_settled_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
-        await _send(
-            _t(
-                lang,
-                "TRADE_SETTLED",
-                symbol=evt.get("symbol", ""),
-                side=evt.get("side", "").upper(),
-                order_id=str(evt.get("order_id", "")),
-            )
+    async def _on_trade_failed(payload: dict[str, Any]) -> None:
+        text = _t(
+            _lang(),
+            "trade_fail",
+            symbol=payload.get("symbol", "?"),
+            reason=payload.get("reason", "unknown"),
         )
+        await _send_text(text)
 
-    async def on_settlement_timeout(evt: dict[str, Any]) -> None:
-        inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
-        await _send(
-            _t(
-                lang,
-                "SETTLEMENT_TIMEOUT",
-                symbol=evt.get("symbol", ""),
-                order_id=str(evt.get("order_id", "")),
-            )
+    async def _on_risk_blocked(payload: dict[str, Any]) -> None:
+        text = _t(_lang(), "risk_blocked", rule=payload.get("rule", "unknown"))
+        await _send_text(text)
+
+    async def _on_budget_exceeded(payload: dict[str, Any]) -> None:
+        text = _t(
+            _lang(),
+            "budget_exceeded",
+            pnl=str(payload.get("pnl", "0")),
+            ccy=payload.get("ccy", ""),
         )
+        await _send_text(text)
 
-    async def on_budget_exceeded(evt: dict[str, Any]) -> None:
-        inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))
-        s = evt.get("symbol", "")
-        kind = evt.get("type", "")
-        detail = (
-            f"count_5m={evt.get('count_5m', '')}/{evt.get('limit', '')}"
-            if kind == "max_orders_5m"
-            else f"turnover={evt.get('turnover', '')}/{evt.get('limit', '')}"
+    async def _on_broker_error(payload: dict[str, Any]) -> None:
+        text = _t(_lang(), "broker_error", msg=payload.get("message", "unknown"))
+        await _send_text(text)
+
+    async def _on_health(payload: dict[str, Any]) -> None:
+        text = _t(
+            _lang(),
+            "health",
+            price=str(payload.get("price", "?")),
+            spread=str(payload.get("spread", "?")),
+            spread_pct=str(payload.get("spread_pct", "?")),
         )
-        await _send(_t(lang, "BUDGET_BLOCK", symbol=s, detail=detail))
+        await _send_text(text)
 
-    async def on_trade_blocked(evt: dict[str, Any]) -> None:
-        inc("trade_blocked_total", symbol=evt.get("symbol", ""), reason=evt.get("reason", ""))
-        await _send(_t(lang, "RISK_BLOCKED", symbol=evt.get("symbol", ""), reason=str(evt.get("reason", ""))))
+    async def _on_dms_triggered(payload: dict[str, Any]) -> None:
+        text = _t(
+            _lang(),
+            "dms_triggered",
+            symbol=payload.get("symbol", "?"),
+            prev=str(payload.get("prev", "?")),
+            last=str(payload.get("last", "?")),
+        )
+        await _send_text(text)
 
-    async def on_broker_error(evt: dict[str, Any]) -> None:
-        inc("broker_error_total", symbol=evt.get("symbol", ""))
-        await _send(_t(lang, "BROKER_ERROR", symbol=evt.get("symbol", ""), error=str(evt.get("error", ""))))
+    async def _on_dms_skipped(payload: dict[str, Any]) -> None:
+        text = _t(
+            _lang(),
+            "dms_skipped",
+            symbol=payload.get("symbol", "?"),
+            prev=str(payload.get("prev", "?")),
+            last=str(payload.get("last", "?")),
+        )
+        await _send_text(text)
 
-    async def on_health_report(evt: dict[str, Any]) -> None:
-        if evt.get("ok", True):
-            return
-        parts = []
-        for k in ("db", "bus", "broker"):
-            v = evt.get(k)
-            if v and v != "ok":
-                parts.append(f"{k}={v}")
-        summary = ", ".join(parts) or "degraded"
-        await _send(_t(lang, "HEALTH_FAIL", summary=summary))
+    async def _on_alertmanager(payload: dict[str, Any]) -> None:
+        labels = payload.get("labels", {})
+        await _send_alert(_t(_lang(), "alerts_forwarded", labels=str(labels)), labels=labels)
 
-    async def on_alertmanager(evt: dict[str, Any]) -> None:
-        p = evt.get("payload", {}) or {}
-        status = p.get("status", "?")
-        alerts = p.get("alerts", []) or []
-        lines = [f"*Alertmanager* status: `{status}`", f"count: {len(alerts)}"]
-        for a in alerts[:5]:
-            ann = a.get("annotations", {}) or {}
-            lbl = a.get("labels", {}) or {}
-            name = lbl.get("alertname") or "Alert"
-            text = ann.get("summary") or ann.get("description") or ""
-            lines.append(f"- `{name}` {text}")
-        await _send("\n".join(lines))
+    # ----------------------------- Subscriptions -----------------------------
 
-    for topic, handler in [
-        (events_topics.ORCH_AUTO_PAUSED, on_auto_paused),
-        (events_topics.ORCH_AUTO_RESUMED, on_auto_resumed),
-        (events_topics.RECONCILE_POSITION_MISMATCH, on_pos_mm),
-        (events_topics.DMS_TRIGGERED, on_dms_triggered),
-        (events_topics.DMS_SKIPPED, on_dms_skipped),
-        (events_topics.TRADE_COMPLETED, on_trade_completed),
-        (events_topics.TRADE_FAILED, on_trade_failed),
-        (events_topics.TRADE_SETTLED, on_settled),
-        (events_topics.TRADE_SETTLEMENT_TIMEOUT, on_settlement_timeout),
-        (events_topics.BUDGET_EXCEEDED, on_budget_exceeded),
-        (events_topics.TRADE_BLOCKED, on_trade_blocked),
-        (events_topics.BROKER_ERROR, on_broker_error),
-        (events_topics.HEALTH_REPORT, on_health_report),
-        (events_topics.ALERTS_ALERTMANAGER, on_alertmanager),
-    ]:
-        _sub(topic, handler)
+    bus.on(events_topics.ORCH_AUTO_PAUSED, _on_orch_paused)
+    bus.on(events_topics.ORCH_AUTO_RESUMED, _on_orch_resumed)
 
-    _log.info("telegram_alerts_enabled")
+    bus.on(events_topics.TRADE_COMPLETED, _on_trade_completed)
+    bus.on(events_topics.TRADE_FAILED, _on_trade_failed)
+    bus.on(events_topics.RISK_BLOCKED, _on_risk_blocked)
+    bus.on(events_topics.BUDGET_EXCEEDED, _on_budget_exceeded)
+
+    bus.on(events_topics.BROKER_ERROR, _on_broker_error)
+    bus.on(events_topics.HEALTH_REPORT, _on_health)
+
+    bus.on(events_topics.DMS_TRIGGERED, _on_dms_triggered)
+    bus.on(events_topics.DMS_SKIPPED, _on_dms_skipped)
+
+    bus.on(events_topics.ALERTS_ALERTMANAGER, _on_alertmanager)

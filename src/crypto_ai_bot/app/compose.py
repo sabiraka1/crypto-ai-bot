@@ -8,204 +8,322 @@ from typing import Any
 
 from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.app.subscribers.telegram_alerts import attach_alerts
-from crypto_ai_bot.core.application.events_topics import EVT  # noqa: N812
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.ports import SafetySwitchPort
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
+from crypto_ai_bot.core.application.reconciliation.discrepancy_handler import PositionsDiscrepancyHandler
+from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
+from crypto_ai_bot.core.application.reconciliation.positions import PositionsReconciler
+from crypto_ai_bot.core.application.use_cases.eval_and_execute import EvalAndExecuteUseCase
+from crypto_ai_bot.core.application.use_cases.execute_trade import ExecuteTradeUseCase
 from crypto_ai_bot.core.domain.risk.manager import RiskConfig, RiskManager
 from crypto_ai_bot.core.infrastructure.brokers.factory import make_broker
 from crypto_ai_bot.core.infrastructure.events.bus import AsyncEventBus
 from crypto_ai_bot.core.infrastructure.events.bus_adapter import UnifiedEventBus
 from crypto_ai_bot.core.infrastructure.events.redis_bus import RedisEventBus
 from crypto_ai_bot.core.infrastructure.safety.dead_mans_switch import DeadMansSwitch
-from crypto_ai_bot.core.infrastructure.safety.instance_lock import InstanceLock
-from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import open_storage
-from crypto_ai_bot.settings import Settings
+from crypto_ai_bot.core.infrastructure.storage.facade import StorageFacade
+from crypto_ai_bot.core.infrastructure.storage.sqlite_adapter import SQLiteAdapter
 from crypto_ai_bot.utils.decimal import dec
+from crypto_ai_bot.utils.ids import cid_middleware
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import inc
-from crypto_ai_bot.utils.symbols import canonical
+from crypto_ai_bot.utils.metrics import inc, observe
+from crypto_ai_bot.utils.retry import retry_async
 
 _log = get_logger("compose")
 
 
 @dataclass
-class Container:
+class AppWiring:
     settings: Any
     storage: Any
     broker: Any
     bus: Any
     risk: Any
     exits: Any
-    health: Any
-    orchestrators: dict[str, Orchestrator]
-    tg_bot_task: asyncio.Task | None
-    instance_lock: InstanceLock | None = None
+    orchestrator: Orchestrator
+    eval_and_execute: EvalAndExecuteUseCase
+    execute_trade: ExecuteTradeUseCase
+    health: HealthChecker
+    telegram_cmd: TelegramBotCommands
+    safety: SafetySwitchPort
 
 
-def _open_storage(s: Settings) -> Any:
-    return open_storage(path=s.DB_PATH)
-
-
-def _build_event_bus(s: Settings) -> Any:
-    # Choose EventBus by ENV: Redis if EVENT_BUS_URL=redis://..., else in-memory
-    url = getattr(s, "EVENT_BUS_URL", "").strip()
-    if url and url.startswith("redis://"):  # noqa: SIM108
-        impl = RedisEventBus(url)
+# ----------------------------- Bus -----------------------------
+def _make_bus(settings: Any) -> UnifiedEventBus:
+    url = getattr(settings, "EVENT_BUS_URL", "") or ""
+    if url.startswith("redis://"):
+        _log.info("event_bus.redis.enabled", extra={"url": url})
+        bus: AsyncEventBus = RedisEventBus(url=url)
     else:
-        impl = AsyncEventBus()
-    return UnifiedEventBus(impl)
+        _log.info("event_bus.memory.enabled")
+        bus = AsyncEventBus()
+    bus.use(cid_middleware())  # attach correlation-id middleware
+    return UnifiedEventBus(bus)
 
 
-def _wrap_bus_publish_with_metrics_and_retry(bus: Any) -> None:
-    orig = bus.publish
-
-    async def _pub(topic: str, payload: dict[str, Any]) -> None:
-        tries = 0
-        while True:
-            try:
-                await orig(topic, payload)
-                return  # noqa: TRY300
-            except Exception:  # noqa: BLE001
-                tries += 1
-                inc("bus_publish_error_total", symbol=payload.get("symbol", ""), topic=topic)
-                if tries >= 3:
-                    _log.error("bus_publish_failed", extra={"topic": topic}, exc_info=True)
-                    raise
-                await asyncio.sleep(0.2 * tries)
-
-    bus.publish = _pub  # type: ignore[attr-defined]
+# ----------------------------- Storage -----------------------------
+def _make_storage(settings: Any) -> StorageFacade:
+    path = getattr(settings, "DB_PATH", "app.db")
+    _log.info("storage.sqlite", extra={"path": path})
+    return StorageFacade(SQLiteAdapter(path))
 
 
-def _make_dms_factory(*, st: Any, br: Any, s: Settings, bus: Any) -> Callable[[str], SafetySwitchPort]:
-    def _factory(sym: str) -> SafetySwitchPort:
-        # Compatibility with AsyncEventBus (pass None if not supported)
-        dms_bus = bus if isinstance(bus, AsyncEventBus) else None
-
-        def safe_dec(name: str, default: str = "0") -> Decimal:
-            val = getattr(s, name, None)
-            if val is None:
-                return dec(default)
-            try:
-                str_val = str(val).strip()
-                if not str_val or str_val.lower() in ("none", "null", ""):
-                    return dec(default)  # noqa: TRY300
-                float(str_val)
-                return dec(str_val)  # noqa: TRY300
-            except (ValueError, TypeError, AttributeError):
-                return dec(default)
-
-        return DeadMansSwitch(
-            storage=st,
-            broker=br,
-            symbol=sym,
-            timeout_ms=int(getattr(s, "DMS_TIMEOUT_MS", 120_000) or 120_000),
-            rechecks=int(getattr(s, "DMS_RECHECKS", 2) or 2),
-            recheck_delay_sec=float(getattr(s, "DMS_RECHECK_DELAY_SEC", 3.0) or 3.0),
-            max_impact_pct=safe_dec("DMS_MAX_IMPACT_PCT", "0"),
-            bus=dms_bus,
-        )
-
-    return _factory
-
-
-async def build_container_async() -> Container:
-    s = Settings.load()
-    st = _open_storage(s)
-    bus = _build_event_bus(s)
-    if hasattr(bus, "start"):
-        await bus.start()
-
-    _wrap_bus_publish_with_metrics_and_retry(bus)
-
-    # single-instance lock (to release in shutdown via server.py)
-    lock = InstanceLock(
-        conn=st.conn,
-        app="trader",
-        owner=getattr(s, "INSTANCE_ID", "local"),
+# ----------------------------- Broker -----------------------------
+def _make_broker(settings: Any) -> Any:
+    return make_broker(
+        exchange=getattr(settings, "EXCHANGE", "gateio"),
+        api_key=getattr(settings, "API_KEY", ""),
+        secret=getattr(settings, "API_SECRET", ""),
+        password=getattr(settings, "API_PASSWORD", None),
+        sandbox=bool(getattr(settings, "SANDBOX", False)),
+        rate_limit_ms=int(getattr(settings, "RATE_LIMIT_MS", 1000) or 1000),
     )
-    assert lock.acquire(ttl_sec=900), "Another instance is already running"
-    _log.info("instance_lock_acquired", extra={"owner": getattr(s, "INSTANCE_ID", "local")})
 
-    br = make_broker(exchange=s.EXCHANGE, mode=s.MODE, settings=s)
-    risk = RiskManager(RiskConfig.from_settings(s))
-    exits = ProtectiveExits(storage=st, broker=br, bus=bus, settings=s)
-    health = HealthChecker(storage=st, broker=br, bus=bus, settings=s)
 
-    symbols: list[str] = [canonical(x.strip()) for x in (s.SYMBOLS or "").split(",") if x.strip()] or [
-        canonical(s.SYMBOL)
-    ]
+# ----------------------------- Risk -----------------------------
+def _make_risk(settings: Any) -> RiskManager:
+    return RiskManager(config=RiskConfig.from_settings(settings))
 
-    orchs: dict[str, Orchestrator] = {}
-    make_dms = _make_dms_factory(st=st, br=br, s=s, bus=bus)
-    for sym in symbols:
-        orchs[sym] = Orchestrator(
-            symbol=sym,
-            storage=st,
-            broker=br,
-            risk=risk,
-            exits=exits,
-            bus=bus,
-            settings=s,
-            dms=make_dms(sym),
-        )
 
-    # Telegram subscribers (alerts) — единый модуль подписок
-    attach_alerts(bus, s)
+# ----------------------------- Protective exits -----------------------------
+def _make_protective_exits(*, bus: Any, settings: Any) -> ProtectiveExits:
+    return ProtectiveExits(
+        bus=bus,
+        symbol=str(getattr(settings, "SYMBOL", "BTC/USDT")),
+        timeframe=str(getattr(settings, "TIMEFRAME", "15m")),
+        atr_period=int(getattr(settings, "EXIT_ATR_PERIOD", 14) or 14),
+        atr_mult=float(getattr(settings, "EXIT_ATR_MULT", 2.0) or 2.0),
+        rsi_period=int(getattr(settings, "EXIT_RSI_PERIOD", 14) or 14),
+        rsi_sell=float(getattr(settings, "EXIT_RSI_SELL", 70.0) or 70.0),
+        rsi_buy=float(getattr(settings, "EXIT_RSI_BUY", 30.0) or 30.0),
+        cooldown_sec=int(getattr(settings, "EXIT_COOLDOWN_SEC", 0) or 0),
+    )
 
-    # Hint for ProtectiveExits + event re-broadcast
-    if hasattr(exits, "on_hint") and hasattr(bus, "on"):
 
-        async def _on_trade_completed_hint(evt: dict[str, Any]) -> None:
-            try:
-                await exits.on_hint(evt)
-            except Exception:  # noqa: BLE001
-                _log.error("exits_on_hint_failed", extra={"symbol": evt.get("symbol", "")}, exc_info=True)
+# ----------------------------- Health -----------------------------
+def _make_health(*, storage: StorageFacade, broker: Any, settings: Any) -> HealthChecker:
+    return HealthChecker(
+        storage=storage,
+        broker=broker,
+        symbol=str(getattr(settings, "SYMBOL", "BTC/USDT")),
+        timeframe=str(getattr(settings, "TIMEFRAME", "15m")),
+        warn_after_sec=int(getattr(settings, "HEALTH_WARN_AFTER_SEC", 120) or 120),
+    )
 
-        bus.on(events_topics.TRADE_COMPLETED, _on_trade_completed_hint)
 
-    # Telegram command bot (incoming commands)
-    tg_task: asyncio.Task | None = None
-    if getattr(s, "TELEGRAM_BOT_COMMANDS_ENABLED", False) and getattr(s, "TELEGRAM_BOT_TOKEN", ""):
-        raw_users = str(getattr(s, "TELEGRAM_ALLOWED_USERS", "") or "").strip()
-        users: list[int] = []
-        if raw_users:
-            try:
-                users = [int(x.strip()) for x in raw_users.split(",") if x.strip()]
-            except Exception:  # noqa: BLE001
-                _log.error("telegram_allowed_users_parse_failed", extra={"raw": raw_users}, exc_info=True)
+# ----------------------------- Safety (DMS) -----------------------------
+def _make_safety(*, bus: UnifiedEventBus, broker: Any, settings: Any) -> DeadMansSwitch:
+    symbol = str(getattr(settings, "SYMBOL", "BTC/USDT"))
+    warn_drop_pct = float(getattr(settings, "DMS_WARN_DROP_PCT", 2.0) or 2.0)
+    trigger_drop_pct = float(getattr(settings, "DMS_TRIGGER_DROP_PCT", 4.0) or 4.0)
+    min_price = Decimal(str(getattr(settings, "DMS_MIN_PRICE", 0.0) or 0.0))
+    return DeadMansSwitch(
+        bus=bus,
+        symbol=symbol,
+        broker=broker,
+        warn_drop_pct=warn_drop_pct,
+        trigger_drop_pct=trigger_drop_pct,
+        warn_min_price=min_price if min_price > 0 else None,
+    )
 
-        container_view = type(
-            "C",
-            (),
-            {
-                "storage": st,
-                "broker": br,
-                "risk": risk,
-                "exits": exits,
-                "orchestrators": orchs,
-                "health": health,
-            },
-        )()
-        bot = TelegramBotCommands(
-            bot_token=s.TELEGRAM_BOT_TOKEN,
-            allowed_users=users,
-            container=container_view,
-            default_symbol=symbols[0],
-        )
-        tg_task = asyncio.create_task(bot.run())
-        _log.info("telegram_bot_enabled")
 
-    return Container(
-        settings=s,
-        storage=st,
-        broker=br,
+# ----------------------------- Use-cases -----------------------------
+def _make_use_cases(
+    *, settings: Any, storage: StorageFacade, broker: Any, bus: UnifiedEventBus, risk: RiskManager
+) -> tuple[EvalAndExecuteUseCase, ExecuteTradeUseCase]:
+    eval_and_execute = EvalAndExecuteUseCase(
+        symbol=str(getattr(settings, "SYMBOL", "BTC/USDT")),
+        timeframe=str(getattr(settings, "TIMEFRAME", "15m")),
+        storage=storage,
+        broker=broker,
+        bus=bus,
+        risk=risk,
+        trade_quote=Decimal(str(getattr(settings, "TRADE_AMOUNT", "10") or "10")),
+        sl_pct=float(getattr(settings, "SL_PCT", 1.0) or 1.0),
+        tp_pct=float(getattr(settings, "TP_PCT", 2.0) or 2.0),
+        allow_short=bool(getattr(settings, "ALLOW_SHORT", False)),
+    )
+
+    execute_trade = ExecuteTradeUseCase(
+        symbol=str(getattr(settings, "SYMBOL", "BTC/USDT")),
+        timeframe=str(getattr(settings, "TIMEFRAME", "15m")),
+        storage=storage,
+        broker=broker,
+        bus=bus,
+        risk=risk,
+    )
+    return eval_and_execute, execute_trade
+
+
+# ----------------------------- Reconciliation -----------------------------
+def _make_reconcilers(*, storage: StorageFacade, broker: Any, bus: UnifiedEventBus) -> tuple[Any, Any, Any]:
+    po = PositionsReconciler(storage=storage, broker=broker, bus=bus)
+    dh = PositionsDiscrepancyHandler(storage=storage, broker=broker, bus=bus)
+    orc = OrdersReconciler(storage=storage, broker=broker, bus=bus)
+    return po, dh, orc
+
+
+# ----------------------------- Orchestrator -----------------------------
+def _make_orchestrator(
+    *,
+    settings: Any,
+    bus: UnifiedEventBus,
+    eval_and_execute: EvalAndExecuteUseCase,
+    execute_trade: ExecuteTradeUseCase,
+    storage: StorageFacade,
+    risk: RiskManager,
+    exits: ProtectiveExits,
+) -> Orchestrator:
+    orch = Orchestrator(bus=bus)
+
+    # Attach periodic loop: evaluate-and-execute
+    interval_sec = int(getattr(settings, "LOOP_INTERVAL_SEC", 60) or 60)
+
+    async def _loop_eval() -> None:
+        try:
+            await eval_and_execute.run_once()
+            inc("loop.eval.ok")
+        except Exception:
+            inc("loop.eval.err")
+            _log.exception("loop_eval_failed")
+
+    orch.attach_loop(name="eval", interval_sec=interval_sec, loop=_loop_eval)
+
+    # Attach periodic loop: reconciliation
+    recon_interval = int(getattr(settings, "RECONCILE_INTERVAL_SEC", 300) or 300)
+
+    positions_reconciler, discrepancy_handler, orders_reconciler = _make_reconcilers(
+        storage=storage, broker=eval_and_execute.broker, bus=bus
+    )
+
+    async def _loop_reconcile() -> None:
+        try:
+            await positions_reconciler.run_once()
+            await discrepancy_handler.run_once()
+            await orders_reconciler.run_once()
+            inc("loop.reconcile.ok")
+        except Exception:
+            inc("loop.reconcile.err")
+            _log.exception("loop_reconcile_failed")
+
+    orch.attach_loop(name="reconcile", interval_sec=recon_interval, loop=_loop_reconcile)
+
+    # Attach listeners
+    orch.on(EVT.TRADE_COMPLETED, lambda p: observe("trade.completed", float(p.get("quote", 0.0) or 0.0)))
+    orch.on(EVT.TRADE_FAILED, lambda _p: inc("trade.failed"))
+    orch.on(EVT.RISK_BLOCKED, lambda _p: inc("risk.blocked"))
+    orch.on(EVT.BROKER_ERROR, lambda _p: inc("broker.error"))
+
+    # Attach safety & exits triggers to bus
+    # (protective exits publish their own events)
+    orch.on(EVT.DMS_TRIGGERED, lambda p: _log.warning("dms_triggered", extra=p))
+    orch.on(EVT.DMS_SKIPPED, lambda p: _log.info("dms_skipped", extra=p))
+
+    # Allow orchestrator to pause on alert
+    async def _pause_on_alert(_p: dict[str, Any]) -> None:
+        try:
+            await orch.pause()
+        except Exception:
+            _log.exception("orch_pause_failed")
+
+    orch.on(EVT.ALERTS_ALERTMANAGER, _pause_on_alert)
+
+    # Wire protective exits (need bus pushed inside)
+    exits.attach_bus(bus)
+    orch.on(EVT.HEALTH_REPORT, exits.on_health_report)
+
+    return orch
+
+
+# ----------------------------- Telegram Commands -----------------------------
+def _make_telegram_cmds(*, bus: UnifiedEventBus, settings: Any, storage: StorageFacade) -> TelegramBotCommands:
+    return TelegramBotCommands(bus=bus, settings=settings, storage=storage)
+
+
+# ----------------------------- Public compose() -----------------------------
+def compose(settings: Any) -> AppWiring:
+    _log.info("compose.start")
+
+    # Bus/Storage/Broker
+    bus = _make_bus(settings)
+    storage = _make_storage(settings)
+
+    # Broker may require retry on cold start (network)
+    broker = make_broker(
+        exchange=getattr(settings, "EXCHANGE", "gateio"),
+        api_key=getattr(settings, "API_KEY", ""),
+        secret=getattr(settings, "API_SECRET", ""),
+        password=getattr(settings, "API_PASSWORD", None),
+        sandbox=bool(getattr(settings, "SANDBOX", False)),
+        rate_limit_ms=int(getattr(settings, "RATE_LIMIT_MS", 1000) or 1000),
+    )
+
+    # Risk / Exits / Health / Safety
+    risk = _make_risk(settings)
+    exits = _make_protective_exits(bus=bus, settings=settings)
+    health = _make_health(storage=storage, broker=broker, settings=settings)
+    safety = _make_safety(bus=bus, broker=broker, settings=settings)
+
+    # Use-cases
+    eval_and_execute, execute_trade = _make_use_cases(
+        settings=settings, storage=storage, broker=broker, bus=bus, risk=risk
+    )
+
+    # Orchestrator
+    orchestrator = _make_orchestrator(
+        settings=settings,
+        bus=bus,
+        eval_and_execute=eval_and_execute,
+        execute_trade=execute_trade,
+        storage=storage,
+        risk=risk,
+        exits=exits,
+    )
+
+    # Subscribers (Telegram alerts)
+    attach_alerts(bus, settings)
+
+    # Some helpful helpers
+    async def _daily_pnl_quote(symbol: str) -> Decimal:
+        try:
+            repo = getattr(storage, "reports", None)
+            if not repo:
+                return dec("0")
+            if hasattr(repo, "daily_pnl_quote"):
+                v = repo.daily_pnl_quote(symbol)
+                return dec(str(v))
+            return dec("0")
+        except Exception:
+            _log.debug("_daily_pnl_quote_failed", exc_info=True)
+            return dec("0")
+
+    async def _balances_series(storage: Any, symbol: str, limit: int = 48) -> list[Decimal]:
+        try:
+            repo = getattr(storage, "reports", None)
+            if not repo or not hasattr(repo, "balances_series"):
+                return []
+            arr = repo.balances_series(symbol=symbol, limit=limit)
+            return [dec(str(x)) for x in arr]
+        except Exception:
+            _log.debug("_balances_series_failed", exc_info=True)
+            return []
+
+    _log.info("compose.done")
+
+    return AppWiring(
+        settings=settings,
+        storage=storage,
+        broker=broker,
         bus=bus,
         risk=risk,
         exits=exits,
+        orchestrator=orchestrator,
+        eval_and_execute=eval_and_execute,
+        execute_trade=execute_trade,
         health=health,
-        orchestrators=orchs,
-        tg_bot_task=tg_task,
-        instance_lock=lock,  # to release in shutdown (server.py)
+        telegram_cmd=_make_telegram_cmds(bus=bus, settings=settings, storage=storage),
+        safety=safety,
     )
