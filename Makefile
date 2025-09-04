@@ -1,4 +1,8 @@
-.PHONY: lint type imports test ci
+.PHONY: lint format type imports test ci
+
+# Форматирование (ruff)
+format:
+	ruff format src/
 
 # Линтер (ruff)
 lint:
