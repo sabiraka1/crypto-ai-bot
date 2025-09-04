@@ -66,31 +66,31 @@ class MaxDrawdownRule:
                 unit_sell = price
                 realized = Decimal("0")
                 idx = 0
-                
+
                 while qty > 0 and idx < len(buy_lots):
                     lot_qty, lot_uc = buy_lots[idx]
                     take = min(lot_qty, qty)
                     realized += take * (unit_sell - lot_uc)
                     new_qty = lot_qty - take
                     qty -= take
-                    
+
                     if new_qty > 0:
                         buy_lots[idx] = (new_qty, lot_uc)
                         idx += 1
                     else:
                         buy_lots.pop(idx)
-                
+
                 realized -= fee_q  # sell commission
 
                 cum += realized
                 if cum > peak:
                     peak = cum
-                
+
                 # relative drawdown from peak
                 denom = float(peak) if float(peak) != 0.0 else 1.0
                 dd_pct = max(0.0, float(peak - cum) / abs(denom) * 100.0)
                 worst_dd_pct = max(worst_dd_pct, dd_pct)
-                
+
                 if dd_pct >= lim_pct:
                     return (
                         False,

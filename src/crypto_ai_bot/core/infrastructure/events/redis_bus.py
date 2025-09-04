@@ -52,37 +52,37 @@ class RedisEventBus:
     async def close(self) -> None:
         """Close the event bus."""
         self._started = False
-        
+
         if self._task:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
-        
+
         if self._ps:
             with suppress(Exception):
                 await self._ps.close()
             self._ps = None
-        
+
         if self._r:
             with suppress(Exception):
                 await self._r.close()
             self._r = None
-        
+
         _log.info("redis_bus_closed")
 
     async def publish(self, topic: str, payload: dict[str, Any], key: str | None = None) -> None:
         """Publish event to topic."""
         if not isinstance(payload, dict):
             raise TypeError("payload must be dict")
-        
+
         if not self._r:
             # Allow publish before start(): lazy init client
             self._r = Redis.from_url(self._url, encoding="utf-8", decode_responses=True)
-        
+
         msg = {"key": key, "payload": payload}
         data = json.dumps(msg, ensure_ascii=False)
-        
+
         try:
             await self._r.publish(topic, data)
             inc("bus_publish_total", topic=topic)
@@ -93,7 +93,7 @@ class RedisEventBus:
         """Subscribe to topic with handler."""
         self._handlers[topic].append(handler)
         self._topics.add(topic)
-        
+
         # If already started - subscribe immediately
         if self._started and self._ps:
             asyncio.create_task(self._ps.subscribe(topic))
@@ -102,7 +102,7 @@ class RedisEventBus:
         """Main listening loop."""
         assert self._ps is not None
         last_ping = 0.0
-        
+
         try:
             while True:
                 # Ping periodically to keep connection alive
@@ -122,12 +122,12 @@ class RedisEventBus:
 
                 topic = str(msg.get("channel", "") or "")
                 raw = msg.get("data", "")
-                
+
                 try:
                     obj = json.loads(raw) if isinstance(raw, str) and raw else {}
                 except Exception:
                     obj = {}
-                
+
                 payload = obj.get("payload", {}) if isinstance(obj, dict) else {}
 
                 # Call handlers
@@ -137,7 +137,7 @@ class RedisEventBus:
                     except Exception:
                         _log.error("handler_failed", extra={"topic": topic}, exc_info=True)
                         inc("bus_handler_errors_total", topic=topic)
-                        
+
         except asyncio.CancelledError:
             pass
         except Exception:

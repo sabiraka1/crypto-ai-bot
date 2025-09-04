@@ -16,7 +16,7 @@ def per_symbol_override(
     # Normalize symbol for settings key
     s = (symbol or "").upper().replace("/", "_").replace("-", "_")
     skey = f"{base_key}_{s}".upper()
-    
+
     # Try symbol-specific setting first
     raw = getattr(settings, skey, None)
     if raw not in (None, ""):
@@ -24,7 +24,7 @@ def per_symbol_override(
             return caster(str(raw))
         except Exception:
             pass  # Fall through to base key
-    
+
     # Try base setting
     raw2 = getattr(settings, base_key, None)
     if raw2 not in (None, ""):
@@ -32,5 +32,5 @@ def per_symbol_override(
             return caster(str(raw2))
         except Exception:
             pass  # Fall through to default
-    
+
     return default
