@@ -51,12 +51,12 @@ class PositionGuard:
         return compute_sell_amount(storage, symbol, amount)
 
 
-# --- Reconciliation logic (from original) -------------------------------------------------
+# --- Reconciliation logic (kept from original) --------------------------------------------
 async def reconcile_positions_batch(
     *, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort
 ) -> None:
     """
-    ѾсѰя сѺ: я ѵю ѵ  я ѵѹ PnL.
+    Recompute unrealized PnL markers by refreshing last price and bumping position cache.
     """
     for sym in symbols:
         try:
@@ -74,7 +74,7 @@ async def reconcile_positions_batch(
             if avg <= 0:
                 continue
             unreal = (last - avg) * base
-            # ѸсѸѽ
+            # touch local cache to persist last price for PnL calc
             storage.positions.apply_trade(
                 symbol=sym, side="buy", base_amount=dec("0"), price=last, fee_quote=dec("0"), last_price=last
             )
@@ -83,9 +83,9 @@ async def reconcile_positions_batch(
             _log.warning("reconcile_error", extra={"symbol": sym, "error": str(exc)})
 
 
-# ѽѸя-Ѻ я ссѸсѸ с orchestrator
+# orchestrator wrapper
 async def reconcile_positions(
     symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any
 ) -> None:
-    """ѽѸя-Ѻ я ссѸсѸ с orchestrator."""
+    """Orchestrator compatibility wrapper."""
     await reconcile_positions_batch(symbols=[symbol], storage=storage, broker=broker, bus=bus)

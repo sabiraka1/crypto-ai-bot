@@ -26,8 +26,8 @@ class BalancesReconciler:
 
     async def run_once(self) -> dict[str, str]:
         """
-        Получает баланс у брокера и нормализует значения к строкам Decimal.
-        Никаких side-effects: публикации событий/запись в БД делает вызывающий слой.
+        Fetch balance at broker and normalize values to Decimal strings.
+        No side-effects: event publishing / DB writes belong to the caller.
         """
         try:
             bal = await self.broker.fetch_balance(self.symbol)  # dict: free_base, free_quote
@@ -49,8 +49,8 @@ class BalancesReconciler:
 
 async def reconcile_balances(symbol: str, storage: Any, broker: Any, bus: Any, settings: Any) -> None:
     """
-    Функция-обёртка для совместимости с orchestrator: сейчас просто вызывает Reconciler.
-    Паблишинг в шину/запись в БД — по месту вызова (application-слой), чтобы не смешивать ответственность.
+    Thin wrapper for orchestrator-compat: call the reconciler and return.
+    Publishing/writing is left to the application layer to avoid mixed responsibilities.
     """
     rec = BalancesReconciler(broker=broker, symbol=symbol)
     _ = await rec.run_once()

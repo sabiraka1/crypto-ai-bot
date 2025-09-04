@@ -1,4 +1,3 @@
-# src/crypto_ai_bot/core/application/orchestrator.py
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics as EVT  # noqa: N812
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc, observe
 from crypto_ai_bot.utils.trace import cid_context, get_cid
@@ -82,7 +81,7 @@ class Orchestrator:
         }
 
     # ---------------------------
-    # РџСѓР±Р»РёС‡РЅРѕРµ API
+    # Public API
     # ---------------------------
     async def start(self) -> None:
         if self._started:
@@ -151,7 +150,7 @@ class Orchestrator:
         }
 
     # ---------------------------
-    # Р’РЅСѓС‚СЂРµРЅРЅРµРµ: РµРґРёРЅС‹Р№ СЂР°РЅРЅРµСЂ С†РёРєР»Р°
+    # Internal: unified loop runner
     # ---------------------------
     async def _loop_runner(self, spec: LoopSpec) -> None:
         loop = asyncio.get_event_loop()
@@ -160,7 +159,7 @@ class Orchestrator:
                 await asyncio.sleep(spec.interval_sec)
                 continue
             try:
-                with cid_context():  # в†ђ РіРµРЅРµСЂРёСЂСѓРµРј CID РЅР° РєР°Р¶РґСѓСЋ РёС‚РµСЂР°С†РёСЋ
+                with cid_context():
                     t0 = loop.time()
                     await spec.runner()
                     dt_ms = (loop.time() - t0) * 1000.0
@@ -175,7 +174,7 @@ class Orchestrator:
             await asyncio.sleep(max(0.001, spec.interval_sec))
 
     # ---------------------------
-    # РљРѕРЅРєСЂРµС‚РЅС‹Рµ С†РёРєР»С‹
+    # Concrete loops
     # ---------------------------
     async def _eval_loop(self) -> None:
         try:
@@ -229,7 +228,7 @@ class Orchestrator:
             raise
 
     # ---------------------------
-    # Р•Р”РРќРћР РђР—РћР’Р«Р™ Р‘РР—РќР•РЎ-РЁРђР“ (evaluate в†’ risk в†’ execute в†’ protective_exits в†’ reconcile в†’ watchdog [+ settlement])
+    # One-shot business step (evaluate → risk/execute → exits → reconcile → watchdog [+ settlement])
     # ---------------------------
     async def run_once(self) -> dict[str, Any]:
         loop = asyncio.get_event_loop()

@@ -19,23 +19,53 @@ class EvalResult:
     order: Any | None = None
 
 
+async def _load_strategy_from_settings(settings: Any) -> Any | None:
+    """
+    Resolve strategy implementation from settings.
+    Expected contracts:
+      - callable in settings.STRATEGY_IMPL -> returns strategy object with .generate(settings, ctx)
+      - default fallback: SignalsPolicyStrategy() from domain if available
+    """
+    try:
+        impl = getattr(settings, "STRATEGY_IMPL", None)
+        if impl:
+            if callable(impl):
+                return impl()
+            # string path support could be added here if needed
+    except Exception:  # noqa: BLE001
+        _log.error("strategy_impl_load_failed", exc_info=True)
+
+    # Fallback to default strategy
+    try:
+        from crypto_ai_bot.core.domain.strategies.signals_policy_strategy import SignalsPolicyStrategy
+
+        return SignalsPolicyStrategy()
+    except Exception:  # noqa: BLE001
+        _log.error("default_strategy_import_failed", exc_info=True)
+        return None
+
+
 async def eval_and_execute(
     *,
     symbol: str,
-    strategy: Any,
     storage: Any,
     broker: Any,
     bus: Any,
+    risk: Any,          # Orchestrator passes RiskManager here
+    exits: Any,
     settings: Any,
-    risk_manager: Any,
 ) -> EvalResult:
     """
-    1) РЎС‚СЂР°С‚РµРіРёСЏ -> СЂРµС€РµРЅРёРµ
-    2) RiskManager -> С‚РѕР»СЊРєРѕ РІРѕР·РІСЂР°С‰Р°РµС‚ ok/reason (Р±РµР· side-effects)
-    3) execute_trade -> РёСЃРїРѕР»РЅСЏРµРј Рё РїСѓР±Р»РёРєСѓРµРј СЃРѕР±С‹С‚РёСЏ РёСЃРїРѕР»РЅРµРЅРёСЏ
+    1) Strategy -> decision (generate)
+    2) Risk check (no side-effects in domain; events are published here)
+    3) Execute trade (and publish execution events)
     """
     try:
-        # 1) РџРѕР»СѓС‡Р°РµРј СЂРµС€РµРЅРёРµ СЃС‚СЂР°С‚РµРіРёРё (РµРґРёРЅС‹Р№ РєРѕРЅС‚СЂР°РєС‚ generate -> dict)
+        # 1) Strategy decision
+        strategy = await _load_strategy_from_settings(settings)
+        if not strategy:
+            return EvalResult(decided=False, action="skip", reason="strategy_missing")
+
         try:
             decision = await strategy.generate(settings, {"symbol": symbol})
         except Exception:  # noqa: BLE001
@@ -53,18 +83,17 @@ async def eval_and_execute(
         if action not in ("buy", "sell"):
             return EvalResult(decided=False, action="skip", reason=decision.get("reason", "no_action"))
 
-        # 2) РџСЂРѕРІРµСЂРєР° СЂРёСЃРєРѕРІ (Р±РµР· РїСѓР±Р»РёРєР°С†РёР№ РёР· domain)
+        # 2) Risk check (orchestrator-supplied risk manager)
         ok = True
         why = ""
         try:
-            ok, why, _ = risk_manager.check(symbol=symbol, storage=storage)
+            ok, why, _ = risk.check(symbol=symbol, storage=storage)
         except Exception:  # noqa: BLE001
             _log.error("risk_check_failed", extra={"symbol": symbol}, exc_info=True)
             ok = False
             why = "risk_check_exception"
 
         if not ok:
-            # side-effects (СЃРѕР±С‹С‚РёСЏ) вЂ” РѕР±СЏР·Р°РЅРЅРѕСЃС‚СЊ orchestration/use-case СѓСЂРѕРІРЅСЏ, РЅРµ domain
             try:
                 from crypto_ai_bot.core.application import events_topics as EVT
 
@@ -73,7 +102,7 @@ async def eval_and_execute(
                 _log.error("publish_trade_blocked_failed", extra={"symbol": symbol}, exc_info=True)
             return EvalResult(decided=True, action="skip", reason=why)
 
-        # 3) РСЃРїРѕР»РЅРµРЅРёРµ
+        # 3) Execute
         exec_res = await execute_trade(
             symbol=symbol,
             side=action,
@@ -81,7 +110,7 @@ async def eval_and_execute(
             broker=broker,
             bus=bus,
             settings=settings,
-            risk_manager=risk_manager,
+            risk_manager=risk,
             protective_exits=getattr(settings, "EXITS_ENABLED", 1) and getattr(settings, "EXITS_IMPL", None),
         )
 
