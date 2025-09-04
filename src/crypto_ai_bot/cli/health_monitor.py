@@ -18,7 +18,8 @@ def _env(name: str, default: str = "") -> str:
 
 async def _fetch_health(url: str, timeout: float) -> dict[str, Any]:
     try:
-        resp = await aget(url, timeout=timeout)
+        # единый профиль таймаута под наш http_client
+        resp = await aget(url, hard_timeout=timeout)
         return {
             "status_code": resp.status_code,
             "ok": resp.status_code == 200,
@@ -36,7 +37,7 @@ async def _oneshot(url: str, timeout: float) -> int:
     res = await _fetch_health(url, timeout)
     pretty = res.get("json") or res.get("text")
 
-    if isinstance(pretty, dict | list):
+    if isinstance(pretty, (dict, list)):
         out = json.dumps(pretty, ensure_ascii=False, indent=2)
     else:
         out = str(pretty)

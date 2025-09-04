@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    command = args.cmd  # Переименовали cmd в command
+    command = args.cmd
 
     if command == "backup":
         _backup(settings.DB_PATH)

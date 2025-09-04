@@ -6,27 +6,43 @@ import json
 from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
-from crypto_ai_bot.core.application.reconciliation.balances import BalancesReconciler
-from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconciler
+from crypto_ai_bot.core.application.reconciliation import (
+    ReconciliationSuite,
+    OrdersReconciler,
+    BalancesReconciler,
+    reconcile_positions,
+    build_report,
+)
 
 
 async def _run_reconcile(symbol: str) -> dict[str, Any]:
     c = await build_container_async()
 
-    # Сверка ордеров
-    orders_rec = OrdersReconciler(c.broker, symbol)
-    await orders_rec.run_once()
-    orders: dict[str, Any] = {}  # добавлена аннотация типа
+    # Набор сверок (можно добавлять другие IReconciler)
+    suite = ReconciliationSuite(
+        reconcilers=[
+            OrdersReconciler(storage=c.storage, broker=c.broker),
+        ]
+    )
+    discrepancies = await suite.run(symbol=symbol)
+    report = build_report(discrepancies=discrepancies)
 
-    # Сверка балансов
-    balances_rec = BalancesReconciler(c.broker, symbol)
-    await balances_rec.run_once()
-    balances: dict[str, Any] = {}  # добавлена аннотация типа
+    # Сверка балансов (oneshot)
+    bal = await BalancesReconciler(broker=c.broker, symbol=symbol).run_once()
 
-    # Сверка позиций
+    # Сверка позиций (обновляет unrealized по последней цене)
+    await reconcile_positions(symbol=symbol, storage=c.storage, broker=c.broker, bus=c.bus, _settings=c.settings)
+
+    # Позиция после сверки
     pos = c.storage.positions.get_position(symbol)
+    pos_base = getattr(pos, "base_qty", "0") if pos else "0"
 
-    return {"symbol": symbol, "orders": orders, "balances": balances, "position_base": str(pos.base_qty)}
+    return {
+        "symbol": symbol,
+        "orders_report": report,
+        "balances": bal,
+        "position_base": str(pos_base),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
 
     symbol = asyncio.run(_get_symbol())
     result = asyncio.run(_run_reconcile(symbol))
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

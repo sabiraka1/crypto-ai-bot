@@ -5,10 +5,10 @@ from typing import Any
 
 from crypto_ai_bot.app.compose import build_container_async
 from crypto_ai_bot.utils.decimal import dec
-from crypto_ai_bot.utils.symbols import canonical  # исправлен путь импорта
+from crypto_ai_bot.utils.symbols import canonical
 
 
-def _symbols_from_settings(settings: Any) -> list[str]:  # добавлена аннотация типа
+def _symbols_from_settings(settings: Any) -> list[str]:
     raw = (getattr(settings, "SYMBOLS", "") or "").strip()
     if raw:
         return [canonical(s.strip()) for s in raw.split(",") if s.strip()]
@@ -39,7 +39,7 @@ async def main() -> None:
     for r in rows:
         print(f"{r[0].ljust(w1)}{r[1].ljust(w2)}{r[2].ljust(w3)}{r[3].ljust(w4)}")
     print("-" * (w1 + w2 + w3 + w4))
-    print(f"{'TOTAL'.ljust(w1)}{str(total_realized).ljust(w2)}{str(total_turnover).ljust(w3)}{'':ljust(0)}")
+    print(f"{'TOTAL'.ljust(w1)}{str(total_realized).ljust(w2)}{str(total_turnover).ljust(w3)}")
 
 
 if __name__ == "__main__":

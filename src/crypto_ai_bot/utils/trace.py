@@ -1,29 +1,38 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-import contextlib
-import contextvars
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
-_cid: contextvars.ContextVar[str | None] = contextvars.ContextVar("cid", default=None)
+from crypto_ai_bot.utils.logging import set_correlation_id as _set_log_cid, get_correlation_id as _get_log_cid
 
-
-def new_cid() -> str:
-    return uuid.uuid4().hex
-
-
-def get_cid() -> str | None:
-    return _cid.get()
+_CID: ContextVar[str | None] = ContextVar("cid", default=None)
 
 
 def set_cid(value: str | None) -> None:
-    _cid.set(value)
+    _CID.set(value)
+    _set_log_cid(value)
 
 
-@contextlib.contextmanager
-def cid_context(value: str | None = None) -> Iterator[None]:
-    token = _cid.set(value or new_cid())
+def get_cid() -> str | None:
+    v = _CID.get()
+    return v if v else _get_log_cid()
+
+
+@contextmanager
+def cid_context(cid: str | None = None) -> Iterator[None]:
+    """
+    Контекст, который проставляет correlation id:
+    - если cid не задан → генерируем uuid4().hex;
+    - CID пробрасывается и в Json-логгер.
+    """
+    current = get_cid()
+    new_value = cid or current or uuid.uuid4().hex
+    token = _CID.set(new_value)
+    _set_log_cid(new_value)
     try:
         yield
     finally:
-        _cid.reset(token)
+        _CID.reset(token)
+        _set_log_cid(current)

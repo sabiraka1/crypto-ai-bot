@@ -17,7 +17,7 @@ def _env(name: str, default: str = "") -> str:
 
 async def _ping(url: str, timeout: float) -> bool:
     try:
-        resp = await aget(url, timeout=timeout)
+        resp = await aget(url, hard_timeout=timeout)
         _log.info("smoke_ping", extra={"url": url, "status": resp.status_code})
         return resp.status_code == 200
     except Exception:
