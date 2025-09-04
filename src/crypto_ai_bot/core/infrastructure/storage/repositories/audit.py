@@ -19,7 +19,9 @@ class AuditRepo:
     ДћВћДћВ¶ДћВёДћВґДћВ°ДћВµГ‘вЂљ SQLite-ДћВїДћВѕДћВґДћВѕДћВ±ДћВЅГ‘вЂ№ДћВ№ connection (conn.cursor().execute(...)).
     """
 
-    def __init__(self, conn: sqlite3.Connection) -> None:  # ДћЛњГ‘ВЃДћВїГ‘в‚¬ДћВ°ДћВІДћВ»ДћВµДћВЅДћВѕ: ДћВґДћВѕДћВ±ДћВ°ДћВІДћВ»ДћВµДћВЅ Г‘вЂљДћВёДћВї
+    def __init__(
+        self, conn: sqlite3.Connection
+    ) -> None:  # ДћЛњГ‘ВЃДћВїГ‘в‚¬ДћВ°ДћВІДћВ»ДћВµДћВЅДћВѕ: ДћВґДћВѕДћВ±ДћВ°ДћВІДћВ»ДћВµДћВЅ Г‘вЂљДћВёДћВї
         self._conn = conn
 
     def write(self, event: str, payload: dict[str, Any]) -> None:

@@ -113,7 +113,9 @@ async def settle_orders(
     """
     # Р—Р°С‰РёС‚РЅС‹Рµ РґРµС„РѕР»С‚С‹ вЂ” С‡С‚РѕР±С‹ РЅРµ РїР°РґР°С‚СЊ РЅР° РїСѓСЃС‚С‹С… ENV/РЅР°СЃС‚СЂРѕР№РєР°С…
     timeout_sec = int(getattr(settings, "SETTLEMENT_TIMEOUT_SEC", 300) or 300)
-    min_ratio_for_ok = dec("0.999")  # РїРѕС‡С‚Рё РїРѕР»РЅРѕРµ РёСЃРїРѕР»РЅРµРЅРёРµ В«РѕРєВ» РїСЂРё Р·Р°РєСЂС‹С‚РёРё
+    min_ratio_for_ok = dec(
+        "0.999"
+    )  # РїРѕС‡С‚Рё РїРѕР»РЅРѕРµ РёСЃРїРѕР»РЅРµРЅРёРµ В«РѕРєВ» РїСЂРё Р·Р°РєСЂС‹С‚РёРё
 
     try:
         open_rows = storage.orders.list_open(symbol) or []

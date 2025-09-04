@@ -215,7 +215,9 @@ class Settings:
             RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
             FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
             RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
-            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.10")),  # 0.10% ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљ
+            RISK_MAX_SLIPPAGE_PCT=dec(
+                _get("RISK_MAX_SLIPPAGE_PCT", "0.10")
+            ),  # 0.10% ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљ
             # extended risk caps
             RISK_MAX_ORDERS_5M=int(_get("RISK_MAX_ORDERS_5M", "0")),
             RISK_MAX_TURNOVER_5M_QUOTE=float(_get("RISK_MAX_TURNOVER_5M_QUOTE", "0")),

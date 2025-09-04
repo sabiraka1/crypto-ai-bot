@@ -21,9 +21,9 @@ async def async_retry(
         except Exception as e:
             last_exc = e
             # capped exponential backoff
-            delay = min(max_delay, base_delay * (2 ** attempt))
+            delay = min(max_delay, base_delay * (2**attempt))
             if jitter:
-                delay *= (0.5 + random.random())  # noqa: S311
+                delay *= 0.5 + random.random()  # noqa: S311
             await asyncio.sleep(delay)
     if last_exc:
         raise last_exc

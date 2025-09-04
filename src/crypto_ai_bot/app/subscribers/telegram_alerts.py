@@ -139,7 +139,18 @@ def attach_alerts(bus: Any, settings: Any) -> None:
         fee = evt.get("fee_quote", "")
         price = evt.get("price", "")
         amt = evt.get("amount", "")
-        await _send(_t(lang, "TRADE_COMPLETED", symbol=s, side=side.upper(), amount=str(amt), price=str(price), cost=str(cost), fee=str(fee)))
+        await _send(
+            _t(
+                lang,
+                "TRADE_COMPLETED",
+                symbol=s,
+                side=side.upper(),
+                amount=str(amt),
+                price=str(price),
+                cost=str(cost),
+                fee=str(fee),
+            )
+        )
 
     async def on_trade_failed(evt: dict[str, Any]) -> None:
         inc("trade_failed_total", symbol=evt.get("symbol", ""), reason=evt.get("error", ""))
@@ -147,11 +158,26 @@ def attach_alerts(bus: Any, settings: Any) -> None:
 
     async def on_settled(evt: dict[str, Any]) -> None:
         inc("trade_settled_total", symbol=evt.get("symbol", ""), side=evt.get("side", ""))
-        await _send(_t(lang, "TRADE_SETTLED", symbol=evt.get("symbol", ""), side=evt.get("side", "").upper(), order_id=str(evt.get("order_id", ""))))
+        await _send(
+            _t(
+                lang,
+                "TRADE_SETTLED",
+                symbol=evt.get("symbol", ""),
+                side=evt.get("side", "").upper(),
+                order_id=str(evt.get("order_id", "")),
+            )
+        )
 
     async def on_settlement_timeout(evt: dict[str, Any]) -> None:
         inc("trade_settlement_timeout_total", symbol=evt.get("symbol", ""))
-        await _send(_t(lang, "SETTLEMENT_TIMEOUT", symbol=evt.get("symbol", ""), order_id=str(evt.get("order_id", ""))))
+        await _send(
+            _t(
+                lang,
+                "SETTLEMENT_TIMEOUT",
+                symbol=evt.get("symbol", ""),
+                order_id=str(evt.get("order_id", "")),
+            )
+        )
 
     async def on_budget_exceeded(evt: dict[str, Any]) -> None:
         inc("budget_exceeded_total", symbol=evt.get("symbol", ""), type=evt.get("type", ""))

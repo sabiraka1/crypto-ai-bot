@@ -30,7 +30,9 @@ class SignalsPolicyStrategy(BaseStrategy):
 
     def __init__(self, *, policy: str = "conservative") -> None:
         self.policy_name = policy
-        self.score = 1.0  # ДћВґДћВ»Г‘ВЏ weighted-Г‘в‚¬ДћВµДћВ¶ДћВёДћВјДћВ° ДћВјДћВµДћВЅДћВµДћВґДћВ¶ДћВµГ‘в‚¬ДћВ°
+        self.score = (
+            1.0  # ДћВґДћВ»Г‘ВЏ weighted-Г‘в‚¬ДћВµДћВ¶ДћВёДћВјДћВ° ДћВјДћВµДћВЅДћВµДћВґДћВ¶ДћВµГ‘в‚¬ДћВ°
+        )
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
         # ДћЕёГ‘в‚¬ДћВѕДћВІДћВµГ‘в‚¬Г‘ВЏДћВµДћВј Г‘вЂЎГ‘вЂљДћВѕ ДћВјДћВѕДћВґГ‘Ж’ДћВ»ДћВё ДћВ±Г‘вЂ№ДћВ»ДћВё ДћВёДћВјДћВїДћВѕГ‘в‚¬Г‘вЂљДћВёГ‘в‚¬ДћВѕДћВІДћВ°ДћВЅГ‘вЂ№
