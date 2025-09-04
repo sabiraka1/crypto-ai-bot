@@ -193,7 +193,9 @@ class PositionsRepository:
             new_avg = avg0 if new_base > 0 else dec("0")
 
         ref_price = (last_price if last_price is not None else price) or dec("0")
-        new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+        new_unreal = (
+            (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+        )
 
         cur = self.conn.cursor()
         ts = _now_ms()
@@ -242,4 +244,8 @@ class PositionsRepository:
                 new_realized = realized0 + pnl - (fee_quote or dec("0"))
                 new_base = base0 - base_amount
                 new_avg = avg0 if new_base > 0 else dec("0")
-            new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
+            new_unreal = (
+                (ref_price - new_avg) * new_base
+                if (new_base > 0 and new_avg > 0 and ref_price > 0)
+                else dec("0")
+            )

@@ -43,13 +43,9 @@ class TelegramErrorHandler(logging.Handler):
         if not self._enabled:
             return
         if not self._token or not self._chat_id:
-            raise RuntimeError(
-                "TelegramErrorHandler: LOG_TG_ERRORS=1, но TELEGRAM_* не заданы."
-            )
+            raise RuntimeError("TelegramErrorHandler: LOG_TG_ERRORS=1, но TELEGRAM_* не заданы.")
         if httpx is None:
-            raise RuntimeError(
-                "TelegramErrorHandler: httpx не установлен."
-            )
+            raise RuntimeError("TelegramErrorHandler: httpx не установлен.")
 
     def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover (I/O)
         if not self._enabled:
