@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable
+from typing import Any
 
-from crypto_ai_bot.core.application import events_topics
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
@@ -66,7 +66,7 @@ class ComponentFactory:
     @staticmethod
     def create_broker(settings: Any) -> Any:
         """Create broker instance."""
-        return make_broker(
+        broker = make_broker(
             mode=getattr(settings, "MODE", "paper"),
             exchange=getattr(settings, "EXCHANGE", "gateio"),
             api_key=getattr(settings, "API_KEY", ""),
@@ -75,6 +75,7 @@ class ComponentFactory:
             sandbox=bool(getattr(settings, "SANDBOX", False)),
             settings=settings,
         )
+        return broker
 
     @staticmethod
     async def create_spread_provider(broker: Any) -> Callable[[str], Awaitable[float | None]]:
@@ -90,7 +91,7 @@ class ComponentFactory:
                     spread_pct = ((ask - bid) / ((ask + bid) / 2)) * 100
                     return spread_pct
 
-            except Exception as e:
+            except (ValueError, ConnectionError) as e:
                 _log.debug("spread_provider_error", extra={"symbol": symbol, "error": str(e)})
 
             return None
@@ -202,7 +203,7 @@ class OrchestratorFactory:
             try:
                 await orchestrator.start()
                 _log.info("orchestrator_auto_started", extra={"symbol": symbol})
-            except Exception as e:
+            except (RuntimeError, AttributeError) as e:
                 _log.error(
                     "orchestrator_auto_start_failed", extra={"symbol": symbol, "error": str(e)}, exc_info=True
                 )
@@ -224,7 +225,7 @@ class TelegramIntegration:
 
         except ImportError as e:
             _log.warning("telegram_modules_not_found", extra={"error": str(e)})
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             _log.error("telegram_setup_failed", extra={"error": str(e)}, exc_info=True)
 
     @staticmethod
@@ -286,7 +287,7 @@ class ContainerBuilder:
 
         _log.info("compose.done")
 
-        return AppContainer(
+        container = AppContainer(
             settings=settings,
             storage=storage,
             broker=broker,
@@ -298,6 +299,7 @@ class ContainerBuilder:
             instance_lock=instance_lock,
             orchestrators=orchestrators,
         )
+        return container
 
     async def _load_settings(self) -> Any:
         """Load application settings."""
@@ -310,7 +312,8 @@ class ContainerBuilder:
 async def build_container_async() -> AppContainer:
     """Asynchronously build the application container."""
     builder = ContainerBuilder()
-    return await builder.build()
+    container = await builder.build()
+    return container
 
 
 def compose() -> AppContainer:

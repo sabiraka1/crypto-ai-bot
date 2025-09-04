@@ -4,11 +4,10 @@ import asyncio
 import html
 import os
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Protocol
-import urllib.parse
 
-from crypto_ai_bot.app.telegram import TelegramAlerts
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
@@ -92,10 +91,9 @@ class MessageCache:
         key = (user_id, text.strip())
         now = time.time()
 
-        # Check existing
-        if key in self.cache:
-            if now - self.cache[key] <= self.ttl_secs:
-                return True
+        # Check existing and add if not duplicate
+        if key in self.cache and now - self.cache[key] <= self.ttl_secs:
+            return True
 
         # Add to cache
         self.cache[key] = now
@@ -174,19 +172,19 @@ class CommandHandler:
         try:
             orch = self.get_orchestrator(symbol)
             status = orch.status()
-        except OrchestratorNotFoundError as e:
+        except OrchestratorNotFoundError:
             await self.api.send_message(chat_id, f"Orchestrator not found for <b>{html.escape(symbol)}</b>")
             return
-        except Exception as e:
+        except Exception:
             _log.error("orch_status_failed", extra={"symbol": symbol}, exc_info=True)
-            await self.api.send_message(chat_id, f"Status failed: <code>{html.escape(str(e))}</code>")
+            await self.api.send_message(chat_id, f"Status failed for <b>{html.escape(symbol)}</b>")
             return
 
         lines = [f"<b>Status {html.escape(symbol)}</b>"]
         for key in ("state", "open_orders", "position", "last_signal", "last_trade_at"):
             if key in status:
                 value = status[key]
-                if isinstance(value, (dict, list)):
+                if isinstance(value, dict | list):
                     value = str(value)
                 lines.append(f"- {key}: <code>{html.escape(str(value))}</code>")
 
@@ -218,9 +216,9 @@ class CommandHandler:
 
         except OrchestratorNotFoundError:
             await self.api.send_message(chat_id, f"Orchestrator not found for <b>{html.escape(symbol)}</b>")
-        except Exception as e:
+        except Exception:
             _log.error("orch_call_failed", extra={"symbol": symbol, "method": method}, exc_info=True)
-            await self.api.send_message(chat_id, f"{method} failed: <code>{html.escape(str(e))}</code>")
+            await self.api.send_message(chat_id, f"{method} failed for <b>{html.escape(symbol)}</b>")
 
 
 class TelegramAPI:
@@ -245,16 +243,22 @@ class TelegramAPI:
                 disable_web_page_preview="true",
             )
             await aget(url)
-        except Exception as e:
+        except Exception:
             _log.error("telegram_reply_failed", exc_info=True)
 
     async def get_updates(self, offset: int, timeout: int) -> list[dict[str, Any]]:
-        """Get updates from Telegram."""
+        """Get updates from Telegram with timeout."""
         url = self._build_url(
             "getUpdates", timeout=str(timeout), offset=str(offset), allowed_updates="message"
         )
 
-        data = await aget(url)
+        try:
+            async with asyncio.timeout(timeout + 10):
+                data = await aget(url)
+        except asyncio.TimeoutError:
+            _log.warning("telegram_get_updates_timeout")
+            return []
+        
         if isinstance(data, dict):
             return data.get("result", [])
         return []
@@ -392,7 +396,7 @@ class TelegramBotCommands:
         """Fetch updates from Telegram."""
         try:
             return await self.api.get_updates(self._offset, self.config.long_poll_sec + 5)
-        except Exception as e:
+        except Exception:
             _log.error("telegram_getupdates_failed", exc_info=True)
             return []
 
@@ -410,7 +414,7 @@ class TelegramBotCommands:
             for update in updates:
                 try:
                     await self._process_update(update)
-                except Exception as e:
+                except Exception:
                     _log.error("telegram_update_process_failed", exc_info=True)
 
             await asyncio.sleep(0.2)

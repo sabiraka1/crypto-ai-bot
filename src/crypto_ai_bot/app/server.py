@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
-import time
 from typing import Any
 
 from fastapi import APIRouter, Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from crypto_ai_bot.app.compose import build_container_async
-from crypto_ai_bot.core.application import events_topics as EVT
+from crypto_ai_bot.core.application import events_topics
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import export_text, hist, inc
 from crypto_ai_bot.utils.time import now_ms
@@ -77,7 +77,7 @@ async def _shutdown_orchestrators(orchs: dict[str, Any]) -> None:
     for oc in orchs.values():
         try:
             tasks.append(asyncio.create_task(oc.stop()))
-        except Exception:
+        except (AttributeError, TypeError):
             _log.error("orchestrator_stop_schedule_failed", exc_info=True)
 
     if tasks:
@@ -127,21 +127,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             orchs = getattr(_container, "orchestrators", None)
             await _shutdown_orchestrators(orchs)
-        except Exception:
+        except (RuntimeError, asyncio.CancelledError):
             _log.error("orchestrators_stop_failed", exc_info=True)
 
         # Shutdown bus
         try:
             bus = getattr(_container, "bus", None)
             await _shutdown_bus(bus)
-        except Exception:
+        except (ConnectionError, RuntimeError):
             _log.error("bus_shutdown_failed", exc_info=True)
 
         # Close broker
         try:
             broker = getattr(_container, "broker", None)
             await _shutdown_broker(broker)
-        except Exception:
+        except (ConnectionError, RuntimeError):
             _log.error("exchange_close_failed", exc_info=True)
 
         _log.info("lifespan_shutdown_end")
@@ -159,23 +159,28 @@ async def _metrics_middleware(
     path = request.url.path
     method = request.method
     t = hist("http_request_latency_seconds", path=path, method=method)
-    if t:
-        with t.time():
-            response = await call_next(request)
-    else:
-        response = await call_next(request)
+    
+    response = await call_next(request) if not t else await _time_request(call_next, request, t)
+    
     inc("http_requests_total", path=path, method=method, code=str(response.status_code))
     return response
 
 
-def _ctx_or_500() -> Any:
+async def _time_request(call_next, request, timer):
+    """Helper to time request with context manager."""
+    with timer.time():
+        return await call_next(request)
+
+
+def _raise_not_ready() -> Any:
+    """Raise HTTPException if container not ready."""
     if _container is None:
         raise HTTPException(status_code=503, detail="Container not ready")
     return _container
 
 
 def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
-    c = _ctx_or_500()
+    c = _raise_not_ready()
     s = getattr(c, "settings", None)
     default_symbol = getattr(s, "SYMBOL", "BTC/USDT") if s else "BTC/USDT"
     sym = symbol or default_symbol
@@ -189,8 +194,10 @@ def _get_orchestrator(symbol: str | None) -> tuple[Any, str]:
 
 
 # -------- helpers --------
-async def _call_with_timeout(coro, *, timeout: float = 2.5):  # noqa: ASYNC109
-    return await asyncio.wait_for(coro, timeout=timeout)
+async def _call_with_timeout(coro, *, timeout: float = 2.5):
+    """Call coroutine with timeout."""
+    async with asyncio.timeout(timeout):
+        return await coro
 
 
 async def _check_storage(storage: Any) -> str:
@@ -225,7 +232,7 @@ async def health() -> JSONResponse:
     details: dict[str, Any] = {"ts_ms": now_ms()}
 
     try:
-        c = _ctx_or_500()
+        c = _raise_not_ready()
     except HTTPException:
         return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
 
@@ -240,29 +247,29 @@ async def health() -> JSONResponse:
     # DB check
     try:
         details["db"] = await _check_storage(storage)
-    except Exception as exc:
+    except (asyncio.TimeoutError, ConnectionError, RuntimeError) as exc:
         ok = False
         details["db"] = f"fail: {exc!s}"
 
     # EventBus check
     try:
         details["bus"] = await _check_bus(bus)
-    except Exception as exc:
+    except (asyncio.TimeoutError, ConnectionError, RuntimeError) as exc:
         ok = False
         details["bus"] = f"fail: {exc!s}"
 
     # Broker check
     try:
         details["broker"] = await _check_broker(broker)
-    except Exception as exc:
+    except (asyncio.TimeoutError, ConnectionError, RuntimeError) as exc:
         ok = False
         details["broker"] = f"fail: {exc!s}"
 
     # publish event for observability/Telegram
     if bus and hasattr(bus, "publish"):
         try:
-            await bus.publish(EVT.HEALTH_REPORT, {"ok": ok, **details})
-        except Exception:
+            await bus.publish(events_topics.HEALTH_REPORT, {"ok": ok, **details})
+        except (ConnectionError, RuntimeError):
             _log.debug("health_bus_publish_failed", exc_info=True)
 
     body = {"ok": ok, "default_symbol": default_symbol, "symbols": symbols, **details}
@@ -271,17 +278,17 @@ async def health() -> JSONResponse:
 
 @router.post("/alertmanager/webhook")
 async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
-    """Alertmanager webhook -> forward to EventBus (EVT.ALERTS_ALERTMANAGER)."""
+    """Alertmanager webhook -> forward to EventBus."""
     try:
-        c = _ctx_or_500()
+        c = _raise_not_ready()
     except HTTPException:
         return JSONResponse({"ok": False, "error": "container_not_ready"}, status_code=503)
 
     bus = getattr(c, "bus", None)
     if bus and hasattr(bus, "publish"):
         try:
-            await bus.publish(EVT.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
-        except Exception:
+            await bus.publish(events_topics.ALERTS_ALERTMANAGER, {"payload": payload, "ts_ms": now_ms()})
+        except (ConnectionError, RuntimeError):
             _log.debug("alert_bus_publish_failed", exc_info=True)
     return JSONResponse({"ok": True})
 
@@ -290,7 +297,7 @@ async def alertmanager_webhook(payload: dict = Body(...)) -> JSONResponse:
 async def metrics() -> PlainTextResponse:
     try:
         return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
-    except Exception:
+    except (ValueError, RuntimeError):
         _log.error("metrics_failed", exc_info=True)
         return PlainTextResponse("", status_code=500)
 
@@ -302,7 +309,7 @@ async def orch_status(symbol: str | None = Query(default=None)) -> JSONResponse:
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse(st)
-    except Exception as e:
+    except (AttributeError, RuntimeError) as e:
         _log.error("orch_status_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="status_failed") from e
 
@@ -316,7 +323,7 @@ async def orch_start(request: Request, symbol: str | None = Query(default=None))
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as e:
+    except (AttributeError, RuntimeError) as e:
         _log.error("orch_start_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="start_failed") from e
 
@@ -330,7 +337,7 @@ async def orch_stop(request: Request, symbol: str | None = Query(default=None)) 
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as e:
+    except (AttributeError, RuntimeError) as e:
         _log.error("orch_stop_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="stop_failed") from e
 
@@ -344,7 +351,7 @@ async def orch_pause(request: Request, symbol: str | None = Query(default=None))
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as e:
+    except (AttributeError, RuntimeError) as e:
         _log.error("orch_pause_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="pause_failed") from e
 
@@ -358,7 +365,7 @@ async def orch_resume(request: Request, symbol: str | None = Query(default=None)
         st = orch.status()
         st["symbol"] = sym
         return JSONResponse({"ok": True, "status": st})
-    except Exception as e:
+    except (AttributeError, RuntimeError) as e:
         _log.error("orch_resume_failed", extra={"symbol": sym}, exc_info=True)
         raise HTTPException(status_code=500, detail="resume_failed") from e
 
@@ -376,7 +383,7 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
     if hasattr(trades, "daily_pnl_quote"):
         try:
             result["pnl_quote"] = str(trades.daily_pnl_quote(symbol))
-        except Exception:
+        except (ValueError, AttributeError):
             _log.error("pnl_today_calc_failed", extra={"symbol": symbol}, exc_info=True)
     else:
         _log.warning("pnl_today_missing_method_daily_pnl_quote", extra={"symbol": symbol})
@@ -385,7 +392,7 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
     if hasattr(trades, "daily_turnover_quote"):
         try:
             result["turnover_quote"] = str(trades.daily_turnover_quote(symbol))
-        except Exception:
+        except (ValueError, AttributeError):
             _log.error("turnover_today_calc_failed", extra={"symbol": symbol}, exc_info=True)
     else:
         _log.warning("pnl_today_missing_method_daily_turnover_quote", extra={"symbol": symbol})
@@ -394,7 +401,7 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
     if hasattr(trades, "count_orders_today"):
         try:
             result["orders_count"] = int(trades.count_orders_today(symbol))
-        except Exception:
+        except (ValueError, AttributeError):
             _log.error("orders_today_count_failed", extra={"symbol": symbol}, exc_info=True)
     else:
         _log.warning("pnl_today_missing_method_count_orders_today", extra={"symbol": symbol})
@@ -405,10 +412,10 @@ def _get_pnl_data(storage: Any, symbol: str) -> dict[str, Any]:
 @router.get("/pnl/today")
 async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
     """
-    Single source of truth – trades repository:
+    Single source of truth — trades repository:
     daily_pnl_quote / daily_turnover_quote / count_orders_today.
     """
-    c = _ctx_or_500()
+    c = _raise_not_ready()
     try:
         _, sym = _get_orchestrator(symbol)
         st = getattr(c, "storage", None)
@@ -419,7 +426,7 @@ async def pnl_today(symbol: str | None = Query(default=None)) -> JSONResponse:
         return JSONResponse({"symbol": sym, **data})
     except HTTPException:
         raise
-    except Exception:
+    except (ValueError, RuntimeError):
         _log.error("pnl_today_failed", exc_info=True)
         raise HTTPException(status_code=500, detail="pnl_today_failed")
 
@@ -430,7 +437,7 @@ async def telegram_webhook(request: Request) -> JSONResponse:
     try:
         _ = await request.body()
         data = await request.json()
-        c = _ctx_or_500()
+        c = _raise_not_ready()
         settings = getattr(c, "settings", None)
         secret = getattr(settings, "TELEGRAM_BOT_SECRET", "")
 
@@ -443,7 +450,7 @@ async def telegram_webhook(request: Request) -> JSONResponse:
         _log.debug("telegram_webhook_received", extra={"update_id": data.get("update_id")})
         # if needed, forward to tg_bot.process_webhook_update(data)
         return JSONResponse({"ok": True})
-    except Exception:
+    except (ValueError, RuntimeError):
         _log.error("telegram_webhook_error", exc_info=True)
         return JSONResponse({"ok": False}, status_code=500)
 
