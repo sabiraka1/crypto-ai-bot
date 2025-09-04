@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
-import os
 import shutil
 import sqlite3
 
@@ -76,7 +76,7 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
 def _pymigrations() -> list[PyMigration]:
     migs: list[PyMigration] = []
 
-    # V0001 Гўв‚¬вЂќ ДћВ±ДћВ°ДћВ·ДћВѕДћВІДћВ°Г‘ВЏ Г‘ВЃГ‘вЂ¦ДћВµДћВјДћВ°
+    # V0001 — базовая схема
     def _v1(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -120,7 +120,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(1, "init", _v1))
 
-    # V0002 - ДћВґДћВѕДћВ±ДћВ°ДћВІДћВёДћВј broker_order_id ДћВё client_order_id
+    # V0002 — добавим broker_order_id и client_order_id
     def _v2(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "trades", "broker_order_id", "TEXT")
         _add_column_if_missing(conn, "trades", "client_order_id", "TEXT")
@@ -128,7 +128,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(2, "trades_order_ids", _v2))
 
-    # V0006 Гўв‚¬вЂќ ДћВёДћВЅДћВґДћВµДћВєГ‘ВЃГ‘вЂ№ ДћВїДћВѕ Г‘ВЃДћВґДћВµДћВ»ДћВєДћВ°ДћВј
+    # V0006 — индексы по сделкам
     def _v6(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -145,7 +145,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(6, "trades_indexes", _v6))
 
-    # V0007 Гўв‚¬вЂќ Г‘Ж’ДћВЅДћВёДћВєДћВ°ДћВ»Г‘Е’ДћВЅДћВѕГ‘ВЃГ‘вЂљГ‘Е’ ДћВёДћВґДћВµДћВјДћВїДћВѕГ‘вЂљДћВµДћВЅГ‘вЂљДћВЅДћВѕГ‘ВЃГ‘вЂљДћВё
+    # V0007 — уникальность идемпотентности
     def _v7(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -159,7 +159,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(7, "idempotency_unique_and_ts", _v7))
 
-    # V0008 Гўв‚¬вЂќ ДћВёДћВЅДћВґДћВµДћВєГ‘ВЃ ДћВїДћВѕДћВ·ДћВёГ‘вЂ ДћВёДћВ№
+    # V0008 — индекс по позициям
     def _v8(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -171,7 +171,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(8, "positions_idx", _v8))
 
-    # V0010 Гўв‚¬вЂќ ДћВёДћВЅДћВґДћВµДћВєГ‘ВЃ ДћВ°Г‘Ж’ДћВґДћВёГ‘вЂљДћВ°
+    # V0010 — индексы аудита и уникальность broker_order_id
     def _v10(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -186,7 +186,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(10, "audit_ts_idx", _v10))
 
-    # V0011 Гўв‚¬вЂќ Г‘в‚¬ДћВ°Г‘ВЃГ‘Л†ДћВёГ‘в‚¬ДћВµДћВЅДћВёДћВµ Г‘ВЃГ‘вЂ¦ДћВµДћВјГ‘вЂ№
+    # V0011 — расширение схемы positions
     def _v11(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "positions", "avg_entry_price", "TEXT NOT NULL DEFAULT '0'")
         _add_column_if_missing(conn, "positions", "realized_pnl", "TEXT NOT NULL DEFAULT '0'")
@@ -209,7 +209,7 @@ def _pymigrations() -> list[PyMigration]:
 
     migs.append(PyMigration(11, "positions_schema_extend", _v11))
 
-    # V0012 - orders table
+    # V0012 — таблица orders
     def _v12(conn: sqlite3.Connection) -> None:
         _apply_sql(
             conn,
@@ -243,7 +243,7 @@ def run_migrations(
     do_backup: bool = True,
     backup_retention_days: int = 30,
 ) -> None:
-    """ДћЕёГ‘в‚¬ДћВёДћВјДћВµДћВЅГ‘ВЏДћВµГ‘вЂљ ДћВїГ‘в‚¬ДћВѕДћВіГ‘в‚¬ДћВ°ДћВјДћВјДћВЅГ‘вЂ№ДћВµ ДћВјДћВёДћВіГ‘в‚¬ДћВ°Г‘вЂ ДћВёДћВё."""
+    """Применяет программные миграции."""
     assert isinstance(now_ms, int), "now_ms must be int (epoch ms)"
     _init_schema_table(conn)
 
@@ -258,7 +258,7 @@ def run_migrations(
         mig.up(conn)
         _mark_applied(conn, mig.version, mig.name, now_ms)
 
-    # ДћЕёДћВѕДћВґГ‘вЂЎДћВёГ‘ВЃГ‘вЂљДћВёГ‘вЂљГ‘Е’ Г‘ВЃГ‘вЂљДћВ°Г‘в‚¬Г‘вЂ№ДћВµ ДћВ±Г‘ВЌДћВєДћВ°ДћВїГ‘вЂ№
+    # ретеншн резервных копий
     try:
         if do_backup and db_path and backup_retention_days >= 0:
             dest = os.path.join(os.path.dirname(db_path) or ".", "backups")

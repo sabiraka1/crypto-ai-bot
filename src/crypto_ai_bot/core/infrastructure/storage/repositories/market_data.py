@@ -42,4 +42,11 @@ class MarketDataRepository:
             """,
             (symbol, int(limit)),
         )
-        return [dict(r) for r in cur.fetchall()]
+        rows = cur.fetchall()
+        # Поддерживаем Row и tuple
+        if rows and hasattr(rows[0], "keys"):
+            return [dict(r) for r in rows]
+        return [
+            {"symbol": r[0], "last": r[1], "bid": r[2], "ask": r[3], "ts_ms": r[4]}
+            for r in (rows or [])
+        ]

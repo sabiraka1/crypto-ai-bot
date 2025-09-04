@@ -7,7 +7,6 @@ from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
 
-# Константа для дефолтного значения B008
 _DEFAULT_FEE_ZERO = dec("0")
 
 
@@ -37,9 +36,10 @@ class PositionsRepository:
             pass
 
     def ensure_schema(self) -> None:
-        """Создает таблицу positions если её нет."""
+        """Создаёт таблицу positions, если её нет."""
         cur = self.conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS positions (
                 symbol TEXT PRIMARY KEY,
                 base_qty NUMERIC NOT NULL DEFAULT 0,
@@ -49,7 +49,8 @@ class PositionsRepository:
                 updated_ts_ms INTEGER NOT NULL DEFAULT 0,
                 version INTEGER NOT NULL DEFAULT 0
             )
-        """)
+            """
+        )
         self.conn.commit()
 
     def get_position(self, symbol: str) -> Position:
@@ -69,21 +70,33 @@ class PositionsRepository:
                 updated_ts_ms=0,
                 version=0,
             )
+        # поддерживаем sqlite3.Row и tuple
+        if hasattr(r, "keys"):
+            d = dict(r)  # type: ignore[arg-type]
+            return Position(
+                symbol=d["symbol"],
+                base_qty=dec(str(d["base_qty"] or "0")),
+                avg_entry_price=dec(str(d["avg_entry_price"] or "0")),
+                realized_pnl=dec(str(d["realized_pnl"] or "0")),
+                unrealized_pnl=dec(str(d["unrealized_pnl"] or "0")),
+                updated_ts_ms=int(d["updated_ts_ms"] or 0),
+                version=int(d["version"] or 0),
+            )
         return Position(
-            symbol=r["symbol"],
-            base_qty=dec(str(r["base_qty"] or "0")),
-            avg_entry_price=dec(str(r["avg_entry_price"] or "0")),
-            realized_pnl=dec(str(r["realized_pnl"] or "0")),
-            unrealized_pnl=dec(str(r["unrealized_pnl"] or "0")),
-            updated_ts_ms=int(r["updated_ts_ms"] or 0),
-            version=int(r["version"] or 0),
+            symbol=r[0],
+            base_qty=dec(str(r[1] or "0")),
+            avg_entry_price=dec(str(r[2] or "0")),
+            realized_pnl=dec(str(r[3] or "0")),
+            unrealized_pnl=dec(str(r[4] or "0")),
+            updated_ts_ms=int(r[5] or 0),
+            version=int(r[6] or 0),
         )
 
     def get_base_qty(self, symbol: str) -> Decimal:
         return self.get_position(symbol).base_qty
 
-    # 🔹 батч-доступ
     def get_positions_many(self, symbols: list[str]) -> dict[str, Position]:
+        """Пакетная выборка нескольких позиций."""
         if not symbols:
             return {}
         placeholders = ",".join(["?"] * len(symbols))
@@ -93,17 +106,30 @@ class PositionsRepository:
             symbols,
         )
         out: dict[str, Position] = {}
-        for r in cur.fetchall():
-            out[r["symbol"]] = Position(
-                symbol=r["symbol"],
-                base_qty=dec(str(r["base_qty"] or "0")),
-                avg_entry_price=dec(str(r["avg_entry_price"] or "0")),
-                realized_pnl=dec(str(r["realized_pnl"] or "0")),
-                unrealized_pnl=dec(str(r["unrealized_pnl"] or "0")),
-                updated_ts_ms=int(r["updated_ts_ms"] or 0),
-                version=int(r["version"] or 0),
-            )
-        # добиваем отсутствующие дефолтами
+        rows = cur.fetchall() or []
+        for r in rows:
+            if hasattr(r, "keys"):
+                d = dict(r)  # type: ignore[arg-type]
+                out[d["symbol"]] = Position(
+                    symbol=d["symbol"],
+                    base_qty=dec(str(d["base_qty"] or "0")),
+                    avg_entry_price=dec(str(d["avg_entry_price"] or "0")),
+                    realized_pnl=dec(str(d["realized_pnl"] or "0")),
+                    unrealized_pnl=dec(str(d["unrealized_pnl"] or "0")),
+                    updated_ts_ms=int(d["updated_ts_ms"] or 0),
+                    version=int(d["version"] or 0),
+                )
+            else:
+                out[r[0]] = Position(
+                    symbol=r[0],
+                    base_qty=dec(str(r[1] or "0")),
+                    avg_entry_price=dec(str(r[2] or "0")),
+                    realized_pnl=dec(str(r[3] or "0")),
+                    unrealized_pnl=dec(str(r[4] or "0")),
+                    updated_ts_ms=int(r[5] or 0),
+                    version=int(r[6] or 0),
+                )
+        # добавляем отсутствующие с дефолтами
         for s in symbols:
             if s not in out:
                 out[s] = Position(
@@ -140,7 +166,7 @@ class PositionsRepository:
         fee_quote: Decimal | None = None,
         last_price: Decimal | None = None,
     ) -> None:
-        # Обработка дефолтного значения для B008
+        # дефолт для None (B008)
         if fee_quote is None:
             fee_quote = _DEFAULT_FEE_ZERO
 
@@ -156,20 +182,18 @@ class PositionsRepository:
                 return
             new_base = base0 + base_amount
             new_avg = ((avg0 * base0) + (price * base_amount)) / new_base if new_base > 0 else dec("0")
-            new_realized = realized0 - (fee_quote if fee_quote else dec("0"))
+            new_realized = realized0 - (fee_quote or dec("0"))
         else:
             if base_amount <= 0:
                 return
             matched = base_amount if base_amount <= base0 else base0
             pnl = (price - avg0) * matched
-            new_realized = realized0 + pnl - (fee_quote if fee_quote else dec("0"))
+            new_realized = realized0 + pnl - (fee_quote or dec("0"))
             new_base = base0 - base_amount
             new_avg = avg0 if new_base > 0 else dec("0")
 
         ref_price = (last_price if last_price is not None else price) or dec("0")
-        new_unreal = (
-            (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
-        )
+        new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")
 
         cur = self.conn.cursor()
         ts = _now_ms()
@@ -205,20 +229,17 @@ class PositionsRepository:
             self.conn.commit()
             if cur.rowcount > 0:
                 return
+            # конфликты версионирования — перечитываем и пересчитываем
             pos = self.get_position(symbol)
             base0, avg0, realized0, ver0 = pos.base_qty, pos.avg_entry_price, pos.realized_pnl, pos.version
             if side == "buy":
                 new_base = base0 + base_amount
                 new_avg = ((avg0 * base0) + (price * base_amount)) / new_base if new_base > 0 else dec("0")
-                new_realized = realized0 - (fee_quote if fee_quote else dec("0"))
+                new_realized = realized0 - (fee_quote or dec("0"))
             else:
                 matched = base_amount if base_amount <= base0 else base0
                 pnl = (price - avg0) * matched
-                new_realized = realized0 + pnl - (fee_quote if fee_quote else dec("0"))
+                new_realized = realized0 + pnl - (fee_quote or dec("0"))
                 new_base = base0 - base_amount
                 new_avg = avg0 if new_base > 0 else dec("0")
-            new_unreal = (
-                (ref_price - new_avg) * new_base
-                if (new_base > 0 and new_avg > 0 and ref_price > 0)
-                else dec("0")
-            )
+            new_unreal = (ref_price - new_avg) * new_base if (new_base > 0 and new_avg > 0 and ref_price > 0) else dec("0")

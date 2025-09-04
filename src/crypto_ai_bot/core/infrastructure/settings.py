@@ -28,8 +28,8 @@ def _read_text_file(path: str) -> str:
 
 def _secret(name: str, default: str = "") -> str:
     """
-    Secrets resolution order (first match wins):
-      - ${NAME}_FILE : path to text file
+    Secrets resolution order:
+      - ${NAME}_FILE : path to text file with the value
       - ${NAME}_B64  : base64-encoded value
       - SECRETS_FILE : JSON file with lowercased keys (e.g., "api_key")
       - ${NAME}      : plain env var
@@ -156,7 +156,7 @@ class Settings:
     REGIME_BTC_DOM_LIMIT_PCT: float
     REGIME_FOMC_BLOCK_HOURS: int
 
-    # strategy weights (clean defaults; invariant: sum==1.0 Г‚В± eps)
+    # strategy weights (sum==1.0 ± eps)
     MTF_W_M15: float
     MTF_W_H1: float
     MTF_W_H4: float
@@ -185,8 +185,7 @@ class Settings:
             f"{'-sandbox' if _get('SANDBOX', '0').lower() in ('1', 'true', 'yes') else ''}.sqlite3"
         )
 
-        # SAFETY_* aliases -> also populate RISK_* if only SAFETY_* provided
-        # (we keep SAFETY_* in the model for backward compatibility)
+        # SAFETY_* aliases -> также заполняем RISK_* если заданы только SAFETY_*
         safety_per_day = int(_get("SAFETY_MAX_ORDERS_PER_DAY", _get("RISK_MAX_ORDERS_PER_DAY", "0")) or "0")
         safety_turnover = float(_get("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0") or "0")
 
@@ -204,20 +203,16 @@ class Settings:
             BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
             IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
             IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
-            EVENT_BUS_URL=_get("EVENT_BUS_URL", ""),  # "" -> in-memory bus, set "redis://..." to enable Redis
+            EVENT_BUS_URL=_get("EVENT_BUS_URL", ""),
             # risk
             RISK_COOLDOWN_SEC=int(_get("RISK_COOLDOWN_SEC", "60")),
-            RISK_MAX_SPREAD_PCT=float(
-                _get("RISK_MAX_SPREAD_PCT", "0.30")
-            ),  # 0.30% Гўв‚¬вЂќ ДћВєДћВѕДћВЅГ‘ВЃДћВµГ‘в‚¬ДћВІДћВ°Г‘вЂљДћВёДћВІДћВЅГ‘вЂ№ДћВ№ ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљ
+            RISK_MAX_SPREAD_PCT=float(_get("RISK_MAX_SPREAD_PCT", "0.30")),
             RISK_MAX_POSITION_BASE=float(_get("RISK_MAX_POSITION_BASE", "0.02")),
             RISK_MAX_ORDERS_PER_HOUR=int(_get("RISK_MAX_ORDERS_PER_HOUR", "6")),
             RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
             FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
             RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
-            RISK_MAX_SLIPPAGE_PCT=dec(
-                _get("RISK_MAX_SLIPPAGE_PCT", "0.10")
-            ),  # 0.10% ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљ
+            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.10")),
             # extended risk caps
             RISK_MAX_ORDERS_5M=int(_get("RISK_MAX_ORDERS_5M", "0")),
             RISK_MAX_TURNOVER_5M_QUOTE=float(_get("RISK_MAX_TURNOVER_5M_QUOTE", "0")),
@@ -251,9 +246,7 @@ class Settings:
             TELEGRAM_ENABLED=int(_get("TELEGRAM_ENABLED", "0")),
             TELEGRAM_BOT_TOKEN=_secret("TELEGRAM_BOT_TOKEN", ""),
             TELEGRAM_CHAT_ID=_get("TELEGRAM_CHAT_ID", ""),
-            TELEGRAM_ALERTS_CHAT_ID=_get(
-                "TELEGRAM_ALERTS_CHAT_ID", ""
-            ),  # optional, can be same as TELEGRAM_CHAT_ID
+            TELEGRAM_ALERTS_CHAT_ID=_get("TELEGRAM_ALERTS_CHAT_ID", ""),
             TELEGRAM_BOT_COMMANDS_ENABLED=int(_get("TELEGRAM_BOT_COMMANDS_ENABLED", "0")),
             TELEGRAM_ALLOWED_USERS=_get("TELEGRAM_ALLOWED_USERS", ""),
             # Regime gating
@@ -265,7 +258,7 @@ class Settings:
             REGIME_DXY_LIMIT_PCT=float(_get("REGIME_DXY_LIMIT_PCT", "0.35")),
             REGIME_BTC_DOM_LIMIT_PCT=float(_get("REGIME_BTC_DOM_LIMIT_PCT", "0.60")),
             REGIME_FOMC_BLOCK_HOURS=int(_get("REGIME_FOMC_BLOCK_HOURS", "8")),
-            # strategy weights Гўв‚¬вЂќ Г‘вЂЎДћВёГ‘ВЃГ‘вЂљГ‘вЂ№ДћВµ ДћВґДћВµГ‘вЂћДћВѕДћВ»Г‘вЂљГ‘вЂ№ (ДћВёДћВЅДћВІДћВ°Г‘в‚¬ДћВёДћВ°ДћВЅГ‘вЂљГ‘вЂ№ ДћВІДћВ°ДћВ»ДћВёДћВґДћВёГ‘в‚¬Г‘Ж’ДћВµДћВј ДћВІ schema)
+            # strategy weights (чистые дефолты)
             MTF_W_M15=float(_get("MTF_W_M15", "0.40")),
             MTF_W_H1=float(_get("MTF_W_H1", "0.25")),
             MTF_W_H4=float(_get("MTF_W_H4", "0.20")),
@@ -283,6 +276,6 @@ class Settings:
             RISK_ANTI_CORR_GROUPS=_get("RISK_ANTI_CORR_GROUPS", ""),
         )
 
-        # validate invariants (raises on invalid)
+        # Валидация инвариантов
         validate_settings(s)
         return s

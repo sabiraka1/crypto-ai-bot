@@ -46,7 +46,7 @@ class OrdersRepository:
     # ---------- public API ----------
 
     def upsert_open(self, order: Any) -> None:
-        """ДћвЂ™Г‘ВЃГ‘вЂљДћВ°ДћВІДћВ»Г‘ВЏДћВµГ‘вЂљ ДћВѕГ‘вЂљДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљГ‘вЂ№ДћВ№ ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬, ДћВµГ‘ВЃДћВ»ДћВё Г‘вЂљДћВ°ДћВєДћВѕДћВіДћВѕ ДћВµГ‘вЂ°Г‘вЂ ДћВЅДћВµГ‘вЂљ (ДћВїДћВѕ broker_id ДћВёДћВ»ДћВё client_id)."""
+        """Вставляет открытый ордер, если такого нет (по broker_id или client_id)."""
         self.ensure_schema()
         broker_id = getattr(order, "id", None) or getattr(order, "order_id", None)
         client_id = getattr(order, "client_order_id", None)
@@ -70,7 +70,7 @@ class OrdersRepository:
         self.conn.commit()
 
     def list_open(self, symbol: str) -> list[dict[str, Any]]:
-        """ДћВћГ‘вЂљДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљГ‘вЂ№ДћВµ (ДћВёДћВ»ДћВё Г‘вЂЎДћВ°Г‘ВЃГ‘вЂљДћВёГ‘вЂЎДћВЅДћВѕ ДћВёГ‘ВЃДћВїДћВѕДћВ»ДћВЅДћВµДћВЅДћВЅГ‘вЂ№ДћВµ) ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ДћВ° ДћВїДћВѕ Г‘ВЃДћВёДћВјДћВІДћВѕДћВ»Г‘Ж’, Г‘ВЃГ‘вЂљДћВ°Г‘в‚¬Г‘вЂ№ДћВµ ГўвЂ вЂ™ ДћВЅДћВѕДћВІГ‘вЂ№ДћВµ."""
+        """Открытые (или частично исполненные) ордера по символу, старые — первыми."""
         self.ensure_schema()
         cur = self.conn.cursor()
         cur.execute(
@@ -100,7 +100,7 @@ class OrdersRepository:
         return result
 
     def update_progress(self, broker_order_id: str, filled: str) -> None:
-        """ДћВћДћВ±ДћВЅДћВѕДћВІДћВ»Г‘ВЏДћВµГ‘вЂљ filled, ДћВЅДћВµ ДћВјДћВµДћВЅГ‘ВЏГ‘ВЏ Г‘ВЃГ‘вЂљДћВ°Г‘вЂљГ‘Ж’Г‘ВЃ."""
+        """Обновляет filled, не меняя статус."""
         if not broker_order_id:
             return
         self.ensure_schema()
@@ -112,7 +112,7 @@ class OrdersRepository:
         self.conn.commit()
 
     def mark_closed(self, broker_order_id: str, filled: str) -> None:
-        """ДћЕёДћВѕДћВјДћВµГ‘вЂЎДћВ°ДћВµГ‘вЂљ ДћВѕГ‘в‚¬ДћВґДћВµГ‘в‚¬ ДћВ·ДћВ°ДћВєГ‘в‚¬Г‘вЂ№Г‘вЂљГ‘вЂ№ДћВј ДћВё Г‘вЂћДћВёДћВєГ‘ВЃДћВёГ‘в‚¬Г‘Ж’ДћВµГ‘вЂљ Г‘вЂћДћВёДћВЅДћВ°ДћВ»Г‘Е’ДћВЅГ‘вЂ№ДћВ№ filled."""
+        """Помечает ордер закрытым и фиксирует итоговый filled."""
         if not broker_order_id:
             return
         self.ensure_schema()
