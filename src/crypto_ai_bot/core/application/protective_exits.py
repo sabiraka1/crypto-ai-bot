@@ -16,12 +16,12 @@ _log = get_logger("protective_exits")
 # ----------------------------- Config -----------------------------
 @dataclass(frozen=True)
 class AtrExitConfig:
-    atr_period: int = 14                # ATR lookback
-    tp1_atr: Decimal = dec("1.0")       # TP1 = entry + 1.0 * ATR
-    tp2_atr: Decimal = dec("2.0")       # TP2 = entry + 2.0 * ATR
-    sl_atr: Decimal = dec("1.5")        # SL  = entry - 1.5 * ATR
-    tp1_close_pct: int = 50             # % to close on TP1
-    enable_breakeven: bool = True       # move SL to breakeven after TP1
+    atr_period: int = 14  # ATR lookback
+    tp1_atr: Decimal = dec("1.0")  # TP1 = entry + 1.0 * ATR
+    tp2_atr: Decimal = dec("2.0")  # TP2 = entry + 2.0 * ATR
+    sl_atr: Decimal = dec("1.5")  # SL  = entry - 1.5 * ATR
+    tp1_close_pct: int = 50  # % to close on TP1
+    enable_breakeven: bool = True  # move SL to breakeven after TP1
     min_base_to_exit: Decimal = dec("0")  # minimal base qty to perform exit
     tick_interval_sec: float = 2.0
     ohlcv_limit: int = 200

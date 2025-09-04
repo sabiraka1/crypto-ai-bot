@@ -21,6 +21,7 @@ def _getv(d: Any) -> Any:
     Safe accessor that works with dicts and objects (case-insensitive for attrs).
     Returns {} if the key is absent.
     """
+
     def _inner(k: str) -> Any:
         try:
             if isinstance(d, dict):
@@ -126,7 +127,13 @@ class TelegramBotCommands:
     async def _reply(self, chat_id: int, text: str, *, parse_mode: str = "HTML") -> None:
         # Prefer sending directly via Telegram API to address the originating chat.
         try:
-            url = self._api("sendMessage", chat_id=str(chat_id), text=text, parse_mode=parse_mode, disable_web_page_preview="true")
+            url = self._api(
+                "sendMessage",
+                chat_id=str(chat_id),
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview="true",
+            )
             await aget(url)
         except Exception:  # noqa: BLE001
             _log.error("telegram_reply_failed", exc_info=True)
@@ -192,7 +199,9 @@ class TelegramBotCommands:
                 lines.append(f"- {k}: <code>{html.escape(str(v))}</code>")
         await self._reply(chat_id, "\n".join(lines))
 
-    async def _cmd_simple_call(self, chat_id: int, tail: str | None, *, sym_first: bool, method: str, ok_text: str) -> None:
+    async def _cmd_simple_call(
+        self, chat_id: int, tail: str | None, *, sym_first: bool, method: str, ok_text: str
+    ) -> None:
         sym = self._pick_symbol(chat_id, tail if sym_first else None)
         orch = self._orch(sym)
         if not orch:
@@ -205,7 +214,10 @@ class TelegramBotCommands:
             else:
                 fn()
             st = orch.status()
-            await self._reply(chat_id, f"{ok_text} <b>{html.escape(sym)}</b>\nstate: <code>{html.escape(str(st.get('state')))}</code>")
+            await self._reply(
+                chat_id,
+                f"{ok_text} <b>{html.escape(sym)}</b>\nstate: <code>{html.escape(str(st.get('state')))}</code>",
+            )
         except Exception as e:  # noqa: BLE001
             _log.error("orch_call_failed", extra={"symbol": sym, "method": method}, exc_info=True)
             await self._reply(chat_id, f"{method} failed: <code>{html.escape(str(e))}</code>")

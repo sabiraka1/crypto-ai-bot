@@ -51,7 +51,7 @@ async def eval_and_execute(
     storage: Any,
     broker: Any,
     bus: Any,
-    risk: Any,          # Orchestrator passes RiskManager here
+    risk: Any,  # Orchestrator passes RiskManager here
     exits: Any,
     settings: Any,
 ) -> EvalResult:

@@ -261,7 +261,9 @@ async def execute_trade(
     try:
         client_order_id = idem_key  # reuse idempotency key for client_order_id
         if act == "buy":
-            q_amt = q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
+            q_amt = (
+                q_in if q_in and q_in > dec("0") else dec(str(getattr(settings, "FIXED_AMOUNT", "0") or "0"))
+            )
             _log.info("execute_order_buy", extra={"symbol": sym, "quote_amount": str(q_amt)})
             order = await broker.create_market_buy_quote(
                 symbol=sym, quote_amount=q_amt, client_order_id=client_order_id
