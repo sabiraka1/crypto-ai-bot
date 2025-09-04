@@ -23,6 +23,7 @@ class TelegramAlerts:
         parse_mode: str = "HTML",
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
+        max_text_len: int = 4000,  # Telegram hard limit ~4096; берём запас
     ) -> None:
         self._token = (bot_token or "").strip()
         self._chat_id = (chat_id or "").strip()
@@ -30,6 +31,7 @@ class TelegramAlerts:
         self._parse_mode = parse_mode
         self._disable_web_page_preview = bool(disable_web_page_preview)
         self._disable_notification = bool(disable_notification)
+        self._max_text_len = int(max_text_len)
 
         # token-bucket anti-storm (avg 1 msg/sec, burst up to 5)
         self._bucket_tokens = 5.0
@@ -72,11 +74,18 @@ class TelegramAlerts:
 
         cid = get_cid()
         if cid:
-            text = f"{text}\n<code>[#CID:{cid}]</code>"
+            suffix = f"\n<code>[#CID:{cid}]</code>"
+            text = (text or "") + suffix
+        else:
+            text = str(text or "")
+
+        # безопасная обрезка до лимита TG
+        if len(text) > self._max_text_len:
+            text = text[: self._max_text_len]
 
         payload: dict[str, Any] = {
             "chat_id": self._chat_id,
-            "text": str(text or ""),
+            "text": text,
             "parse_mode": self._parse_mode,
             "disable_web_page_preview": self._disable_web_page_preview,
             "disable_notification": self._disable_notification,

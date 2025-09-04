@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-# Domain правила (чистый слой)
+# Domain rules (чистый слой)
 from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
 from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
 
@@ -45,7 +45,6 @@ except ImportError:
     CorrelationManager = None  # type: ignore
     CorrelationConfig = None  # type: ignore
 
-# Utils в domain допустимы
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
@@ -252,17 +251,17 @@ class RiskManager:
                 inc("risk_block_total", symbol=symbol, reason=why)
                 return False, why, extra
 
-        # If no trades repo, skip streak/drawdown checks
+        # Если нет репозитория trades — пропускаем streak/drawdown
         if trades is None:
             return True, "ok", {"note": "no_trades_repo"}
 
-        # Loss streak check
+        # Loss streak
         ok, why, extra = self._loss.check(symbol=symbol, trades_repo=trades)
         if not ok:
             inc("risk_block_total", symbol=symbol, reason=why)
             return False, why, extra
 
-        # Max drawdown check
+        # Max drawdown
         ok, why, extra = self._dd.check(symbol=symbol, trades_repo=trades)
         if not ok:
             inc("risk_block_total", symbol=symbol, reason=why)
@@ -270,8 +269,7 @@ class RiskManager:
 
         return True, "ok", {}
 
-    # ---- Compat для старых вызовов ----
+    # ---- Совместимость для старых вызовов ----
     def can_execute(self, symbol: str, storage: Any) -> bool:
-        """Legacy compatibility method."""
         ok, _, _ = self.check(symbol=symbol, storage=storage)
         return ok
