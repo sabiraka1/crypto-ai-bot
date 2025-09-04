@@ -26,8 +26,8 @@ class BalancesReconciler:
 
     async def run_once(self) -> dict[str, str]:
         """
-        РџРѕР»СѓС‡Р°РµС‚ Р±Р°Р»Р°РЅСЃ Сѓ Р±СЂРѕРєРµСЂР° Рё РЅРѕСЂРјР°Р»РёР·СѓРµС‚ Р·РЅР°С‡РµРЅРёСЏ Рє СЃС‚СЂРѕРєР°Рј Decimal.
-        РќРёРєР°РєРёС… side-effects: РїСѓР±Р»РёРєР°С†РёРё СЃРѕР±С‹С‚РёР№/Р·Р°РїРёСЃСЊ РІ Р‘Р” РґРµР»Р°РµС‚ РІС‹Р·С‹РІР°СЋС‰РёР№ СЃР»РѕР№.
+        Получает баланс у брокера и нормализует значения к строкам Decimal.
+        Никаких side-effects: публикации событий/запись в БД делает вызывающий слой.
         """
         try:
             bal = await self.broker.fetch_balance(self.symbol)  # dict: free_base, free_quote
@@ -49,8 +49,8 @@ class BalancesReconciler:
 
 async def reconcile_balances(symbol: str, storage: Any, broker: Any, bus: Any, settings: Any) -> None:
     """
-    Р¤СѓРЅРєС†РёСЏ-РѕР±С‘СЂС‚РєР° РґР»СЏ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё СЃ orchestrator: СЃРµР№С‡Р°СЃ РїСЂРѕСЃС‚Рѕ РІС‹Р·С‹РІР°РµС‚ Reconciler.
-    РџР°Р±Р»РёС€РёРЅРі РІ С€РёРЅСѓ/Р·Р°РїРёСЃСЊ РІ Р‘Р” вЂ” РїРѕ РјРµСЃС‚Сѓ РІС‹Р·РѕРІР° (application-СЃР»РѕР№), С‡С‚РѕР±С‹ РЅРµ СЃРјРµС€РёРІР°С‚СЊ РѕС‚РІРµС‚СЃС‚РІРµРЅРЅРѕСЃС‚СЊ.
+    Функция-обёртка для совместимости с orchestrator: сейчас просто вызывает Reconciler.
+    Паблишинг в шину/запись в БД — по месту вызова (application-слой), чтобы не смешивать ответственность.
     """
     rec = BalancesReconciler(broker=broker, symbol=symbol)
     _ = await rec.run_once()

@@ -13,17 +13,17 @@ from crypto_ai_bot.core.application.reconciliation.orders import OrdersReconcile
 async def _run_reconcile(symbol: str) -> dict[str, Any]:
     c = await build_container_async()
 
-    # РЎРІРµСЂРєР° РѕСЂРґРµСЂРѕРІ
+    # Сверка ордеров
     orders_rec = OrdersReconciler(c.broker, symbol)
     await orders_rec.run_once()
-    orders: dict[str, Any] = {}  # РґРѕР±Р°РІР»РµРЅР° Р°РЅРЅРѕС‚Р°С†РёСЏ С‚РёРїР°
+    orders: dict[str, Any] = {}  # добавлена аннотация типа
 
-    # РЎРІРµСЂРєР° Р±Р°Р»Р°РЅСЃРѕРІ
+    # Сверка балансов
     balances_rec = BalancesReconciler(c.broker, symbol)
     await balances_rec.run_once()
-    balances: dict[str, Any] = {}  # РґРѕР±Р°РІР»РµРЅР° Р°РЅРЅРѕС‚Р°С†РёСЏ С‚РёРїР°
+    balances: dict[str, Any] = {}  # добавлена аннотация типа
 
-    # РЎРІРµСЂРєР° РїРѕР·РёС†РёР№
+    # Сверка позиций
     pos = c.storage.positions.get_position(symbol)
 
     return {"symbol": symbol, "orders": orders, "balances": balances, "position_base": str(pos.base_qty)}

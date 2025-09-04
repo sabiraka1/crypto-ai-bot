@@ -10,7 +10,7 @@ from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 
 class RSIMomentumStrategy(BaseStrategy):
-    """RSI + Momentum: РїРѕРєСѓРїРєРё РїСЂРё РїРµСЂРµРїСЂРѕРґР°РЅРЅРѕСЃС‚Рё СЃ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј РјРѕРјРµРЅС‚СѓРјРѕРј Рё РЅР°РѕР±РѕСЂРѕС‚."""
+    """RSI + Momentum: покупки при перепроданности с положительным моментумом и наоборот."""
 
     def __init__(
         self,
@@ -83,8 +83,8 @@ class RSIMomentumStrategy(BaseStrategy):
         return "hold", explain
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        """РђРґР°РїС‚РµСЂ РґР»СЏ BaseStrategy.generate() - РІС‹Р·С‹РІР°РµС‚ decide() Рё РїСЂРµРѕР±СЂР°Р·СѓРµС‚ СЂРµР·СѓР»СЊС‚Р°С‚."""
-        # РџРѕР»СѓС‡Р°РµРј РґР°РЅРЅС‹Рµ РёР· MarketData РµСЃР»Рё РёС… РЅРµС‚ РІ РєРѕРЅС‚РµРєСЃС‚Рµ
+        """Адаптер для BaseStrategy.generate() - вызывает decide() и преобразует результат."""
+        # Получаем данные из MarketData если их нет в контексте
         if ctx.data is None:
             ticker = await md.get_ticker(ctx.symbol)
             ctx = StrategyContext(symbol=ctx.symbol, settings=ctx.settings, data={"ticker": ticker})
@@ -92,8 +92,8 @@ class RSIMomentumStrategy(BaseStrategy):
         action, explain = self.decide(ctx)
         reason = explain.get("signal", explain.get("reason", ""))
 
-        # Р’С‹С‡РёСЃР»СЏРµРј confidence РЅР° РѕСЃРЅРѕРІРµ СЃРёР»С‹ СЃРёРіРЅР°Р»Р°
-        confidence = 0.5  # Р±Р°Р·РѕРІР°СЏ СѓРІРµСЂРµРЅРЅРѕСЃС‚СЊ
+        # Вычисляем confidence на основе силы сигнала
+        confidence = 0.5  # базовая уверенность
         if (
             action == "buy"
             and "oversold_with_positive_momentum" in reason

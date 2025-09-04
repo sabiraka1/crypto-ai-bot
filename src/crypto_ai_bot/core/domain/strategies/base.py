@@ -15,17 +15,17 @@ _log = get_logger("strategy.base")
 class Signal:
     side: str  # "buy" | "sell" | "none"
     score: Decimal  # [-1..+1]
-    reason: str = ""  # РєСЂР°С‚РєР°СЏ РїСЂРёС‡РёРЅР°
+    reason: str = ""  # краткая причина
 
 
 class BaseStrategy:
     """
-    РЁР°Р±Р»РѕРЅРЅС‹Р№ РјРµС‚РѕРґ:
-      - prepare()  -> РїРѕРґРіРѕС‚РѕРІРєР° С„РёС‡/РєСЌС€Р° (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
-      - signal()   -> СЃС‚РѕСЂРѕРЅР°/score
-      - sizing()   -> С†РµР»РµРІРѕР№ СЂР°Р·РјРµСЂ (quote/base) (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ)
-      - validate() -> РёРЅРІР°СЂРёР°РЅС‚С‹, С„РёР»СЊС‚СЂС‹
-    Р’РЅРµС€РЅРёР№ РєРѕРЅС‚СЂР°РєС‚: generate(ctx, md) -> dict
+    Шаблонный метод:
+      - prepare()  -> подготовка фич/кэша (опционально)
+      - signal()   -> сторона/score
+      - sizing()   -> целевой размер (quote/base) (опционально)
+      - validate() -> инварианты, фильтры
+    Внешний контракт: generate(ctx, md) -> dict
     """
 
     name: str = "base"
@@ -37,11 +37,11 @@ class BaseStrategy:
         return Signal(side="none", score=dec("0"), reason="noimpl")
 
     async def sizing(self, ctx: Any, md: Any, sig: Signal) -> dict[str, str | Decimal]:
-        # РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ вЂ” Р±РµР· РёР·РјРµРЅРµРЅРёСЏ СЂР°Р·РјРµСЂР°; РєРѕРЅРєСЂРµС‚РЅС‹Рµ СЃС‚СЂР°С‚РµРіРёРё РїРµСЂРµРѕРїСЂРµРґРµР»СЏСЋС‚
+        # по умолчанию — без изменения размера; конкретные стратегии переопределяют
         return {"mode": "fixed_quote", "quote_amount": dec(str(getattr(ctx, "FIXED_AMOUNT", "0") or "0"))}
 
     async def validate(self, ctx: Any, md: Any, sig: Signal) -> tuple[bool, str]:
-        # РѕР±С‰РёР№ С„РёР»СЊС‚СЂ: Р·Р°РїСЂРµС‰Р°РµРј Р±РµСЃСЃРјС‹СЃР»РµРЅРЅС‹Рµ СЃРёРіРЅР°Р»С‹
+        # общий фильтр: запрещаем бессмысленные сигналы
         if sig.side not in ("buy", "sell", "none"):
             return False, "invalid_side"
         return True, ""

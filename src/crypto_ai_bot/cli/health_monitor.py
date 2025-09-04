@@ -52,9 +52,9 @@ async def _watch(url: str, timeout: float, interval: float) -> int:  # noqa: ASY
         code = await _oneshot(url, timeout)
         await asyncio.sleep(max(0.5, interval))
         if code != 0:
-            # Сѕ СЋ,  Сµ СµСїСµ
+            # Ѿ ю,  ѵ ѵѿѵ
             _log.warning("health_not_ok", extra={"url": url})
-    # СЃСё
+    # сѸ
     # return 0
 
 
@@ -68,7 +68,7 @@ def main() -> None:
 
     if args.oneshot:
         raise SystemExit(asyncio.run(_oneshot(args.url, args.timeout)))
-        # СЅ СЋ
+        # ѽ ю
         try:
             asyncio.run(_watch(args.url, args.timeout, args.interval))
         except KeyboardInterrupt:

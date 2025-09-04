@@ -22,10 +22,10 @@ class _RedisBusLike(Protocol):
 
 class UnifiedEventBus(EventBusPort):
     """
-    РЈРЅРёС„РёС†РёСЂСѓРµС‚ РёРЅС‚РµСЂС„РµР№СЃС‹ СЂР°Р·РЅС‹С… СЂРµР°Р»РёР·Р°С†РёР№ С€РёРЅС‹:
-    - AsyncEventBus (СЂР°Р±РѕС‚Р°РµС‚ СЃ Event)
-    - RedisEventBus (СЂР°Р±РѕС‚Р°РµС‚ СЃ dict)
-    Р’РЅРµС€РЅРёР№ РєРѕРЅС‚СЂР°РєС‚: publish(dict), on(dict-handler). Р’РѕР·РІСЂР°С‰Р°РµС‚ None.
+    Унифицирует интерфейсы разных реализаций шины:
+    - AsyncEventBus (работает с Event)
+    - RedisEventBus (работает с dict)
+    Внешний контракт: publish(dict), on(dict-handler). Возвращает None.
     """
 
     def __init__(self, implementation: AsyncEventBus | RedisEventBus):

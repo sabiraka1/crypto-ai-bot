@@ -33,25 +33,25 @@ class DeadMansSwitch:
 
     async def check(self) -> None:
         """
-        Р›С‘РіРєРёР№ Р·Р°С‰РёС‚РЅС‹Р№ С‚СЂРёРіРіРµСЂ РїРѕ СЂРµР·РєРѕР№ РїСЂРѕСЃР°РґРєРµ С†РµРЅС‹:
-        - РґРµР»Р°РµС‚ 0..N РїРѕРІС‚РѕСЂРЅС‹С… РїСЂРѕРІРµСЂРѕРє С†РµРЅС‹ СЃ Р·Р°РґРµСЂР¶РєРѕР№;
-        - РїСЂРё СЃСЂР°Р±Р°С‚С‹РІР°РЅРёРё РїС‹С‚Р°РµС‚СЃСЏ РїСЂРѕРґР°С‚СЊ Р±Р°Р·РѕРІС‹Р№ Р°РєС‚РёРІ (best-effort);
-        - РїСѓР±Р»РёРєСѓРµС‚ СЃРѕР±С‹С‚РёРµ РІ С€РёРЅСѓ.
+        Лёгкий защитный триггер по резкой просадке цены:
+        - делает 0..N повторных проверок цены с задержкой;
+        - при срабатывании пытается продать базовый актив (best-effort);
+        - публикует событие в шину.
         """
-        # Skip branch (РЅР°СЃС‚СЂРѕР№РєР° РґР»СЏ СЋРЅРёС‚-С‚РµСЃС‚РѕРІ)
+        # Skip branch (настройка для юнит-тестов)
         if self.max_impact_pct and self.max_impact_pct > 0:
             return
         if not self.broker or not self.symbol:
             return
 
-        # РїРµСЂРІС‹Р№ СЃРЅРёРјРѕРє
+        # первый снимок
         t = await self.broker.fetch_ticker(self.symbol)
         last = Decimal(str(getattr(t, "last", "0")))
         if self._last_healthy_price is None:
             self._last_healthy_price = last
             return
 
-        # РїРѕРІС‚РѕСЂС‹
+        # повторы
         cur = last
         for _ in range(max(0, int(self.rechecks))):
             if self.recheck_delay_sec:
@@ -59,11 +59,11 @@ class DeadMansSwitch:
             t2 = await self.broker.fetch_ticker(self.symbol)
             cur = Decimal(str(getattr(t2, "last", str(cur))))
 
-        # С‚СЂРёРіРіРµСЂ: РїР°РґРµРЅРёРµ >= 3%
+        # триггер: падение >= 3%
         threshold = Decimal("0.97") * self._last_healthy_price
         if cur < threshold:
             try:
-                # best-effort: РЅРµ РІР°Р»РёРј РїРѕС‚РѕРє, РЅРѕ Рё РЅРµ РіР»СѓС€РёРј РёСЃРєР»СЋС‡РµРЅРёРµ
+                # best-effort: не валим поток, но и не глушим исключение
                 await self.broker.create_market_sell_base(self.symbol, Decimal("0"))
             except Exception as exc:
                 _log.warning(

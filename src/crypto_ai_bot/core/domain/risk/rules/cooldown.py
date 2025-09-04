@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class CooldownConfig:
-    cooldown_sec: int = 0  # 0 = РІС‹РєР»СЋС‡РµРЅРѕ
+    cooldown_sec: int = 0  # 0 = выключено
 
 
 class CooldownRule:
@@ -25,7 +25,7 @@ class CooldownRule:
             if not items:
                 return None
 
-            # РїСЂРµРґРїРѕР»Р°РіР°РµРј, С‡С‚Рѕ РїРѕСЃР»РµРґРЅРёР№ вЂ” РІ РєРѕРЅС†Рµ; РёРЅР°С‡Рµ СЃРѕСЂС‚РёСЂСѓРµРј РїРѕ ts
+            # предполагаем, что последний — в конце; иначе сортируем по ts
             def get_ts(x: Any) -> int:
                 for k in ("ts", "timestamp", "time"):
                     v = getattr(x, k, None) if not isinstance(x, dict) else x.get(k)

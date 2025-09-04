@@ -13,8 +13,8 @@ def check(
     risk_manager: RiskManager | None = None,
 ) -> dict[str, str] | None:
     """
-    РўРѕРЅРєР°СЏ РѕР±С‘СЂС‚РєР° РЅР°Рґ RiskManager: РЅРёРєР°РєРѕР№ СЃРѕР±СЃС‚РІРµРЅРЅРѕР№ Р»РѕРіРёРєРё.
-    Р’РѕР·РІСЂР°С‰Р°РµС‚ dict-РѕРїРёСЃР°РЅРёРµ РїСЂРµРІС‹С€РµРЅРёСЏ Р»РёРјРёС‚Р° РёР»Рё None (РµСЃР»Рё РјРѕР¶РЅРѕ С‚РѕСЂРіРѕРІР°С‚СЊ).
+    Тонкая обёртка над RiskManager: никакой собственной логики.
+    Возвращает dict-описание превышения лимита или None (если можно торговать).
     """
     rm = risk_manager or RiskManager(cfg=RiskConfig.from_settings(settings))
     ok, reason, extra = rm.check(symbol=symbol, storage=storage)

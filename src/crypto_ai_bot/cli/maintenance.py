@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 
-# : С№   Settings СЃ СЃС°СёСёСё:
+# : ѹ   Settings с сѰѸѸѸ:
 from crypto_ai_bot.core.infrastructure.settings import Settings
 
 BACKUPS_DIR = Path("./backups")
@@ -38,7 +38,7 @@ def _rotate(retention_days: int) -> None:
     removed = 0
     for p in BACKUPS_DIR.glob("db-*.sqlite3"):
         try:
-            # С¶
+            # Ѷ
             stem = p.stem
             # db-YYYYmmdd-HHMMSS
             ts = stem.split("-")[1]

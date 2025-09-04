@@ -56,7 +56,7 @@ async def reconcile_positions_batch(
     *, symbols: list[str], storage: StoragePort, broker: BrokerPort, bus: EventBusPort
 ) -> None:
     """
-    СѕСЃС°СЏ СЃСє: СЏ СµСЋ Сµ  СЏ СµС№ PnL.
+    ѾсѰя сѺ: я ѵю ѵ  я ѵѹ PnL.
     """
     for sym in symbols:
         try:
@@ -74,7 +74,7 @@ async def reconcile_positions_batch(
             if avg <= 0:
                 continue
             unreal = (last - avg) * base
-            # СёСЃСёСЅ
+            # ѸсѸѽ
             storage.positions.apply_trade(
                 symbol=sym, side="buy", base_amount=dec("0"), price=last, fee_quote=dec("0"), last_price=last
             )
@@ -83,9 +83,9 @@ async def reconcile_positions_batch(
             _log.warning("reconcile_error", extra={"symbol": sym, "error": str(exc)})
 
 
-# СЅСёСЏ-Сє СЏ СЃСЃСёСЃСё СЃ orchestrator
+# ѽѸя-Ѻ я ссѸсѸ с orchestrator
 async def reconcile_positions(
     symbol: str, storage: StoragePort, broker: BrokerPort, bus: EventBusPort, settings: Any
 ) -> None:
-    """СЅСёСЏ-Сє СЏ СЃСЃСёСЃСё СЃ orchestrator."""
+    """ѽѸя-Ѻ я ссѸсѸ с orchestrator."""
     await reconcile_positions_batch(symbols=[symbol], storage=storage, broker=broker, bus=bus)

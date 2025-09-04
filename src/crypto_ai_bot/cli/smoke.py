@@ -41,14 +41,14 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=float(_env("HTTP_TIMEOUT_SEC", "30")))
     args = parser.parse_args()
 
-    # 1) Сµ
+    # 1) ѵ
     ok = True
     ok &= _import_ok("crypto_ai_bot.app.server")
     ok &= _import_ok("crypto_ai_bot.app.compose")
     ok &= _import_ok("crypto_ai_bot.core.infrastructure.events.bus")
     ok &= _import_ok("crypto_ai_bot.core.infrastructure.events.redis_bus")
 
-    # 2) СёСЅС№ HTTP-
+    # 2) Ѹѽѹ HTTP-
     if args.url:
         ok &= asyncio.run(_ping(args.url, args.timeout))
 

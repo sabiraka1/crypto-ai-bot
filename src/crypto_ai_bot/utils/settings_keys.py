@@ -10,8 +10,8 @@ def per_symbol_override(
     settings: Any, symbol: str, base_key: str, caster: Callable[[str], T], default: T
 ) -> T:
     """
-    Сµ СЋ  BASEKEY_BASE_QUOTE СЃ  СЃ.
-    СЃ   С№  СЃСµ  С°С°; Сµ  Сј base_key  default.
+    ѵ ю  BASEKEY_BASE_QUOTE с  с.
+    с   ѹ  сѵ  ѰѰ; ѵ  Ѽ base_key  default.
     """
     s = (symbol or "").upper().replace("/", "_").replace("-", "_")
     skey = f"{base_key}_{s}".upper()
