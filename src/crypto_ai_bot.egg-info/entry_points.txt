@@ -1,6 +1,0 @@
-[console_scripts]
-cab-health = crypto_ai_bot.cli.health_monitor:main
-cab-maintenance = crypto_ai_bot.cli.maintenance:main
-cab-perf = crypto_ai_bot.cli.performance:main
-cab-reconcile = crypto_ai_bot.cli.reconcile:main
-cab-smoke = crypto_ai_bot.cli.smoke:main
