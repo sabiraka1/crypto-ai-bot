@@ -12,8 +12,13 @@ _log = get_logger("macro.dxy_http")
 
 class DxyHttp(DxyPort):
     """
-    HTTP-Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº Ğ¸Ğ½Ğ´ĞµĞºÑĞ° DXY.
-    ĞĞ¶Ğ¸Ğ´Ğ°ĞµĞ¼Ñ‹Ğ¹ JSON: {"change_pct": 0.37}
+    HTTP-источник индекса DXY (процентное изменение).
+
+    Ожидаемый JSON (гибко):
+      {"change_pct": 0.37}
+      {"changePercent": 0.37}
+      {"data": {"change_pct": 0.37}}
+      [{"change_pct": 0.37}, ...]
     """
 
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
@@ -22,11 +27,14 @@ class DxyHttp(DxyPort):
 
     async def change_pct(self) -> float | None:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as c:
+            async with httpx.AsyncClient(timeout=self._timeout, headers={"User-Agent": "crypto-ai-bot/1.0"}) as c:
                 r = await c.get(self._url)
                 r.raise_for_status()
                 data: Any = r.json()
-                return self._parse_change_pct(data)
+                val = self._parse_change_pct(data)
+                if val is None:
+                    _log.debug("dxy_unexpected_payload", extra={"url": self._url, "payload_preview": str(data)[:200]})
+                return val
         except httpx.HTTPStatusError as e:
             _log.warning("dxy_http_status", extra={"url": self._url, "status": e.response.status_code})
         except httpx.RequestError as e:
@@ -37,9 +45,21 @@ class DxyHttp(DxyPort):
 
     @staticmethod
     def _parse_change_pct(data: Any) -> float | None:
-        try:
-            if isinstance(data, dict) and "change_pct" in data:
-                return float(data["change_pct"])
-        except Exception:
-            _log.debug("dxy_parse_failed", exc_info=True)
-        return None
+        def _coerce(v: Any) -> float | None:
+            try:
+                return float(str(v))
+            except Exception:
+                return None
+
+        if isinstance(data, dict):
+            for key in ("change_pct", "changePercent", "pct", "change"):
+                if key in data:
+                    return _coerce(data[key])
+            if isinstance(data.get("data"), dict):
+                return DxyHttp._parse_change_pct(data["data"])
+            return None
+
+        if isinstance(data, list) and data:
+            return DxyHttp._parse_change_pct(data[0])
+
+        return _coerce(data)

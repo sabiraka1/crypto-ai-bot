@@ -12,8 +12,13 @@ _log = get_logger("macro.btc_dom_http")
 
 class BtcDominanceHttp(BtcDomPort):
     """
-    HTTP-Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº BTC Dominance.
-    ĞĞ¶Ğ¸Ğ´Ğ°ĞµĞ¼Ñ‹Ğ¹ JSON: {"change_pct": -0.25}
+    HTTP-источник BTC Dominance.
+
+    Ожидаемый JSON (гибко):
+      {"change_pct": -0.25}
+      {"changePercent": -0.25}
+      {"data": {"change_pct": -0.25}}
+      [{"change_pct": -0.25}, ...]
     """
 
     def __init__(self, url: str, timeout_sec: float = 5.0) -> None:
@@ -22,11 +27,14 @@ class BtcDominanceHttp(BtcDomPort):
 
     async def change_pct(self) -> float | None:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as c:
+            async with httpx.AsyncClient(timeout=self._timeout, headers={"User-Agent": "crypto-ai-bot/1.0"}) as c:
                 r = await c.get(self._url)
                 r.raise_for_status()
                 data: Any = r.json()
-                return self._parse_change_pct(data)
+                val = self._parse_change_pct(data)
+                if val is None:
+                    _log.debug("btc_dom_unexpected_payload", extra={"url": self._url, "payload_preview": str(data)[:200]})
+                return val
         except httpx.HTTPStatusError as e:
             _log.warning("btc_dom_http_status", extra={"url": self._url, "status": e.response.status_code})
         except httpx.RequestError as e:
@@ -37,9 +45,25 @@ class BtcDominanceHttp(BtcDomPort):
 
     @staticmethod
     def _parse_change_pct(data: Any) -> float | None:
-        try:
-            if isinstance(data, dict) and "change_pct" in data:
-                return float(data["change_pct"])
-        except Exception:
-            _log.debug("btc_dom_parse_failed", exc_info=True)
-        return None
+        def _coerce(v: Any) -> float | None:
+            try:
+                return float(str(v))
+            except Exception:
+                return None
+
+        # словарь верхнего уровня
+        if isinstance(data, dict):
+            for key in ("change_pct", "changePercent", "pct", "change"):
+                if key in data:
+                    return _coerce(data[key])
+            # вложенное поле data
+            if isinstance(data.get("data"), dict):
+                return BtcDominanceHttp._parse_change_pct(data["data"])
+            return None
+
+        # массив — берём первый элемент
+        if isinstance(data, list) and data:
+            return BtcDominanceHttp._parse_change_pct(data[0])
+
+        # число/строка
+        return _coerce(data)

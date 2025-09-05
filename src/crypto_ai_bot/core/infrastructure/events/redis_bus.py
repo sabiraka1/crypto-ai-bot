@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 import json
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from redis.asyncio import Redis
 from redis.asyncio.client import PubSub
@@ -13,132 +13,200 @@ from redis.asyncio.client import PubSub
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
 
+# Тип обработчика: получает payload (dict)
 Handler = Callable[[dict[str, Any]], Awaitable[None]]
-_log = get_logger("events.redis")
+
+_log = get_logger("events.redis_bus")
 
 
 class RedisEventBus:
     """
-    Асинхронная шина событий на Redis Pub/Sub.
-      - publish(topic: str, payload: dict, key: str|None = None)
-      - on(topic, handler) — точные подписки
-      - on_wildcard("orders.*", handler) — паттерн-подписки (psubscribe)
-      - start()/close() — управление жизненным циклом
-    Гарантии доставки Pub/Sub: at-most-once (без очередей).
+    Простая асинхронная шина событий поверх Redis Pub/Sub.
+
+    Особенности:
+      - start()/stop() идемпотентные;
+      - publish можно вызывать до start() — клиент создастся лениво;
+      - on/on_wildcard регистрируют корутины-обработчики (topic → dict payload);
+      - слушающий цикл: читает PubSub и диспатчит в соответствующие хэндлеры;
+      - JSON-пакет: {"key": <опц. ключ>, "payload": <данные>}.
     """
 
     def __init__(
         self,
         url: str,
         *,
-        ping_interval_sec: float = 30.0,
-        hard_timeout_sec: float = 10.0,
+        ping_interval: float = 15.0,
+        hard_timeout: float = 10.0,
+        channel_prefix: str = "",
     ) -> None:
-        if not url:
-            raise ValueError("RedisEventBus requires non-empty redis url (e.g. redis://...)")
         self._url = url
-        self._r: Redis | None = None
-        self._ps: PubSub | None = None
-        self._task: asyncio.Task[None] | None = None
-        self._handlers: dict[str, list[Handler]] = defaultdict(list)
-        self._p_handlers: dict[str, list[Handler]] = defaultdict(list)  # pattern -> handlers
-        self._topics: set[str] = set()
-        self._patterns: set[str] = set()
-        self._ping_interval = float(ping_interval_sec)
-        self._hard_timeout = float(hard_timeout_sec)
-        self._started = False
+        self._ping_interval = float(ping_interval)
+        self._hard_timeout = float(hard_timeout)
+        self._prefix = channel_prefix.rstrip(":")
 
-    # -------- lifecycle --------
+        self._r: Optional[Redis] = None
+        self._ps: Optional[PubSub] = None
+
+        self._started = False
+        self._listen_task: Optional[asyncio.Task[None]] = None
+
+        # Хендлеры топиков и паттернов
+        self._handlers: Dict[str, List[Handler]] = defaultdict(list)
+        self._p_handlers: Dict[str, List[Handler]] = defaultdict(list)
+
+    # ------------------------------------------------------------------ #
+    # lifecycle
+    # ------------------------------------------------------------------ #
+
     async def start(self) -> None:
-        """Запустить шину (ленивое подключение и подписка)."""
         if self._started:
             return
-        self._r = Redis.from_url(self._url, encoding="utf-8", decode_responses=True)
-        self._ps = self._r.pubsub()
-        if self._topics:
-            await self._ps.subscribe(*self._topics)
-        if self._patterns:
-            await self._ps.psubscribe(*self._patterns)
+        self._r = Redis.from_url(self._url, decode_responses=True)
+        self._ps = self._r.pubsub(ignore_subscribe_messages=True)
         self._started = True
-        self._task = asyncio.create_task(self._listen_loop())
+
+        # Подписываем уже зарегистрированные обработчики
+        if self._handlers and self._ps:
+            topics = list(self._handlers.keys())
+            with suppress(Exception):
+                await self._ps.subscribe(*topics)
+                for t in topics:
+                    inc("bus_subscribe_total", topic=t)
+
+        if self._p_handlers and self._ps:
+            patterns = list(self._p_handlers.keys())
+            with suppress(Exception):
+                await self._ps.psubscribe(*patterns)
+                for p in patterns:
+                    inc("bus_psubscribe_total", pattern=p)
+
+        # Запускаем слушающий цикл
+        self._listen_task = asyncio.create_task(self._listen_loop(), name="redis-bus-listen")
         _log.info("redis_bus_started", extra={"url": self._url})
 
-    async def close(self) -> None:
-        """Остановить шину и закрыть ресурсы."""
+    async def stop(self) -> None:
+        if not self._started:
+            return
+
         self._started = False
 
-        if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+        # Останавливаем слушатель
+        t = self._listen_task
+        self._listen_task = None
+        if t:
+            t.cancel()
+            with suppress(Exception):
+                await t
 
-        if self._ps:
+        # Отписка и закрытие PubSub
+        if self._ps is not None:
+            with suppress(Exception):
+                await self._ps.unsubscribe()
+            with suppress(Exception):
+                await self._ps.punsubscribe()
             with suppress(Exception):
                 await self._ps.close()
             self._ps = None
 
-        if self._r:
+        # Закрываем Redis
+        if self._r is not None:
             with suppress(Exception):
                 await self._r.close()
             self._r = None
 
-        _log.info("redis_bus_closed")
+        _log.info("redis_bus_stopped")
 
-    # совместимость/алиас
-    async def stop(self) -> None:
-        await self.close()
+    # Совместимость с адаптерами
+    async def close(self) -> None:
+        await self.stop()
 
-    # -------- api --------
+    # ------------------------------------------------------------------ #
+    # helpers
+    # ------------------------------------------------------------------ #
+
+    def _full_topic(self, topic: str) -> str:
+        if not self._prefix:
+            return topic
+        return f"{self._prefix}:{topic}"
+
+    # ------------------------------------------------------------------ #
+    # publish / subscribe
+    # ------------------------------------------------------------------ #
+
     async def publish(self, topic: str, payload: dict[str, Any], key: str | None = None) -> None:
-        """Публикация события в топик (с hard-timeout и безопасной ленивой инициализацией)."""
-        if not isinstance(payload, dict):
-            raise TypeError("payload must be dict")
+        """
+        Публикует событие в канал Redis.
 
-        if not self._r:
-            # разрешаем publish до start(): лениво инициализируем клиент
-            self._r = Redis.from_url(self._url, encoding="utf-8", decode_responses=True)
+        Args:
+            topic: имя канала
+            payload: данные события (dict)
+            key: опциональный ключ (для идемпотентности/группировки)
+        """
+        if self._r is None:
+            # ленивое подключение, если publish вызвали до start()
+            self._r = Redis.from_url(self._url, decode_responses=True)
+
+        topic = self._full_topic(topic)
 
         msg = {"key": key, "payload": payload}
         data = json.dumps(msg, ensure_ascii=False)
 
         try:
             async with asyncio.timeout(self._hard_timeout):
-                await self._r.publish(topic, data)
+                await self._r.publish(topic, data)  # type: ignore[func-returns-value]
             inc("bus_publish_total", topic=topic)
         except Exception:
             _log.error("redis_publish_failed", extra={"topic": topic}, exc_info=True)
 
     def on(self, topic: str, handler: Handler) -> None:
         """Подписка на конкретный топик (обработчик — корутина)."""
-        self._handlers[topic].append(handler)
-        self._topics.add(topic)
-        # если уже стартовали — подписываемся немедленно
+        self._handlers[self._full_topic(topic)].append(handler)
+        # Если уже запущены — фоновой таской подписываемся
         if self._started and self._ps:
-            asyncio.create_task(self._ps.subscribe(topic))
+            asyncio.create_task(self._safe_subscribe(self._full_topic(topic)))
 
-    # alias
     def on_wildcard(self, pattern: str, handler: Handler) -> None:
-        """
-        Паттерн-подписка: 'orders.*' → psubscribe('orders.*').
-        Обработчик принимает payload (dict).
-        """
-        self._p_handlers[pattern].append(handler)
-        self._patterns.add(pattern)
+        """Подписка по паттерну (psubscribe, например 'orders.*')."""
+        # Префикс добавляем как namespace
+        patt = self._full_topic(pattern)
+        self._p_handlers[patt].append(handler)
         if self._started and self._ps:
-            asyncio.create_task(self._ps.psubscribe(pattern))
+            asyncio.create_task(self._safe_psubscribe(patt))
 
-    # -------- internals --------
+    async def _safe_subscribe(self, topic: str) -> None:
+        """Фоновая подписка с безопасным логированием ошибок."""
+        try:
+            if self._ps:
+                await self._ps.subscribe(topic)
+                inc("bus_subscribe_total", topic=topic)
+        except Exception:
+            _log.error("redis_subscribe_failed", extra={"topic": topic}, exc_info=True)
+
+    async def _safe_psubscribe(self, pattern: str) -> None:
+        """Фоновая psubscribe с безопасным логированием ошибок."""
+        try:
+            if self._ps:
+                await self._ps.psubscribe(pattern)
+                inc("bus_psubscribe_total", pattern=pattern)
+        except Exception:
+            _log.error("redis_psubscribe_failed", extra={"pattern": pattern}, exc_info=True)
+
+    # ------------------------------------------------------------------ #
+    # listen loop
+    # ------------------------------------------------------------------ #
+
     async def _listen_loop(self) -> None:
-        """Основной цикл чтения сообщений Pub/Sub."""
+        """
+        Основной цикл: поддерживаем соединение пингами и читаем сообщения PubSub.
+        """
         assert self._ps is not None
         last_ping = 0.0
 
         try:
             while self._started:
-                # ping для поддержания соединения
+                # поддерживающий ping
                 if self._r and (self._ping_interval > 0):
-                    now = asyncio.get_event_loop().time()
+                    now = asyncio.get_running_loop().time()
                     if now - last_ping > self._ping_interval:
                         try:
                             async with asyncio.timeout(self._hard_timeout):
@@ -147,33 +215,49 @@ class RedisEventBus:
                             _log.warning("redis_ping_failed", exc_info=True)
                         last_ping = now
 
-                # читаем сообщение
-                msg = await self._ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                # читаем следующее сообщение
+                try:
+                    msg = await self._ps.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=1.0,  # сек.
+                    )
+                except Exception:
+                    _log.error("redis_get_message_failed", exc_info=True)
+                    msg = None
+
                 if not msg:
-                    await asyncio.sleep(0.05)
+                    # ничего не пришло — новая итерация
                     continue
 
-                typ = msg.get("type")
+                # typ = msg.get("type")  # можно раскомментировать для отладки
                 topic = str(msg.get("channel", "") or "")
                 pattern = str(msg.get("pattern", "") or "")
                 raw = msg.get("data", "")
 
+                payload: dict[str, Any]
                 try:
-                    obj = json.loads(raw) if isinstance(raw, str) and raw else {}
+                    decoded = json.loads(raw)
+                    payload = decoded.get("payload", {}) if isinstance(decoded, dict) else {}
                 except Exception:
-                    obj = {}
+                    payload = {}
+                    _log.error("redis_message_decode_failed", extra={"topic": topic}, exc_info=True)
 
-                payload = obj.get("payload", {}) if isinstance(obj, dict) else {}
+                # метрики получения
+                if topic:
+                    inc("bus_received_total", topic=topic)
+                if pattern:
+                    inc("bus_received_total", pattern=pattern)
 
-                # точечные обработчики
-                for handler in list(self._handlers.get(topic, [])):
-                    try:
-                        await handler(payload)
-                    except Exception:
-                        _log.error("handler_failed", extra={"topic": topic}, exc_info=True)
-                        inc("bus_handler_errors_total", topic=topic)
+                # Диспатчим: точное совпадение канала
+                if topic:
+                    for handler in list(self._handlers.get(topic, [])):
+                        try:
+                            await handler(payload)
+                        except Exception:
+                            _log.error("handler_failed", extra={"topic": topic}, exc_info=True)
+                            inc("bus_handler_errors_total", topic=topic)
 
-                # паттерн-обработчики
+                # И по паттерну (если есть)
                 if pattern:
                     for handler in list(self._p_handlers.get(pattern, [])):
                         try:
@@ -183,6 +267,7 @@ class RedisEventBus:
                             inc("bus_handler_errors_total", pattern=pattern)
 
         except asyncio.CancelledError:
+            # штатное завершение
             pass
         except Exception:
             _log.error("redis_listen_loop_crashed", exc_info=True)
