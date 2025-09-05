@@ -1,288 +1,486 @@
+"""
+Settings module for crypto-ai-bot.
+Единый источник конфигурации системы.
+
+Философия:
+- ENV = только критичное (среда, безопасность, ключевые лимиты)
+- Код = умные дефолты, адаптивная логика, политики
+- Override = ENV может переопределить дефолты из кода
+"""
 from __future__ import annotations
 
-import base64
-from dataclasses import dataclass
-from decimal import Decimal
-import json
 import os
+from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 
-from crypto_ai_bot.core.infrastructure.settings_schema import validate_settings
 from crypto_ai_bot.utils.decimal import dec
 
 
-# --------- helpers ---------
-def _get(name: str, default: str) -> str:
-    return os.getenv(name, default)
+# ============= ДЕФОЛТЫ ИЗ КОДА (не ENV) =============
+
+@dataclass
+class BackgroundIntervals:
+    """Интервалы фоновых процессов (секунды)"""
+    EVAL: int = 15            # Оценка сигналов
+    EXITS: int = 5             # Проверка защитных выходов
+    RECONCILE: int = 60        # Сверка с биржей
+    SETTLEMENT: int = 30       # Обработка частичных исполнений
+    WATCHDOG: int = 3          # Мониторинг здоровья
+    HEALTH_CHECK: int = 10     # HTTP health endpoint
 
 
-def _read_text_file(path: str) -> str:
+@dataclass
+class SoftRiskDefaults:
+    """Мягкие риск-правила (из кода, не ENV)"""
+    COOLDOWN_SEC: int = 60
+    MAX_SPREAD_PCT: Decimal = dec("0.5")
+    MAX_SLIPPAGE_PCT: Decimal = dec("1.0")
+    MAX_ORDERS_5M: int = 5
+    MAX_TURNOVER_5M_QUOTE: Decimal = dec("1000.0")
+    FEE_PCT_ESTIMATE: Decimal = dec("0.1")  # 0.1% комиссия биржи
+
+
+@dataclass
+class TechnicalDefaults:
+    """Технические параметры"""
+    BROKER_RATE_RPS: float = 8.0
+    BROKER_RATE_BURST: int = 16
+    HTTP_TIMEOUT_SEC: int = 30
+    IDEMPOTENCY_BUCKET_MS: int = 60000
+    IDEMPOTENCY_TTL_SEC: int = 3600
+    BACKUP_RETENTION_DAYS: int = 30
+    
+    # Dead Man's Switch
+    DMS_TIMEOUT_MS: int = 120000  # 2 минуты
+    DMS_RECHECKS: int = 2
+    DMS_RECHECK_DELAY_SEC: float = 3.0
+    DMS_MAX_IMPACT_PCT: Decimal = dec("1.0")
+
+
+@dataclass
+class RegimeDefaults:
+    """Дефолтные пороги для режима рынка"""
+    DXY_CHANGE_PCT: Decimal = dec("0.35")
+    BTC_DOM_CHANGE_PCT: Decimal = dec("0.60")
+    FOMC_BLOCK_HOURS: int = 8
+    HTTP_TIMEOUT_SEC: float = 5.0
+
+
+@dataclass 
+class StrategyWeights:
+    """Веса стратегий и таймфреймов (с авто-нормализацией)"""
+    # Базовые веса таймфреймов
+    MTF_15M: float = 0.40  # Основной торговый ТФ
+    MTF_1H: float = 0.25
+    MTF_4H: float = 0.20
+    MTF_1D: float = 0.10
+    MTF_1W: float = 0.05
+    
+    # Fusion веса
+    TECHNICAL: float = 0.65
+    AI: float = 0.35
+    
+    def normalize_mtf_weights(self) -> dict[str, float]:
+        """Нормализовать веса таймфреймов (сумма = 1.0)"""
+        weights = {
+            '15m': self.MTF_15M,
+            '1h': self.MTF_1H,
+            '4h': self.MTF_4H,
+            '1d': self.MTF_1D,
+            '1w': self.MTF_1W
+        }
+        total = sum(weights.values())
+        if total > 0:
+            return {k: v/total for k, v in weights.items()}
+        return weights
+    
+    def normalize_fusion_weights(self) -> tuple[float, float]:
+        """Нормализовать веса fusion (сумма = 1.0)"""
+        total = self.TECHNICAL + self.AI
+        if total > 0:
+            return self.TECHNICAL/total, self.AI/total
+        return 1.0, 0.0  # Fallback: только технический
+
+
+# ============= HELPERS =============
+
+def _get_env(name: str, default: str = "") -> str:
+    """Получить значение из ENV"""
+    return os.getenv(name, default).strip()
+
+
+def _get_bool(name: str, default: bool = False) -> bool:
+    """ENV переменная как bool"""
+    val = _get_env(name, str(default))
+    return val.lower() in ('1', 'true', 'yes', 'on')
+
+
+def _get_int(name: str, default: int = 0) -> int:
+    """ENV переменная как int"""
+    val = _get_env(name, str(default))
     try:
-        p = Path(path)
-        if p.exists():
-            return p.read_text(encoding="utf-8").strip()
+        return int(val) if val else default
+    except ValueError:
+        return default
+
+
+def _get_float(name: str, default: float = 0.0) -> float:
+    """ENV переменная как float"""
+    val = _get_env(name, str(default))
+    try:
+        return float(val) if val else default
+    except ValueError:
+        return default
+
+
+def _get_decimal(name: str, default: str = "0") -> Decimal:
+    """ENV переменная как Decimal (для денег и процентов)"""
+    val = _get_env(name, default)
+    try:
+        return dec(val) if val else dec(default)
     except Exception:
-        pass
-    return ""
+        return dec(default)
 
 
-def _secret(name: str, default: str = "") -> str:
+def _get_list(name: str, default: str = "") -> list[str]:
+    """ENV переменная как список строк (через запятую)"""
+    raw = _get_env(name, default)
+    return [s.strip() for s in raw.split(',') if s.strip()]
+
+
+def _get_int_list(name: str, default: str = "") -> list[int]:
+    """ENV переменная как список int (через запятую)"""
+    raw = _get_env(name, default)
+    result = []
+    for s in raw.split(','):
+        s = s.strip()
+        if s and s.isdigit():
+            result.append(int(s))
+    return result
+
+
+def _get_secret(name: str, default: str = "") -> str:
     """
-    Secrets resolution order:
-      - ${NAME}_FILE : path to text file with the value
-      - ${NAME}_B64  : base64-encoded value
-      - SECRETS_FILE : JSON file with lowercased keys (e.g., "api_key")
-      - ${NAME}      : plain env var
+    Получить секрет (API ключи и т.д.)
+    Поддержка _FILE суффикса для чтения из файла
     """
-    val_file = os.getenv(f"{name}_FILE")
-    if val_file:
-        txt = _read_text_file(val_file)
-        if txt:
-            return txt
-    val_b64 = os.getenv(f"{name}_B64")
-    if val_b64:
+    # Сначала проверяем файл
+    file_path = _get_env(f"{name}_FILE")
+    if file_path:
         try:
-            return base64.b64decode(val_b64).decode("utf-8").strip()
+            return Path(file_path).read_text().strip()
         except Exception:
             pass
-    secrets_path = os.getenv("SECRETS_FILE")
-    if secrets_path:
-        try:
-            data = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
-            key = name.lower()
-            if data.get(key):
-                return str(data[key]).strip()
-        except Exception:
-            pass
-    return os.getenv(name, default)
+    
+    # Иначе обычный ENV
+    return _get_env(name, default)
 
 
-def _list(name: str, default: str = "") -> list[str]:
-    raw = _get(name, default)
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return parts
+def _get_config_value(env_name: str, default_value):
+    """
+    Приоритет загрузки:
+    1. ENV переменная (если задана)
+    2. Дефолт из кода
+    """
+    env_val = _get_env(env_name)
+    if env_val:
+        # Определяем тип по дефолту
+        if isinstance(default_value, bool):
+            return _get_bool(env_name)
+        elif isinstance(default_value, int):
+            return _get_int(env_name, default_value)
+        elif isinstance(default_value, float):
+            return _get_float(env_name, default_value)
+        elif isinstance(default_value, Decimal):
+            return _get_decimal(env_name, str(default_value))
+        else:
+            return env_val
+    return default_value
 
 
-# --------- settings model ---------
+# ============= ОСНОВНОЙ КЛАСС НАСТРОЕК =============
+
 @dataclass
 class Settings:
-    # mode / exchange / symbols
-    MODE: str
-    SANDBOX: int
-    EXCHANGE: str
-    SYMBOL: str
-    SYMBOLS: str  # comma-separated list
-
-    # amounts & pricing
-    FIXED_AMOUNT: float
-    PRICE_FEED: str
-    FIXED_PRICE: float
-
-    # storage
-    DB_PATH: str
-    BACKUP_RETENTION_DAYS: int
-
-    # idempotency
-    IDEMPOTENCY_BUCKET_MS: int
-    IDEMPOTENCY_TTL_SEC: int
-
-    # event bus / redis
-    EVENT_BUS_URL: str  # "" => in-memory; "redis://..." => RedisEventBus
-    EVENT_BUS_INCLUDE: str  # CSV префиксов для зеркалирования, напр. "trade.,orders.,health."
-    EVENT_BUS_EXCLUDE: str  # CSV префиксов исключений, напр. "__"
-
-    # risk & safety (application-level caps)
-    RISK_COOLDOWN_SEC: int
-    RISK_MAX_SPREAD_PCT: float
-    RISK_MAX_POSITION_BASE: float
-    RISK_MAX_ORDERS_PER_HOUR: int  # kept for backward compatibility
-    RISK_DAILY_LOSS_LIMIT_QUOTE: float
-
-    FEE_PCT_ESTIMATE: Decimal
-    RISK_MAX_FEE_PCT: Decimal
-    RISK_MAX_SLIPPAGE_PCT: Decimal
-
-    # extended risk caps (5m caps etc.)
-    RISK_MAX_ORDERS_5M: int
-    RISK_MAX_TURNOVER_5M_QUOTE: float
-    SAFETY_MAX_ORDERS_PER_DAY: int
-    SAFETY_MAX_TURNOVER_QUOTE_PER_DAY: float
-
-    # broker throttling
-    BROKER_RATE_RPS: float
-    BROKER_RATE_BURST: int
-
-    # orchestrator intervals / http
-    HTTP_TIMEOUT_SEC: int
-    TRADER_AUTOSTART: int
-
-    EVAL_ENABLED: int
-    EXITS_ENABLED: int
-    RECONCILE_ENABLED: int
-    WATCHDOG_ENABLED: int
-    SETTLEMENT_ENABLED: int
-
-    EVAL_INTERVAL_SEC: int
-    EXITS_INTERVAL_SEC: int
-    RECONCILE_INTERVAL_SEC: int
-    WATCHDOG_INTERVAL_SEC: int
-    SETTLEMENT_INTERVAL_SEC: int
-
-    # dead man's switch
-    DMS_TIMEOUT_MS: int
-    DMS_RECHECKS: int
-    DMS_RECHECK_DELAY_SEC: float
-    DMS_MAX_IMPACT_PCT: float
-
-    # exits
-    EXITS_MODE: str
-    EXITS_HARD_STOP_PCT: float
-    EXITS_TRAILING_PCT: float
-    EXITS_MIN_BASE_TO_EXIT: float
-
-    # Telegram (publisher + commands)
-    TELEGRAM_ENABLED: int
-    TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_CHAT_ID: str
-    TELEGRAM_ALERTS_CHAT_ID: str
-    TELEGRAM_BOT_COMMANDS_ENABLED: int
-    TELEGRAM_ALLOWED_USERS: str  # "123,456"
-    TELEGRAM_LONG_POLL: int  # NEW: длинный поллинг для бота
-
-    # Regime gating (macro regime filter)
-    REGIME_ENABLED: int
-    REGIME_DXY_URL: str
-    REGIME_BTC_DOM_URL: str
-    REGIME_FOMC_URL: str
-    REGIME_HTTP_TIMEOUT_SEC: float
-    REGIME_DXY_LIMIT_PCT: float
-    REGIME_BTC_DOM_LIMIT_PCT: float
-    REGIME_FOMC_BLOCK_HOURS: int
-
-    # strategy weights (sum==1.0 ± eps)
-    MTF_W_M15: float
-    MTF_W_H1: float
-    MTF_W_H4: float
-    MTF_W_D1: float
-    MTF_W_W1: float
-    FUSION_W_TECHNICAL: float
-    FUSION_W_AI: float
-
-    # api creds / runtime
-    API_TOKEN: str
-    API_KEY: str
-    API_SECRET: str
-    POD_NAME: str
-    HOSTNAME: str
-
-    # session & correlation
-    SESSION_RUN_ID: str
-    RISK_ANTI_CORR_GROUPS: str  # e.g. "BTC/USDT|ETH/USDT;XRP/USDT|ADA/USDT"
-
+    """
+    Единый источник конфигурации системы.
+    
+    Структура:
+    - Критичные параметры из ENV (обязательные)
+    - Умные дефолты из кода (опциональные override через ENV)
+    - Вычисляемые значения
+    """
+    
+    # ========== КРИТИЧНЫЕ (из ENV) ==========
+    
+    # --- Среда и режим ---
+    MODE: str  # paper | live - ОБЯЗАТЕЛЬНО
+    EXCHANGE: str  # gateio - ОБЯЗАТЕЛЬНО  
+    SYMBOLS: list[str]  # ['BTC/USDT', 'ETH/USDT'] - ОБЯЗАТЕЛЬНО
+    
+    # --- API доступ (для live) ---
+    API_KEY: str = ""
+    API_SECRET: str = ""
+    API_TOKEN: str = ""  # Для HTTP API endpoints
+    
+    # --- Критичные торговые параметры ---
+    FIXED_AMOUNT: Decimal = dec("50.0")  # Размер позиции в USDT
+    
+    # Защитные выходы (в процентах)
+    STOP_LOSS_PCT: Decimal = dec("5.0")
+    TRAILING_STOP_PCT: Decimal = dec("3.0")
+    TAKE_PROFIT_1_PCT: Decimal = dec("2.0")  # Закрыть 50%
+    TAKE_PROFIT_2_PCT: Decimal = dec("5.0")  # Закрыть остаток
+    
+    # Критические риск-лимиты
+    RISK_MAX_DRAWDOWN_PCT: Decimal = dec("10.0")
+    RISK_DAILY_LOSS_LIMIT_QUOTE: Decimal = dec("100.0")
+    RISK_LOSS_STREAK_COUNT: int = 3
+    
+    # --- Внешние сервисы (опционально) ---
+    
+    # Telegram
+    TELEGRAM_ENABLED: bool = False
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_ALLOWED_USERS: list[int] = field(default_factory=list)
+    
+    # Макро-источники (URLs only)
+    REGIME_ENABLED: bool = False
+    REGIME_DXY_URL: str = ""
+    REGIME_BTC_DOM_URL: str = ""
+    REGIME_FOMC_URL: str = ""
+    
+    # Инфраструктура
+    EVENT_BUS_URL: str = ""  # "" = in-memory, "redis://..." = Redis
+    DB_PATH: str = ""  # Будет вычислен автоматически
+    LOG_LEVEL: str = "INFO"
+    
+    # ========== ДЕФОЛТЫ ИЗ КОДА (редко override) ==========
+    
+    # Фоновые процессы
+    intervals: BackgroundIntervals = field(default_factory=BackgroundIntervals)
+    
+    # Мягкие риск-правила  
+    soft_risk: SoftRiskDefaults = field(default_factory=SoftRiskDefaults)
+    
+    # Технические параметры
+    technical: TechnicalDefaults = field(default_factory=TechnicalDefaults)
+    
+    # Режим рынка (дефолты)
+    regime: RegimeDefaults = field(default_factory=RegimeDefaults)
+    
+    # Веса стратегий
+    weights: StrategyWeights = field(default_factory=StrategyWeights)
+    
+    # ========== ВЫЧИСЛЯЕМЫЕ ЗНАЧЕНИЯ ==========
+    
+    # Runtime info
+    POD_NAME: str = field(init=False)
+    HOSTNAME: str = field(init=False)
+    SESSION_ID: str = field(init=False)
+    
+    # Флаги включения подсистем
+    AUTOSTART: bool = field(init=False)
+    EVAL_ENABLED: bool = field(init=False)
+    EXITS_ENABLED: bool = field(init=False)
+    RECONCILE_ENABLED: bool = field(init=False)
+    SETTLEMENT_ENABLED: bool = field(init=False)
+    WATCHDOG_ENABLED: bool = field(init=False)
+    DMS_ENABLED: bool = field(init=False)
+    
+    # Режим выходов
+    EXITS_MODE: str = field(init=False)  # "stop" | "trailing" | "both"
+    
+    def __post_init__(self):
+        """Вычисляемые значения и финальная валидация"""
+        import socket
+        import uuid
+        
+        # Runtime
+        self.POD_NAME = _get_env("POD_NAME", "local")
+        self.HOSTNAME = _get_env("HOSTNAME", socket.gethostname())
+        self.SESSION_ID = _get_env("SESSION_ID", str(uuid.uuid4())[:8])
+        
+        # Автоматический путь к БД если не задан
+        if not self.DB_PATH:
+            symbol = self.SYMBOLS[0] if self.SYMBOLS else "BTC-USDT"
+            base, quote = symbol.replace("/", "-").split("-")
+            self.DB_PATH = f"./data/trader-{self.EXCHANGE}-{base}{quote}-{self.MODE}.sqlite3"
+        
+        # Флаги подсистем (можно отключить через ENV для отладки)
+        self.AUTOSTART = _get_bool("AUTOSTART", self.MODE == "paper")
+        self.EVAL_ENABLED = _get_bool("EVAL_ENABLED", True)
+        self.EXITS_ENABLED = _get_bool("EXITS_ENABLED", True)
+        self.RECONCILE_ENABLED = _get_bool("RECONCILE_ENABLED", True)
+        self.SETTLEMENT_ENABLED = _get_bool("SETTLEMENT_ENABLED", True)
+        self.WATCHDOG_ENABLED = _get_bool("WATCHDOG_ENABLED", True)
+        self.DMS_ENABLED = _get_bool("DMS_ENABLED", self.MODE == "live")
+        
+        # Режим выходов
+        self.EXITS_MODE = _get_env("EXITS_MODE", "both")  # stop | trailing | both
+        
+        # Override интервалов из ENV если заданы
+        self.intervals.EVAL = _get_config_value("EVAL_INTERVAL_SEC", self.intervals.EVAL)
+        self.intervals.EXITS = _get_config_value("EXITS_INTERVAL_SEC", self.intervals.EXITS)
+        self.intervals.RECONCILE = _get_config_value("RECONCILE_INTERVAL_SEC", self.intervals.RECONCILE)
+        self.intervals.SETTLEMENT = _get_config_value("SETTLEMENT_INTERVAL_SEC", self.intervals.SETTLEMENT)
+        self.intervals.WATCHDOG = _get_config_value("WATCHDOG_INTERVAL_SEC", self.intervals.WATCHDOG)
+        
+        # Override мягких правил если заданы
+        self.soft_risk.COOLDOWN_SEC = _get_config_value("RISK_COOLDOWN_SEC", self.soft_risk.COOLDOWN_SEC)
+        self.soft_risk.MAX_SPREAD_PCT = _get_config_value("RISK_MAX_SPREAD_PCT", self.soft_risk.MAX_SPREAD_PCT)
+        self.soft_risk.MAX_SLIPPAGE_PCT = _get_config_value("RISK_MAX_SLIPPAGE_PCT", self.soft_risk.MAX_SLIPPAGE_PCT)
+        self.soft_risk.MAX_ORDERS_5M = _get_config_value("RISK_MAX_ORDERS_5M", self.soft_risk.MAX_ORDERS_5M)
+        self.soft_risk.MAX_TURNOVER_5M_QUOTE = _get_config_value("RISK_MAX_TURNOVER_5M_QUOTE", self.soft_risk.MAX_TURNOVER_5M_QUOTE)
+        
+        # Override режима если заданы
+        self.regime.DXY_CHANGE_PCT = _get_config_value("REGIME_DXY_LIMIT_PCT", self.regime.DXY_CHANGE_PCT)
+        self.regime.BTC_DOM_CHANGE_PCT = _get_config_value("REGIME_BTC_DOM_LIMIT_PCT", self.regime.BTC_DOM_CHANGE_PCT)
+        self.regime.FOMC_BLOCK_HOURS = _get_config_value("REGIME_FOMC_BLOCK_HOURS", self.regime.FOMC_BLOCK_HOURS)
+        
+        # Override весов если заданы
+        self.weights.MTF_15M = _get_config_value("MTF_W_M15", self.weights.MTF_15M)
+        self.weights.MTF_1H = _get_config_value("MTF_W_H1", self.weights.MTF_1H)
+        self.weights.MTF_4H = _get_config_value("MTF_W_H4", self.weights.MTF_4H)
+        self.weights.MTF_1D = _get_config_value("MTF_W_D1", self.weights.MTF_1D)
+        self.weights.MTF_1W = _get_config_value("MTF_W_W1", self.weights.MTF_1W)
+        self.weights.TECHNICAL = _get_config_value("FUSION_W_TECHNICAL", self.weights.TECHNICAL)
+        self.weights.AI = _get_config_value("FUSION_W_AI", self.weights.AI)
+        
+        # Override DMS если заданы
+        self.technical.DMS_TIMEOUT_MS = _get_config_value("DMS_TIMEOUT_MS", self.technical.DMS_TIMEOUT_MS)
+        self.technical.DMS_RECHECKS = _get_config_value("DMS_RECHECKS", self.technical.DMS_RECHECKS)
+        self.technical.DMS_RECHECK_DELAY_SEC = _get_config_value("DMS_RECHECK_DELAY_SEC", self.technical.DMS_RECHECK_DELAY_SEC)
+        
+        # Валидация
+        self._validate()
+    
+    def _validate(self):
+        """Валидация критичных параметров"""
+        # Обязательные
+        assert self.MODE in ("paper", "live"), f"MODE должен быть paper или live, получен {self.MODE}"
+        assert self.EXCHANGE, "EXCHANGE обязателен"
+        assert self.SYMBOLS, "SYMBOLS обязателен (минимум одна пара)"
+        
+        # API ключи для live
+        if self.MODE == "live":
+            assert self.API_KEY, "API_KEY обязателен для live режима"
+            assert self.API_SECRET, "API_SECRET обязателен для live режима"
+        
+        # Критические лимиты
+        assert self.FIXED_AMOUNT > 0, "FIXED_AMOUNT должен быть > 0"
+        assert self.RISK_MAX_DRAWDOWN_PCT > 0, "RISK_MAX_DRAWDOWN_PCT должен быть > 0"
+        assert self.RISK_DAILY_LOSS_LIMIT_QUOTE > 0, "RISK_DAILY_LOSS_LIMIT_QUOTE должен быть > 0"
+        
+        # Защитные выходы
+        assert 0 < self.STOP_LOSS_PCT <= 100, "STOP_LOSS_PCT должен быть от 0 до 100"
+        assert 0 < self.TRAILING_STOP_PCT <= 100, "TRAILING_STOP_PCT должен быть от 0 до 100"
+        assert 0 < self.TAKE_PROFIT_1_PCT <= 100, "TAKE_PROFIT_1_PCT должен быть от 0 до 100"
+        assert 0 < self.TAKE_PROFIT_2_PCT <= 100, "TAKE_PROFIT_2_PCT должен быть от 0 до 100"
+        
+        # Режим выходов
+        assert self.EXITS_MODE in ("stop", "trailing", "both"), f"EXITS_MODE должен быть stop|trailing|both, получен {self.EXITS_MODE}"
+        
+        # Telegram
+        if self.TELEGRAM_ENABLED:
+            assert self.TELEGRAM_BOT_TOKEN, "TELEGRAM_BOT_TOKEN обязателен если Telegram включен"
+            assert self.TELEGRAM_CHAT_ID, "TELEGRAM_CHAT_ID обязателен если Telegram включен"
+        
+        # Интервалы должны быть положительными
+        assert self.intervals.EVAL > 0, "EVAL_INTERVAL_SEC должен быть > 0"
+        assert self.intervals.EXITS > 0, "EXITS_INTERVAL_SEC должен быть > 0"
+        assert self.intervals.RECONCILE > 0, "RECONCILE_INTERVAL_SEC должен быть > 0"
+    
     @classmethod
-    def load(cls) -> Settings:
-        mode = _get("MODE", "paper")
-        base, quote = (_get("SYMBOL", "BTC/USDT").split("/") + ["USDT"])[:2]
-        db_default = (
-            f"./data/trader-{_get('EXCHANGE', 'gateio')}-{base}{quote}-{mode}"
-            f"{'-sandbox' if _get('SANDBOX', '0').lower() in ('1', 'true', 'yes') else ''}.sqlite3"
-        )
-
-        # SAFETY_* aliases -> также заполняем RISK_* если заданы только SAFETY_*
-        safety_per_day = int(_get("SAFETY_MAX_ORDERS_PER_DAY", _get("RISK_MAX_ORDERS_PER_DAY", "0")) or "0")
-        safety_turnover = float(_get("SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", "0") or "0")
-
-        s = cls(
-            # core
-            MODE=mode,
-            SANDBOX=int(_get("SANDBOX", "0")),
-            EXCHANGE=_get("EXCHANGE", "gateio"),
-            SYMBOL=_get("SYMBOL", "BTC/USDT"),
-            SYMBOLS=_get("SYMBOLS", ""),
-            FIXED_AMOUNT=float(_get("FIXED_AMOUNT", "50")),
-            PRICE_FEED=_get("PRICE_FEED", "fixed"),
-            FIXED_PRICE=float(_get("FIXED_PRICE", "100")),
-            DB_PATH=_get("DB_PATH", db_default),
-            BACKUP_RETENTION_DAYS=int(_get("BACKUP_RETENTION_DAYS", "30")),
-            IDEMPOTENCY_BUCKET_MS=int(_get("IDEMPOTENCY_BUCKET_MS", "60000")),
-            IDEMPOTENCY_TTL_SEC=int(_get("IDEMPOTENCY_TTL_SEC", "3600")),
-            # Event bus
-            EVENT_BUS_URL=_get("EVENT_BUS_URL", ""),
-            EVENT_BUS_INCLUDE=_get("EVENT_BUS_INCLUDE", "trade.,orders.,health."),
-            EVENT_BUS_EXCLUDE=_get("EVENT_BUS_EXCLUDE", "__"),
-            # risk
-            RISK_COOLDOWN_SEC=int(_get("RISK_COOLDOWN_SEC", "60")),
-            RISK_MAX_SPREAD_PCT=float(_get("RISK_MAX_SPREAD_PCT", "0.30")),
-            RISK_MAX_POSITION_BASE=float(_get("RISK_MAX_POSITION_BASE", "0.02")),
-            RISK_MAX_ORDERS_PER_HOUR=int(_get("RISK_MAX_ORDERS_PER_HOUR", "6")),
-            RISK_DAILY_LOSS_LIMIT_QUOTE=float(_get("RISK_DAILY_LOSS_LIMIT_QUOTE", "100")),
-            FEE_PCT_ESTIMATE=dec(_get("FEE_PCT_ESTIMATE", "0.001")),
-            RISK_MAX_FEE_PCT=dec(_get("RISK_MAX_FEE_PCT", "0.001")),
-            RISK_MAX_SLIPPAGE_PCT=dec(_get("RISK_MAX_SLIPPAGE_PCT", "0.10")),
-            # extended risk caps
-            RISK_MAX_ORDERS_5M=int(_get("RISK_MAX_ORDERS_5M", "0")),
-            RISK_MAX_TURNOVER_5M_QUOTE=float(_get("RISK_MAX_TURNOVER_5M_QUOTE", "0")),
-            SAFETY_MAX_ORDERS_PER_DAY=safety_per_day,
-            SAFETY_MAX_TURNOVER_QUOTE_PER_DAY=safety_turnover,
-            # broker throttle
-            BROKER_RATE_RPS=float(_get("BROKER_RATE_RPS", "8.0")),
-            BROKER_RATE_BURST=int(_get("BROKER_RATE_BURST", "16")),
-            # orchestrator & timeouts
-            HTTP_TIMEOUT_SEC=int(_get("HTTP_TIMEOUT_SEC", "30")),
-            TRADER_AUTOSTART=int(_get("TRADER_AUTOSTART", "0")),
-            EVAL_ENABLED=int(_get("EVAL_ENABLED", "1")),
-            EXITS_ENABLED=int(_get("EXITS_ENABLED", "1")),
-            RECONCILE_ENABLED=int(_get("RECONCILE_ENABLED", "1")),
-            WATCHDOG_ENABLED=int(_get("WATCHDOG_ENABLED", "1")),
-            SETTLEMENT_ENABLED=int(_get("SETTLEMENT_ENABLED", "1")),
-            EVAL_INTERVAL_SEC=int(_get("EVAL_INTERVAL_SEC", "5")),
-            EXITS_INTERVAL_SEC=int(_get("EXITS_INTERVAL_SEC", "5")),
-            RECONCILE_INTERVAL_SEC=int(_get("RECONCILE_INTERVAL_SEC", "15")),
-            WATCHDOG_INTERVAL_SEC=int(_get("WATCHDOG_INTERVAL_SEC", "10")),
-            SETTLEMENT_INTERVAL_SEC=int(_get("SETTLEMENT_INTERVAL_SEC", "7")),
-            DMS_TIMEOUT_MS=int(_get("DMS_TIMEOUT_MS", "120000")),
-            DMS_RECHECKS=int(_get("DMS_RECHECKS", "2")),
-            DMS_RECHECK_DELAY_SEC=float(_get("DMS_RECHECK_DELAY_SEC", "3.0")),
-            DMS_MAX_IMPACT_PCT=float(_get("DMS_MAX_IMPACT_PCT", "0.0")),
-            EXITS_MODE=_get("EXITS_MODE", "both"),
-            EXITS_HARD_STOP_PCT=float(_get("EXITS_HARD_STOP_PCT", "0.05")),
-            EXITS_TRAILING_PCT=float(_get("EXITS_TRAILING_PCT", "0.03")),
-            EXITS_MIN_BASE_TO_EXIT=float(_get("EXITS_MIN_BASE_TO_EXIT", "0")),
+    def load(cls) -> "Settings":
+        """Загрузить настройки из ENV с валидацией"""
+        
+        settings = cls(
+            # Критичные из ENV
+            MODE=_get_env("MODE", "paper"),
+            EXCHANGE=_get_env("EXCHANGE", "gateio"),
+            SYMBOLS=_get_list("SYMBOLS", "BTC/USDT"),
+            
+            # API
+            API_KEY=_get_secret("API_KEY"),
+            API_SECRET=_get_secret("API_SECRET"),
+            API_TOKEN=_get_env("API_TOKEN"),
+            
+            # Торговые параметры (Decimal для точности)
+            FIXED_AMOUNT=_get_decimal("FIXED_AMOUNT", "50.0"),
+            
+            # Защитные выходы (Decimal для процентов)
+            STOP_LOSS_PCT=_get_decimal("STOP_LOSS_PCT", "5.0"),
+            TRAILING_STOP_PCT=_get_decimal("TRAILING_STOP_PCT", "3.0"),
+            TAKE_PROFIT_1_PCT=_get_decimal("TAKE_PROFIT_1_PCT", "2.0"),
+            TAKE_PROFIT_2_PCT=_get_decimal("TAKE_PROFIT_2_PCT", "5.0"),
+            
+            # Критические риски (Decimal для денег и процентов)
+            RISK_MAX_DRAWDOWN_PCT=_get_decimal("RISK_MAX_DRAWDOWN_PCT", "10.0"),
+            RISK_DAILY_LOSS_LIMIT_QUOTE=_get_decimal("RISK_DAILY_LOSS_LIMIT_QUOTE", "100.0"),
+            RISK_LOSS_STREAK_COUNT=_get_int("RISK_LOSS_STREAK_COUNT", 3),
+            
             # Telegram
-            TELEGRAM_ENABLED=int(_get("TELEGRAM_ENABLED", "0")),
-            TELEGRAM_BOT_TOKEN=_secret("TELEGRAM_BOT_TOKEN", ""),
-            TELEGRAM_CHAT_ID=_get("TELEGRAM_CHAT_ID", ""),
-            TELEGRAM_ALERTS_CHAT_ID=_get("TELEGRAM_ALERTS_CHAT_ID", ""),
-            TELEGRAM_BOT_COMMANDS_ENABLED=int(_get("TELEGRAM_BOT_COMMANDS_ENABLED", "0")),
-            TELEGRAM_ALLOWED_USERS=_get("TELEGRAM_ALLOWED_USERS", ""),
-            TELEGRAM_LONG_POLL=int(_get("TELEGRAM_LONG_POLL", "30")),
-            # Regime gating
-            REGIME_ENABLED=int(_get("REGIME_ENABLED", "0")),
-            REGIME_DXY_URL=_get("REGIME_DXY_URL", ""),
-            REGIME_BTC_DOM_URL=_get("REGIME_BTC_DOM_URL", ""),
-            REGIME_FOMC_URL=_get("REGIME_FOMC_URL", ""),
-            REGIME_HTTP_TIMEOUT_SEC=float(_get("REGIME_HTTP_TIMEOUT_SEC", "5.0")),
-            REGIME_DXY_LIMIT_PCT=float(_get("REGIME_DXY_LIMIT_PCT", "0.35")),
-            REGIME_BTC_DOM_LIMIT_PCT=float(_get("REGIME_BTC_DOM_LIMIT_PCT", "0.60")),
-            REGIME_FOMC_BLOCK_HOURS=int(_get("REGIME_FOMC_BLOCK_HOURS", "8")),
-            # strategy weights (чистые дефолты)
-            MTF_W_M15=float(_get("MTF_W_M15", "0.40")),
-            MTF_W_H1=float(_get("MTF_W_H1", "0.25")),
-            MTF_W_H4=float(_get("MTF_W_H4", "0.20")),
-            MTF_W_D1=float(_get("MTF_W_D1", "0.10")),
-            MTF_W_W1=float(_get("MTF_W_W1", "0.05")),
-            FUSION_W_TECHNICAL=float(_get("FUSION_W_TECHNICAL", "0.65")),
-            FUSION_W_AI=float(_get("FUSION_W_AI", "0.35")),
-            # creds/runtime
-            API_TOKEN=_get("API_TOKEN", ""),
-            API_KEY=_secret("API_KEY", ""),
-            API_SECRET=_secret("API_SECRET", ""),
-            POD_NAME=_get("POD_NAME", ""),
-            HOSTNAME=_get("HOSTNAME", ""),
-            SESSION_RUN_ID=_get("SESSION_RUN_ID", ""),
-            RISK_ANTI_CORR_GROUPS=_get("RISK_ANTI_CORR_GROUPS", ""),
+            TELEGRAM_ENABLED=_get_bool("TELEGRAM_ENABLED"),
+            TELEGRAM_BOT_TOKEN=_get_secret("TELEGRAM_BOT_TOKEN"),
+            TELEGRAM_CHAT_ID=_get_env("TELEGRAM_CHAT_ID"),
+            TELEGRAM_ALLOWED_USERS=_get_int_list("TELEGRAM_ALLOWED_USERS"),
+            
+            # Режим рынка
+            REGIME_ENABLED=_get_bool("REGIME_ENABLED"),
+            REGIME_DXY_URL=_get_env("REGIME_DXY_URL"),
+            REGIME_BTC_DOM_URL=_get_env("REGIME_BTC_DOM_URL"),
+            REGIME_FOMC_URL=_get_env("REGIME_FOMC_URL"),
+            
+            # Инфраструктура
+            EVENT_BUS_URL=_get_env("EVENT_BUS_URL"),
+            DB_PATH=_get_env("DB_PATH"),
+            LOG_LEVEL=_get_env("LOG_LEVEL", "INFO"),
         )
+        
+        return settings
+    
+    def get_normalized_mtf_weights(self) -> dict[str, float]:
+        """Получить нормализованные веса таймфреймов"""
+        return self.weights.normalize_mtf_weights()
+    
+    def get_normalized_fusion_weights(self) -> tuple[float, float]:
+        """Получить нормализованные веса fusion (technical, ai)"""
+        return self.weights.normalize_fusion_weights()
 
-        # Валидация инвариантов
-        validate_settings(s)
-        return s
+
+# ============= SINGLETON =============
+
+_settings_instance: Optional[Settings] = None
+
+
+def get_settings() -> Settings:
+    """Получить единственный экземпляр настроек"""
+    global _settings_instance
+    if _settings_instance is None:
+        _settings_instance = Settings.load()
+    return _settings_instance
+
+
+def reload_settings():
+    """Перезагрузить настройки (для тестов)"""
+    global _settings_instance
+    _settings_instance = None
+    return get_settings()
+
+
+# ============= EXPORT =============
+
+__all__ = [
+    "Settings",
+    "get_settings", 
+    "reload_settings",
+    "BackgroundIntervals",
+    "SoftRiskDefaults",
+    "TechnicalDefaults",
+    "RegimeDefaults",
+    "StrategyWeights",
+]

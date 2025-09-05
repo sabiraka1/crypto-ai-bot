@@ -8,13 +8,14 @@ Rules:
 - Domain knows nothing about these interfaces (pure business logic)
 """
 from __future__ import annotations
+
+from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, AsyncIterator, Optional, Protocol, runtime_checkable
-from typing import Callable, Awaitable
 
 from crypto_ai_bot.utils.decimal import dec
 
@@ -411,7 +412,7 @@ class EventBusPort(Protocol):
     async def subscribe(
         self,
         topic: str,
-        handler: Callable[[dict[str, Any]], Awaitable[None]]
+        handler: callable
     ) -> None:
         """Subscribe to topic events"""
         ...
@@ -664,7 +665,7 @@ class NoopEventBus:
     """No-op Event Bus for testing"""
     
     def __init__(self) -> None:
-        self._handlers: dict[str, list[Callable[[dict[str, Any]], Awaitable[None]]]] = {}
+        self._handlers: dict[str, list[callable]] = {}
         self._published: list[tuple[str, dict[str, Any], Optional[str]]] = []  # For testing
     
     async def publish(
@@ -683,7 +684,7 @@ class NoopEventBus:
                 except Exception:
                     pass  # Ignore errors in noop mode
     
-    async def subscribe(self, topic: str, handler: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
+    async def subscribe(self, topic: str, handler: callable) -> None:
         """NOOP: event subscribe"""
         if topic not in self._handlers:
             self._handlers[topic] = []

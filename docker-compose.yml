@@ -1,35 +1,35 @@
-version: '3.9'
+version: "3.9"
 services:
-  redis:
-    image: redis:7-alpine
-    ports:
-    - 6379:6379
-    healthcheck:
-      test:
-      - CMD
-      - redis-cli
-      - ping
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-  app:
+  web:
     build: .
+    container_name: cab-web
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: cab-worker
+    command: ["python", "-m", "crypto_ai_bot.cli.health_monitor"]
     env_file: .env
     depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-    - 8000:8000
-    environment:
-      EVENT_BUS_URL: redis://redis:6379/0
+      - web
+      - redis
     volumes:
-    - ./data:/app/data
-    healthcheck:
-      test:
-      - CMD-SHELL
-      - curl -fsS http://localhost:8000/health || exit 1
-      interval: 10s
-      timeout: 3s
-      retries: 30
+      - ./data:/app/data
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: cab-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  data:

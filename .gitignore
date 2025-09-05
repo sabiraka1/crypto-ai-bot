@@ -1,38 +1,42 @@
-# ---- Python bytecode / caches ----
+# Python / venv / build
 __pycache__/
 *.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.ipynb_checkpoints/
-
-# ---- Coverage / test artifacts ----
-.coverage
-coverage.xml
-htmlcov/
-
-# ---- Virtual envs ----
+*.egg-info/
 .venv/
-venv/
-ENV/
-env/
+.env
+.env.*
+dist/
+build/
 
-# ---- Editors/IDE ----
+# Caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+
+# IDE
 .vscode/
 .idea/
 
-# ---- OS ----
-.DS_Store
-Thumbs.db
-
-# ---- Project-specific ----
-/data/
-*.db
-backups/
-.backups/
+# Data / logs
+data/
 logs/
 *.log
 
-# Migrations history (архивные SQL, если используешь archive/)
-src/crypto_ai_bot/core/infrastructure/storage/migrations/archive/
+# SQLite & migrations artefacts
+*.db
+*.sqlite
+*.sqlite3
+
+# Coverage
+htmlcov/
+.coverage*
+
+# Docker
+*.pid
+*.sock
+
+# Secrets
+secrets/
+*.key
+*.pem

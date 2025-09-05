@@ -1,82 +1,34 @@
-.PHONY: lint format type imports test test-all test-unit test-integ test-smoke test-risk-all test-idempotency test-settlement ci
+.PHONY: install run worker test lint type import-lint smoke up down format pre-commit
 
-# Форматирование (ruff)
-format:
-	ruff format src/
+install:
+\tpython -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements.txt
 
-# Линтер (ruff)  
+run:
+\tuvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port 8000
+
+worker:
+\tpython -m crypto_ai_bot.cli.health_monitor
+
 lint:
-	ruff check .
+\truff check src
 
-# Статическая типизация (mypy)
+format:
+\truff check --fix src && ruff format src
+
 type:
-	PYTHONPATH=src mypy src/
+\tmypy --config-file mypy.ini
 
-# Архитектурные зависимости (import-linter)
-imports:
-	lint-imports -c importlinter.ini
+import-lint:
+\tlint-imports
 
-# --- ТЕСТЫ ---
-
-# Быстрый smoke test
-test-smoke:
-	cab-smoke
-
-# Unit тесты
-test-unit:
-	MODE=paper EXCHANGE=gateio SYMBOLS=BTC/USDT DB_PATH=":memory:" \
-	PYTHONPATH=src pytest tests/unit -v --cov --cov-fail-under=80
-
-# Integration тесты
-test-integ:
-	MODE=paper EXCHANGE=gateio SYMBOLS=BTC/USDT DB_PATH=":memory:" \
-	PYTHONPATH=src pytest tests/integration -m "not slow"
-
-# Все тесты риск-менеджмента
-test-risk-all:
-	PYTHONPATH=src pytest tests/unit/risk -v
-
-# Тесты идемпотентности
-test-idempotency:
-	PYTHONPATH=src pytest tests/unit/test_idempotency.py -v
-
-# Тесты settlement
-test-settlement:
-	PYTHONPATH=src pytest tests/unit/test_settlement.py -v
-
-# Основной набор тестов
 test:
-	MODE=paper EXCHANGE=gateio SYMBOLS=BTC/USDT DB_PATH=":memory:" \
-	PYTHONPATH=src pytest -q
+\tpytest -q
 
-# Полный набор тестов (как в README)
-test-all: lint type imports test-unit test-integ test-smoke
+smoke:
+\tpython -m crypto_ai_bot.cli.cab_smoke
 
-# --- CI/CD ---
+up:
+\tdocker compose up -d --build
 
-# Полный прогон CI (все шаги)
-ci: format lint type imports test
-
-# --- DOCKER ---
-
-# Сборка Docker образа
-docker-build:
-	docker build -t crypto-ai-bot:latest .
-
-# Запуск через docker-compose
-docker-up:
-	docker-compose up -d
-
-docker-down:
-	docker-compose down
-
-# --- ОБСЛУЖИВАНИЕ БД ---
-
-backup:
-	cab-maintenance backup
-
-vacuum:
-	cab-maintenance vacuum
-
-integrity:
-	cab-maintenance integrity
+down:
+\tdocker compose down

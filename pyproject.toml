@@ -1,78 +1,19 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "crypto-ai-bot"
-version = "1.0b1"  # 1.0-beta в PEP формате
-description = "Production-ready crypto trading bot with Clean Architecture. SPOT only, LONG only."
-readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [{ name = "Sabir Sahbaz", email = "sabiraka1@example.com" }]
-
-dependencies = [
-  "fastapi>=0.115,<1.0",
-  "uvicorn[standard]>=0.30,<0.31",
-  "redis>=5,<6",
-  "gunicorn>=21.2,<22",
-  "httpx>=0.27,<0.28",
-  "ccxt>=4.2,<5",
-  "prometheus-client>=0.20,<0.21",
-  "pydantic>=2.7,<3",
-  "python-telegram-bot>=21.0,<22",  # Добавлено для Telegram
-  "apsw>=3.45,<4",  # SQLite с поддержкой WAL
-]
-
-[project.optional-dependencies]
-charts = ["matplotlib>=3.8,<3.10"]
-backtest = ["numpy>=1.26,<2.0", "pandas>=2.2,<3.0"]
-dev = [
-  "pytest>=8.2,<9",
-  "pytest-asyncio>=0.23,<1",
-  "pytest-mock>=3.12,<4",
-  "pytest-cov>=4.1,<5",
-  "coverage>=7.4,<8",
-  "ruff>=0.6,<0.7",
-  "pre-commit>=3.6,<4",
-  "mypy>=1.8,<2",
-  "import-linter>=2.0,<3",
-  "detect-secrets>=1.4,<2",  # Добавлено для проверки секретов
-]
-
-[project.scripts]
-# CLI команды из README
-cab-smoke = "crypto_ai_bot.cli.smoke:main"
-cab-maintenance = "crypto_ai_bot.cli.maintenance:main"
-cab-reconcile = "crypto_ai_bot.cli.reconcile:main"
-cab-perf = "crypto_ai_bot.cli.performance:main"
-cab-health-monitor = "crypto_ai_bot.cli.health_monitor:main"
-
-[project.urls]
-"Homepage" = "https://github.com/sabiraka1/crypto-ai-bot"
-"Bug Reports" = "https://github.com/sabiraka1/crypto-ai-bot/issues"
-"Source" = "https://github.com/sabiraka1/crypto-ai-bot"
-
-[tool.setuptools]
-package-dir = { "" = "src" }
-
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["crypto_ai_bot*"]
-
 [tool.pytest.ini_options]
 minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
 addopts = [
+  "-vv",
   "-ra",
+  "--maxfail=1",
   "--strict-markers",
   "--strict-config",
+  "-W", "error",
   "--cov=crypto_ai_bot",
   "--cov-report=term-missing:skip-covered",
   "--cov-report=html",
   "--cov-fail-under=80",
 ]
-testpaths = ["tests"]
-asyncio_mode = "auto"
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
   "integration: marks tests as integration tests",
