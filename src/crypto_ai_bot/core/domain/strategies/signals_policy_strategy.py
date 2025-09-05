@@ -6,13 +6,13 @@ from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 # ДћЕёДћВѕДћВґГ‘ВЃДћВёГ‘ВЃГ‘вЂљДћВµДћВјДћВ° signals (ДћВіДћВѕГ‘вЂљДћВѕДћВІДћВ°Г‘ВЏ, ДћВЅДћВѕ Г‘в‚¬ДћВ°ДћВЅДћВµДћВµ ДћВЅДћВµ ДћВІДћВєДћВ»Г‘ВЋГ‘вЂЎГ‘вЂДћВЅДћВЅДћВ°Г‘ВЏ ДћВІ Г‘в‚¬ДћВ°ДћВЅГ‘вЂљДћВ°ДћВ№ДћВј)
 if TYPE_CHECKING:
-    from crypto_ai_bot.core.domain.signals._build import build_signals
-    from crypto_ai_bot.core.domain.signals._fusion import fuse_signals
+    from crypto_ai_bot.core.domain.signals.fusion import build_signals
+    from crypto_ai_bot.core.domain.signals.fusion import fuse_signals
     from crypto_ai_bot.core.domain.signals.policy import Policy as SignalsPolicy
 else:
     try:
-        from crypto_ai_bot.core.domain.signals._build import build_signals
-        from crypto_ai_bot.core.domain.signals._fusion import fuse_signals
+        from crypto_ai_bot.core.domain.signals.fusion import build_signals
+        from crypto_ai_bot.core.domain.signals.fusion import fuse_signals
         from crypto_ai_bot.core.domain.signals.policy import Policy as SignalsPolicy
     except ImportError:
         SignalsPolicy = None

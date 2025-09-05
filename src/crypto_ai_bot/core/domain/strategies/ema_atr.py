@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.domain.strategies.base import BaseStrategy, Decision, MarketData, StrategyContext
+from crypto_ai_bot.core.domain.strategies.base_strategy import BaseStrategy, Decision, MarketData, StrategyContext
 from crypto_ai_bot.utils.decimal import dec
 
 

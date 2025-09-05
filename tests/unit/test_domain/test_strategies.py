@@ -13,7 +13,7 @@ def test_strategy_manager_import():
 def test_base_strategy_import():
     """Test base strategy can be imported"""
     try:
-        from crypto_ai_bot.core.domain.strategies.base import BaseStrategy
+        from crypto_ai_bot.core.domain.strategies.base_strategy import BaseStrategy
 
         assert True
     except ImportError:

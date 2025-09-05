@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from crypto_ai_bot.core.domain.strategies.base import BaseStrategy, Decision, MarketData
+from crypto_ai_bot.core.domain.strategies.base_strategy import BaseStrategy, Decision, MarketData
 from crypto_ai_bot.core.domain.strategies.ema_atr import EmaAtrConfig, EmaAtrStrategy
 from crypto_ai_bot.utils.decimal import dec
 
@@ -45,7 +45,7 @@ class StrategyManager:
             return Signal(action="hold", reason="no_strategies")
         # Р СџРЎР‚Р С•РЎРѓРЎвЂљР С•Р в„– Р С—РЎР‚Р С‘Р С•РЎР‚Р С‘РЎвЂљР ВµРЎвЂљ: Р С—Р ВµРЎР‚Р Р†Р В°РЎРЏ, Р Т‘Р В°Р Р†РЎв‚¬Р В°РЎРЏ directional-РЎРѓР С‘Р С–Р Р…Р В°Р В»
         for strat in self._strategies:
-            from crypto_ai_bot.core.domain.strategies.base import StrategyContext
+            from crypto_ai_bot.core.domain.strategies.base_strategy import StrategyContext
 
             ctx = StrategyContext(symbol=symbol, settings=self._settings)
             sig = await strat.generate(md=self._md, ctx=ctx)
