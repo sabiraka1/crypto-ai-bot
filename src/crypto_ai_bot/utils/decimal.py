@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
-from typing import Optional, Union, overload
+from typing import Union, overload
 
 # Публичный алиас (как и раньше)
 Dec = Decimal
