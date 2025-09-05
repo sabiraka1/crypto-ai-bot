@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-ai-bot"
-version = "0.1.0"
-description = "Production-ready ASGI trading bot (Gate.io via CCXT), long-only, paper/live parity, protective exits, reconciliation, observability"
+version = "1.0b1"  # 1.0-beta в PEP формате
+description = "Production-ready crypto trading bot with Clean Architecture. SPOT only, LONG only."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Sabir Sahbaz" }]
+authors = [{ name = "Sabir Sahbaz", email = "sabiraka1@example.com" }]
 
 dependencies = [
   "fastapi>=0.115,<1.0",
@@ -20,7 +20,8 @@ dependencies = [
   "ccxt>=4.2,<5",
   "prometheus-client>=0.20,<0.21",
   "pydantic>=2.7,<3",
-  "requests>=2.31,<3",
+  "python-telegram-bot>=21.0,<22",  # Добавлено для Telegram
+  "apsw>=3.45,<4",  # SQLite с поддержкой WAL
 ]
 
 [project.optional-dependencies]
@@ -30,21 +31,27 @@ dev = [
   "pytest>=8.2,<9",
   "pytest-asyncio>=0.23,<1",
   "pytest-mock>=3.12,<4",
+  "pytest-cov>=4.1,<5",
   "coverage>=7.4,<8",
   "ruff>=0.6,<0.7",
   "pre-commit>=3.6,<4",
   "mypy>=1.8,<2",
   "import-linter>=2.0,<3",
-  "black>=24.0,<25",
-  "isort>=5.13,<6",
+  "detect-secrets>=1.4,<2",  # Добавлено для проверки секретов
 ]
 
 [project.scripts]
+# CLI команды из README
+cab-smoke = "crypto_ai_bot.cli.smoke:main"
 cab-maintenance = "crypto_ai_bot.cli.maintenance:main"
-cab-reconcile   = "crypto_ai_bot.cli.reconcile:main"
-cab-health      = "crypto_ai_bot.cli.health_monitor:main"
-cab-perf        = "crypto_ai_bot.cli.performance:main"
-cab-smoke       = "crypto_ai_bot.cli.smoke:main"
+cab-reconcile = "crypto_ai_bot.cli.reconcile:main"
+cab-perf = "crypto_ai_bot.cli.performance:main"
+cab-health-monitor = "crypto_ai_bot.cli.health_monitor:main"
+
+[project.urls]
+"Homepage" = "https://github.com/sabiraka1/crypto-ai-bot"
+"Bug Reports" = "https://github.com/sabiraka1/crypto-ai-bot/issues"
+"Source" = "https://github.com/sabiraka1/crypto-ai-bot"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -70,27 +77,5 @@ markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
   "integration: marks tests as integration tests",
   "unit: marks tests as unit tests",
-]
-
-[tool.coverage.run]
-source = ["crypto_ai_bot"]
-omit = [
-  "*/tests/*",
-  "*/backtest/*",
-  "*/types/*",
-  "*/analytics/*",
-]
-
-[tool.coverage.report]
-exclude_lines = [
-  "pragma: no cover",
-  "def __repr__",
-  "if self.debug:",
-  "if settings.DEBUG",
-  "raise AssertionError",
-  "raise NotImplementedError",
-  "if 0:",
-  "if __name__ == \"__main__\":",
-  "class .*\\bProtocol\\):",
-  "@(abc\\.)?abstractmethod",
+  "e2e: marks tests as end-to-end tests",
 ]

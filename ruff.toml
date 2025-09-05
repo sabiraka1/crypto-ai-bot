@@ -1,9 +1,8 @@
-# Crypto AI Bot — Ruff config (balanced)
+# Crypto AI Bot — Ruff config (v1.0-beta)
 target-version = "py311"
 line-length = 110
 
 [lint]
-# Блок правил: базовые ошибки, безопасность, апгрейд синтаксиса, производительность.
 select = [
   "E","F","W",          # pycodestyle + pyflakes
   "I",                  # isort (импорты)
@@ -15,67 +14,38 @@ select = [
   "ASYNC",              # async/await
   "A",                  # builtins
   "BLE",                # blind-except
-  "C4",                 # comprehensions
-  "ARG",                # unused args
   "TRY",                # exceptions
 ]
 
-# Глобально игнорим то, что нам осознанно не важно
 ignore = [
   "E501",   # длина строки (контролируем line-length)
-  "E731",   # lambda assignment
-  "B904",   # raise без `from`
-  "B008",   # вызовы в дефолтах
-  "S101",   # assert
-  "A003",   # теневые атрибуты builtin
-  "ARG002", # неисп. аргумент у методов (self/_)
+  "S101",   # assert в тестах
   "TRY003", # длинные тексты в исключениях
 ]
 
-# ВНИМАНИЕ: пути — ОТ КОРНЯ РЕПОЗИТОРИЯ, с префиксом src/
 [lint.per-file-ignores]
-
 # Tests
-"src/crypto_ai_bot/tests/**/*.py" = ["S","ARG","BLE001","SIM","N802"]
-
-# Scripts
-"src/scripts/**/*.py" = ["T20","S"]
+"tests/**/*.py" = ["S","ARG","BLE001","SIM"]
 
 # CLI
-"src/crypto_ai_bot/cli/*.py" = ["T20","BLE001","TRY301","ARG001"]
+"src/crypto_ai_bot/cli/*.py" = ["T20","BLE001"]
 
-# App layer (хэндлеры/подписчики допускают большую сложность и широкие try/except)
-"src/crypto_ai_bot/app/server.py" = ["ARG001","ASYNC109","B008"]
-"src/crypto_ai_bot/app/compose.py" = ["BLE001","C901"]
-"src/crypto_ai_bot/app/adapters/telegram*.py" = ["BLE001","TRY301","S101"]
-"src/crypto_ai_bot/app/subscribers/*.py" = ["BLE001","ARG001"]
+# App layer
+"src/crypto_ai_bot/app/*.py" = ["BLE001","C901"]
+"src/crypto_ai_bot/app/telegram*.py" = ["BLE001","TRY301"]
 
 # Core application
-"src/crypto_ai_bot/core/application/orchestrator.py" = ["C901","BLE001"]
-"src/crypto_ai_bot/core/application/use_cases/execute_trade.py" = ["TRY301","BLE001"]
-"src/crypto_ai_bot/core/application/protective_exits.py" = ["BLE001","PERF401"]
-"src/crypto_ai_bot/core/application/events_topics.py" = ["N812"]
-
-# Core domain
-"src/crypto_ai_bot/core/domain/strategies/*.py" = ["C901"]
-"src/crypto_ai_bot/core/domain/signals/*.py" = ["C901"]
+"src/crypto_ai_bot/core/application/orchestrator.py" = ["C901"]
+"src/crypto_ai_bot/core/application/use_cases/execute_trade.py" = ["TRY301"]
 
 # Infrastructure
-"src/crypto_ai_bot/core/infrastructure/brokers/*.py" = ["BLE001","ARG","C901","TRY301","S324"]
-"src/crypto_ai_bot/core/infrastructure/storage/*.py" = ["S608","BLE001"]
-"src/crypto_ai_bot/core/infrastructure/storage/migrations/*.py" = ["S608","E501"]
-"src/crypto_ai_bot/core/infrastructure/settings.py" = ["S105","S106","C901"]
-
-# Utils — критичные файлы без послаблений
-"src/crypto_ai_bot/utils/decimal.py" = []
-"src/crypto_ai_bot/utils/pnl.py" = []
+"src/crypto_ai_bot/core/infrastructure/brokers/*.py" = ["BLE001"]
+"src/crypto_ai_bot/core/infrastructure/macro_sources/*.py" = ["BLE001"]  # НОВОЕ
+"src/crypto_ai_bot/core/infrastructure/settings.py" = ["S105","S106"]
 
 # Пакетные __init__.py
 "**/__init__.py" = ["F401","F403"]
 
 [lint.isort]
 known-first-party = ["crypto_ai_bot"]
-known-third-party = ["ccxt","redis","prometheus_client","fastapi","pydantic","httpx"]
 combine-as-imports = true
-force-single-line = false
-force-sort-within-sections = true
