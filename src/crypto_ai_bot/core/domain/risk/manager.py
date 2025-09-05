@@ -2,48 +2,48 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Callable
 
 # Domain rules
 from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
 from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
 
-# Optional rules
+# Optional rules — могут отсутствовать в сборке
 try:
     from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mConfig, MaxOrders5mRule
-except ImportError:
-    MaxOrders5mRule = None  # type: ignore
-    MaxOrders5mConfig = None  # type: ignore
+except ImportError:  # pragma: no cover
+    MaxOrders5mRule = None  # type: ignore[assignment]
+    MaxOrders5mConfig = None  # type: ignore[assignment]
 
 try:
     from crypto_ai_bot.core.domain.risk.rules.max_turnover_5m import MaxTurnover5mConfig, MaxTurnover5mRule
-except ImportError:
-    MaxTurnover5mRule = None  # type: ignore
-    MaxTurnover5mConfig = None  # type: ignore
+except ImportError:  # pragma: no cover
+    MaxTurnover5mRule = None  # type: ignore[assignment]
+    MaxTurnover5mConfig = None  # type: ignore[assignment]
 
 try:
     from crypto_ai_bot.core.domain.risk.rules.cooldown import CooldownConfig, CooldownRule
-except ImportError:
-    CooldownRule = None  # type: ignore
-    CooldownConfig = None  # type: ignore
+except ImportError:  # pragma: no cover
+    CooldownRule = None  # type: ignore[assignment]
+    CooldownConfig = None  # type: ignore[assignment]
 
 try:
     from crypto_ai_bot.core.domain.risk.rules.spread_cap import SpreadCapConfig, SpreadCapRule
-except ImportError:
-    SpreadCapRule = None  # type: ignore
-    SpreadCapConfig = None  # type: ignore
+except ImportError:  # pragma: no cover
+    SpreadCapRule = None  # type: ignore[assignment]
+    SpreadCapConfig = None  # type: ignore[assignment]
 
 try:
     from crypto_ai_bot.core.domain.risk.rules.daily_loss import DailyLossConfig, DailyLossRule
-except ImportError:
-    DailyLossRule = None  # type: ignore
-    DailyLossConfig = None  # type: ignore
+except ImportError:  # pragma: no cover
+    DailyLossRule = None  # type: ignore[assignment]
+    DailyLossConfig = None  # type: ignore[assignment]
 
 try:
     from crypto_ai_bot.core.domain.risk.rules.correlation_manager import CorrelationConfig, CorrelationManager
-except ImportError:
-    CorrelationManager = None  # type: ignore
-    CorrelationConfig = None  # type: ignore
+except ImportError:  # pragma: no cover
+    CorrelationManager = None  # type: ignore[assignment]
+    CorrelationConfig = None  # type: ignore[assignment]
 
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.metrics import inc
@@ -71,11 +71,12 @@ class RiskConfig:
     # Anti-correlation
     anti_corr_groups: list[list[str]] | None = None
 
-    # Spread provider
-    spread_provider: callable | None = None
+    # Spread provider: функция, возвращающая текущий спред в %
+    # Сигнатура может отличаться в твоём проекте — минимально предполагаем symbol -> float (%)
+    spread_provider: Callable[[str], float] | None = None
 
     @classmethod
-    def from_settings(cls, s: Any, *, spread_provider: callable | None = None) -> RiskConfig:
+    def from_settings(cls, s: object, *, spread_provider: Callable[[str], float] | None = None) -> RiskConfig:
         """Create config from settings object."""
         groups = getattr(s, "RISK_ANTI_CORR_GROUPS", None) or None
         if isinstance(groups, str):
@@ -145,8 +146,11 @@ class RiskManager:
             else None
         )
 
-    def _budget_check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
-        """Daily budgets: order count and turnover in quote currency. 0 = disabled."""
+    def _budget_check(self, *, symbol: str, storage: object) -> tuple[bool, str, dict]:
+        """
+        Daily budgets: order count and turnover in quote currency. 0 = disabled.
+        storage — произвольная реализация с .trades и методами, если доступны.
+        """
         limit_n = int(self.cfg.max_orders_per_day or 0)
         limit_turn = Decimal(self.cfg.max_turnover_quote_per_day or 0)
         trades = getattr(storage, "trades", None)
@@ -180,7 +184,7 @@ class RiskManager:
 
         return True, "ok", {}
 
-    def check(self, *, symbol: str, storage: Any) -> tuple[bool, str, dict]:
+    def check(self, *, symbol: str, storage: object) -> tuple[bool, str, dict]:
         """Return (ok, reason, extra)."""
         ok, why, extra = self._budget_check(symbol=symbol, storage=storage)
         if not ok:
@@ -190,7 +194,7 @@ class RiskManager:
         trades = getattr(storage, "trades", None)
         positions = getattr(storage, "positions", None)
 
-        # Optional checks
+        # Optional checks (если модуль/правило не подключено — пропускаем)
         for rule in [self._cool, self._orders5, self._turn5, self._corr, self._spread, self._dailoss]:
             if rule is not None:
                 try:
@@ -199,7 +203,7 @@ class RiskManager:
                         inc("risk_block_total", symbol=symbol, reason=why)
                         return False, why, extra
                 except TypeError:
-                    # Some rules don't need both repos
+                    # Некоторые правила не требуют оба репозитория
                     try:
                         ok, why, extra = rule.check(symbol=symbol, trades_repo=trades)
                         if not ok:
@@ -225,6 +229,6 @@ class RiskManager:
 
         return True, "ok", {}
 
-    def can_execute(self, symbol: str, storage: Any) -> bool:
+    def can_execute(self, symbol: str, storage: object) -> bool:
         ok, _, _ = self.check(symbol=symbol, storage=storage)
         return ok
