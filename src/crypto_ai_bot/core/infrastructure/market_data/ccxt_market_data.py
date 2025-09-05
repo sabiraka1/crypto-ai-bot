@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
-from crypto_ai_bot.core.domain.strategies.base_strategy import MarketData as MarketData
+from crypto_ai_bot.core.domain.strategies.base import MarketData as MarketData
 from crypto_ai_bot.core.infrastructure.market_data.cache import TTLCache
 
 _OHLCV = list[list[Any]]  # ccxt: list[list[number]]

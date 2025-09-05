@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from crypto_ai_bot.core.domain.strategies.base_strategy import (
+from crypto_ai_bot.core.domain.strategies.base import (
     BaseStrategy,
     Decision,
     MarketData,
@@ -52,24 +52,28 @@ class EmaAtrConfig:
     ema_short: int = 12
     ema_long: int = 26
     atr_period: int = 14
-    atr_max_pct: Decimal = dec("1000")  # ограничитель шума, 1000% ~ фактически отключен
-    ema_min_slope: Decimal = dec("0")  # минимальный наклон (в процентах) краткосрочной EMA относительно цены
+    atr_max_pct: Decimal = dec(
+        "1000"
+    )  # Ğ¾Ğ³Ñ€Ğ°Ğ½Ğ¸Ñ‡Ğ¸Ñ‚ĞµĞ»ÑŒ ÑˆÑƒĞ¼Ğ°, 1000% ~ Ñ„Ğ°ĞºÑ‚Ğ¸Ñ‡ĞµÑĞºĞ¸ Ğ¾Ñ‚ĞºĞ»ÑÑ‡ĞµĞ½
+    ema_min_slope: Decimal = dec(
+        "0"
+    )  # Ğ¼Ğ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ Ğ½Ğ°ĞºĞ»Ğ¾Ğ½ (Ğ² Ğ¿Ñ€Ğ¾Ñ†ĞµĞ½Ñ‚Ğ°Ñ…) ĞºÑ€Ğ°Ñ‚ĞºĞ¾ÑÑ€Ğ¾Ñ‡Ğ½Ğ¾Ğ¹ EMA Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ĞµĞ»ÑŒĞ½Ğ¾ Ñ†ĞµĞ½Ñ‹
 
 
 class EmaAtrStrategy(BaseStrategy):
     """
-    Простая и чистая стратегия:
-    - Сигнал BUY, когда EMA_short > EMA_long и краткосрочная EMA не "плоская" (наклон > ema_min_slope)
-    - Сигнал SELL, когда EMA_short < EMA_long
-    - ATR фильтр: если ATR% > atr_max_pct → игнорируем (слишком шумно)
-    Размер не определяет → отдаёт только направление + reason.
+    ĞŸÑ€Ğ¾ÑÑ‚Ğ°Ñ Ğ¸ Ñ‡Ğ¸ÑÑ‚Ğ°Ñ ÑÑ‚Ñ€Ğ°Ñ‚ĞµĞ³Ğ¸Ñ:
+    - Ğ¡Ğ¸Ğ³Ğ½Ğ°Ğ» BUY, ĞºĞ¾Ğ³Ğ´Ğ° EMA_short > EMA_long Ğ¸ ĞºÑ€Ğ°Ñ‚ĞºĞ¾ÑÑ€Ğ¾Ñ‡Ğ½Ğ°Ñ EMA Ğ½Ğµ "Ğ¿Ğ»Ğ¾ÑĞºĞ°Ñ" (Ğ½Ğ°ĞºĞ»Ğ¾Ğ½ > ema_min_slope)
+    - Ğ¡Ğ¸Ğ³Ğ½Ğ°Ğ» SELL, ĞºĞ¾Ğ³Ğ´Ğ° EMA_short < EMA_long
+    - ATR Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€: ĞµÑĞ»Ğ¸ ATR% > atr_max_pct â†’ Ğ¸Ğ³Ğ½Ğ¾Ñ€Ğ¸Ñ€ÑƒĞµĞ¼ (ÑĞ»Ğ¸ÑˆĞºĞ¾Ğ¼ ÑˆÑƒĞ¼Ğ½Ğ¾)
+    Ğ Ğ°Ğ·Ğ¼ĞµÑ€ Ğ½Ğµ Ğ¾Ğ¿Ñ€ĞµĞ´ĞµĞ»ÑĞµÑ‚ â†’ Ğ¾Ñ‚Ğ´Ğ°Ñ‘Ñ‚ Ñ‚Ğ¾Ğ»ÑŒĞºĞ¾ Ğ½Ğ°Ğ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½Ğ¸Ğµ + reason.
     """
 
     def __init__(self, cfg: EmaAtrConfig) -> None:
         self.cfg = cfg
 
     async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        # Получаем OHLCV данные
+        # ĞŸĞ¾Ğ»ÑƒÑ‡Ğ°ĞµĞ¼ OHLCV Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ
         ohlcv = await md.get_ohlcv(ctx.symbol, timeframe="1m", limit=300)
         if len(ohlcv) < max(self.cfg.ema_long + 2, self.cfg.atr_period + 2):
             return Decision(action="hold", reason="not_enough_bars")
@@ -79,21 +83,21 @@ class EmaAtrStrategy(BaseStrategy):
         ema_long = _ema(closes, self.cfg.ema_long)
         es, el = ema_s[-1], ema_long[-1]
 
-        # ATR фильтр по относительной волатильности (к цене)
+        # ATR Ñ„Ğ¸Ğ»ÑŒÑ‚Ñ€ Ğ¿Ğ¾ Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ĞµĞ»ÑŒĞ½Ğ¾Ğ¹ Ğ²Ğ¾Ğ»Ğ°Ñ‚Ğ¸Ğ»ÑŒĞ½Ğ¾ÑÑ‚Ğ¸ (Ğº Ñ†ĞµĞ½Ğµ)
         atr_abs = _atr(ohlcv, self.cfg.atr_period)
         last = closes[-1]
         atr_pct = (atr_abs / last * dec("100")) if last > 0 else dec("0")
         if atr_pct > self.cfg.atr_max_pct:
             return Decision(action="hold", reason=f"atr_too_high:{atr_pct:.2f}%")
 
-        # Наклон краткосрочной EMA относительно цены (процент)
+        # ĞĞ°ĞºĞ»Ğ¾Ğ½ ĞºÑ€Ğ°Ñ‚ĞºĞ¾ÑÑ€Ğ¾Ñ‡Ğ½Ğ¾Ğ¹ EMA Ğ¾Ñ‚Ğ½Ğ¾ÑĞ¸Ñ‚ĞµĞ»ÑŒĞ½Ğ¾ Ñ†ĞµĞ½Ñ‹ (Ğ¿Ñ€Ğ¾Ñ†ĞµĞ½Ñ‚)
         slope = (
             ((ema_s[-1] - ema_s[-2]) / last * dec("100") if last > 0 else dec("0"))
             if len(ema_s) >= 2
             else dec("0")
         )
 
-        # Логика сигналов
+        # Ğ›Ğ¾Ğ³Ğ¸ĞºĞ° ÑĞ¸Ğ³Ğ½Ğ°Ğ»Ğ¾Ğ²
         if es > el and slope >= self.cfg.ema_min_slope:
             return Decision(action="buy", confidence=0.6, reason=f"ema_bull;slope={slope:.3f}%")
         if es < el:

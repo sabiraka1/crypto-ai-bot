@@ -5,8 +5,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-# NEW: телеграм-бот всегда стартует
-from crypto_ai_bot.app.adapters.telegram_bot import TelegramBotCommands
+# NEW: Ñ‚ĞµĞ»ĞµĞ³Ñ€Ğ°Ğ¼-Ğ±Ğ¾Ñ‚ Ğ²ÑĞµĞ³Ğ´Ğ° ÑÑ‚Ğ°Ñ€Ñ‚ÑƒĞµÑ‚
+from crypto_ai_bot.app.telegram_bot import TelegramBotCommands
 from crypto_ai_bot.core.application.monitoring.health_checker import HealthChecker
 from crypto_ai_bot.core.application.orchestrator import Orchestrator
 from crypto_ai_bot.core.application.protective_exits import ProtectiveExits
@@ -38,7 +38,7 @@ class AppContainer:
     dms: DeadMansSwitch
     instance_lock: InstanceLock
     orchestrators: dict[str, Orchestrator]
-    telegram_task: asyncio.Task | None = None  # NEW: фонова задача бота
+    telegram_task: asyncio.Task | None = None  # NEW: Ñ„Ğ¾Ğ½Ğ¾Ğ²Ğ° Ğ·Ğ°Ğ´Ğ°Ñ‡Ğ° Ğ±Ğ¾Ñ‚Ğ°
 
 
 class ComponentFactory:
@@ -48,8 +48,8 @@ class ComponentFactory:
     def create_bus(settings: Any) -> MultiEventBus:
         """
         Create multi-event bus:
-          - локально: AsyncEventBus (быстрые подписчики внутри процесса)
-          - зеркалирование во внешнюю шину: RedisEventBus при EVENT_BUS_URL='redis://...'
+          - Ğ»Ğ¾ĞºĞ°Ğ»ÑŒĞ½Ğ¾: AsyncEventBus (Ğ±Ñ‹ÑÑ‚Ñ€Ñ‹Ğµ Ğ¿Ğ¾Ğ´Ğ¿Ğ¸ÑÑ‡Ğ¸ĞºĞ¸ Ğ²Ğ½ÑƒÑ‚Ñ€Ğ¸ Ğ¿Ñ€Ğ¾Ñ†ĞµÑÑĞ°)
+          - Ğ·ĞµÑ€ĞºĞ°Ğ»Ğ¸Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ¸Ğµ Ğ²Ğ¾ Ğ²Ğ½ĞµÑˆĞ½ÑÑ ÑˆĞ¸Ğ½Ñƒ: RedisEventBus Ğ¿Ñ€Ğ¸ EVENT_BUS_URL='redis://...'
         """
         url = str(getattr(settings, "EVENT_BUS_URL", "") or "")
         include_csv = str(getattr(settings, "EVENT_BUS_INCLUDE", "trade.,orders.,health.") or "")
@@ -58,7 +58,7 @@ class ComponentFactory:
         include = [s.strip() for s in include_csv.split(",") if s.strip()]
         exclude = [s.strip() for s in exclude_csv.split(",") if s.strip()]
 
-        # локальная шина с дедупликацией
+        # Ğ»Ğ¾ĞºĞ°Ğ»ÑŒĞ½Ğ°Ñ ÑˆĞ¸Ğ½Ğ° Ñ Ğ´ĞµĞ´ÑƒĞ¿Ğ»Ğ¸ĞºĞ°Ñ†Ğ¸ĞµĞ¹
         local_bus = AsyncEventBus(enable_dedupe=True, topic_concurrency=64)
 
         remote_bus = None
@@ -215,7 +215,7 @@ class ContainerBuilder:
         storage = self.factory.create_storage(settings)
         broker = self.factory.create_broker(settings)
 
-        # Start bus (инициализация Redis-клиента, если включён)
+        # Start bus (Ğ¸Ğ½Ğ¸Ñ†Ğ¸Ğ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Redis-ĞºĞ»Ğ¸ĞµĞ½Ñ‚Ğ°, ĞµÑĞ»Ğ¸ Ğ²ĞºĞ»ÑÑ‡Ñ‘Ğ½)
         try:
             await bus.start()
         except Exception:
@@ -237,7 +237,7 @@ class ContainerBuilder:
             settings, storage, broker, bus, risk, exits, health, dms
         )
 
-        # NEW: Telegram-бот — всегда поднимаем фоновую задачу
+        # NEW: Telegram-Ğ±Ğ¾Ñ‚ â€” Ğ²ÑĞµĞ³Ğ´Ğ° Ğ¿Ğ¾Ğ´Ğ½Ğ¸Ğ¼Ğ°ĞµĞ¼ Ñ„Ğ¾Ğ½Ğ¾Ğ²ÑƒÑ Ğ·Ğ°Ğ´Ğ°Ñ‡Ñƒ
         telegram_task = None
         try:
             default_symbol = OrchestratorFactory.parse_symbols(settings)[0]
@@ -248,20 +248,20 @@ class ContainerBuilder:
             bot = TelegramBotCommands(
                 bot_token=bot_token,
                 allowed_users=allowed_users,
-                container=None,  # заполним ссылкой на контейнер после сборки
+                container=None,  # Ğ·Ğ°Ğ¿Ğ¾Ğ»Ğ½Ğ¸Ğ¼ ÑÑÑ‹Ğ»ĞºĞ¾Ğ¹ Ğ½Ğ° ĞºĞ¾Ğ½Ñ‚ĞµĞ¹Ğ½ĞµÑ€ Ğ¿Ğ¾ÑĞ»Ğµ ÑĞ±Ğ¾Ñ€ĞºĞ¸
                 default_symbol=default_symbol,
                 long_poll_sec=long_poll,
             )
 
-            # Временная заглушка контейнера, заменим после return
-            # (боту нужен доступ к orchestrators внутри контейнера)
+            # Ğ’Ñ€ĞµĞ¼ĞµĞ½Ğ½Ğ°Ñ Ğ·Ğ°Ğ³Ğ»ÑƒÑˆĞºĞ° ĞºĞ¾Ğ½Ñ‚ĞµĞ¹Ğ½ĞµÑ€Ğ°, Ğ·Ğ°Ğ¼ĞµĞ½Ğ¸Ğ¼ Ğ¿Ğ¾ÑĞ»Ğµ return
+            # (Ğ±Ğ¾Ñ‚Ñƒ Ğ½ÑƒĞ¶ĞµĞ½ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿ Ğº orchestrators Ğ²Ğ½ÑƒÑ‚Ñ€Ğ¸ ĞºĞ¾Ğ½Ñ‚ĞµĞ¹Ğ½ĞµÑ€Ğ°)
             _pending_bot_holder["bot"] = bot  # type: ignore[name-defined]
             telegram_task = asyncio.create_task(bot.run())
             _log.info("telegram_bot_autostarted", extra={"long_poll": long_poll})
         except Exception:
             _log.warning("telegram_bot_autostart_failed", exc_info=True)
 
-        # Авто-старт оркестраторов (если включено)
+        # ĞĞ²Ñ‚Ğ¾-ÑÑ‚Ğ°Ñ€Ñ‚ Ğ¾Ñ€ĞºĞµÑÑ‚Ñ€Ğ°Ñ‚Ğ¾Ñ€Ğ¾Ğ² (ĞµÑĞ»Ğ¸ Ğ²ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾)
         await self.orch_factory.auto_start_orchestrators(orchestrators, settings)
 
         _log.info("compose.done")
@@ -280,7 +280,7 @@ class ContainerBuilder:
             telegram_task=telegram_task,
         )
 
-        # Дадим боту доступ к уже собранному контейнеру
+        # Ğ”Ğ°Ğ´Ğ¸Ğ¼ Ğ±Ğ¾Ñ‚Ñƒ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿ Ğº ÑƒĞ¶Ğµ ÑĞ¾Ğ±Ñ€Ğ°Ğ½Ğ½Ğ¾Ğ¼Ñƒ ĞºĞ¾Ğ½Ñ‚ĞµĞ¹Ğ½ĞµÑ€Ñƒ
         try:
             bot = _pending_bot_holder.pop("bot", None)  # type: ignore[name-defined]
             if bot is not None:
@@ -297,7 +297,9 @@ class ContainerBuilder:
         return Settings.load()
 
 
-_pending_bot_holder: dict[str, Any] = {}  # простая передача ссылки на бота между стадиями
+_pending_bot_holder: dict[
+    str, Any
+] = {}  # Ğ¿Ñ€Ğ¾ÑÑ‚Ğ°Ñ Ğ¿ĞµÑ€ĞµĞ´Ğ°Ñ‡Ğ° ÑÑÑ‹Ğ»ĞºĞ¸ Ğ½Ğ° Ğ±Ğ¾Ñ‚Ğ° Ğ¼ĞµĞ¶Ğ´Ñƒ ÑÑ‚Ğ°Ğ´Ğ¸ÑĞ¼Ğ¸
 
 
 # Helpers

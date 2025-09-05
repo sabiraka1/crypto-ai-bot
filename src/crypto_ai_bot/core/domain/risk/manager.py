@@ -8,7 +8,7 @@ from typing import Callable
 from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
 from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
 
-# Optional rules — могут отсутствовать в сборке
+# Optional rules â€” Ğ¼Ğ¾Ğ³ÑƒÑ‚ Ğ¾Ñ‚ÑÑƒÑ‚ÑÑ‚Ğ²Ğ¾Ğ²Ğ°Ñ‚ÑŒ Ğ² ÑĞ±Ğ¾Ñ€ĞºĞµ
 try:
     from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mConfig, MaxOrders5mRule
 except ImportError:  # pragma: no cover
@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover
     DailyLossConfig = None  # type: ignore[assignment]
 
 try:
-    from crypto_ai_bot.core.domain.risk.rules.correlation_manager import CorrelationConfig, CorrelationManager
+    from crypto_ai_bot.core.domain.risk.rules.correlation import CorrelationConfig, CorrelationManager
 except ImportError:  # pragma: no cover
     CorrelationManager = None  # type: ignore[assignment]
     CorrelationConfig = None  # type: ignore[assignment]
@@ -71,8 +71,8 @@ class RiskConfig:
     # Anti-correlation
     anti_corr_groups: list[list[str]] | None = None
 
-    # Spread provider: функция, возвращающая текущий спред в %
-    # Сигнатура может отличаться в твоём проекте — минимально предполагаем symbol -> float (%)
+    # Spread provider: Ñ„ÑƒĞ½ĞºÑ†Ğ¸Ñ, Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ÑÑ‰Ğ°Ñ Ñ‚ĞµĞºÑƒÑ‰Ğ¸Ğ¹ ÑĞ¿Ñ€ĞµĞ´ Ğ² %
+    # Ğ¡Ğ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ğ° Ğ¼Ğ¾Ğ¶ĞµÑ‚ Ğ¾Ñ‚Ğ»Ğ¸Ñ‡Ğ°Ñ‚ÑŒÑÑ Ğ² Ñ‚Ğ²Ğ¾Ñ‘Ğ¼ Ğ¿Ñ€Ğ¾ĞµĞºÑ‚Ğµ â€” Ğ¼Ğ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ğ¾ Ğ¿Ñ€ĞµĞ´Ğ¿Ğ¾Ğ»Ğ°Ğ³Ğ°ĞµĞ¼ symbol -> float (%)
     spread_provider: Callable[[str], float] | None = None
 
     @classmethod
@@ -149,7 +149,7 @@ class RiskManager:
     def _budget_check(self, *, symbol: str, storage: object) -> tuple[bool, str, dict]:
         """
         Daily budgets: order count and turnover in quote currency. 0 = disabled.
-        storage — произвольная реализация с .trades и методами, если доступны.
+        storage â€” Ğ¿Ñ€Ğ¾Ğ¸Ğ·Ğ²Ğ¾Ğ»ÑŒĞ½Ğ°Ñ Ñ€ĞµĞ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ñ .trades Ğ¸ Ğ¼ĞµÑ‚Ğ¾Ğ´Ğ°Ğ¼Ğ¸, ĞµÑĞ»Ğ¸ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ½Ñ‹.
         """
         limit_n = int(self.cfg.max_orders_per_day or 0)
         limit_turn = Decimal(self.cfg.max_turnover_quote_per_day or 0)
@@ -194,7 +194,7 @@ class RiskManager:
         trades = getattr(storage, "trades", None)
         positions = getattr(storage, "positions", None)
 
-        # Optional checks (если модуль/правило не подключено — пропускаем)
+        # Optional checks (ĞµÑĞ»Ğ¸ Ğ¼Ğ¾Ğ´ÑƒĞ»ÑŒ/Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾ Ğ½Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾ â€” Ğ¿Ñ€Ğ¾Ğ¿ÑƒÑĞºĞ°ĞµĞ¼)
         for rule in [self._cool, self._orders5, self._turn5, self._corr, self._spread, self._dailoss]:
             if rule is not None:
                 try:
@@ -203,7 +203,7 @@ class RiskManager:
                         inc("risk_block_total", symbol=symbol, reason=why)
                         return False, why, extra
                 except TypeError:
-                    # Некоторые правила не требуют оба репозитория
+                    # ĞĞµĞºĞ¾Ñ‚Ğ¾Ñ€Ñ‹Ğµ Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° Ğ½Ğµ Ñ‚Ñ€ĞµĞ±ÑƒÑÑ‚ Ğ¾Ğ±Ğ° Ñ€ĞµĞ¿Ğ¾Ğ·Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ñ
                     try:
                         ok, why, extra = rule.check(symbol=symbol, trades_repo=trades)
                         if not ok:
