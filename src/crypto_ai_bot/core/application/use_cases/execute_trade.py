@@ -344,7 +344,7 @@ class ExecuteTrade:
         trace_id: str
     ) -> RiskCheckResult:
         """Check risk rules"""
-        return await self._risk_manager.check_trade(
+        return self._risk_manager.check_trade(
             symbol=symbol,
             side=side.value,
             amount=amount,
@@ -495,8 +495,8 @@ class ExecuteTrade:
                 "side": order.side.value,
                 "amount": str(order.amount),
                 "price": str(order.price) if order.price else "market",
-                "filled": str(order.filled),
-                "fee": str(order.fee),
+                "filled": str(order.filled) if order.filled else str(order.amount),
+                "fee": str(order.fee) if order.fee else "0",
             },
             trace_id
         )

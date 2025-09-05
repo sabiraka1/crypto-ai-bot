@@ -1,234 +1,653 @@
+"""
+Risk Manager - Aggregates all risk rules and evaluates trading decisions.
+
+This is pure domain logic - no external dependencies, no side effects.
+All rules return structured results that application layer can use.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
-from typing import Callable
+from enum import Enum
+from typing import Optional, Protocol, runtime_checkable
 
-# Domain rules
-from crypto_ai_bot.core.domain.risk.rules.loss_streak import LossStreakConfig, LossStreakRule
-from crypto_ai_bot.core.domain.risk.rules.max_drawdown import MaxDrawdownConfig, MaxDrawdownRule
-
-# Optional rules â€” Ğ¼Ğ¾Ğ³ÑƒÑ‚ Ğ¾Ñ‚ÑÑƒÑ‚ÑÑ‚Ğ²Ğ¾Ğ²Ğ°Ñ‚ÑŒ Ğ² ÑĞ±Ğ¾Ñ€ĞºĞµ
-try:
-    from crypto_ai_bot.core.domain.risk.rules.max_orders_5m import MaxOrders5mConfig, MaxOrders5mRule
-except ImportError:  # pragma: no cover
-    MaxOrders5mRule = None  # type: ignore[assignment]
-    MaxOrders5mConfig = None  # type: ignore[assignment]
-
-try:
-    from crypto_ai_bot.core.domain.risk.rules.max_turnover_5m import MaxTurnover5mConfig, MaxTurnover5mRule
-except ImportError:  # pragma: no cover
-    MaxTurnover5mRule = None  # type: ignore[assignment]
-    MaxTurnover5mConfig = None  # type: ignore[assignment]
-
-try:
-    from crypto_ai_bot.core.domain.risk.rules.cooldown import CooldownConfig, CooldownRule
-except ImportError:  # pragma: no cover
-    CooldownRule = None  # type: ignore[assignment]
-    CooldownConfig = None  # type: ignore[assignment]
-
-try:
-    from crypto_ai_bot.core.domain.risk.rules.spread_cap import SpreadCapConfig, SpreadCapRule
-except ImportError:  # pragma: no cover
-    SpreadCapRule = None  # type: ignore[assignment]
-    SpreadCapConfig = None  # type: ignore[assignment]
-
-try:
-    from crypto_ai_bot.core.domain.risk.rules.daily_loss import DailyLossConfig, DailyLossRule
-except ImportError:  # pragma: no cover
-    DailyLossRule = None  # type: ignore[assignment]
-    DailyLossConfig = None  # type: ignore[assignment]
-
-try:
-    from crypto_ai_bot.core.domain.risk.rules.correlation import CorrelationConfig, CorrelationManager
-except ImportError:  # pragma: no cover
-    CorrelationManager = None  # type: ignore[assignment]
-    CorrelationConfig = None  # type: ignore[assignment]
-
+from crypto_ai_bot.utils.decimal import dec
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import inc
 
-_log = get_logger("risk.manager")
+_log = get_logger(__name__)
+
+
+# ============= RESULT TYPES =============
+
+class RiskAction(Enum):
+    """Action to take based on risk assessment"""
+    ALLOW = "allow"           # Trade allowed
+    BLOCK = "block"          # Trade blocked completely
+    REDUCE = "reduce"        # Reduce position size
+    WARN = "warn"           # Warning but allow
+
+
+class RiskRuleType(Enum):
+    """Types of risk rules"""
+    # Critical rules (BLOCK)
+    LOSS_STREAK = "loss_streak"
+    MAX_DRAWDOWN = "max_drawdown"
+    DAILY_LOSS = "daily_loss"
+    BUDGET_ORDERS = "budget_orders"
+    BUDGET_TURNOVER = "budget_turnover"
+    
+    # Soft rules (REDUCE/WARN)
+    COOLDOWN = "cooldown"
+    SPREAD_CAP = "spread_cap"
+    CORRELATION = "correlation"
+    
+    # Monitoring rules (WARN only)
+    ORDERS_5M = "orders_5m"
+    TURNOVER_5M = "turnover_5m"
 
 
 @dataclass(frozen=True)
-class RiskConfig:
-    """Risk management configuration."""
-
-    # Hard limits
-    loss_streak_limit: int = 0
-    max_drawdown_pct: float = 0.0
-    max_orders_per_day: int = 0
-    max_turnover_quote_per_day: Decimal = Decimal("0")
-
-    # Soft limits (0 = disabled)
-    max_orders_5m: int = 0
-    max_turnover_5m_quote: Decimal = Decimal("0")
-    cooldown_sec: int = 0
-    max_spread_pct: float = 0.0
-    daily_loss_limit_quote: Decimal = Decimal("0")
-
-    # Anti-correlation
-    anti_corr_groups: list[list[str]] | None = None
-
-    # Spread provider: Ñ„ÑƒĞ½ĞºÑ†Ğ¸Ñ, Ğ²Ğ¾Ğ·Ğ²Ñ€Ğ°Ñ‰Ğ°ÑÑ‰Ğ°Ñ Ñ‚ĞµĞºÑƒÑ‰Ğ¸Ğ¹ ÑĞ¿Ñ€ĞµĞ´ Ğ² %
-    # Ğ¡Ğ¸Ğ³Ğ½Ğ°Ñ‚ÑƒÑ€Ğ° Ğ¼Ğ¾Ğ¶ĞµÑ‚ Ğ¾Ñ‚Ğ»Ğ¸Ñ‡Ğ°Ñ‚ÑŒÑÑ Ğ² Ñ‚Ğ²Ğ¾Ñ‘Ğ¼ Ğ¿Ñ€Ğ¾ĞµĞºÑ‚Ğµ â€” Ğ¼Ğ¸Ğ½Ğ¸Ğ¼Ğ°Ğ»ÑŒĞ½Ğ¾ Ğ¿Ñ€ĞµĞ´Ğ¿Ğ¾Ğ»Ğ°Ğ³Ğ°ĞµĞ¼ symbol -> float (%)
-    spread_provider: Callable[[str], float] | None = None
-
+class RiskCheckResult:
+    """Result of risk check"""
+    allowed: bool
+    action: RiskAction
+    triggered_rule: Optional[RiskRuleType] = None
+    reason: str = ""
+    current_value: Optional[Decimal] = None
+    threshold: Optional[Decimal] = None
+    metadata: dict[str, any] = field(default_factory=dict)
+    
     @classmethod
-    def from_settings(cls, s: object, *, spread_provider: Callable[[str], float] | None = None) -> RiskConfig:
-        """Create config from settings object."""
-        groups = getattr(s, "RISK_ANTI_CORR_GROUPS", None) or None
-        if isinstance(groups, str):
-            try:
-                raw_groups = [g for g in groups.split(";") if g]
-                groups = [g.split("|") for g in raw_groups]
-            except Exception:
-                groups = None
-
-        from decimal import Decimal as D
-
+    def allow(cls) -> RiskCheckResult:
+        """Create allow result"""
+        return cls(allowed=True, action=RiskAction.ALLOW)
+    
+    @classmethod
+    def block(
+        cls,
+        rule: RiskRuleType,
+        reason: str,
+        current: Optional[Decimal] = None,
+        threshold: Optional[Decimal] = None,
+        **metadata
+    ) -> RiskCheckResult:
+        """Create block result"""
         return cls(
-            loss_streak_limit=int(getattr(s, "RISK_LOSS_STREAK_LIMIT", 0) or 0),
-            max_drawdown_pct=float(getattr(s, "RISK_MAX_DRAWDOWN_PCT", 0.0) or 0.0),
-            max_orders_per_day=int(getattr(s, "SAFETY_MAX_ORDERS_PER_DAY", 0) or 0),
-            max_turnover_quote_per_day=D(str(getattr(s, "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", 0.0) or 0.0)),
-            max_orders_5m=int(getattr(s, "RISK_MAX_ORDERS_5M", 0) or 0),
-            max_turnover_5m_quote=D(str(getattr(s, "RISK_MAX_TURNOVER_5M_QUOTE", 0.0) or 0.0)),
-            cooldown_sec=int(getattr(s, "RISK_COOLDOWN_SEC", 0) or 0),
-            max_spread_pct=float(getattr(s, "RISK_MAX_SPREAD_PCT", 0.0) or 0.0),
-            daily_loss_limit_quote=D(str(getattr(s, "RISK_DAILY_LOSS_LIMIT_QUOTE", 0.0) or 0.0)),
-            anti_corr_groups=groups,
-            spread_provider=spread_provider,
+            allowed=False,
+            action=RiskAction.BLOCK,
+            triggered_rule=rule,
+            reason=reason,
+            current_value=current,
+            threshold=threshold,
+            metadata=metadata
+        )
+    
+    @classmethod
+    def reduce(
+        cls,
+        rule: RiskRuleType,
+        reason: str,
+        reduction_pct: Decimal = dec("50"),
+        **metadata
+    ) -> RiskCheckResult:
+        """Create reduce result"""
+        return cls(
+            allowed=True,  # Still allowed but reduced
+            action=RiskAction.REDUCE,
+            triggered_rule=rule,
+            reason=reason,
+            metadata={"reduction_pct": str(reduction_pct), **metadata}
+        )
+    
+    @classmethod
+    def warn(
+        cls,
+        rule: RiskRuleType,
+        reason: str,
+        **metadata
+    ) -> RiskCheckResult:
+        """Create warning result"""
+        return cls(
+            allowed=True,
+            action=RiskAction.WARN,
+            triggered_rule=rule,
+            reason=reason,
+            metadata=metadata
         )
 
+
+# ============= STORAGE PROTOCOLS =============
+
+@runtime_checkable
+class TradesRepository(Protocol):
+    """Protocol for trades storage"""
+    
+    def count_orders_last_minutes(self, symbol: str, minutes: int) -> int:
+        """Count orders in last N minutes"""
+        ...
+    
+    def daily_turnover_quote(self, symbol: str) -> Decimal:
+        """Get daily turnover in quote currency"""
+        ...
+    
+    def get_loss_streak(self, symbol: str) -> int:
+        """Get current loss streak"""
+        ...
+    
+    def calculate_drawdown_pct(self, symbol: str) -> Decimal:
+        """Calculate current drawdown percentage"""
+        ...
+    
+    def get_daily_pnl(self, symbol: str) -> Decimal:
+        """Get today's PnL"""
+        ...
+    
+    def get_last_trade_time(self, symbol: str) -> Optional[datetime]:
+        """Get timestamp of last trade"""
+        ...
+
+
+@runtime_checkable
+class PositionsRepository(Protocol):
+    """Protocol for positions storage"""
+    
+    def get_position_size(self, symbol: str) -> Decimal:
+        """Get current position size"""
+        ...
+    
+    def has_open_position(self, symbol: str) -> bool:
+        """Check if there's an open position"""
+        ...
+
+
+# ============= RISK CONFIGURATION =============
+
+@dataclass(frozen=True)
+class RiskConfig:
+    """Risk management configuration"""
+    
+    # Critical limits (force BLOCK)
+    loss_streak_limit: int = 3
+    max_drawdown_pct: Decimal = dec("10.0")
+    daily_loss_limit_quote: Decimal = dec("100.0")
+    max_orders_per_day: int = 100
+    max_turnover_quote_per_day: Decimal = dec("10000.0")
+    
+    # Soft limits (REDUCE or WARN)
+    cooldown_seconds: int = 60
+    max_spread_pct: Decimal = dec("0.5")
+    
+    # Monitoring limits (WARN only)
+    max_orders_5m: int = 5
+    max_turnover_5m_quote: Decimal = dec("1000.0")
+    
+    # Correlation groups (symbols that should not be traded together)
+    correlation_groups: list[list[str]] = field(default_factory=list)
+    
+    @classmethod
+    def from_settings(cls, settings: any) -> RiskConfig:
+        """Create config from settings object"""
+        # Parse correlation groups from string format
+        groups_str = getattr(settings, "RISK_ANTI_CORR_GROUPS", "")
+        groups = []
+        if groups_str:
+            try:
+                # Format: "BTC/USDT|ETH/USDT;XRP/USDT|ADA/USDT"
+                for group_str in groups_str.split(";"):
+                    if group_str:
+                        group = [s.strip() for s in group_str.split("|")]
+                        if group:
+                            groups.append(group)
+            except Exception as e:
+                _log.warning(f"Failed to parse correlation groups: {e}")
+        
+        return cls(
+            # Critical limits
+            loss_streak_limit=getattr(settings, "RISK_LOSS_STREAK_COUNT", 3),
+            max_drawdown_pct=dec(str(getattr(settings, "RISK_MAX_DRAWDOWN_PCT", 10.0))),
+            daily_loss_limit_quote=dec(str(getattr(settings, "RISK_DAILY_LOSS_LIMIT_QUOTE", 100.0))),
+            max_orders_per_day=getattr(settings, "SAFETY_MAX_ORDERS_PER_DAY", 100),
+            max_turnover_quote_per_day=dec(str(getattr(settings, "SAFETY_MAX_TURNOVER_QUOTE_PER_DAY", 10000.0))),
+            
+            # Soft limits
+            cooldown_seconds=getattr(settings, "soft_risk", {}).COOLDOWN_SEC if hasattr(settings, "soft_risk") else 60,
+            max_spread_pct=dec(str(getattr(settings, "soft_risk", {}).MAX_SPREAD_PCT if hasattr(settings, "soft_risk") else 0.5)),
+            
+            # Monitoring
+            max_orders_5m=getattr(settings, "soft_risk", {}).MAX_ORDERS_5M if hasattr(settings, "soft_risk") else 5,
+            max_turnover_5m_quote=dec(str(getattr(settings, "soft_risk", {}).MAX_TURNOVER_5M_QUOTE if hasattr(settings, "soft_risk") else 1000.0)),
+            
+            # Correlation
+            correlation_groups=groups
+        )
+
+
+# ============= BASE RISK RULE =============
+
+class BaseRiskRule:
+    """Base class for risk rules"""
+    
+    def check(
+        self,
+        symbol: str,
+        trades_repo: Optional[TradesRepository] = None,
+        positions_repo: Optional[PositionsRepository] = None,
+        **kwargs
+    ) -> RiskCheckResult:
+        """Check if rule is violated"""
+        raise NotImplementedError
+
+
+# ============= CRITICAL RULES (BLOCK) =============
+
+class LossStreakRule(BaseRiskRule):
+    """Block trading after N consecutive losses"""
+    
+    def __init__(self, limit: int):
+        self.limit = limit
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.limit <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            streak = trades_repo.get_loss_streak(symbol)
+            if streak >= self.limit:
+                return RiskCheckResult.block(
+                    rule=RiskRuleType.LOSS_STREAK,
+                    reason=f"Loss streak {streak} >= {self.limit}",
+                    current=dec(str(streak)),
+                    threshold=dec(str(self.limit))
+                )
+        except Exception as e:
+            _log.error(f"Loss streak check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class MaxDrawdownRule(BaseRiskRule):
+    """Block trading when drawdown exceeds limit"""
+    
+    def __init__(self, max_pct: Decimal):
+        self.max_pct = max_pct
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.max_pct <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            drawdown = trades_repo.calculate_drawdown_pct(symbol)
+            if drawdown >= self.max_pct:
+                return RiskCheckResult.block(
+                    rule=RiskRuleType.MAX_DRAWDOWN,
+                    reason=f"Drawdown {drawdown}% >= {self.max_pct}%",
+                    current=drawdown,
+                    threshold=self.max_pct
+                )
+        except Exception as e:
+            _log.error(f"Drawdown check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class DailyLossRule(BaseRiskRule):
+    """Block trading when daily loss exceeds limit"""
+    
+    def __init__(self, limit_quote: Decimal):
+        self.limit = limit_quote
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.limit <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            daily_pnl = trades_repo.get_daily_pnl(symbol)
+            if daily_pnl < -self.limit:
+                return RiskCheckResult.block(
+                    rule=RiskRuleType.DAILY_LOSS,
+                    reason=f"Daily loss {daily_pnl} exceeds limit {-self.limit}",
+                    current=abs(daily_pnl),
+                    threshold=self.limit
+                )
+        except Exception as e:
+            _log.error(f"Daily loss check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class BudgetOrdersRule(BaseRiskRule):
+    """Block trading when daily order count exceeds limit"""
+    
+    def __init__(self, limit: int):
+        self.limit = limit
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.limit <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            count = trades_repo.count_orders_last_minutes(symbol, 1440)  # 24 hours
+            if count >= self.limit:
+                return RiskCheckResult.block(
+                    rule=RiskRuleType.BUDGET_ORDERS,
+                    reason=f"Daily orders {count} >= {self.limit}",
+                    current=dec(str(count)),
+                    threshold=dec(str(self.limit))
+                )
+        except Exception as e:
+            _log.error(f"Budget orders check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class BudgetTurnoverRule(BaseRiskRule):
+    """Block trading when daily turnover exceeds limit"""
+    
+    def __init__(self, limit_quote: Decimal):
+        self.limit = limit_quote
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.limit <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            turnover = trades_repo.daily_turnover_quote(symbol)
+            if turnover >= self.limit:
+                return RiskCheckResult.block(
+                    rule=RiskRuleType.BUDGET_TURNOVER,
+                    reason=f"Daily turnover {turnover} >= {self.limit}",
+                    current=turnover,
+                    threshold=self.limit
+                )
+        except Exception as e:
+            _log.error(f"Budget turnover check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+# ============= SOFT RULES (REDUCE/WARN) =============
+
+class CooldownRule(BaseRiskRule):
+    """Enforce cooldown period between trades"""
+    
+    def __init__(self, cooldown_seconds: int):
+        self.cooldown = cooldown_seconds
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.cooldown <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            last_trade_time = trades_repo.get_last_trade_time(symbol)
+            if last_trade_time:
+                elapsed = (datetime.utcnow() - last_trade_time).total_seconds()
+                if elapsed < self.cooldown:
+                    remaining = self.cooldown - elapsed
+                    return RiskCheckResult.reduce(
+                        rule=RiskRuleType.COOLDOWN,
+                        reason=f"Cooldown active ({remaining:.0f}s remaining)",
+                        reduction_pct=dec("100"),  # Full reduction = skip
+                        remaining_seconds=remaining
+                    )
+        except Exception as e:
+            _log.error(f"Cooldown check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class SpreadCapRule(BaseRiskRule):
+    """Reduce position when spread is too high"""
+    
+    def __init__(self, max_spread_pct: Decimal, spread_provider: Optional[callable] = None):
+        self.max_spread = max_spread_pct
+        self.spread_provider = spread_provider
+    
+    def check(self, symbol: str, **kwargs) -> RiskCheckResult:
+        if not self.spread_provider or self.max_spread <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            current_spread = self.spread_provider(symbol)
+            if current_spread > self.max_spread:
+                # Reduce position size proportionally
+                reduction = min(dec("75"), (current_spread / self.max_spread - 1) * 100)
+                return RiskCheckResult.reduce(
+                    rule=RiskRuleType.SPREAD_CAP,
+                    reason=f"Spread {current_spread:.2f}% > {self.max_spread}%",
+                    reduction_pct=reduction,
+                    current_spread=current_spread
+                )
+        except Exception as e:
+            _log.error(f"Spread check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class CorrelationRule(BaseRiskRule):
+    """Warn about correlated positions"""
+    
+    def __init__(self, groups: list[list[str]]):
+        self.groups = groups
+    
+    def check(
+        self,
+        symbol: str,
+        positions_repo: Optional[PositionsRepository] = None,
+        **kwargs
+    ) -> RiskCheckResult:
+        if not positions_repo or not self.groups:
+            return RiskCheckResult.allow()
+        
+        try:
+            # Find which group this symbol belongs to
+            for group in self.groups:
+                if symbol in group:
+                    # Check if any other symbol in group has position
+                    for other_symbol in group:
+                        if other_symbol != symbol and positions_repo.has_open_position(other_symbol):
+                            return RiskCheckResult.warn(
+                                rule=RiskRuleType.CORRELATION,
+                                reason=f"Correlated position exists: {other_symbol}",
+                                correlated_symbol=other_symbol
+                            )
+        except Exception as e:
+            _log.error(f"Correlation check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+# ============= MONITORING RULES (WARN) =============
+
+class Orders5MinuteRule(BaseRiskRule):
+    """Monitor order frequency"""
+    
+    def __init__(self, limit: int):
+        self.limit = limit
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.limit <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            count = trades_repo.count_orders_last_minutes(symbol, 5)
+            if count >= self.limit:
+                return RiskCheckResult.warn(
+                    rule=RiskRuleType.ORDERS_5M,
+                    reason=f"High order frequency: {count} in 5min",
+                    count=count
+                )
+        except Exception as e:
+            _log.error(f"5min orders check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+class Turnover5MinuteRule(BaseRiskRule):
+    """Monitor turnover rate"""
+    
+    def __init__(self, limit_quote: Decimal):
+        self.limit = limit_quote
+    
+    def check(self, symbol: str, trades_repo: Optional[TradesRepository] = None, **kwargs) -> RiskCheckResult:
+        if not trades_repo or self.limit <= 0:
+            return RiskCheckResult.allow()
+        
+        try:
+            # This would need a method to get 5-minute turnover
+            # For now, just return allow
+            pass
+        except Exception as e:
+            _log.error(f"5min turnover check failed: {e}")
+        
+        return RiskCheckResult.allow()
+
+
+# ============= MAIN RISK MANAGER =============
 
 class RiskManager:
     """
-    Pure API for application layer:
-    check(symbol, storage) -> (ok: bool, reason: str, extra: dict)
-    No event bus or side effects inside domain.
+    Aggregates all risk rules and evaluates trading decisions.
+    Pure domain logic - no side effects, returns structured results.
     """
-
-    def __init__(self, cfg: RiskConfig) -> None:
-        self.cfg = cfg
-        self._loss = LossStreakRule(LossStreakConfig(limit=cfg.loss_streak_limit))
-        self._dd = MaxDrawdownRule(MaxDrawdownConfig(max_drawdown_pct=cfg.max_drawdown_pct))
-
-        self._orders5 = (
-            MaxOrders5mRule(MaxOrders5mConfig(limit=cfg.max_orders_5m))
-            if (MaxOrders5mRule and cfg.max_orders_5m > 0)
-            else None
-        )
-        self._turn5 = (
-            MaxTurnover5mRule(MaxTurnover5mConfig(limit_quote=cfg.max_turnover_5m_quote))
-            if (MaxTurnover5mRule and cfg.max_turnover_5m_quote > 0)
-            else None
-        )
-        self._cool = (
-            CooldownRule(CooldownConfig(cooldown_sec=cfg.cooldown_sec))
-            if (CooldownRule and cfg.cooldown_sec > 0)
-            else None
-        )
-        self._spread = (
-            SpreadCapRule(SpreadCapConfig(max_spread_pct=cfg.max_spread_pct), provider=cfg.spread_provider)
-            if (SpreadCapRule and cfg.max_spread_pct > 0)
-            else None
-        )
-        self._dailoss = (
-            DailyLossRule(DailyLossConfig(limit_quote=cfg.daily_loss_limit_quote))
-            if (DailyLossRule and cfg.daily_loss_limit_quote > 0)
-            else None
-        )
-        self._corr = (
-            CorrelationManager(CorrelationConfig(groups=cfg.anti_corr_groups or []))
-            if (CorrelationManager and cfg.anti_corr_groups)
-            else None
-        )
-
-    def _budget_check(self, *, symbol: str, storage: object) -> tuple[bool, str, dict]:
+    
+    def __init__(self, config: RiskConfig):
+        self.config = config
+        
+        # Critical rules (BLOCK)
+        self.critical_rules = [
+            LossStreakRule(config.loss_streak_limit),
+            MaxDrawdownRule(config.max_drawdown_pct),
+            DailyLossRule(config.daily_loss_limit_quote),
+            BudgetOrdersRule(config.max_orders_per_day),
+            BudgetTurnoverRule(config.max_turnover_quote_per_day),
+        ]
+        
+        # Soft rules (REDUCE/WARN)
+        self.soft_rules = [
+            CooldownRule(config.cooldown_seconds),
+            SpreadCapRule(config.max_spread_pct),
+            CorrelationRule(config.correlation_groups),
+        ]
+        
+        # Monitoring rules (WARN)
+        self.monitoring_rules = [
+            Orders5MinuteRule(config.max_orders_5m),
+            Turnover5MinuteRule(config.max_turnover_5m_quote),
+        ]
+    
+    def check_trade(
+        self,
+        symbol: str,
+        side: str,
+        amount: Decimal,
+        trace_id: str,
+        trades_repo: Optional[TradesRepository] = None,
+        positions_repo: Optional[PositionsRepository] = None,
+        spread_provider: Optional[Callable[[str], Decimal]] = None
+    ) -> RiskCheckResult:
         """
-        Daily budgets: order count and turnover in quote currency. 0 = disabled.
-        storage â€” Ğ¿Ñ€Ğ¾Ğ¸Ğ·Ğ²Ğ¾Ğ»ÑŒĞ½Ğ°Ñ Ñ€ĞµĞ°Ğ»Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ñ .trades Ğ¸ Ğ¼ĞµÑ‚Ğ¾Ğ´Ğ°Ğ¼Ğ¸, ĞµÑĞ»Ğ¸ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ½Ñ‹.
+        Check if trade is allowed according to all risk rules.
+        
+        Returns structured result with action to take.
+        Application layer decides how to handle the result.
         """
-        limit_n = int(self.cfg.max_orders_per_day or 0)
-        limit_turn = Decimal(self.cfg.max_turnover_quote_per_day or 0)
-        trades = getattr(storage, "trades", None)
+        
+        # Check critical rules first (can BLOCK)
+        for rule in self.critical_rules:
+            result = rule.check(
+                symbol=symbol,
+                trades_repo=trades_repo,
+                positions_repo=positions_repo
+            )
+            if result.action == RiskAction.BLOCK:
+                _log.warning(
+                    f"Trade blocked by {result.triggered_rule}",
+                    extra={
+                        "trace_id": trace_id,
+                        "symbol": symbol,
+                        "reason": result.reason,
+                        "rule": result.triggered_rule.value if result.triggered_rule else None
+                    }
+                )
+                return result
+        
+        # Check soft rules (can REDUCE)
+        reduction_pct = dec("0")
+        soft_warnings = []
+        
+        for rule in self.soft_rules:
+            if isinstance(rule, SpreadCapRule) and spread_provider:
+                # Pass custom spread provider if available
+                rule.spread_provider = spread_provider
+            
+            result = rule.check(
+                symbol=symbol,
+                trades_repo=trades_repo,
+                positions_repo=positions_repo
+            )
+            
+            if result.action == RiskAction.REDUCE:
+                # Accumulate reductions
+                rule_reduction = dec(result.metadata.get("reduction_pct", "0"))
+                reduction_pct = max(reduction_pct, rule_reduction)
+                soft_warnings.append(result.reason)
+        
+        # If we have reductions, return REDUCE result
+        if reduction_pct > 0:
+            return RiskCheckResult.reduce(
+                rule=RiskRuleType.SPREAD_CAP,  # Primary rule
+                reason="; ".join(soft_warnings),
+                reduction_pct=reduction_pct
+            )
+        
+        # Check monitoring rules (WARN only)
+        for rule in self.monitoring_rules:
+            result = rule.check(
+                symbol=symbol,
+                trades_repo=trades_repo,
+                positions_repo=positions_repo
+            )
+            if result.action == RiskAction.WARN:
+                _log.info(
+                    f"Risk warning: {result.reason}",
+                    extra={"trace_id": trace_id, "symbol": symbol}
+                )
+                # Continue checking, warnings don't block
+        
+        # All checks passed
+        return RiskCheckResult.allow()
+    
+    def can_execute(
+        self,
+        symbol: str,
+        trades_repo: Optional[TradesRepository] = None,
+        positions_repo: Optional[PositionsRepository] = None
+    ) -> bool:
+        """
+        Quick check if trade can be executed.
+        Returns bool for backward compatibility.
+        """
+        # Only check critical rules for quick decision
+        for rule in self.critical_rules:
+            result = rule.check(
+                symbol=symbol,
+                trades_repo=trades_repo,
+                positions_repo=positions_repo
+            )
+            if result.action == RiskAction.BLOCK:
+                return False
+        return True
 
-        if (limit_n > 0) and trades:
-            count = None
-            if hasattr(trades, "count_orders_last_minutes"):
-                try:
-                    count = int(trades.count_orders_last_minutes(symbol, 1440))
-                except Exception:
-                    count = None
-            if count is None and hasattr(trades, "list_today"):
-                try:
-                    count = len(trades.list_today(symbol))
-                except Exception:
-                    count = None
-            if isinstance(count, int) and count >= limit_n:
-                return False, "budget:max_orders_per_day", {"count": count, "limit": limit_n}
 
-        if (limit_turn > 0) and trades and hasattr(trades, "daily_turnover_quote"):
-            try:
-                turn = trades.daily_turnover_quote(symbol)
-                if turn >= limit_turn:
-                    return (
-                        False,
-                        "budget:max_turnover_quote_per_day",
-                        {"turnover": str(turn), "limit": str(limit_turn)},
-                    )
-            except Exception:
-                pass
+# ============= EXPORT =============
 
-        return True, "ok", {}
-
-    def check(self, *, symbol: str, storage: object) -> tuple[bool, str, dict]:
-        """Return (ok, reason, extra)."""
-        ok, why, extra = self._budget_check(symbol=symbol, storage=storage)
-        if not ok:
-            inc("budget_exceeded_total", symbol=symbol, type=why.split(":", 1)[-1])
-            return False, why, extra
-
-        trades = getattr(storage, "trades", None)
-        positions = getattr(storage, "positions", None)
-
-        # Optional checks (ĞµÑĞ»Ğ¸ Ğ¼Ğ¾Ğ´ÑƒĞ»ÑŒ/Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ¾ Ğ½Ğµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾ â€” Ğ¿Ñ€Ğ¾Ğ¿ÑƒÑĞºĞ°ĞµĞ¼)
-        for rule in [self._cool, self._orders5, self._turn5, self._corr, self._spread, self._dailoss]:
-            if rule is not None:
-                try:
-                    ok, why, extra = rule.check(symbol=symbol, trades_repo=trades, positions_repo=positions)
-                    if not ok:
-                        inc("risk_block_total", symbol=symbol, reason=why)
-                        return False, why, extra
-                except TypeError:
-                    # ĞĞµĞºĞ¾Ñ‚Ğ¾Ñ€Ñ‹Ğµ Ğ¿Ñ€Ğ°Ğ²Ğ¸Ğ»Ğ° Ğ½Ğµ Ñ‚Ñ€ĞµĞ±ÑƒÑÑ‚ Ğ¾Ğ±Ğ° Ñ€ĞµĞ¿Ğ¾Ğ·Ğ¸Ñ‚Ğ¾Ñ€Ğ¸Ñ
-                    try:
-                        ok, why, extra = rule.check(symbol=symbol, trades_repo=trades)
-                        if not ok:
-                            inc("risk_block_total", symbol=symbol, reason=why)
-                            return False, why, extra
-                    except Exception:
-                        continue
-                except Exception:
-                    continue
-
-        if trades is None:
-            return True, "ok", {"note": "no_trades_repo"}
-
-        ok, why, extra = self._loss.check(symbol=symbol, trades_repo=trades)
-        if not ok:
-            inc("risk_block_total", symbol=symbol, reason=why)
-            return False, why, extra
-
-        ok, why, extra = self._dd.check(symbol=symbol, trades_repo=trades)
-        if not ok:
-            inc("risk_block_total", symbol=symbol, reason=why)
-            return False, why, extra
-
-        return True, "ok", {}
-
-    def can_execute(self, symbol: str, storage: object) -> bool:
-        ok, _, _ = self.check(symbol=symbol, storage=storage)
-        return ok
+__all__ = [
+    "RiskManager",
+    "RiskConfig",
+    "RiskCheckResult",
+    "RiskAction",
+    "RiskRuleType",
+    "TradesRepository",
+    "PositionsRepository",
+]

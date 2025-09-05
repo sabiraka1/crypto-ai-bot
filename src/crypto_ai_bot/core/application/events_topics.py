@@ -11,7 +11,10 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from typing import Final, TypedDict, Optional, Literal
-from typing import Any
+
+from crypto_ai_bot.utils.decimal import dec
+
+
 # ============================================================================
 # BROKER & ORDERS
 # ============================================================================
@@ -131,6 +134,7 @@ ORCH_AUTO_PAUSED: Final[str] = "orch.auto.paused"
 ORCH_AUTO_RESUMED: Final[str] = "orch.auto.resumed"
 ORCH_CYCLE_STARTED: Final[str] = "orch.cycle.started"
 ORCH_CYCLE_COMPLETED: Final[str] = "orch.cycle.completed"
+ORCH_LOOP_FAILED: Final[str] = "orch.loop.failed"
 
 # ============================================================================
 # SAFETY & EMERGENCY
@@ -268,7 +272,7 @@ class AlertPayload(TypedDict):
     severity: Literal["info", "warning", "error", "critical"]
     title: str
     message: str
-    metadata: Optional[dict[str, Any]]
+    metadata: Optional[dict[str, any]]
 
 
 # ============================================================================
@@ -379,8 +383,8 @@ def build_pnl_event(
 
 
 def build_regime_event(
-    old_state: Literal["risk_on", "risk_small", "neutral", "risk_off"],
-    new_state: Literal["risk_on", "risk_small", "neutral", "risk_off"],
+    old_state: str,
+    new_state: str,
     score: float,
     dxy_change: Optional[float],
     btc_dom_change: Optional[float],

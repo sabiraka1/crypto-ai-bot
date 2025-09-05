@@ -18,7 +18,7 @@ class TradingConfig(BaseModel):
     FIXED_AMOUNT: PositiveFloat = 10.0
     RISK_MAX_SLIPPAGE_PCT: float = Field(
         0.10, ge=0.0, le=5.0
-    )  # ГўвЂ°В¤5% ДћВ·ДћВ°Г‘вЂ°ДћВёГ‘вЂљДћВЅГ‘вЂ№ДћВ№ ДћВјДћВ°ДћВєГ‘ВЃДћВёДћВјГ‘Ж’ДћВј
+    )  # Max slippage 5% protection limit
 
 
 class SafetyConfig(BaseModel):

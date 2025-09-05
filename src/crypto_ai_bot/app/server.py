@@ -1,256 +1,235 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable
 import contextlib
-from contextlib import asynccontextmanager
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable, Dict, Optional
 
-from fastapi import APIRouter, Body, FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import PlainTextResponse, JSONResponse
 
-from crypto_ai_bot.app.compose import build_container_async
-from crypto_ai_bot.core.application import events_topics
+# ВАЖНО: импортируем compose() и даём локальный алиас,
+# чтобы не менять остальной код:
+from crypto_ai_bot.app.compose import compose as build_container_async  # совместимо с compose.py
+
 from crypto_ai_bot.utils.logging import get_logger
-from crypto_ai_bot.utils.metrics import export_text, hist, inc
-from crypto_ai_bot.utils.time import now_ms
+from crypto_ai_bot.utils.metrics import inc, hist, export_text
 
-_log = get_logger("app.server")
-_container: Any | None = None
+logger = get_logger(__name__)
 
 
-# -------- rate limiter --------
+# ---------------- Rate Limiter (простой in-memory) ----------------
+
 class RateLimiter:
-    def __init__(self, limit_per_min: int = 10) -> None:
-        self.limit = int(limit_per_min)
-        self.bucket: dict[str, list[float]] = {}
+    def __init__(self, limit: int = 60, window_sec: int = 60, max_keys: int = 10_000) -> None:
+        self.limit = int(limit)
+        self.window = float(window_sec)
+        self.max_keys = int(max_keys)
+        # key -> (window_start_ts, count)
+        self.bucket: Dict[str, tuple[float, int]] = {}
 
     def _key(self, request: Request) -> str:
+        # Ключ на основе IP + Authorization (если есть)
         ip = request.client.host if request.client else "unknown"
-        tok = request.headers.get("authorization", "")
-        return f"{ip}|{tok}"
+        auth = request.headers.get("authorization", "")
+        return f"{ip}|{auth}"
 
     def allow(self, request: Request) -> bool:
-        now = time.time()
-        k = self._key(request)
-        q = self.bucket.setdefault(k, [])
-        while q and q[0] < now - 60.0:
-            q.pop(0)
-        if len(q) >= self.limit:
-            return False
-        q.append(now)
-        return True
+        now = time.monotonic()
+        key = self._key(request)
+        win_start, count = self.bucket.get(key, (now, 0))
+
+        if now - win_start >= self.window:
+            # новый окно
+            self.bucket[key] = (now, 1)
+            # простая «обрезка» карты, чтобы не росла бесконечно
+            if len(self.bucket) > self.max_keys:
+                # удаляем произвольный старый элемент
+                self.bucket.pop(next(iter(self.bucket)))
+            return True
+
+        if count < self.limit:
+            self.bucket[key] = (win_start, count + 1)
+            return True
+
+        return False
 
 
-_rl = RateLimiter(limit_per_min=10)
+rl = RateLimiter(limit=120, window_sec=60)
 
 
-def limit(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        request: Request | None = None
-        for a in args:
-            if isinstance(a, Request):
-                request = a
-                break
-        if request is None:
-            request = kwargs.get("request")
-        if isinstance(request, Request) and not _rl.allow(request):
-            inc(
-                "http_requests_total",
-                path="rate_limited",
-                method=getattr(request, "method", "GET"),
-                code="429",
-            )
-            raise HTTPException(status_code=429, detail="Too Many Requests")
-        return await fn(*args, **kwargs)
+# ---------------- FastAPI app + lifespan ----------------
 
-    return wrapper
+app = FastAPI(title="crypto-ai-bot API")
 
 
-# -------- helper functions --------
-async def _shutdown_orchestrators(orchs: dict[str, Any]) -> None:
-    if not isinstance(orchs, dict):
-        return
-    tasks = []
-    for oc in orchs.values():
-        if hasattr(oc, "stop") and callable(oc.stop):
-            tasks.append(asyncio.create_task(oc.stop()))
-        else:
-            _log.error("orchestrator_stop_schedule_failed", extra={"orch": oc})
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+@app.on_event("startup")
+async def _startup() -> None:
+    """
+    Загружаем DI-контейнер и стартуем ключевые компоненты.
+    Делаем это аккуратно и идемпотентно.
+    """
+    # Сохраняем контейнер в app.state
+    container = await build_container_async()
+    app.state.container = container
 
+    # Явно стартуем event bus и health (не полагаясь на AppContainer.start)
+    await container.bus.start()
+    await container.health.start()
 
-async def _shutdown_bus(bus: Any) -> None:
-    if not bus:
-        return
-    if hasattr(bus, "stop") and callable(bus.stop):
-        await bus.stop()
-    elif hasattr(bus, "close") and callable(bus.close):
-        await bus.close()
+    # DMS — если включен
+    if getattr(container.settings, "DMS_ENABLED", False):
+        try:
+            await container.dms.start()
+        except Exception:  # устойчиво
+            logger.error("dms.start_failed", exc_info=True)
 
-
-async def _shutdown_broker(broker: Any) -> None:
-    exch = getattr(broker, "exchange", None) if broker else None
-    if exch and hasattr(exch, "close") and callable(exch.close):
-        await exch.close()
-
-
-# -------- lifespan --------
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    global _container
-    _log.info("lifespan_start")
-    _container = await build_container_async()
-
+    # Защитные выходы: стартуем по каждому символу оркестратора
     try:
-        yield
-    finally:
-        _log.info("lifespan_shutdown_begin")
+        for sym in container.orchestrators.keys():
+            try:
+                await container.exits.start(sym)  # наша ProtectiveExits ожидает symbol
+            except Exception:
+                logger.error("exits.start_failed", extra={"symbol": sym}, exc_info=True)
+    except Exception:
+        # если защитные выходы не критичны — не валим приложение
+        logger.error("exits.bulk_start_failed", exc_info=True)
 
-        try:
-            inst_lock = getattr(_container, "instance_lock", None)
-            if inst_lock and hasattr(inst_lock, "release"):
-                inst_lock.release()
-        except Exception:
-            _log.debug("instance_lock_release_failed", exc_info=True)
-
-        try:
-            orchs = getattr(_container, "orchestrators", None)
-            await _shutdown_orchestrators(orchs)
-        except Exception:
-            _log.error("orchestrators_stop_failed", exc_info=True)
-
-        try:
-            bus = getattr(_container, "bus", None)
-            await _shutdown_bus(bus)
-        except Exception:
-            _log.error("bus_shutdown_failed", exc_info=True)
-
-        try:
-            broker = getattr(_container, "broker", None)
-            await _shutdown_broker(broker)
-        except Exception:
-            _log.error("exchange_close_failed", exc_info=True)
-
-        _log.info("lifespan_shutdown_end")
+    # Автостарт оркестраторов если задано
+    if getattr(container.settings, "AUTOSTART", False):
+        for sym, orch in container.orchestrators.items():
+            try:
+                await orch.start()
+                logger.info("orchestrator.autostart", extra={"symbol": sym})
+            except Exception:
+                logger.error("orchestrator.autostart_failed", extra={"symbol": sym}, exc_info=True)
 
 
-app = FastAPI(lifespan=lifespan)
-router = APIRouter()
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    """Корректно останавливаем все компоненты."""
+    container = getattr(app.state, "container", None)
+    if container is None:
+        return
+
+    # Оркестраторы
+    for sym, orch in container.orchestrators.items():
+        with contextlib.suppress(Exception):
+            await orch.stop()
+
+    # Остальные компоненты
+    with contextlib.suppress(Exception):
+        await container.exits.stop()
+    with contextlib.suppress(Exception):
+        await container.health.stop()
+    with contextlib.suppress(Exception):
+        await container.dms.stop()
+    with contextlib.suppress(Exception):
+        await container.bus.stop()
+
+    # Лок на инстанс
+    with contextlib.suppress(Exception):
+        container.instance_lock.release()
 
 
-# -------- HTTP metrics middleware --------
+# ---------------- Метрики и middleware ----------------
+
 @app.middleware("http")
-async def _metrics_middleware(
-    request: Request, call_next: Callable[[Request], Awaitable[Response]]
-) -> Response:
-    path = request.url.path
+async def _metrics_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    # Используем шаблон пути (route.path), а не конкретный URL —
+    # так мы понижаем кардинальность лейблов в Prometheus.
+    route = request.scope.get("route")
+    path_template = getattr(route, "path", request.url.path)
     method = request.method
-    t = hist("http_request_latency_seconds", path=path, method=method)
 
-    with t.time() if t else contextlib.nullcontext():
-        response = await call_next(request)
+    h = hist("http_request_latency_seconds", path=path_template, method=method)
+    # Если prometheus_client не установлен — h может быть None
+    timer_cm = h.time() if hasattr(h, "time") else contextlib.nullcontext()
 
-    inc("http_requests_total", path=path, method=method, code=str(response.status_code))
+    with timer_cm:  # type: ignore[arg-type]
+        try:
+            response = await call_next(request)
+        finally:
+            inc("http_requests_total", path=path_template, method=method)
+
     return response
 
 
-# -------- endpoints: orchestrator --------
-@router.post("/orchestrator/{name}/start")
-@limit
-async def orch_start(name: str, request: Request) -> JSONResponse:
-    orch = getattr(_container, "orchestrators", {}).get(name) if _container else None
+# ---------------- Рейткеп на write-эндпойнтах ----------------
+
+async def _ensure_rate_limit(request: Request) -> None:
+    if not rl.allow(request):
+        inc("http_rate_limited_total")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
+# ---------------- Базовые эндпоинты ----------------
+
+@app.get("/health", response_class=JSONResponse)
+async def health() -> dict[str, Any]:
+    return {"status": "ok"}
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics_endpoint() -> Response:
+    # Выгрузка прометей-метрик
+    return PlainTextResponse(export_text(), media_type="text/plain; version=0.0.4")
+
+
+# ---------------- Управление оркестраторами ----------------
+
+@app.post("/orchestrator/{symbol}/start")
+async def start_orchestrator(symbol: str, request: Request) -> dict[str, Any]:
+    await _ensure_rate_limit(request)
+    container = app.state.container
+    orch = container.orchestrators.get(symbol)
     if not orch:
-        raise HTTPException(status_code=404, detail=f"Orchestrator {name} not found")
-    try:
-        await orch.start()
-        return JSONResponse({"status": "started", "name": name})
-    except Exception as exc:
-        _log.error("orchestrator_start_failed", extra={"name": name, "error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to start orchestrator")
+        raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
+    await orch.start()
+    inc("orchestrator_start_total", symbol=symbol)
+    return {"status": "started", "symbol": symbol}
 
 
-@router.post("/orchestrator/{name}/stop")
-@limit
-async def orch_stop(name: str, request: Request) -> JSONResponse:
-    orch = getattr(_container, "orchestrators", {}).get(name) if _container else None
+@app.post("/orchestrator/{symbol}/stop")
+async def stop_orchestrator(symbol: str, request: Request) -> dict[str, Any]:
+    await _ensure_rate_limit(request)
+    container = app.state.container
+    orch = container.orchestrators.get(symbol)
     if not orch:
-        raise HTTPException(status_code=404, detail=f"Orchestrator {name} not found")
-    try:
-        await orch.stop()
-        return JSONResponse({"status": "stopped", "name": name})
-    except Exception as exc:
-        _log.error("orchestrator_stop_failed", extra={"name": name, "error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to stop orchestrator")
+        raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
+    await orch.stop()
+    inc("orchestrator_stop_total", symbol=symbol)
+    return {"status": "stopped", "symbol": symbol}
 
 
-@router.get("/orchestrator/{name}/status")
-@limit
-async def orch_status(name: str, request: Request) -> JSONResponse:
-    orch = getattr(_container, "orchestrators", {}).get(name) if _container else None
+@app.get("/orchestrator/{symbol}/status", response_class=JSONResponse)
+async def orchestrator_status(symbol: str) -> dict[str, Any]:
+    container = app.state.container
+    orch = container.orchestrators.get(symbol)
     if not orch:
-        raise HTTPException(status_code=404, detail=f"Orchestrator {name} not found")
-    try:
-        st = await orch.status()
-        return JSONResponse({"status": "ok", "orchestrator": name, "details": st})
-    except Exception as exc:
-        _log.error("orchestrator_status_failed", extra={"name": name, "error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch status")
+        raise HTTPException(status_code=404, detail=f"Unknown symbol: {symbol}")
+    # Минимальный статус (можно расширить из самого Orchestrator)
+    return {
+        "symbol": symbol,
+        "running": getattr(orch, "is_running", lambda: False)(),
+    }
 
 
-# -------- endpoints: telegram webhook --------
-@router.post("/telegram/webhook")
-async def telegram_webhook(
-    request: Request,
-    update: dict[str, Any] = Body(...),
-) -> JSONResponse:
-    bus = getattr(_container, "bus", None)
-    if not bus:
-        raise HTTPException(status_code=500, detail="Bus not initialized")
+# ---------------- Управление ProtectiveExits (по желанию) ----------------
 
-    try:
-        await bus.publish(events_topics.TELEGRAM_UPDATE, update)
-        return JSONResponse({"ok": True})
-    except Exception as exc:
-        _log.error("telegram_webhook_failed", extra={"error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to process telegram update")
+@app.post("/exits/{symbol}/start")
+async def start_exits(symbol: str, request: Request) -> dict[str, Any]:
+    await _ensure_rate_limit(request)
+    container = app.state.container
+    await container.exits.start(symbol)
+    inc("exits_start_total", symbol=symbol)
+    return {"status": "started", "symbol": symbol}
 
 
-# -------- endpoints: health & metrics --------
-@router.get("/health")
-async def health() -> JSONResponse:
-    try:
-        return JSONResponse({"status": "ok", "ts": now_ms()})
-    except Exception as exc:
-        _log.error("health_failed", extra={"error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Health check failed")
-
-
-@router.get("/metrics")
-async def metrics() -> PlainTextResponse:
-    try:
-        return PlainTextResponse(export_text())
-    except Exception as exc:
-        _log.error("metrics_failed", extra={"error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Metrics export failed")
-
-
-# -------- endpoints: pnl --------
-@router.get("/pnl/today")
-@limit
-async def pnl_today(request: Request) -> JSONResponse:
-    try:
-        trades_repo = getattr(_container, "storage", None).trades if _container else None
-        if not trades_repo or not hasattr(trades_repo, "daily_pnl_quote"):
-            raise HTTPException(status_code=500, detail="Trades repo not available")
-        pnl = trades_repo.daily_pnl_quote()
-        return JSONResponse({"status": "ok", "pnl_today_quote": str(pnl)})
-    except Exception as exc:
-        _log.error("pnl_today_failed", extra={"error": str(exc)}, exc_info=True)
-        raise HTTPException(status_code=500, detail="PNL calculation failed")
-
-
-# -------- register router --------
-app.include_router(router)
+@app.post("/exits/{symbol}/stop")
+async def stop_exits(symbol: str, request: Request) -> dict[str, Any]:
+    await _ensure_rate_limit(request)
+    container = app.state.container
+    await container.exits.stop(symbol)
+    inc("exits_stop_total", symbol=symbol)
+    return {"status": "stopped", "symbol": symbol}

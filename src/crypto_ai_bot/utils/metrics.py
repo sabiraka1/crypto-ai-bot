@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 import os
 import time
-from typing import Any
+from typing import Any, Optional
 
 try:
     from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
@@ -17,6 +17,7 @@ except Exception as _imp_err:  # noqa: BLE001
         return b""
 
 
+# Общий реестр и кэши labelsets для уже созданных метрик
 _REGISTRY = CollectorRegistry() if isinstance(CollectorRegistry, type) else CollectorRegistry  # type: ignore[call-arg]
 _COUNTERS: dict[tuple[str, tuple[tuple[str, str], ...]], Any] = {}
 _GAUGES: dict[tuple[str, tuple[tuple[str, str], ...]], Any] = {}
@@ -27,7 +28,7 @@ _DISABLED = os.environ.get("METRICS_DISABLED", "0") == "1"
 
 
 def reset_registry() -> None:
-    """Сброс реестра для тестов."""
+    """Сброс реестра и локальных кэшей (используется в тестах)."""
     global _REGISTRY, _COUNTERS, _GAUGES, _HISTS
     if _DISABLED:
         _COUNTERS = {}
@@ -41,58 +42,74 @@ def reset_registry() -> None:
 
 
 def _sanitize_name(name: str) -> str:
-    """Prometheus-совместимость: точки/дефисы -> подчёркивания."""
+    """Prometheus-совместимость: точки/дефисы → подчёркивания."""
     return name.replace(".", "_").replace("-", "_")
 
 
+def _sanitize_labels(labels: dict[str, Any]) -> dict[str, str]:
+    """
+    Приводим label-значения к str, а имена лейблов — к прометеевскому формату.
+    Prometheus допускает [a-zA-Z_][a-zA-Z0-9_]*, поэтому просто нормализуем как имя метрики.
+    """
+    return {_sanitize_name(str(k)): str(v) for k, v in labels.items()}
+
+
 def _key(name: str, labels: dict[str, str] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Ключ для кэша «метрика + конкретный набор лейблов» (отсортированный)."""
     pairs = tuple(sorted((labels or {}).items()))
     return (name, pairs)
 
 
 def _buckets_ms() -> tuple[float, ...]:
+    """
+    Читаем гистограммные бакеты из ENV (миллисекунды), конвертируем в секунды.
+    По умолчанию: 5,10,25,50,100,250,500,1000 (мс).
+    """
     env = os.environ.get("METRICS_BUCKETS_MS", "5,10,25,50,100,250,500,1000")
     try:
         vals = [float(x.strip()) for x in env.split(",") if x.strip()]
     except Exception:
         vals = [5, 10, 25, 50, 100, 250, 500, 1000]
-    # prometheus принимает секунды
-    return tuple(v / 1000.0 for v in vals)
+    return tuple(v / 1000.0 for v in vals)  # prometheus принимает секунды
 
 
-def _ensure_counter(name: str, labs: dict[str, str]) -> Any:
+def _ensure_counter(name: str, labs: dict[str, str]) -> Any | None:
+    """Создаёт/возвращает labelset счётчика (или None, если выключено/не установлено)."""
     if _DISABLED or Counter is object:
         return None
     k = _key(name, labs)
     if k not in _COUNTERS:
         try:
-            _COUNTERS[k] = Counter(name, name, list(labs.keys()), registry=_REGISTRY)  # type: ignore[call-arg]
+            # ВАЖНО: список имён лейблов отсортирован → детерминированная регистрация
+            _COUNTERS[k] = Counter(name, name, sorted(labs.keys()), registry=_REGISTRY)  # type: ignore[call-arg]
         except Exception:
             # несовместимые лейблы для уже зарегистрированной метрики — пропускаем
             return None
     return _COUNTERS[k].labels(**labs)  # type: ignore[no-any-return]
 
 
-def _ensure_gauge(name: str, labs: dict[str, str]) -> Any:
+def _ensure_gauge(name: str, labs: dict[str, str]) -> Any | None:
+    """Создаёт/возвращает labelset gauge (или None)."""
     if _DISABLED or Gauge is object:
         return None
     k = _key(name, labs)
     if k not in _GAUGES:
         try:
-            _GAUGES[k] = Gauge(name, name, list(labs.keys()), registry=_REGISTRY)  # type: ignore[call-arg]
+            _GAUGES[k] = Gauge(name, name, sorted(labs.keys()), registry=_REGISTRY)  # type: ignore[call-arg]
         except Exception:
             return None
     return _GAUGES[k].labels(**labs)  # type: ignore[no-any-return]
 
 
-def _ensure_hist(name: str, labs: dict[str, str]) -> Any:
+def _ensure_hist(name: str, labs: dict[str, str]) -> Any | None:
+    """Создаёт/возвращает labelset гистограммы (или None)."""
     if _DISABLED or Histogram is object:
         return None
     k = _key(name, labs)
     if k not in _HISTS:
         try:
             _HISTS[k] = Histogram(  # type: ignore[call-arg]
-                name, name, list(labs.keys()), buckets=_buckets_ms(), registry=_REGISTRY
+                name, name, sorted(labs.keys()), buckets=_buckets_ms(), registry=_REGISTRY
             )
         except Exception:
             return None
@@ -107,42 +124,43 @@ def inc(name: str, **labels: Any) -> None:
     if _DISABLED:
         return
     name = _sanitize_name(name)
-    labs = {k: str(v) for k, v in labels.items()}
+    labs = _sanitize_labels(labels)
     c = _ensure_counter(name, labs)
     if c is not None:
         c.inc()
 
 
-def gauge(name: str, **labels: Any):
+def gauge(name: str, **labels: Any) -> Any | None:
     """Gauge (вернёт объект, чтобы .set())"""
     if _DISABLED:
         return None
     name = _sanitize_name(name)
-    labs = {k: str(v) for k, v in labels.items()}
+    labs = _sanitize_labels(labels)
     return _ensure_gauge(name, labs)
 
 
-def hist(name: str, **labels: Any):
-    """Histogram (секунды)"""
+def hist(name: str, **labels: Any) -> Any | None:
+    """Histogram (секунды; бакеты настраиваются через METRICS_BUCKETS_MS в мс)"""
     if _DISABLED:
         return None
     name = _sanitize_name(name)
-    labs = {k: str(v) for k, v in labels.items()}
+    labs = _sanitize_labels(labels)
     return _ensure_hist(name, labs)
 
 
 def observe(name: str, value_ms: float, labels: dict[str, Any] | None = None) -> None:
-    """Шорткат для наблюдения значения (миллисекунды -> секунды)."""
+    """Шорткат: записать значение в гистограмму (в миллисекундах на входе)."""
     if _DISABLED:
         return
     name = _sanitize_name(name)
-    h = _ensure_hist(name, {k: str(v) for k, v in (labels or {}).items()})
-    if h:
+    labs = _sanitize_labels(labels or {})
+    h = _ensure_hist(name, labs)
+    if h is not None:
         h.observe(float(value_ms) / 1000.0)
 
 
 def export_text() -> str:
-    """Для /metrics в FastAPI."""
+    """Экспорт /metrics для HTTP-эндпоинта (Prometheus exposition format)."""
     if _DISABLED:
         return ""
     try:
