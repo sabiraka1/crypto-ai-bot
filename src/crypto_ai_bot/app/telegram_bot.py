@@ -1,33 +1,46 @@
+"""Telegram bot for crypto trading system management.
+
+Located in app layer - handles external interface for bot commands.
+Uses orchestrator and storage through existing interfaces.
+"""
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import html
 import os
 import time
-from typing import Any, Protocol
-import urllib.parse
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Optional, Protocol
 
 from crypto_ai_bot.utils.http_client import aget
 from crypto_ai_bot.utils.logging import get_logger
 from crypto_ai_bot.utils.symbols import canonical
+from crypto_ai_bot.utils.trace import generate_trace_id
 
-_log = get_logger("adapters.telegram_bot")
+_log = get_logger(__name__)
 
 
-class OrchestratorNotFoundError(Exception):
-    """Raised when orchestrator is not found for symbol."""
-
+# ============== Protocols ==============
 
 class OrchestratorProtocol(Protocol):
     """Protocol for orchestrator interface."""
 
     def status(self) -> dict[str, Any]: ...
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def pause(self) -> None: ...
-    def resume(self) -> None: ...
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+    async def pause(self) -> None: ...
+    async def resume(self) -> None: ...
 
+
+class HealthCheckerProtocol(Protocol):
+    """Protocol for health checker."""
+
+    async def check(self) -> dict[str, Any]: ...
+
+
+# ============== Configuration ==============
 
 @dataclass
 class BotConfig:
@@ -36,21 +49,26 @@ class BotConfig:
     bot_token: str
     allowed_users: set[int]
     default_symbol: str
-    long_poll_sec: int
-    ttl_secs: float
-    throttle_max: int
-    throttle_window: int
+    long_poll_sec: int = 30
+    ttl_secs: float = 30.0
+    throttle_max: int = 5
+    throttle_window: int = 10
 
+
+# ============== Data Classes ==============
 
 @dataclass
 class UpdateData:
-    """Parsed update data."""
+    """Parsed Telegram update."""
 
     chat_id: int
     user_id: int
     text: str
     offset: int
+    trace_id: str
 
+
+# ============== Utilities ==============
 
 class RateLimiter:
     """Rate limiting for users."""
@@ -86,10 +104,10 @@ class MessageCache:
 
     def is_duplicate(self, user_id: int, text: str) -> bool:
         """Check if message is duplicate."""
-        key = (user_id, text.strip())
+        key = (user_id, text.strip().lower())
         now = time.time()
 
-        # Check existing and add if not duplicate
+        # Check existing
         if key in self.cache and now - self.cache[key] <= self.ttl_secs:
             return True
 
@@ -104,201 +122,471 @@ class MessageCache:
         return False
 
 
+# ============== Telegram API ==============
+
 class TelegramAPI:
     """Telegram API client."""
 
     def __init__(self, bot_token: str):
         self.token = bot_token
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
 
-    def _build_url(self, method: str, **params: Any) -> str:
-        """Build API URL."""
-        query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
-        return f"https://api.telegram.org/bot{self.token}/{method}?{query}"
-
-    async def send_message(self, chat_id: int, text: str, parse_mode: str = "HTML") -> None:
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str = "HTML",
+        trace_id: str | None = None,
+    ) -> None:
         """Send message to chat."""
         try:
-            url = self._build_url(
-                "sendMessage",
-                chat_id=str(chat_id),
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview="true",
-            )
-            # жёсткий cap на всю операцию отправки
+            url = f"{self.base_url}/sendMessage"
+            params = {
+                "chat_id": str(chat_id),
+                "text": text,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": "true",
+            }
+
+            # Build URL with params
+            from urllib.parse import urlencode
+            url = f"{url}?{urlencode(params)}"
+
             await aget(url, hard_timeout=20.0)
+
+            if trace_id:
+                _log.info("telegram_message_sent", extra={"trace_id": trace_id, "chat_id": chat_id})
+
         except Exception:
-            _log.error("telegram_reply_failed", exc_info=True)
+            _log.error("telegram_send_failed", exc_info=True, extra={"trace_id": trace_id} if trace_id else {})
 
     async def get_updates(self, offset: int, timeout: int) -> list[dict[str, Any]]:
-        """Get updates from Telegram with timeout."""
-        url = self._build_url(
-            "getUpdates",
-            timeout=str(timeout),
-            offset=str(offset),
-            # Telegram ожидает JSON-список строк; строка тоже работает, но оставим как есть
-            allowed_updates="message",
-        )
+        """Get updates with long polling."""
+        url = f"{self.base_url}/getUpdates"
+        params = {
+            "timeout": str(timeout),
+            "offset": str(offset),
+            "allowed_updates": '["message"]',
+        }
+
+        from urllib.parse import urlencode
+        url = f"{url}?{urlencode(params)}"
 
         try:
-            # небольшая подстраховка поверх long-poll (timeout + запас)
+            # Add buffer for network delays
             async with asyncio.timeout(timeout + 10):
                 resp = await aget(url, hard_timeout=timeout + 8)
-                data = resp.json() if resp.status_code == 200 else {}
-        except TimeoutError:
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("result", []) if isinstance(data, dict) else []
+        except asyncio.TimeoutError:
             _log.warning("telegram_get_updates_timeout")
-            return []
         except Exception:
             _log.error("telegram_get_updates_failed", exc_info=True)
-            return []
 
-        if isinstance(data, dict):
-            return data.get("result", [])
         return []
 
 
-class CommandHandler:
-    """Handle individual commands."""
+# ============== Command Handlers ==============
 
-    def __init__(self, container: Any, default_symbol: str, api_client: TelegramAPI):
+class CommandHandler:
+    """Handle bot commands."""
+
+    def __init__(
+        self,
+        container: Any,
+        default_symbol: str,
+        api: TelegramAPI,
+    ):
         self.container = container
         self.default_symbol = default_symbol
-        self.api = api_client
+        self.api = api
         self.chat_symbols: dict[int, str] = {}
 
     def pick_symbol(self, chat_id: int, tail: str | None) -> str:
         """Pick symbol for chat."""
         if tail:
             symbol = canonical(tail.strip())
-            if symbol:
+            if symbol:  # не затираем, если canonical() вернул пустое
                 self.chat_symbols[chat_id] = symbol
                 return symbol
         return self.chat_symbols.get(chat_id) or self.default_symbol
 
-    def get_orchestrator(self, symbol: str) -> OrchestratorProtocol:
+    def get_orchestrator(self, symbol: str) -> OrchestratorProtocol | None:
         """Get orchestrator for symbol."""
-        orchestrators = getattr(self.container, "orchestrators", None)
+        orchestrators = getattr(self.container, "orchestrators", {})
         if not isinstance(orchestrators, dict):
-            raise OrchestratorNotFoundError("Orchestrators not ready")
+            return None
 
+        # Try exact match first
         orch = orchestrators.get(symbol)
-        if not orch:
-            # Try with slash replacement
-            orch = orchestrators.get(symbol.replace("-", "/").upper())
+        if orch:
+            return orch
 
-        if not orch:
-            raise OrchestratorNotFoundError(f"Orchestrator not found for {symbol}")
+        # Try with slash replacement + upper
+        symbol_alt = symbol.replace("-", "/").upper()
+        return orchestrators.get(symbol_alt)
 
-        return orch
+    def get_health_checker(self) -> HealthCheckerProtocol | None:
+        """Get health checker (support both names)."""
+        return getattr(self.container, "health_checker", None) or getattr(self.container, "health", None)
 
-    async def handle_help(self, chat_id: int) -> None:
-        """Handle help command."""
+    def get_broker(self) -> Any:
+        """Get broker."""
+        return getattr(self.container, "broker", None)
+
+    def get_storage(self) -> Any:
+        """Get storage facade."""
+        return getattr(self.container, "storage", None)
+
+    async def handle_help(self, chat_id: int, trace_id: str) -> None:
+        """Show help message."""
         text = (
-            "<b>Available commands</b>\n"
-            "/help – show this help\n"
-            "/symbol SYMBOL – set default symbol\n"
-            "/status [SYMBOL] – show orchestrator status\n"
-            "/start_trade [SYMBOL] – start orchestrator\n"
-            "/stop_trade [SYMBOL] – stop orchestrator\n"
-            "/pause [SYMBOL] – pause orchestrator\n"
-            "/resume [SYMBOL] – resume orchestrator\n"
+            "<b>📊 Crypto Trading Bot Commands</b>\n\n"
+            "<b>Info:</b>\n"
+            "/status - Trading status\n"
+            "/pnl - PnL report\n"
+            "/today - Today's summary\n"
+            "/balance - Account balance\n"
+            "/position - Open positions\n"
+            "/limits - Risk limits usage\n"
+            "/health - System health\n\n"
+            "<b>Control:</b>\n"
+            "/pause - Pause trading\n"
+            "/resume - Resume trading\n"
+            "/stop - Stop bot\n\n"
+            "<b>Settings:</b>\n"
+            "/symbol PAIR - Set active pair\n"
+            "/help - This message"
         )
-        await self.api.send_message(chat_id, text)
+        await self.api.send_message(chat_id, text, trace_id=trace_id)
 
-    async def handle_symbol(self, chat_id: int, tail: str | None) -> None:
-        """Handle symbol command."""
-        if not tail or not tail.strip():
-            current = self.chat_symbols.get(chat_id) or self.default_symbol
-            await self.api.send_message(chat_id, f"Current symbol: <code>{html.escape(current)}</code>")
-            return
-
-        symbol = canonical(tail.strip())
-        self.chat_symbols[chat_id] = symbol
-        await self.api.send_message(chat_id, f"Default symbol set: <b>{html.escape(symbol)}</b>")
-
-    async def handle_status(self, chat_id: int, tail: str | None) -> None:
-        """Handle status command."""
+    async def handle_status(self, chat_id: int, tail: str | None, trace_id: str) -> None:
+        """Show orchestrator status."""
         symbol = self.pick_symbol(chat_id, tail)
 
-        try:
-            orch = self.get_orchestrator(symbol)
-            status = orch.status()
-        except OrchestratorNotFoundError:
-            await self.api.send_message(chat_id, f"Orchestrator not found for <b>{html.escape(symbol)}</b>")
-            return
-        except Exception:
-            _log.error("orch_status_failed", extra={"symbol": symbol}, exc_info=True)
-            await self.api.send_message(chat_id, f"Status failed for <b>{html.escape(symbol)}</b>")
+        orch = self.get_orchestrator(symbol)
+        if not orch:
+            await self.api.send_message(
+                chat_id,
+                f"❌ Orchestrator not found for <b>{html.escape(symbol)}</b>",
+                trace_id=trace_id,
+            )
             return
 
-        lines = [f"<b>Status {html.escape(symbol)}</b>"]
-        for key in ("state", "open_orders", "position", "last_signal", "last_trade_at"):
-            if key in status:
-                value = status[key]
-                if isinstance(value, (dict, list)):
-                    value = str(value)
-                lines.append(f"- {key}: <code>{html.escape(str(value))}</code>")
-
-        await self.api.send_message(chat_id, "\n".join(lines))
-
-    async def handle_orchestrator_command(
-        self, chat_id: int, tail: str | None, method: str, success_text: str
-    ) -> None:
-        """Handle orchestrator method call."""
-        symbol = self.pick_symbol(chat_id, tail)
-
         try:
-            orch = self.get_orchestrator(symbol)
-            func = getattr(orch, method)
-
-            if asyncio.iscoroutinefunction(func):
-                await func()
-            else:
-                func()
-
             status = orch.status()
+
+            # Format status
+            lines = [f"<b>📊 Status {html.escape(symbol)}</b>"]
+
+            # State with emoji
             state = status.get("state", "unknown")
+            state_emoji = {
+                "running": "🟢",
+                "paused": "⏸️",
+                "stopped": "🔴",
+                "starting": "🔄",
+            }.get(str(state).lower(), "❓")
+            lines.append(f"{state_emoji} State: <b>{html.escape(str(state))}</b>")
+
+            # Position
+            if pos := status.get("position"):
+                try:
+                    size = float(pos.get("size", 0))
+                    entry = float(pos.get("entry_price", 0))
+                    if size > 0:
+                        lines.append(f"📈 Position: {size:.4f} @ {entry:.2f}")
+                except Exception:
+                    pass
+
+            # Last trade
+            if last_trade := status.get("last_trade_at"):
+                lines.append(f"⏰ Last trade: {html.escape(str(last_trade))}")
+
+            # Open orders
+            if orders := status.get("open_orders"):
+                try:
+                    lines.append(f"📝 Open orders: {len(orders)}")
+                except Exception:
+                    pass
+
+            await self.api.send_message(chat_id, "\n".join(lines), trace_id=trace_id)
+
+        except Exception:
+            _log.error("status_command_failed", exc_info=True, extra={"symbol": symbol, "trace_id": trace_id})
+            await self.api.send_message(
+                chat_id,
+                f"❌ Failed to get status for {html.escape(symbol)}",
+                trace_id=trace_id,
+            )
+
+    async def handle_pnl(self, chat_id: int, tail: str | None, trace_id: str) -> None:
+        """Show PnL report."""
+        symbol = self.pick_symbol(chat_id, tail)
+
+        try:
+            storage = self.get_storage()
+            if not storage:
+                await self.api.send_message(chat_id, "❌ Storage not available", trace_id=trace_id)
+                return
+
+            trades_repo = getattr(storage, "trades", None)
+            if not trades_repo:
+                await self.api.send_message(chat_id, "❌ Trades repository not available", trace_id=trace_id)
+                return
+
+            # Today's trades
+            today = datetime.now(timezone.utc).date()
+            trades = (
+                trades_repo.get_by_date_range(start_date=today, end_date=today, symbol=symbol)
+                if hasattr(trades_repo, "get_by_date_range")
+                else []
+            )
+
+            # Calculate PnL
+            today_pnl = sum(float(t.get("pnl", 0) or 0) for t in trades)
+            total_trades = len(trades)
+            wins = sum(1 for t in trades if float(t.get("pnl", 0) or 0) > 0)
+            losses = sum(1 for t in trades if float(t.get("pnl", 0) or 0) < 0)
+
+            lines = [f"<b>💰 PnL Report {html.escape(symbol)}</b>"]
+            today_emoji = "📈" if today_pnl >= 0 else "📉"
+            lines.append(f"{today_emoji} Today: {today_pnl:+.2f} USDT")
+
+            if total_trades > 0:
+                win_rate = wins / total_trades * 100
+                lines.append("\n<b>📊 Statistics:</b>")
+                lines.append(f"Win rate: {win_rate:.1f}%")
+                lines.append(f"Wins: {wins}")
+                lines.append(f"Losses: {losses}")
+                lines.append(f"Total trades: {total_trades}")
+            else:
+                lines.append("\nNo trades today")
+
+            await self.api.send_message(chat_id, "\n".join(lines), trace_id=trace_id)
+
+        except Exception:
+            _log.error("pnl_command_failed", exc_info=True, extra={"symbol": symbol, "trace_id": trace_id})
+            await self.api.send_message(chat_id, "❌ Failed to get PnL report", trace_id=trace_id)
+
+    async def handle_balance(self, chat_id: int, trace_id: str) -> None:
+        """Show account balance."""
+        try:
+            broker = self.get_broker()
+            if not broker:
+                await self.api.send_message(chat_id, "❌ Broker not available", trace_id=trace_id)
+                return
+
+            balances = await broker.fetch_balance()
+
+            lines = ["<b>💼 Account Balance</b>"]
+            any_found = False
+
+            def _extract(b: Any) -> tuple[float, float, float]:
+                # BalanceDTO with attributes
+                if hasattr(b, "free") or hasattr(b, "used") or hasattr(b, "total"):
+                    fr = float(getattr(b, "free", 0) or 0)
+                    us = float(getattr(b, "used", 0) or 0)
+                    to = float(getattr(b, "total", fr + us) or (fr + us))
+                    return fr, us, to
+                # dict-like
+                if isinstance(b, dict):
+                    fr = float(b.get("free", 0) or 0)
+                    us = float(b.get("used", 0) or 0)
+                    to = float(b.get("total", fr + us) or (fr + us))
+                    return fr, us, to
+                # primitive
+                val = float(b or 0)
+                return val, 0.0, val
+
+            for currency, balance in balances.items():
+                free, used, total = _extract(balance)
+                if total > 0:
+                    any_found = True
+                    if currency == "USDT":
+                        lines.append("\n💵 USDT:")
+                        lines.append(f"  Total: {total:.2f}")
+                        lines.append(f"  Available: {free:.2f}")
+                        lines.append(f"  In orders: {used:.2f}")
+                    else:
+                        lines.append(f"{html.escape(str(currency))}: {total:.8f}")
+
+            if not any_found:
+                lines.append("No balances found")
+
+            await self.api.send_message(chat_id, "\n".join(lines), trace_id=trace_id)
+
+        except Exception:
+            _log.error("balance_command_failed", exc_info=True, extra={"trace_id": trace_id})
+            await self.api.send_message(chat_id, "❌ Failed to get balance", trace_id=trace_id)
+
+    async def handle_position(self, chat_id: int, tail: str | None, trace_id: str) -> None:
+        """Show open positions."""
+        symbol = self.pick_symbol(chat_id, tail)
+
+        try:
+            broker = self.get_broker()
+            if not broker:
+                await self.api.send_message(chat_id, "❌ Broker not available", trace_id=trace_id)
+                return
+
+            position = await broker.fetch_position(symbol)
+
+            if not position:
+                await self.api.send_message(
+                    chat_id, f"📊 No open position for {html.escape(symbol)}", trace_id=trace_id
+                )
+                return
+
+            # Extract fields from object or dict
+            def _get(obj: Any, name: str, default: float = 0.0) -> float:
+                if hasattr(obj, name):
+                    try:
+                        return float(getattr(obj, name) or default)
+                    except Exception:
+                        return default
+                if isinstance(obj, dict):
+                    try:
+                        return float(obj.get(name, default) or default)
+                    except Exception:
+                        return default
+                return default
+
+            size = _get(position, "amount")
+            entry = _get(position, "entry_price")
+            current = _get(position, "current_price", entry)
+            pnl = _get(position, "unrealized_pnl")
+            pnl_pct = ((current - entry) / entry * 100) if entry > 0 else 0.0
+
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            lines = [
+                f"<b>📈 Position {html.escape(symbol)}</b>",
+                f"{emoji} Size: {size:.4f}",
+                f"Entry: {entry:.2f}",
+                f"Current: {current:.2f}",
+                f"PnL: {pnl:+.2f} ({pnl_pct:+.1f}%)",
+            ]
+
+            await self.api.send_message(chat_id, "\n".join(lines), trace_id=trace_id)
+
+        except Exception:
+            _log.error("position_command_failed", exc_info=True, extra={"trace_id": trace_id})
+            await self.api.send_message(chat_id, "❌ Failed to get position", trace_id=trace_id)
+
+    async def handle_limits(self, chat_id: int, trace_id: str) -> None:
+        """Show risk limits usage."""
+        try:
+            risk = getattr(self.container, "risk", None)
+            if not risk:
+                await self.api.send_message(chat_id, "❌ Risk manager not available", trace_id=trace_id)
+                return
+
+            lines = ["<b>🛡️ Risk Limits</b>"]
+            config = getattr(risk, "config", None)
+            if config:
+                daily_limit = float(getattr(config, "daily_loss_limit_quote", 0) or 0)
+                max_dd = float(getattr(config, "max_drawdown_pct", 0) or 0)
+                streak = int(getattr(config, "loss_streak_count", 0) or 0)
+                cooldown = float(getattr(config, "cooldown_sec", 0) or 0)
+                lines.append(f"\n<b>Daily Loss Limit:</b> {daily_limit:.2f} USDT")
+                lines.append(f"<b>Max Drawdown:</b> {max_dd:.1f}%")
+                lines.append(f"<b>Loss Streak Limit:</b> {streak} trades")
+                lines.append(f"<b>Cooldown:</b> {int(cooldown)} seconds")
+            else:
+                lines.append("Configuration not available")
+
+            await self.api.send_message(chat_id, "\n".join(lines), trace_id=trace_id)
+
+        except Exception:
+            _log.error("limits_command_failed", exc_info=True, extra={"trace_id": trace_id})
+            await self.api.send_message(chat_id, "❌ Failed to get risk limits", trace_id=trace_id)
+
+    async def handle_today(self, chat_id: int, trace_id: str) -> None:
+        """Show today's summary."""
+        try:
+            storage = self.get_storage()
+            if not storage:
+                await self.api.send_message(chat_id, "❌ Storage not available", trace_id=trace_id)
+                return
+
+            today = datetime.now(timezone.utc).date()
+            lines = [f"<b>📅 Today's Summary</b>", f"<i>{today.isoformat()}</i>\n"]
+
+            trades_repo = getattr(storage, "trades", None)
+            if trades_repo and hasattr(trades_repo, "get_by_date_range"):
+                trades = trades_repo.get_by_date_range(start_date=today, end_date=today)
+
+                total_trades = len(trades)
+                pnl = sum(float(t.get("pnl", 0) or 0) for t in trades)
+                wins = sum(1 for t in trades if float(t.get("pnl", 0) or 0) > 0)
+                losses = sum(1 for t in trades if float(t.get("pnl", 0) or 0) < 0)
+                volume = sum(abs(float(t.get("amount", 0) or 0) * float(t.get("price", 0) or 0)) for t in trades)
+
+                pnl_emoji = "📈" if pnl >= 0 else "📉"
+                lines.append(f"{pnl_emoji} PnL: {pnl:+.2f} USDT")
+                lines.append(f"📊 Trades: {total_trades} (W:{wins}/L:{losses})")
+                if total_trades > 0:
+                    win_rate = wins / total_trades * 100
+                    lines.append(f"🎯 Win rate: {win_rate:.1f}%")
+                if volume > 0:
+                    lines.append(f"💎 Volume: {volume:.2f} USDT")
+            else:
+                lines.append("No trading data available")
+
+            await self.api.send_message(chat_id, "\n".join(lines), trace_id=trace_id)
+
+        except Exception:
+            _log.error("today_command_failed", exc_info=True, extra={"trace_id": trace_id})
+            await self.api.send_message(chat_id, "❌ Failed to get today's summary", trace_id=trace_id)
+
+    async def handle_control_command(
+        self,
+        chat_id: int,
+        tail: str | None,
+        command: str,
+        trace_id: str,
+    ) -> None:
+        """Handle control commands (pause/resume/stop)."""
+        symbol = self.pick_symbol(chat_id, tail)
+
+        orch = self.get_orchestrator(symbol)
+        if not orch:
+            await self.api.send_message(
+                chat_id, f"❌ Orchestrator not found for <b>{html.escape(symbol)}</b>", trace_id=trace_id
+            )
+            return
+
+        try:
+            # Execute command
+            method = getattr(orch, command)
+            if asyncio.iscoroutinefunction(method):
+                await method()
+            else:
+                method()
+
+            # Get new status
+            state = orch.status().get("state", "unknown")
+
+            emoji = {"pause": "⏸️", "resume": "▶️", "stop": "🛑"}.get(command, "✅")
+            action = {"pause": "Paused", "resume": "Resumed", "stop": "Stopped"}.get(command, "Done")
 
             await self.api.send_message(
                 chat_id,
-                f"{success_text} <b>{html.escape(symbol)}</b>\nstate: <code>{html.escape(str(state))}</code>",
+                f"{emoji} {action} <b>{html.escape(symbol)}</b>\n"
+                f"State: <code>{html.escape(str(state))}</code>",
+                trace_id=trace_id,
             )
 
-        except OrchestratorNotFoundError:
-            await self.api.send_message(chat_id, f"Orchestrator not found for <b>{html.escape(symbol)}</b>")
         except Exception:
-            _log.error("orch_call_failed", extra={"symbol": symbol, "method": method}, exc_info=True)
-            await self.api.send_message(chat_id, f"{method} failed for <b>{html.escape(symbol)}</b>")
+            _log.error(f"{command}_command_failed", exc_info=True, extra={"symbol": symbol, "trace_id": trace_id})
+            await self.api.send_message(chat_id, f"❌ Failed to {command} {html.escape(symbol)}", trace_id=trace_id)
 
 
-class UpdateParser:
-    """Parse Telegram updates."""
-
-    @staticmethod
-    def parse(update: dict[str, Any], current_offset: int) -> UpdateData | None:
-        """Parse single update."""
-        try:
-            update_id = int(update.get("update_id", 0))
-            new_offset = max(current_offset, update_id + 1)
-
-            message = update.get("message") or {}
-            chat = message.get("chat") or {}
-            from_user = message.get("from") or {}
-
-            chat_id = int(chat.get("id", 0) or 0)
-            user_id = int(from_user.get("id", 0) or 0)
-            text = str(message.get("text") or "").strip()
-
-            if not chat_id or not text:
-                return None
-
-            return UpdateData(chat_id=chat_id, user_id=user_id, text=text, offset=new_offset)
-        except (ValueError, TypeError):
-            return None
-
+# ============== Main Bot ==============
 
 class TelegramBotCommands:
-    """Long-polling bot for admin commands."""
+    """Telegram bot for system management."""
 
     def __init__(
         self,
@@ -306,21 +594,21 @@ class TelegramBotCommands:
         bot_token: str,
         allowed_users: list[int],
         container: Any,
-        default_symbol: str,
+        default_symbol: str = "BTC/USDT",
         long_poll_sec: int = 30,
-    ) -> None:
-        # Parse environment configs
-        ttl = float(os.environ.get("TELEGRAM_BOT_TTL_SECS", "30") or 30.0)
-        throttle_str = os.environ.get("TELEGRAM_BOT_THROTTLE", "3/5")
+    ):
+        # Parse config from env
+        ttl = float(os.environ.get("TELEGRAM_BOT_TTL_SECS", "30"))
+        throttle = os.environ.get("TELEGRAM_BOT_THROTTLE", "5/10")
 
         try:
-            throttle_max, throttle_win = (int(x) for x in throttle_str.split("/", 1))
+            throttle_max, throttle_win = map(int, throttle.split("/"))
         except ValueError:
-            throttle_max, throttle_win = 3, 5
+            throttle_max, throttle_win = 5, 10
 
         self.config = BotConfig(
-            bot_token=(bot_token or "").strip(),
-            allowed_users={int(x) for x in allowed_users if str(x).strip()},
+            bot_token=bot_token.strip() if bot_token else "",
+            allowed_users={int(u) for u in allowed_users if str(u).strip()},
             default_symbol=canonical(default_symbol),
             long_poll_sec=max(3, int(long_poll_sec)),
             ttl_secs=ttl,
@@ -333,11 +621,9 @@ class TelegramBotCommands:
         self.rate_limiter = RateLimiter(self.config.throttle_max, self.config.throttle_window)
         self.message_cache = MessageCache(self.config.ttl_secs)
         self.command_handler = CommandHandler(container, self.config.default_symbol, self.api)
-        self.parser = UpdateParser()
-        self._offset = 0
 
-        # ограничитель параллельных обработок апдейтов
-        self._sem = asyncio.Semaphore(int(os.environ.get("TELEGRAM_BOT_CONCURRENCY", "8") or "8"))
+        self._offset = 0
+        self._semaphore = asyncio.Semaphore(int(os.environ.get("TELEGRAM_BOT_CONCURRENCY", "8")))
 
     def _is_authorized(self, user_id: int) -> bool:
         """Check if user is authorized."""
@@ -345,95 +631,168 @@ class TelegramBotCommands:
             return True
         return user_id in self.config.allowed_users
 
+    def _parse_update(self, update: dict[str, Any]) -> UpdateData | None:
+        """Parse Telegram update."""
+        try:
+            update_id = int(update.get("update_id", 0))
+            new_offset = max(self._offset, update_id + 1)
+
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            from_user = message.get("from") or {}
+
+            chat_id = int(chat.get("id", 0))
+            user_id = int(from_user.get("id", 0))
+            text = str(message.get("text", "")).strip()
+
+            if not chat_id or not text:
+                return None
+
+            return UpdateData(
+                chat_id=chat_id,
+                user_id=user_id,
+                text=text,
+                offset=new_offset,
+                trace_id=generate_trace_id(),
+            )
+
+        except (ValueError, TypeError):
+            return None
+
+    async def _dispatch_command(self, data: UpdateData) -> None:
+        """Route command to handler."""
+        text_lower = data.text.lower()
+        parts = data.text.split(" ", 1)
+        tail = parts[1] if len(parts) > 1 else None
+
+        # Route commands
+        if text_lower.startswith(("/help", "/start")):
+            await self.command_handler.handle_help(data.chat_id, data.trace_id)
+
+        elif text_lower.startswith("/status"):
+            await self.command_handler.handle_status(data.chat_id, tail, data.trace_id)
+
+        elif text_lower.startswith("/pnl"):
+            await self.command_handler.handle_pnl(data.chat_id, tail, data.trace_id)
+
+        elif text_lower.startswith("/today"):
+            await self.command_handler.handle_today(data.chat_id, data.trace_id)
+
+        elif text_lower.startswith("/balance"):
+            await self.command_handler.handle_balance(data.chat_id, data.trace_id)
+
+        elif text_lower.startswith("/position"):
+            await self.command_handler.handle_position(data.chat_id, tail, data.trace_id)
+
+        elif text_lower.startswith("/limits"):
+            await self.command_handler.handle_limits(data.chat_id, data.trace_id)
+
+        elif text_lower.startswith("/health"):
+            await self.command_handler.handle_health(data.chat_id, data.trace_id)
+
+        elif text_lower.startswith("/pause"):
+            await self.command_handler.handle_control_command(data.chat_id, tail, "pause", data.trace_id)
+
+        elif text_lower.startswith("/resume"):
+            await self.command_handler.handle_control_command(data.chat_id, tail, "resume", data.trace_id)
+
+        elif text_lower.startswith("/stop"):
+            await self.command_handler.handle_control_command(data.chat_id, tail, "stop", data.trace_id)
+
+        elif text_lower.startswith("/symbol"):
+            # Handle symbol change
+            if tail:
+                symbol = canonical(tail.strip())
+                if symbol:
+                    self.command_handler.chat_symbols[data.chat_id] = symbol
+                    await self.api.send_message(
+                        data.chat_id, f"✅ Active symbol: <b>{html.escape(symbol)}</b>", trace_id=data.trace_id
+                    )
+                else:
+                    await self.api.send_message(
+                        data.chat_id,
+                        "❌ Invalid symbol. Use format like <b>BTC/USDT</b>.",
+                        trace_id=data.trace_id,
+                    )
+            else:
+                current = self.command_handler.pick_symbol(data.chat_id, None)
+                await self.api.send_message(
+                    data.chat_id,
+                    f"Current symbol: <b>{html.escape(current)}</b>\nUse <code>/symbol PAIR</code> to change",
+                    trace_id=data.trace_id,
+                )
+
+        else:
+            # Unknown command
+            await self.api.send_message(
+                data.chat_id, "❓ Unknown command. Type /help for available commands.", trace_id=data.trace_id
+            )
+
     async def _process_update(self, update: dict[str, Any]) -> None:
         """Process single update."""
-        parsed = self.parser.parse(update, self._offset)
+        parsed = self._parse_update(update)
         if not parsed:
             return
 
         self._offset = parsed.offset
 
-        # Authorization check
+        # Authorization
         if not self._is_authorized(parsed.user_id):
-            await self.api.send_message(parsed.chat_id, "Unauthorized.")
+            await self.api.send_message(parsed.chat_id, "🚫 Unauthorized", trace_id=parsed.trace_id)
+            _log.warning("unauthorized_access", extra={"user_id": parsed.user_id, "trace_id": parsed.trace_id})
             return
 
         # Rate limiting
         if self.rate_limiter.check_throttle(parsed.user_id):
-            await self.api.send_message(parsed.chat_id, "Rate limit, try later.")
+            await self.api.send_message(parsed.chat_id, "⏳ Rate limit exceeded. Please wait.", trace_id=parsed.trace_id)
             return
 
         # Deduplication
         if self.message_cache.is_duplicate(parsed.user_id, parsed.text):
             return
 
-        # Dispatch command
-        await self._dispatch_command(parsed.chat_id, parsed.text)
+        # Log command
+        _log.info(
+            "telegram_command",
+            extra={"user_id": parsed.user_id, "command": parsed.text.split()[0], "trace_id": parsed.trace_id},
+        )
 
-    async def _dispatch_command(self, chat_id: int, text: str) -> None:
-        """Dispatch command to handler."""
-        text = text.strip()
-        lower_text = text.lower()
-
-        # Split command and arguments
-        parts = text.split(" ", 1)
-        tail = parts[1] if len(parts) > 1 else ""
-
-        # Route commands
-        if lower_text.startswith(("/start", "/help")):
-            await self.command_handler.handle_help(chat_id)
-        elif lower_text.startswith("/symbol"):
-            await self.command_handler.handle_symbol(chat_id, tail)
-        elif lower_text.startswith("/status"):
-            await self.command_handler.handle_status(chat_id, tail)
-        elif lower_text.startswith("/start_trade"):
-            await self.command_handler.handle_orchestrator_command(chat_id, tail, "start", "Started")
-        elif lower_text.startswith(("/stop_trade", "/stop")):
-            await self.command_handler.handle_orchestrator_command(chat_id, tail, "stop", "Stopped")
-        elif lower_text.startswith("/pause"):
-            await self.command_handler.handle_orchestrator_command(chat_id, tail, "pause", "Paused")
-        elif lower_text.startswith("/resume"):
-            await self.command_handler.handle_orchestrator_command(chat_id, tail, "resume", "Resumed")
-        else:
-            # Unknown command
-            symbol = self.command_handler.pick_symbol(chat_id, None)
-            await self.api.send_message(
-                chat_id,
-                f"Unknown command. Type /help\nCurrent symbol: <code>{html.escape(symbol)}</code>",
-            )
-
-    async def _fetch_updates(self) -> list[dict[str, Any]]:
-        """Fetch updates from Telegram."""
-        try:
-            return await self.api.get_updates(self._offset, self.config.long_poll_sec)
-        except Exception:
-            _log.error("telegram_getupdates_failed", exc_info=True)
-            return []
-
-    async def _guarded_process(self, update: dict[str, Any]) -> None:
-        async with self._sem:
-            try:
-                # не задерживаем обработку каждого апдейта дольше, чем long-poll
-                async with asyncio.timeout(self.config.long_poll_sec + 5):
-                    await self._process_update(update)
-            except TimeoutError:
-                _log.warning("telegram_update_timeout")
-            except Exception:
-                _log.error("telegram_update_process_failed", exc_info=True)
+        # Dispatch
+        await self._dispatch_command(parsed)
 
     async def run(self) -> None:
-        """Main long-polling loop."""
+        """Main bot loop."""
         if not self.config.bot_token:
-            _log.warning("telegram_bot_token_missing")
+            _log.warning("telegram_bot_disabled", extra={"reason": "no_token"})
             return
 
-        _log.info("telegram_bot_started")
+        _log.info(
+            "telegram_bot_started",
+            extra={"allowed_users": len(self.config.allowed_users), "default_symbol": self.config.default_symbol},
+        )
 
         while True:
-            updates = await self._fetch_updates()
+            try:
+                # Get updates
+                updates = await self.api.get_updates(self._offset, self.config.long_poll_sec)
 
-            # параллелим обработку входящих апдейтов с ограничением
-            if updates:
-                await asyncio.gather(*[self._guarded_process(u) for u in updates], return_exceptions=True)
+                # Process in parallel with limit
+                if updates:
+                    async def process_with_timeout(u: dict[str, Any]) -> None:
+                        async with self._semaphore:
+                            try:
+                                async with asyncio.timeout(self.config.long_poll_sec + 5):
+                                    await self._process_update(u)
+                            except asyncio.TimeoutError:
+                                _log.warning("update_process_timeout")
+                            except Exception:
+                                _log.error("update_process_failed", exc_info=True)
 
-            await asyncio.sleep(0.2)
+                    await asyncio.gather(*(process_with_timeout(u) for u in updates), return_exceptions=True)
+
+                # Small delay between polls
+                await asyncio.sleep(0.1)
+
+            except Exception:
+                _log.error("bot_loop_error", exc_info=True)
+                await asyncio.sleep(5)  # Backoff on error
