@@ -5,7 +5,6 @@ from decimal import Decimal
 from typing import Any
 
 from crypto_ai_bot.utils.decimal import dec
-
 from .base import BaseStrategy, Decision, MarketData, StrategyContext
 
 
@@ -23,12 +22,12 @@ class RSIMomentumStrategy(BaseStrategy):
         self.rsi_oversold = float(rsi_oversold)
         self.rsi_overbought = float(rsi_overbought)
         self.momentum_period = momentum_period
-
         self._prices: deque[Decimal] = deque(maxlen=max(rsi_period, momentum_period) + 1)
 
     def _calc_rsi(self) -> Decimal:
         gains = dec("0")
         losses = dec("0")
+        # упрощённый RSI по сумме позитивных/негативных изменений
         for i in range(1, len(self._prices)):
             diff = self._prices[i] - self._prices[i - 1]
             if diff > 0:
@@ -53,53 +52,25 @@ class RSIMomentumStrategy(BaseStrategy):
             return dec("0")
         return ((cur - past) / past) * dec("100")
 
-    def decide(self, ctx: StrategyContext) -> tuple[str, dict[str, Any]]:
-        data = ctx.data or {}
-        price = dec(str(data.get("ticker", {}).get("last", "0")))
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
+        if ctx.data is None:
+            ticker = await md.get_ticker(ctx.symbol)
+            price = dec(str(ticker.get("last", "0")))
+        else:
+            price = dec(str(ctx.data.get("ticker", {}).get("last", "0")))
+
         if price <= 0:
-            return "hold", {"reason": "no_price"}
+            return Decision(action="hold", reason="no_price")
 
         self._prices.append(price)
         if len(self._prices) < max(self.rsi_period, self.momentum_period) + 1:
-            return "hold", {"reason": "warming_up", "samples": len(self._prices)}
+            return Decision(action="hold", reason="warming_up")
 
         rsi = self._calc_rsi()
         mom = self._calc_momentum()
-        explain: dict[str, Any] = {
-            "rsi": float(rsi),
-            "momentum_pct": float(mom),
-            "oversold": self.rsi_oversold,
-            "overbought": self.rsi_overbought,
-        }
 
         if float(rsi) < self.rsi_oversold and mom > 0:
-            explain["signal"] = "oversold_with_positive_momentum"
-            return "buy", explain
+            return Decision(action="buy", confidence=0.7, reason="oversold_with_positive_momentum")
         if float(rsi) > self.rsi_overbought and mom < 0:
-            explain["signal"] = "overbought_with_negative_momentum"
-            return "sell", explain
-
-        explain["signal"] = "neutral"
-        return "hold", explain
-
-    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
-        """Адаптер для BaseStrategy.generate() - вызывает decide() и преобразует результат."""
-        # Получаем данные из MarketData если их нет в контексте
-        if ctx.data is None:
-            ticker = await md.get_ticker(ctx.symbol)
-            ctx = StrategyContext(symbol=ctx.symbol, settings=ctx.settings, data={"ticker": ticker})
-
-        action, explain = self.decide(ctx)
-        reason = explain.get("signal", explain.get("reason", ""))
-
-        # Вычисляем confidence на основе силы сигнала
-        confidence = 0.5  # базовая уверенность
-        if (
-            action == "buy"
-            and "oversold_with_positive_momentum" in reason
-            or action == "sell"
-            and "overbought_with_negative_momentum" in reason
-        ):
-            confidence = 0.7
-
-        return Decision(action=action, confidence=confidence, reason=reason)
+            return Decision(action="sell", confidence=0.7, reason="overbought_with_negative_momentum")
+        return Decision(action="hold", reason="neutral")

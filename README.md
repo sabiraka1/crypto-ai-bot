@@ -116,33 +116,34 @@
 
 ### Диаграмма слоёв
 
-```
 ┌──────────────────────────────────────────────┐
-│                    APP                       │
-│ FastAPI, Telegram, CLI, Compose (DI)         │
+│ APP │
+│ FastAPI, Telegram, CLI, Compose (DI) │
 └───────────────────────┬──────────────────────┘
-                        │ использует
+│ использует
 ┌───────────────────────▼──────────────────────┐
-│               APPLICATION                    │
-│ Orchestrator, Use Cases, Reconciliation      │
-│ Ports.py (контракты)                         │
+│ APPLICATION │
+│ Orchestrator, Use Cases, Reconciliation │
+│ Ports.py (контракты) │
 └─────────────┬───────────────────────┬────────┘
-              │ использует            │ реализует
-┌─────────────▼────────────┐   ┌──────▼────────────────────┐
-│          DOMAIN          │   │       INFRASTRUCTURE      │
-│ Strategies, Signals,     │   │ Brokers, DB, Events,      │
-│ Risk, Macro (Regime)     │   │ Macro Sources (HTTP), DMS │
-└─────────────┬────────────┘   └──────────┬────────────────┘
-              │                           │
-              └───────────┬───────────────┘
-                          │
-                   ┌──────▼───────┐
-                   │    UTILS     │
-                   │ decimal,     │
-                   │ pnl, retry,  │
-                   │ http, trace  │
-                   └──────────────┘
-```
+│ использует │ реализует
+┌─────────────▼────────────┐ ┌──────▼────────────────────┐
+│ DOMAIN │ │ INFRASTRUCTURE │
+│ Strategies, Signals, │ │ Brokers, DB, Events, │
+│ Risk, Macro (Regime) │ │ Macro Sources (HTTP), DMS │
+└─────────────┬────────────┘ └──────────┬────────────────┘
+│ │
+└───────────┬───────────────┘
+│
+┌──────▼───────┐
+│ UTILS │
+│ decimal, │
+│ pnl, retry, │
+│ http, trace │
+└──────────────┘
+
+markdown
+Копировать код
 
 ### Роли слоёв:
 - **APP** — только собирает и запускает
@@ -153,143 +154,150 @@
 
 ## Структура файлов
 
-```
 crypto-ai-bot/
 ├── README.md
 ├── pyproject.toml
 ├── requirements.txt
 ├── Makefile
 ├── Procfile
-├── importlinter.ini              # Контроль архитектурных границ
+├── importlinter.ini # Контроль архитектурных границ
 ├── .env.example
 │
-├── scripts/                       # Утилиты обслуживания
-│  ├── backup_db.py
-│  ├── rotate_backups.py
-│  └── run_server.sh
+├── scripts/ # Утилиты обслуживания
+│ ├── backup_db.py
+│ ├── rotate_backups.py
+│ └── run_server.sh
 │
 ├── tests/
-│  ├── unit/
-│  ├── integration/
-│  ├── e2e/
-│  └── fixtures/                  # Тестовые данные
-│     ├── market_data.json
-│     ├── risk_scenarios.json
-│     └── orders.json
+│ ├── unit/
+│ ├── integration/
+│ ├── e2e/
+│ └── fixtures/ # Тестовые данные
+│ ├── market_data.json
+│ ├── risk_scenarios.json
+│ └── orders.json
 │
 └── src/crypto_ai_bot/
-   ├── app/                        # 🔌 Внешние интерфейсы (только сборка и запуск)
-   │  ├── server.py                # FastAPI эндпоинты
-   │  ├── compose.py               # DI композиция (сборка зависимостей)
-   │  ├── logging_bootstrap.py     # Инициализация логирования
-   │  ├── telegram.py              # Telegram publisher (отправка)
-   │  ├── telegram_bot.py          # Telegram bot (прием команд)
-   │  └── telegram_alerts.py       # Alertmanager → Telegram роутинг
-   │
-   ├── cli/                        # CLI утилиты (cab-*)
-   │  ├── smoke.py                 # Быстрый тест системы
-   │  ├── maintenance.py           # Обслуживание БД
-   │  ├── reconcile.py            # Ручная сверка с биржей
-   │  ├── performance.py          # Отчеты PnL
-   │  └── health_monitor.py       # Мониторинг здоровья
-   │
-   ├── core/
-   │  ├── application/             # 🎭 Бизнес-процессы и координация
-   │  │  ├── orchestrator.py       # ⭐ Главный координатор циклов
-   │  │  ├── ports.py             # ⭐ Контракты между слоями
-   │  │  ├── events_topics.py     # ⭐ Реестр всех событий
-   │  │  ├── protective_exits.py  # Логика стоп-лоссов
-   │  │  │
-   │  │  ├── use_cases/
-   │  │  │  ├── execute_trade.py  # ⭐ ЕДИНСТВЕННАЯ точка исполнения
-   │  │  │  └── partial_fills.py  # Settlement частичных ордеров
-   │  │  │
-   │  │  ├── reconciliation/       # Сверка с биржей
-   │  │  │  ├── orders.py
-   │  │  │  ├── positions.py
-   │  │  │  └── balances.py
-   │  │  │
-   │  │  ├── regime/
-   │  │  │  └── gated_broker.py   # Фильтр по режиму рынка
-   │  │  │
-   │  │  ├── policies/             # Дефолтные политики
-   │  │  │  └── intervals.py      # Интервалы процессов
-   │  │  │
-   │  │  └── monitoring/
-   │  │     └── health_checker.py # Watchdog системы
-   │  │
-   │  ├── domain/                  # 💎 Чистая бизнес-логика
-   │  │  ├── risk/
-   │  │  │  ├── manager.py        # ⭐ Агрегатор всех risk rules
-   │  │  │  ├── policies.py       # Дефолтные soft limits
-   │  │  │  └── rules/            # Правила риска:
-   │  │  │     ├── loss_streak.py
-   │  │  │     ├── max_drawdown.py
-   │  │  │     ├── daily_loss.py
-   │  │  │     ├── cooldown.py
-   │  │  │     ├── spread_cap.py
-   │  │  │     └── correlation.py
-   │  │  │
-   │  │  ├── strategies/           # Торговые стратегии
-   │  │  │  ├── ema_cross.py
-   │  │  │  ├── rsi_momentum.py
-   │  │  │  ├── bollinger.py
-   │  │  │  └── strategy_manager.py # Агрегация стратегий
-   │  │  │
-   │  │  ├── signals/
-   │  │  │  ├── timeframes.py     # Адаптивные веса ТФ
-   │  │  │  ├── fusion.py         # Tech + AI слияние
-   │  │  │  ├── ai_model.py       # AI-модель (опционально)
-   │  │  │  └── feature_pipeline.py
-   │  │  │
-   │  │  └── macro/
-   │  │     ├── regime_detector.py # ⭐ 4-уровневый режим рынка
-   │  │     └── types.py
-   │  │
-   │  └── infrastructure/          # 🔧 Реализации внешних систем
-   │     ├── settings.py          # ⭐ ЕДИНСТВЕННЫЙ источник конфигурации
-   │     ├── settings_schema.py   # Валидация ENV
-   │     │
-   │     ├── brokers/             # Адаптеры бирж
-   │     │  ├── base.py
-   │     │  ├── factory.py
-   │     │  ├── ccxt_adapter.py   # Gate.io через CCXT
-   │     │  ├── live.py
-   │     │  └── paper.py          # Эмуляция для тестов
-   │     │
-   │     ├── events/              # Шина событий
-   │     │  ├── bus.py            # In-memory
-   │     │  ├── bus_adapter.py    # Выбор реализации
-   │     │  └── redis_bus.py      # Redis pub/sub
-   │     │
-   │     ├── macro_sources/       # ✅ ПРАВИЛЬНОЕ место для HTTP-адаптеров
-   │     │  ├── dxy.py           # HTTP источник DXY
-   │     │  ├── btc_dominance.py # HTTP источник BTC.D
-   │     │  └── fomc.py          # HTTP источник FOMC
-   │     │
-   │     ├── safety/              # Механизмы безопасности
-   │     │  ├── dead_mans_switch.py
-   │     │  └── instance_lock.py
-   │     │
-   │     └── storage/             # Персистентность
-   │        ├── facade.py         # StoragePort реализация
-   │        ├── sqlite_adapter.py # SQLite engine
-   │        ├── backup.py
-   │        └── migrations/       # SQL миграции
-   │           ├── runner.py
-   │           └── V*.sql
-   │
-   └── utils/                      # 🛠 Вспомогательные функции
-       ├── decimal.py             # Операции с деньгами
-       ├── pnl.py                # FIFO расчеты
-       ├── metrics.py            # Prometheus метрики
-       ├── logging.py            # Структурированные логи
-       ├── retry.py              # Exponential backoff
-       ├── http_client.py        # HTTP с таймаутами
-       ├── symbols.py            # Нормализация пар
-       ├── time.py               # UTC операции
-       └── trace.py              # Trace ID генерация
-```
+├── app/ # 🔌 Внешние интерфейсы (только сборка и запуск)
+│ ├── server.py # FastAPI эндпоинты
+│ ├── compose.py # DI композиция (сборка зависимостей)
+│ ├── logging_bootstrap.py # Инициализация логирования
+│ ├── telegram.py # Telegram publisher (отправка)
+│ ├── telegram_bot.py # Telegram bot (прием команд)
+│ └── telegram_alerts.py # Alertmanager → Telegram роутинг
+│
+├── cli/ # CLI утилиты (cab-)
+│ ├── smoke.py # Быстрый тест системы
+│ ├── maintenance.py # Обслуживание БД
+│ ├── reconcile.py # Ручная сверка с биржей
+│ ├── performance.py # Отчеты PnL
+│ └── health_monitor.py # Мониторинг здоровья
+│
+├── core/
+│ ├── application/ # 🎭 Бизнес-процессы и координация
+│ │ ├── orchestrator.py # ⭐ Главный координатор циклов
+│ │ ├── ports.py # ⭐ Контракты между слоями
+│ │ ├── events_topics.py # ⭐ Реестр всех событий
+│ │ ├── protective_exits.py # Логика стоп-лоссов
+│ │ │
+│ │ ├── use_cases/
+│ │ │ ├── execute_trade.py # ⭐ ЕДИНСТВЕННАЯ точка исполнения
+│ │ │ └── partial_fills.py # Settlement частичных ордеров
+│ │ │
+│ │ ├── reconciliation/ # Сверка с биржей
+│ │ │ ├── orders.py
+│ │ │ ├── positions.py
+│ │ │ └── balances.py
+│ │ │
+│ │ ├── regime/
+│ │ │ └── gated_broker.py # Фильтр по режиму рынка
+│ │ │
+│ │ ├── policies/ # Дефолтные политики
+│ │ │ └── intervals.py # Интервалы процессов
+│ │ │
+│ │ └── monitoring/
+│ │ └── health_checker.py # Watchdog системы
+│ │
+│ ├── domain/ # 💎 Чистая бизнес-логика
+│ │ ├── risk/
+│ │ │ ├── manager.py # ⭐ Агрегатор всех risk rules
+│ │ │ ├── policies.py # Дефолтные soft limits
+│ │ │ └── rules/ # Правила риска:
+│ │ │ ├── loss_streak.py
+│ │ │ ├── max_drawdown.py
+│ │ │ ├── daily_loss.py
+│ │ │ ├── cooldown.py
+│ │ │ ├── spread_cap.py
+│ │ │ └── correlation.py
+│ │ │
+│ │ ├── strategies/ # Торговые стратегии
+│ │ │ ├── ema_atr.py
+│ │ │ ├── ema_cross.py
+│ │ │ ├── rsi_momentum.py
+│ │ │ ├── bollinger_bands.py
+│ │ │ ├── donchian_breakout.py
+│ │ │ ├── supertrend.py
+│ │ │ ├── stochastic_adx.py
+│ │ │ ├── keltner_squeeze.py
+│ │ │ ├── vwap_reversion.py
+│ │ │ └── strategy_manager.py # Агрегация стратегий (first|vote|weighted)
+│ │ │
+│ │ ├── signals/
+│ │ │ ├── timeframes.py # Адаптивные веса ТФ
+│ │ │ ├── fusion.py # Tech + AI слияние (ИИ здесь)
+│ │ │ ├── ai_model.py # AI-модель (опционально)
+│ │ │ └── feature_pipeline.py
+│ │ │
+│ │ └── macro/
+│ │ ├── regime_detector.py # ⭐ 4-уровневый режим рынка
+│ │ └── types.py
+│ │
+│ └── infrastructure/ # 🔧 Реализации внешних систем
+│ ├── settings.py # ⭐ ЕДИНСТВЕННЫЙ источник конфигурации
+│ ├── settings_schema.py # Валидация ENV
+│ │
+│ ├── brokers/ # Адаптеры бирж
+│ │ ├── base.py
+│ │ ├── factory.py
+│ │ ├── ccxt_adapter.py # Gate.io через CCXT
+│ │ ├── live.py
+│ │ └── paper.py # Эмуляция для тестов
+│ │
+│ ├── events/ # Шина событий
+│ │ ├── bus.py # In-memory
+│ │ ├── bus_adapter.py # Выбор реализации
+│ │ └── redis_bus.py # Redis pub/sub
+│ │
+│ ├── macro_sources/ # ✅ ПРАВИЛЬНОЕ место для HTTP-адаптеров
+│ │ ├── dxy.py # HTTP источник DXY
+│ │ ├── btc_dominance.py # HTTP источник BTC.D
+│ │ └── fomc.py # HTTP источник FOMC
+│ │
+│ ├── safety/ # Механизмы безопасности
+│ │ ├── dead_mans_switch.py
+│ │ └── instance_lock.py
+│ │
+│ └── storage/ # Персистентность
+│ ├── facade.py # StoragePort реализация
+│ ├── sqlite_adapter.py # SQLite engine
+│ ├── backup.py
+│ └── migrations/ # SQL миграции
+│ ├── runner.py
+│ └── V.sql
+│
+└── utils/ # 🛠 Вспомогательные функции
+├── decimal.py # Операции с деньгами
+├── pnl.py # FIFO расчеты
+├── metrics.py # Prometheus метрики
+├── logging.py # Структурированные логи
+├── retry.py # Exponential backoff
+├── http_client.py # HTTP с таймаутами
+├── symbols.py # Нормализация пар
+├── time.py # UTC операции
+└── trace.py # Trace ID генерация
+
+markdown
+Копировать код
 
 ### Ключевые файлы (помечены ⭐)
 - `orchestrator.py` — главный координатор
@@ -325,18 +333,21 @@ crypto-ai-bot/
    - Реализация: `signals/timeframes.py` + `feature_pipeline.py`
 
 2. **Генерация сигналов (15m только)**
-   - Применяем стратегии (EMA, RSI, Bollinger) на 15-минутном графике
+   - Применяются стратегии:
+     - Тренд: `ema_atr`, `ema_cross`, `supertrend`, `donchian_breakout`
+     - Моментум/осцилляторы: `rsi_momentum`, `stochastic_adx`
+     - Каналы/волатильность/среднее: `bollinger_bands`, `keltner_squeeze`, `vwap_reversion`
    - Проверяем соответствие тренду старших ТФ
-   - Фильтр качества: подтверждение объёмом (TODO)
+   - Фильтр качества: (TODO) подтверждение объёмом
 
 3. **Fusion (опционально)**
    - Технический сигнал: 65%
    - AI-модель сигнал: 35%
-   - TODO: нелинейное правило (AI < 0.5 → усиление требований к тех.сигналу)
+   - *Важно:* ИИ подключается **не** в менеджере стратегий, а здесь (в `signals/fusion.py`) вместе с `ai_model.py`
 
 4. **Агрегация стратегий**
-   - Режимы: first (первая), vote (голосование), weighted (взвешенный)
-   - TODO: динамический выбор режима на основе статистики
+   - Режимы: `first` (первая), `vote` (голосование), `weighted` (взвешенное голосование)
+   - Управляется настройками (см. ниже «Стратегии в ENV»)
 
 5. **Фильтр режима рынка (Regime Filter) - 4 состояния**
    - **Автоматическое определение** (не через ENV):
@@ -408,10 +419,9 @@ SYMBOLS=BTC/USDT,ETH/USDT         # Торговые пары
 API_KEY=xxx                        # Ключ биржи
 API_SECRET=xxx                     # Секрет биржи
 API_TOKEN=random-string            # Токен HTTP API
-```
-
-#### 💰 Критические торговые параметры
-```env
+💰 Критические торговые параметры
+env
+Копировать код
 FIXED_AMOUNT=50                    # Размер позиции (USDT)
 
 # Защитные выходы
@@ -424,10 +434,9 @@ TAKE_PROFIT_2_PCT=5.0
 RISK_MAX_DRAWDOWN_PCT=10.0        
 RISK_DAILY_LOSS_LIMIT_QUOTE=100   
 RISK_LOSS_STREAK_COUNT=3          
-```
-
-#### 📡 Внешние сервисы
-```env
+📡 Внешние сервисы
+env
+Копировать код
 # Telegram (опционально)
 TELEGRAM_BOT_TOKEN=xxx             
 TELEGRAM_CHAT_ID=-100xxx           
@@ -442,12 +451,28 @@ REGIME_FOMC_URL=https://...
 EVENT_BUS_URL=redis://localhost:6379/0  
 DB_PATH=./data/trader.sqlite3           
 LOG_LEVEL=INFO                          
-```
+⚙️ Стратегии (опционально — для тонкой настройки)
+Если не задать — по умолчанию активна ema_atr, режим агрегации first, минимальная уверенность 0.0, веса по 1.0.
 
-### В КОДЕ (не в ENV)
+env
+Копировать код
+# Управление стратегиями
+STRATEGY_ENABLED=true
+STRATEGY_SET=ema_atr,donchian_breakout,supertrend,stochastic_adx,keltner_squeeze,vwap_reversion
+STRATEGY_MODE=vote                  # first | vote | weighted
+STRATEGY_MIN_CONFIDENCE=0.50
+STRATEGY_WEIGHTS=ema_atr:1.0,donchian_breakout:1.2,supertrend:1.0,stochastic_adx:0.9,keltner_squeeze:1.1,vwap_reversion:0.8
 
-#### domain/signals/timeframes.py
-```python
+# Параметры EMA/ATR (используются ema_atr и др., при отсутствии берутся дефолты из кода)
+EMA_SHORT=12
+EMA_LONG=26
+ATR_PERIOD=14
+ATR_MAX_PCT=1000
+EMA_MIN_SLOPE=0
+В КОДЕ (не в ENV)
+domain/signals/timeframes.py
+python
+Копировать код
 class AdaptiveTimeframeWeights:
     """Веса автоматически корректируются по ATR"""
     BASE_WEIGHTS = {
@@ -461,10 +486,9 @@ class AdaptiveTimeframeWeights:
         # Адаптивная логика на основе волатильности
         # Высокий ATR → больше вес этого ТФ
         pass
-```
-
-#### domain/risk/policies.py
-```python
+domain/risk/policies.py
+python
+Копировать код
 # Мягкие правила (константы)
 class SoftRiskDefaults:
     COOLDOWN_SEC = 60
@@ -472,10 +496,9 @@ class SoftRiskDefaults:
     MAX_SLIPPAGE_PCT = 1.0
     MAX_ORDERS_5M = 5
     MAX_TURNOVER_5M_QUOTE = 1000
-```
-
-#### domain/macro/regime_detector.py
-```python
+domain/macro/regime_detector.py
+python
+Копировать код
 class RegimeThresholds:
     """Автоматический расчет режима"""
     DXY_CHANGE_PCT = 0.35
@@ -485,20 +508,18 @@ class RegimeThresholds:
     def calculate_score(self) -> RegimeState:
         # Возвращает: risk_on | risk_small | neutral | risk_off
         pass
-```
-
-#### application/policies/intervals.py
-```python
+application/policies/intervals.py
+python
+Копировать код
 # Интервалы фоновых процессов
 class BackgroundIntervals:
     RECONCILE_SEC = 60
     SETTLEMENT_SEC = 30
     WATCHDOG_SEC = 3
     HEALTH_CHECK_SEC = 10
-```
-
-### Приоритет загрузки
-```python
+Приоритет загрузки
+python
+Копировать код
 # В settings.py
 def get_config_value(key, default):
     # 1. Проверить ENV
@@ -512,30 +533,37 @@ cooldown = get_config_value(
     'RISK_COOLDOWN_SEC',  # Редкий override через ENV
     SoftRiskDefaults.COOLDOWN_SEC  # Обычно из кода
 )
-```
+✅ Преимущества подхода
+ENV короткий и понятный — только критичное
 
-### ✅ Преимущества подхода
-1. **ENV короткий и понятный** — только критичное
-2. **Логика в коде** — версионируется, тестируется
-3. **Работает из коробки** — минимум конфигурации
-4. **Гибкость** — можно переопределить через ENV при необходимости
+Логика в коде — версионируется, тестируется
 
-### ⚠️ Валидация при запуске
-- Проверка обязательных ENV (MODE, EXCHANGE, SYMBOLS)
-- Критические лимиты > 0
-- API ключи для live режима
-- При ошибке → детальное сообщение и выход
+Работает из коробки — минимум конфигурации
 
-## Getting Started (Быстрый старт)
+Гибкость — можно переопределить через ENV при необходимости
 
-### Минимальные требования
-- Python 3.11+
-- 512 MB RAM
-- 1 GB свободного места (БД + логи)
-- Стабильное интернет-соединение
+⚠️ Валидация при запуске
+Проверка обязательных ENV (MODE, EXCHANGE, SYMBOLS)
 
-### Первый запуск за 5 минут
-```bash
+Критические лимиты > 0
+
+API ключи для live режима
+
+При ошибке → детальное сообщение и выход
+
+Getting Started (Быстрый старт)
+Минимальные требования
+Python 3.11+
+
+512 MB RAM
+
+1 GB свободного места (БД + логи)
+
+Стабильное интернет-соединение
+
+Первый запуск за 5 минут
+bash
+Копировать код
 # 1. Клонировать проект
 git clone <repo> && cd crypto-ai-bot
 
@@ -561,28 +589,23 @@ uvicorn crypto_ai_bot.app.server:app
 
 # 6. Проверка
 curl http://localhost:8000/health
-```
-
-## Запуск
-
-### Режимы запуска
-
-#### Paper Trading (тестовый)
-```env
+Запуск
+Режимы запуска
+Paper Trading (тестовый)
+env
+Копировать код
 MODE=paper
 # API ключи НЕ нужны
 # Эмуляция ордеров локально
-```
-
-#### Live Trading (боевой)
-```env
+Live Trading (боевой)
+env
+Копировать код
 MODE=live
 API_KEY=xxx       # ОБЯЗАТЕЛЬНО
 API_SECRET=xxx    # ОБЯЗАТЕЛЬНО
-```
-
-### CLI команды (cab-*)
-```bash
+CLI команды (cab-*)
+bash
+Копировать код
 # Тестирование
 cab-smoke                # Быстрая проверка всех систем
 
@@ -597,10 +620,9 @@ cab-perf               # Отчет PnL за сутки
 
 # Мониторинг
 cab-health-monitor --oneshot  # Проверка health статуса
-```
-
-### HTTP API эндпоинты
-```bash
+HTTP API эндпоинты
+bash
+Копировать код
 # Статус и мониторинг
 GET  /health              # Детальный статус всех систем
 GET  /ready               # Готовность (200 OK или 503)
@@ -615,10 +637,9 @@ POST /orchestrator/stop?symbol=BTC/USDT
 
 # Отчеты
 GET  /pnl/today?symbol=BTC/USDT
-```
-
-### Telegram команды
-```bash
+Telegram команды
+bash
+Копировать код
 /status    # Статус всех торговых пар
 /pnl       # PnL детальный
 /today     # Сводка за день
@@ -631,84 +652,76 @@ GET  /pnl/today?symbol=BTC/USDT
 /resume    # Возобновить торговлю
 /stop      # Остановить бота
 /health    # Проверка здоровья
-```
-
-### Production деплой
-
-#### Railway/Heroku
-```yaml
+Production деплой
+Railway/Heroku
+yaml
+Копировать код
 # Procfile
 web: uvicorn crypto_ai_bot.app.server:app --host 0.0.0.0 --port $PORT
 worker: cab-health-monitor --daemon
-```
-
-#### Docker
-```dockerfile
+Docker
+dockerfile
+Копировать код
 # Dockerfile (базовый)
 FROM python:3.11-slim
 WORKDIR /app
 COPY . .
 RUN pip install -e .
 CMD ["uvicorn", "crypto_ai_bot.app.server:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-#### Systemd
-```ini
+Systemd
+ini
+Копировать код
 # /etc/systemd/system/crypto-bot.service
 [Service]
 ExecStart=/path/to/venv/bin/uvicorn crypto_ai_bot.app.server:app
 Restart=always
 Environment="PATH=/path/to/venv/bin"
-```
+⚠️ Важно для продакшена
+InstanceLock автоматически предотвращает двойной запуск
 
-### ⚠️ Важно для продакшена
-1. **InstanceLock** автоматически предотвращает двойной запуск
-2. **Dead Man's Switch** закроет позиции при зависании
-3. **Reconciliation** исправит расхождения с биржей
-4. **Health endpoint** для мониторинга внешними системами
+Dead Man's Switch закроет позиции при зависании
 
-## Тестирование
+Reconciliation исправит расхождения с биржей
 
-### Уровни тестирования
+Health endpoint для мониторинга внешними системами
 
-#### 1. Smoke Test (быстрая проверка)
-```bash
+Тестирование
+Уровни тестирования
+1. Smoke Test (быстрая проверка)
+bash
+Копировать код
 cab-smoke  # ~5 секунд
 # ✓ Подключение к бирже (paper mode)
 # ✓ Инициализация БД
 # ✓ Полный цикл: сигнал → риск → mock-ордер
-```
-
-#### 2. Unit Tests (компоненты)
-```bash
+2. Unit Tests (компоненты)
+bash
+Копировать код
 pytest tests/unit -v --cov --cov-fail-under=80
 # Фокус:
 # - Каждое risk rule отдельно
 # - Стратегии на тестовых данных
 # - Идемпотентность ордеров
 # - PnL расчеты (FIFO)
-```
-
-#### 3. Integration Tests (связки)
-```bash
+3. Integration Tests (связки)
+bash
+Копировать код
 pytest tests/integration -m "not slow"
 # - Orchestrator → RiskManager → ExecuteTrade
 # - Reconciliation с mock биржей
 # - EventBus → Telegram mock
 # - Settlement частичных ордеров
-```
-
-#### 4. E2E Test (полный прогон)
-```bash
+4. E2E Test (полный прогон)
+bash
+Копировать код
 pytest tests/e2e --paper-mode --duration=2h
 # - Запуск в paper mode на 2 часа
 # - Реальные рыночные данные
 # - Фиксация всех событий
 # - Сравнение с эталонным прогоном
-```
-
-#### 5. Static Analysis
-```bash
+5. Static Analysis
+bash
+Копировать код
 # Архитектурные границы (КРИТИЧНО)
 import-linter --config importlinter.ini
 
@@ -720,22 +733,19 @@ ruff check src/
 
 # Секреты (pre-commit hook)
 detect-secrets scan
-```
-
-### Test Fixtures
-```
+Test Fixtures
+bash
+Копировать код
 tests/fixtures/
 ├── market_data.json         # OHLCV данные для стратегий
 ├── risk_scenarios.json      # Edge-cases для risk rules
 ├── orders.json              # Частичные исполнения, phantom orders
 ├── regime_states.json       # Состояния режима (risk_on/off/small/neutral)
 └── reconciliation_cases.json # Расхождения биржа/БД
-```
-
-### Критичные тест-кейсы
-
-#### Безопасность и надежность
-```python
+Критичные тест-кейсы
+Безопасность и надежность
+python
+Копировать код
 # Идемпотентность
 def test_no_duplicate_orders()
 def test_idempotency_after_restart()
@@ -751,10 +761,9 @@ def test_dms_closes_position_correctly()
 # Rate limiting
 def test_api_rate_limit_throttling()
 def test_burst_protection()
-```
-
-#### Risk Management
-```python
+Risk Management
+python
+Копировать код
 # Критические правила (полная остановка)
 def test_loss_streak_blocks_all()
 def test_daily_limit_stops_trading()
@@ -768,24 +777,21 @@ def test_spread_blocks_entry_not_exit()
 def test_neutral_mode_blocks_entry_allows_exit()
 def test_risk_small_reduces_position_50pct()
 def test_risk_off_blocks_all_entries()
-```
-
-#### Protective Exits
-```python
+Protective Exits
+python
+Копировать код
 def test_trailing_stop_moves_up_only()
 def test_tp1_moves_sl_to_breakeven()
 def test_multi_stage_exit_execution()
-```
-
-#### Reconciliation
-```python
+Reconciliation
+python
+Копировать код
 def test_position_mismatch_auto_corrected()
 def test_phantom_order_cleanup()
 def test_systematic_mismatch_alerts()
-```
-
-### CI/CD Pipeline
-```yaml
+CI/CD Pipeline
+yaml
+Копировать код
 # .github/workflows/ci.yml
 name: CI
 on: [push, pull_request]
@@ -808,12 +814,10 @@ jobs:
   e2e:
     - if: branch == main
       run: pytest e2e --paper-mode --duration=1h
-```
-
-### Специальные правила тестирования
-
-#### При изменении критичных модулей
-```bash
+Специальные правила тестирования
+При изменении критичных модулей
+bash
+Копировать код
 # risk/manager.py изменен
 make test-risk-all
 
@@ -826,27 +830,28 @@ make test-reconciliation-suite
 
 # regime_detector.py изменен
 make test-regime-states
-```
+PR Checklist (обязательно)
+ Новая фича = новый тест
 
-### PR Checklist (обязательно)
-- [ ] Новая фича = новый тест
-- [ ] CI зеленый
-- [ ] Coverage > 80%
-- [ ] Import Linter passed
-- [ ] No secrets in code
-- [ ] Risk rules протестированы на всех сценариях
+ CI зеленый
 
-### Локальный прогон всего
-```bash
+ Coverage > 80%
+
+ Import Linter passed
+
+ No secrets in code
+
+ Risk rules протестированы на всех сценариях
+
+Локальный прогон всего
+bash
+Копировать код
 make test-all  # Запускает полный цикл проверок
-```
-
-## Мониторинг
-
-### Что предоставляет бот
-
-#### Эндпоинты
-```bash
+Мониторинг
+Что предоставляет бот
+Эндпоинты
+bash
+Копировать код
 # Детальное состояние (JSON)
 curl http://localhost:8000/health
 
@@ -855,29 +860,27 @@ curl http://localhost:8000/ready
 
 # Prometheus метрики
 curl http://localhost:8000/metrics | grep crypto_
-```
+Метрики (экспортируемые ботом)
+Бизнес-метрики
 
-#### Метрики (экспортируемые ботом)
-
-**Бизнес-метрики**
-```prometheus
+prometheus
+Копировать код
 crypto_pnl_realized_total{symbol="BTC/USDT"}
 crypto_trades_total{symbol="BTC/USDT", status="completed"}
 crypto_position_size{symbol="BTC/USDT"}
 crypto_risk_blocked_total{rule="loss_streak"}
 crypto_regime_state{state="risk_on|risk_small|neutral|risk_off"}
-```
+Технические метрики
 
-**Технические метрики**
-```prometheus
+prometheus
+Копировать код
 crypto_cycle_duration_ms{phase="signals|risk|execute"}
 crypto_api_latency_ms{endpoint="ticker|order"}
 crypto_reconciliation_duration_ms
 crypto_health_status{component="db|broker|eventbus"}
-```
-
-#### Структурированные логи
-```json
+Структурированные логи
+json
+Копировать код
 {
   "timestamp": "2025-01-10T12:00:00Z",
   "level": "INFO",
@@ -887,164 +890,183 @@ crypto_health_status{component="db|broker|eventbus"}
   "message": "Signal generated",
   "context": {...}
 }
-```
+Trace ID (критично)
+Каждый цикл orchestrator генерирует уникальный trace_id
 
-### Trace ID (критично)
-- **Каждый цикл orchestrator** генерирует уникальный trace_id
-- **Пробрасывается** через все операции (логи, метрики, события)
-- **Видно в Telegram** алертах для корреляции
-- **Связывает** метрики ↔ логи ↔ алерты
+Пробрасывается через все операции (логи, метрики, события)
 
-### Внешний мониторинг
+Видно в Telegram алертах для корреляции
 
-⚠️ **Вся инфраструктура мониторинга в отдельном репозитории:**
-```
+Связывает метрики ↔ логи ↔ алерты
+
+Внешний мониторинг
+⚠️ Вся инфраструктура мониторинга в отдельном репозитории:
+
+bash
+Копировать код
 https://github.com/YOUR_ORG/crypto-bot-monitoring
-```
-
 Там находятся:
-- Prometheus конфигурация (scrape jobs, retention 30 дней)
-- Alertmanager правила и роутинг
-- Grafana дашборды (PnL, Risk, Performance панели)
-- Docker Compose для деплоя стека
-- Terraform/Ansible скрипты
 
-### Alert Rules (основные)
+Prometheus конфигурация (scrape jobs, retention 30 дней)
 
-#### Критические (действие немедленно)
-```yaml
+Alertmanager правила и роутинг
+
+Grafana дашборды (PnL, Risk, Performance панели)
+
+Docker Compose для деплоя стека
+
+Terraform/Ansible скрипты
+
+Alert Rules (основные)
+Критические (действие немедленно)
+yaml
+Копировать код
 BotDown: up == 0 for 1m
 DeadMansSwitchTriggered: crypto_dms_triggered_total > 0
 MaxDrawdownExceeded: crypto_drawdown_current_pct > 10
-```
-
-#### Важные (проверить в течение часа)
-```yaml
+Важные (проверить в течение часа)
+yaml
+Копировать код
 NoTradesLongTime: rate(crypto_trades_total[1h]) == 0 for 2h
 HighAPILatency: crypto_api_latency_ms > 1000 for 5m
 NeutralTooLong: crypto_regime_state == "neutral" for 4h
-```
-
-#### Информационные
-```yaml
+Информационные
+yaml
+Копировать код
 RiskBlockedFrequent: rate(crypto_risk_blocked_total[5m]) > 0.5
 RegimeChanged: crypto_regime_state != offset 5m
-```
+Telegram интеграция
+Критические → мгновенно с trace_id
 
-### Telegram интеграция
-- **Критические** → мгновенно с trace_id
-- **Важные** → батчинг 5 минут
-- **Инфо** → сводка раз в час
-- **Anti-spam** защита от дублей
+Важные → батчинг 5 минут
 
-### Retention политика
-- **Метрики Prometheus**: 30 дней (конфиг в crypto-bot-monitoring)
-- **Логи**: 90 дней (ротация через logrotate или cloud provider)
-- **БД бэкапы**: 7 дней daily, 4 недели weekly
+Инфо → сводка раз в час
 
-### Примеры использования
+Anti-spam защита от дублей
 
-#### Проверка здоровья
-```bash
+Retention политика
+Метрики Prometheus: 30 дней (конфиг в crypto-bot-monitoring)
+
+Логи: 90 дней (ротация через logrotate или cloud provider)
+
+БД бэкапы: 7 дней daily, 4 недели weekly
+
+Примеры использования
+Проверка здоровья
+bash
+Копировать код
 # Быстрая проверка
 curl -s http://localhost:8000/ready && echo "OK" || echo "FAIL"
 
 # Детальная диагностика
 curl -s http://localhost:8000/health | jq .components
-```
-
-#### Поиск по trace_id
-```bash
+Поиск по trace_id
+bash
+Копировать код
 # В логах
 grep "trace_id.*abc123" /var/log/crypto-bot.log
 
 # В метриках
 curl http://localhost:8000/metrics | grep 'trace_id="abc123"'
-```
+⚠️ Правила мониторинга
+Метрики не блокируют торговлю (async export)
 
-### ⚠️ Правила мониторинга
-1. **Метрики не блокируют торговлю** (async export)
-2. **Алерты actionable** (не шум, а конкретные действия)
-3. **Trace ID обязателен** для всех операций
-4. **Dashboard real-time** (обновление 15 сек)
-5. **Separation of concerns**: бот только экспортирует, мониторинг в отдельном сервисе
+Алерты actionable (не шум, а конкретные действия)
 
-## Troubleshooting
+Trace ID обязателен для всех операций
 
-### InstanceLock не освобождается
-**Симптом:** "Instance already running"
+Dashboard real-time (обновление 15 сек)
 
-**Решение:**
-```bash
+Separation of concerns: бот только экспортирует, мониторинг в отдельном сервисе
+
+Troubleshooting
+InstanceLock не освобождается
+Симптом: "Instance already running"
+
+Решение:
+
+bash
+Копировать код
 rm -f /tmp/crypto-bot.lock
 # Если Redis:
 redis-cli DEL crypto-bot:instance:lock
-```
-
-### Reconciliation всегда находит расхождения
-```bash
+Reconciliation всегда находит расхождения
+bash
+Копировать код
 timedatectl   # Проверить, что сервер в UTC
 cab-reconcile --force-sync
-```
-
-### Risk Manager блокирует все сделки
-```bash
+Risk Manager блокирует все сделки
+bash
+Копировать код
 curl http://localhost:8000/orchestrator/status?symbol=BTC/USDT
 # Сброс дневных счётчиков (осторожно!)
 sqlite3 data/trader.sqlite3 "DELETE FROM risk_counters WHERE date < date('now')"
-```
-
-### Telegram не работает
-```bash
+Telegram не работает
+bash
+Копировать код
 curl https://api.telegram.org/bot<TOKEN>/getMe
 curl https://api.telegram.org/bot<TOKEN>/getUpdates
-```
+Roadmap / TODO
+В разработке (v1.1)
+ Multi-stage exits (TP1/TP2 + SL в безубыток)
 
-## Roadmap / TODO
+ Адаптивные веса таймфреймов (ATR)
 
-### В разработке (v1.1)
-- [ ] Multi-stage exits (TP1/TP2 + SL в безубыток)
-- [ ] Адаптивные веса таймфреймов (ATR)
-- [ ] 4-уровневый режим рынка (risk_on/small/neutral/off)
-- [ ] Нелинейный Fusion (AI confidence → tech weight)
+ 4-уровневый режим рынка (risk_on/small/neutral/off)
 
-### Планируется (v1.2)
-- [ ] Множественные биржи
-- [ ] Grid-trading для флэта
-- [ ] Basket-trading (корзина активов)
-- [ ] Web-интерфейс мониторинга
+ Нелинейный Fusion (AI confidence → tech weight)
 
-### Backlog (идеи)
-- [ ] Short позиции (требует редизайна)
-- [ ] Options/Futures
-- [ ] Social sentiment анализ
-- [ ] ML-оптимизация параметров
+Планируется (v1.2)
+ Множественные биржи
 
-## Contributing Guidelines
+ Grid-trading для флэта
 
-### Архитектурные правила
-- Domain **не импортирует** из Infrastructure
-- Application работает **только через Ports**
-- Новые адаптеры → только в `infrastructure/`
+ Basket-trading (корзина активов)
 
-### Единые точки входа
-- Новые события → `events_topics.py`
-- Новые настройки → сначала в код, потом в ENV
-- Ордера → только через `execute_trade.py`
+ Web-интерфейс мониторинга
 
-### Добавление стратегии
-```python
+Backlog (идеи)
+ Short позиции (требует редизайна)
+
+ Options/Futures
+
+ Social sentiment анализ
+
+ ML-оптимизация параметров
+
+Contributing Guidelines
+Архитектурные правила
+Domain не импортирует из Infrastructure
+
+Application работает только через Ports
+
+Новые адаптеры → только в infrastructure/
+
+Единые точки входа
+Новые события → events_topics.py
+
+Новые настройки → сначала в код, потом в ENV
+
+Ордера → только через execute_trade.py
+
+Добавление стратегии
+python
+Копировать код
 # domain/strategies/my_strategy.py
+from .base import BaseStrategy, Decision, MarketData, StrategyContext
+
 class MyStrategy(BaseStrategy):
-    def generate_signal(self, data) -> Signal:
-        pass
+    async def generate(self, *, md: MarketData, ctx: StrategyContext) -> Decision:
+        # Возвратить Decision(action="buy"|"sell"|"hold", confidence: float, reason: str)
+        return Decision(action="hold", reason="not_implemented")
 
 # strategy_manager.py
-AVAILABLE_STRATEGIES['my_strategy'] = MyStrategy
-```
-
-### Добавление risk rules
-```python
+AVAILABLE = "STRATEGY_SET via settings"  # имена, разделённые запятыми
+# Пример ENV:
+# STRATEGY_SET=ema_atr,donchian_breakout,supertrend
+Добавление risk rules
+python
+Копировать код
 # domain/risk/rules/my_rule.py
 class MyRule(BaseRule):
     def check(self, context) -> RuleResult:
@@ -1052,35 +1074,44 @@ class MyRule(BaseRule):
 
 # risk/manager.py
 self.rules.append(MyRule())
-```
+Checklist перед коммитом
+ make test-all зелёный
 
-### Checklist перед коммитом
-- [ ] `make test-all` зелёный
-- [ ] Import Linter не ругается
-- [ ] Новый код покрыт тестами
-- [ ] Trace ID пробрасывается
-- [ ] События используют `events_topics.py`
-- [ ] README обновлён
+ Import Linter не ругается
 
-## Performance
+ Новый код покрыт тестами
 
-### Средние показатели
-- **RAM**: 200–300 MB (idle), до 500 MB при активной торговле
-- **CPU**: <5% среднее, пики до 20% (reconciliation)
-- **Латенси цикла**: 50–200 ms
-- **API**: ~500 запросов/час (ticker), ~20/час (orders)
-- **БД**: ~10 MB/месяц/пара
-- **Логи**: ~100 MB/день (INFO)
+ Trace ID пробрасывается
 
-### Оптимизация
-- WAL mode SQLite (по умолчанию)
-- Redis EventBus при >3 парах
-- `LOG_LEVEL=WARNING` для продакшена
-- Увеличить `RECONCILE_INTERVAL_SEC` при редких сделках
+ События используют events_topics.py
 
-## Контакты
+ README обновлён
 
-Проект поддерживается и развивается внутри команды. Для вопросов по архитектуре или внесения вклада вы можете связаться с автором и главным разработчиком: **Sabir Şahbaz** (GitHub: sabiraka1).
+Performance
+Средние показатели
+RAM: 200–300 MB (idle), до 500 MB при активной торговле
+
+CPU: <5% среднее, пики до 20% (reconciliation)
+
+Латенси цикла: 50–200 ms
+
+API: ~500 запросов/час (ticker), ~20/час (orders)
+
+БД: ~10 MB/месяц/пара
+
+Логи: ~100 MB/день (INFO)
+
+Оптимизация
+WAL mode SQLite (по умолчанию)
+
+Redis EventBus при >3 парах
+
+LOG_LEVEL=WARNING для продакшена
+
+Увеличить RECONCILE_INTERVAL_SEC при редких сделках
+
+Контакты
+Проект поддерживается и развивается внутри команды. Для вопросов по архитектуре или внесения вклада вы можете связаться с автором и главным разработчиком: Sabir Şahbaz (GitHub: sabiraka1).
 
 Для новых участников команды: по всем организационным моментам (доступы к Railway, переменным окружения, ключам API) обращайтесь к тимлиду или DevOps инженеру.
 
